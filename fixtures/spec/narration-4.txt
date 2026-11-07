@@ -1,0 +1,9 @@
+Now we record. Press the record button and the app starts three separate tracks, one for the screen, one for the camera, and one for the microphone.
+
+Each track is written as a fragmented file. If the machine crashes or the battery dies, everything up to the last second is still on disk, and the project opens normally afterwards.
+
+While you talk, you can press a key to drop a marker. Use a marker for a good line, a mistake, or a spot where you want a diagram to appear.
+
+If you stumble over a sentence, just say it again. The editor notices that the second attempt is almost the same as the first one, and it keeps the better take.
+
+When you are done, press stop, and the rough cut is ready within a few seconds.

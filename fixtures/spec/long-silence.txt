@@ -1,0 +1,1 @@
+That was the setup. [[slnc 8000]] Now let's look at the result.

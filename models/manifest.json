@@ -1,0 +1,25 @@
+{
+  "note": "Pinned model downloads, see docs/decisions/0008. Model files are never committed. Verify size and sha256 after download.",
+  "models": [
+    {
+      "name": "whisper-large-v3-turbo",
+      "purpose": "Transcription with word timestamps (whisper.cpp ggml format, used by whisper-rs)",
+      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-large-v3-turbo.bin",
+      "revision": "5359861c739e955e79d9a303bcbc70fb988958b1",
+      "file": "ggml-large-v3-turbo.bin",
+      "sha256": "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69",
+      "size": 1624555275,
+      "license": "MIT"
+    },
+    {
+      "name": "silero-vad",
+      "purpose": "Voice activity detection for auto cut (onnx, run through ort)",
+      "url": "https://raw.githubusercontent.com/snakers4/silero-vad/066409f3d9db45a30d21dfcbf9147826ffdd7052/src/silero_vad/data/silero_vad.onnx",
+      "revision": "066409f3d9db45a30d21dfcbf9147826ffdd7052",
+      "file": "silero_vad.onnx",
+      "sha256": "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3",
+      "size": 2327524,
+      "license": "MIT"
+    }
+  ]
+}

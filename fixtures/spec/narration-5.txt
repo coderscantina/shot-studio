@@ -1,0 +1,9 @@
+Here is where the auto cut earns its keep. It works like a linter for your recording.
+
+First it looks for silence. Short pauses stay, because they give the speech room to breathe. Long pauses are trimmed to a length that matches the pacing you picked for this format.
+
+Then it looks at the transcript. Filler words such as um and uh are marked, and repeated starts of the same sentence are grouped. The last complete attempt wins, and the earlier ones are cut.
+
+Every change shows up as a suggestion with a reason. You can accept all of them with one key, or you can walk through them one by one and undo the ones you do not like.
+
+Nothing is destructive. The original recording is never touched, and you can always go back to it.

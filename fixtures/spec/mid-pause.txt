@@ -1,0 +1,1 @@
+The renderer only redraws [[slnc 1500]] the chapters that changed.

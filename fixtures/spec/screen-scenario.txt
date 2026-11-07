@@ -1,0 +1,12 @@
+# One 6 s loop at 3840x2160, 60 fps. Times in seconds, positions in pixels.
+# start X Y | move START END X Y (eased) | click T | type START text (one key per 0.12 s)
+# The loop ends where it starts, so tiled copies have no jump at the seam.
+start 1920 1080
+move 0.4 1.2 800 500
+click 1.4
+move 1.8 2.6 1400 900
+click 2.8
+type 3.0 cargo test
+move 4.0 4.9 3000 400
+click 5.0
+move 5.1 5.9 1920 1080
