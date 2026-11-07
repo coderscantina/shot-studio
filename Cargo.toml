@@ -25,6 +25,12 @@ blake3 = "1.8.7"
 git2 = { version = "0.21.0", default-features = false, features = ["vendored-libgit2"] }
 thiserror = "2.0.21"
 tempfile = "3.27.0"
+# Official MCP Rust SDK. The client feature is only enabled for tests.
+rmcp = { version = "3.9.0", default-features = false, features = ["server", "macros", "transport-io"] }
+tokio = { version = "1.53.1", features = ["rt", "macros", "io-std"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+clap = { version = "4", features = ["derive"] }
 
 [profile.release]
 debug = "line-tables-only"

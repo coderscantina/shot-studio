@@ -189,6 +189,20 @@ impl Board {
         }
     }
 
+    /// The text of `file` (relative to the video folder) at the video's tip, `None` if it has no
+    /// such file yet.
+    pub fn read_file(&self, slug: &str, file: &str) -> Result<Option<String>> {
+        if !proposals::is_inside(file) {
+            return Err(Error::InvalidPath(file.to_owned()));
+        }
+        let tip = self.tip(slug)?;
+        let Ok(entry) = tip.tree()?.get_path(Path::new(&video_path(slug, file))) else {
+            return Ok(None);
+        };
+        let blob = self.repo.find_blob(entry.id())?;
+        Ok(Some(String::from_utf8_lossy(blob.content()).into_owned()))
+    }
+
     /// The commit a video is read from: its branch tip, else the default branch if it has the
     /// video folder.
     fn tip(&self, slug: &str) -> Result<Commit<'_>> {
