@@ -1,13 +1,19 @@
 //! An evaluated output snapped to the frame grid: which source frames each segment renders, where
 //! it lands in the output, and where chapters start. Pure, no IO.
 //!
-//! Snapping depends only on a segment's source range, never on its output position, so a cached
-//! segment stays valid when the edit before it changes. Audio follows the same grid: at 48 kHz and
-//! 60 fps a frame is exactly 800 samples, so audio and video can never drift apart.
+//! Each segment is cut into chunks, the unit of render caching: half-second windows on its take's
+//! own frame grid, which is the recordings' keyframe grid, cut short at the segment's edges.
+//! Snapping and chunking depend only on a segment's source range, never on its output position,
+//! so deleting a word only re-keys the two chunks at the new edges, and every other chunk stays
+//! valid even though it moved. Audio follows the same grid: at 48 kHz and 60 fps a frame is
+//! exactly 800 samples, so audio and video can never drift apart.
 
 use std::ops::Range;
 
-use shot_core::{Micros, Output, Segment, TimeRange};
+use shot_core::{ContentHash, Id, MediaId, Micros, Output, Segment, TimeRange};
+
+/// Chunks per second of a take: one per keyframe interval of the recordings.
+const CHUNKS_PER_SECOND: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportPlan {
@@ -28,11 +34,32 @@ pub struct PlannedSegment {
     /// Whether the previous segment ends where this one starts in the same take, so the audio
     /// runs on without a cut.
     pub continues_previous: bool,
+    /// The segment's frames on its take's chunk grid, in order.
+    pub chunks: Vec<PlannedChunk>,
+}
+
+/// A cached piece of a segment: at most half a second of one take.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedChunk {
+    /// Frames of the take, at the output frame rate.
+    pub frames: Range<u64>,
+    pub hash: ContentHash,
+}
+
+impl PlannedChunk {
+    pub fn frame_count(&self) -> u64 {
+        self.frames.end - self.frames.start
+    }
 }
 
 impl PlannedSegment {
     pub fn frames(&self) -> u64 {
         self.source_frames.end - self.source_frames.start
+    }
+
+    /// The output frame where `chunk`, one of this segment's chunks, starts.
+    pub fn output_frame_of(&self, chunk: &PlannedChunk) -> u64 {
+        self.output_frame + chunk.frames.start - self.source_frames.start
     }
 
     /// The punch-in at a source frame: the zoom covering that frame's start, or 1.
@@ -53,9 +80,10 @@ pub struct PlannedChapter {
 }
 
 impl ExportPlan {
-    /// Plans `output` at `fps`. Segments shorter than half a frame snap to nothing and are left
-    /// out, and so are chapters left without frames.
-    pub fn new(output: &Output, fps: u32) -> Self {
+    /// Plans `output` at `fps`, with `media` naming the recorded files of each take. Segments
+    /// shorter than half a frame snap to nothing and are left out, and so are chapters left
+    /// without frames.
+    pub fn new(output: &Output, fps: u32, media: impl Fn(&Id) -> MediaId) -> Self {
         let mut segments: Vec<PlannedSegment> = Vec::new();
         let mut chapters = Vec::new();
         let mut frames = 0;
@@ -72,11 +100,19 @@ impl ExportPlan {
                 });
                 let output_frame = frames;
                 frames += source_frames.end - source_frames.start;
+                let media = media(&segment.take);
+                let chunks = chunk_grid(source_frames.clone(), fps)
+                    .map(|frames| PlannedChunk {
+                        hash: output.chunk_hash(segment, media, fps, frames.clone()),
+                        frames,
+                    })
+                    .collect();
                 segments.push(PlannedSegment {
                     segment: segment.clone(),
                     source_frames,
                     output_frame,
                     continues_previous,
+                    chunks,
                 });
             }
             if frames > start {
@@ -95,6 +131,20 @@ impl ExportPlan {
     }
 }
 
+/// `frames` cut at every multiple of the chunk length.
+fn chunk_grid(frames: Range<u64>, fps: u32) -> impl Iterator<Item = Range<u64>> {
+    let length = u64::from((fps / CHUNKS_PER_SECOND).max(1));
+    let mut start = frames.start;
+    std::iter::from_fn(move || {
+        (start < frames.end).then(|| {
+            let end = ((start / length + 1) * length).min(frames.end);
+            let chunk = start..end;
+            start = end;
+            chunk
+        })
+    })
+}
+
 /// The frames whose start falls in `range`, rounding each edge to the nearest frame.
 pub fn snap(range: TimeRange, fps: u32) -> Range<u64> {
     let frame = |time: Micros| (time.0 * u64::from(fps) + 500_000) / 1_000_000;
@@ -109,6 +159,8 @@ pub fn frame_time(frame: u64, fps: u32) -> Micros {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
+
     use shot_core::{Cut, FormatKind, Project, Script, Timeline, Video};
 
     fn plan(cut: &str) -> ExportPlan {
@@ -118,7 +170,9 @@ mod tests {
             format: FormatKind::Opinion.preset(),
             cut: Cut::parse(cut).unwrap(),
         };
-        ExportPlan::new(Timeline::evaluate(&project).main(), 60)
+        ExportPlan::new(Timeline::evaluate(&project).main(), 60, |_| {
+            MediaId::default()
+        })
     }
 
     #[test]
@@ -170,6 +224,53 @@ chapter "Two" {
             .map(|c| (c.title.as_str(), c.output_frame))
             .collect();
         assert_eq!(chapters, [("One", 0), ("Two", 91)]);
+    }
+
+    #[test]
+    fn deleting_a_word_re_keys_only_the_chunks_at_its_edges() {
+        let keys = |plan: &ExportPlan| -> Vec<(Range<u64>, ContentHash)> {
+            plan.segments
+                .iter()
+                .flat_map(|s| s.chunks.iter().map(|c| (c.frames.clone(), c.hash)))
+                .collect()
+        };
+        let before = plan(
+            r#"
+chapter "One" {
+    take t01 {
+        keep from=0 to=10_000_000
+    }
+}
+"#,
+        );
+        let after = plan(
+            r#"
+chapter "One" {
+    take t01 {
+        keep from=0 to=4_200_000
+        remove from=4_200_000 to=4_600_000 by=manual
+        keep from=4_600_000 to=10_000_000
+    }
+}
+"#,
+        );
+        let before_keys = keys(&before);
+        assert_eq!(before_keys.len(), 20);
+        assert!(
+            before_keys
+                .iter()
+                .all(|(frames, _)| frames.end - frames.start == 30)
+        );
+        let old: HashSet<ContentHash> = before_keys.iter().map(|(_, hash)| *hash).collect();
+        let new: Vec<Range<u64>> = keys(&after)
+            .into_iter()
+            .filter(|(_, hash)| !old.contains(hash))
+            .map(|(frames, _)| frames)
+            .collect();
+        // 4.2 s is frame 252, 4.6 s is frame 276.
+        assert_eq!(new, [240..252, 276..300]);
+        let moved = &after.segments[1];
+        assert_eq!(moved.output_frame_of(&moved.chunks[1]), 252 + 24);
     }
 
     #[test]

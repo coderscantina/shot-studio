@@ -1,4 +1,4 @@
-//! `shot export`: one video folder's cut to an MP4, rendering only segments that changed.
+//! `shot export`: one video folder's cut to an MP4, rendering only chunks that changed.
 
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -19,7 +19,7 @@ pub struct ExportArgs {
     /// The cut to export.
     #[arg(long, default_value = "main")]
     cut: String,
-    /// Segments rendered at the same time.
+    /// Encoder sessions running at the same time.
     #[arg(long, default_value_t = ExportOptions::default().jobs)]
     jobs: usize,
 }
@@ -35,7 +35,7 @@ pub fn run(args: ExportArgs) -> Result<(), String> {
     let interactive = std::io::stderr().is_terminal();
     let progress = |p: Progress| {
         if interactive {
-            eprint!("\rrendered {}/{} segments", p.rendered, p.to_render);
+            eprint!("\rrendered {}/{} chunks", p.rendered, p.to_render);
             let _ = std::io::stderr().flush();
         }
     };
@@ -59,9 +59,9 @@ pub fn run(args: ExportArgs) -> Result<(), String> {
         report.output.display()
     );
     println!(
-        "{} of {} segments rendered, {} frames in {:.1} s ({:.0} fps), joined in {:.1} s, {:.1} s total",
+        "{} of {} chunks rendered, {} frames in {:.1} s ({:.0} fps), joined in {:.1} s, {:.1} s total",
         report.rendered,
-        report.segments,
+        report.chunks,
         report.rendered_frames,
         render,
         report.rendered_frames as f64 / render.max(1e-9),

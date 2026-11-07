@@ -41,5 +41,4 @@ Found by agents and waiting for a task. Remove a line when it's fixed.
 - Capture-time markers (A, N, M, Z, B and layout hotkeys) have no place in the contract yet. Milestone 05 adds them, most likely as a `marker` kind in `events.jsonl`.
 - Unsure auto-cut results waiting in the review queue are not stored in any file, which breaks the no-hidden-state rule. Milestone 04 adds them to the contract.
 - Caption text fixes (misheard names) are not stored in any file, and burned-in segment hashes will need them. Milestone 04.
-- Take ids are the highest existing id plus one, and segment hashes use the take id as the media id. Deleting the newest take and recording again reuses its id, so stale segments in `.shot/cache` would be reused. Fix before 03 closes: either ids that are never reused (for example from the start time) or a media id in the cache key.
 - `script.md` rejects text between a chapter heading and its first beat. Revisit when milestone 08 builds the script editor.

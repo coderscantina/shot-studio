@@ -17,7 +17,7 @@ This contract owns the files a video consists of and what each one means. `shot-
       media/            recordings and b-roll (ignored)
         <take>/         one folder per take, named by its take id
           events.jsonl  cursor and key events, see below
-      .shot/cache/      SQLite and rendered segments (ignored, safe to delete)
+      .shot/cache/      SQLite and rendered chunks (ignored, safe to delete)
   formats/              the four shipped presets, editable per channel
 ```
 
@@ -37,7 +37,7 @@ This contract owns the files a video consists of and what each one means. `shot-
 - Files are written in a stable order so a diff shows only what changed.
 - `shot-core` parses and evaluates these files with no IO. Unknown nodes are an error with a line number, never silently dropped.
 - The cache is derived from these files and media only. Deleting `.shot/cache` loses nothing.
-- A segment's cache key is a hash of everything that affects its pixels and samples: source media ids, ranges, effects, template parameters, format settings and renderer version.
+- A rendered chunk's cache key is a hash of everything that affects its pixels: source media ids, ranges, effects, template parameters, format settings and renderer version.
 
 ## Common rules for the KDL files
 
@@ -189,7 +189,10 @@ x-clip the-rule {
 
 - A main output has one group of segments per chapter. A segment is a kept range of one take with one layout, so a kept range splits wherever a layout change starts or ends. It carries the zooms and overlays that overlap it, with their full ranges.
 - A derived output has one group, named after the cut. Its segments are the main segments cut down to each clip's range.
-- Each segment has a content hash (BLAKE3) over the renderer version, the output aspect, the burned-in caption style (or the fact that captions are a sidecar), the take id, the source range, the layout, and every overlapping zoom and overlay with its parameters. Output position and chapter titles are not part of it, so editing one chapter only changes that chapter's hashes.
+- Export caches rendered video in chunks. A segment is snapped to the output frame grid and cut at every half second of its take's media time, which is the recordings' keyframe grid. So a chunk is at most 0.5 s and starts on the grid or at a segment edge.
+- Each chunk has a content hash (BLAKE3) over the renderer version, the output aspect, the burned-in caption style (or the fact that captions are a sidecar), the take id and the take's media identity, the frame rate and the chunk's frames of the take, the layout, the zooms cut to the chunk, and every overlay overlapping the chunk with its full range and parameters. Output position and chapter titles are not part of it. Deleting a word therefore re-renders only the two chunks at the new edges, and every other chunk is reused at its new position.
+- A take's media identity hashes the size and modification time of its video tracks. A take recorded again under a reused id gets a new identity, so it never matches the old recording's chunks.
+- Audio is not cached. Export encodes the whole cut's audio as one AAC stream, so the joins have no encoder delay or padding.
 
 ## `script.md`
 
@@ -237,7 +240,7 @@ media/t03/
   events.jsonl  cursor and key events, see below
 ```
 
-- **Take ids** are `t` and a number, at least two digits: `t01`, `t02`, ... `t100`. A new take gets the number after the highest take folder in `media/`, so an id is never reused while its folder exists, and a gap left by a deleted take is never filled. Segment cache keys hash the take id, so they rely on this. Deleting the newest take frees its id for the next recording, so delete `.shot/cache` along with it.
+- **Take ids** are `t` and a number, at least two digits: `t01`, `t02`, ... `t100`. A new take gets the number after the highest take folder in `media/`, so an id is never reused while its folder exists, and a gap left by a deleted take is never filled. Deleting the newest take frees its id for the next recording. Cache keys hash the take's media identity as well as its id, so the new recording never reuses the old one's cache.
 - **One clock.** Every track and the event log share the take's media time, 0 at session start. A track may begin a little after 0 when its device delivers its first sample late.
 - **Fragmented MP4.** Each file is an initialization segment (`ftyp`, `moov`) followed by `moof` and `mdat` fragments of about 0.5 s, appended as they are encoded. Video has a keyframe every 0.5 s and no B-frames. A killed recording keeps every complete fragment and stays playable.
 - A track that is missing was not recorded. Readers do not assume a camera or system audio.

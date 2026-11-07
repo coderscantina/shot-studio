@@ -2,8 +2,13 @@
 //! `VTDecompressionSession` that must run on the hardware decoder turns them into
 //! IOSurface-backed `CVPixelBuffer`s that Metal samples in place. No pixel ever touches the CPU.
 //!
-//! The decoder outputs video range, so VideoToolbox runs a hardware pixel transfer to full range.
-//! [`Matrix::Bt601`] lets the same transfer also re-encode the colors for gpui's surface shader.
+//! The decoder outputs video range. For gpui, VideoToolbox runs a hardware pixel transfer to full
+//! range, and [`Matrix::Bt601`] lets the same transfer also re-encode the colors for gpui's surface
+//! shader. Export takes the native video range with [`Decoder::open_native`], about three times
+//! faster at 4K.
+//!
+//! Opening reads the keyframe index from the fragment headers of a fragmented MP4, and scans the
+//! samples only for other files.
 
 use std::collections::VecDeque;
 use std::path::Path;
@@ -30,6 +35,7 @@ use objc2_core_video::{
     kCVImageBufferYCbCrMatrixKey, kCVPixelBufferIOSurfacePropertiesKey,
     kCVPixelBufferMetalCompatibilityKey, kCVPixelBufferPixelFormatTypeKey,
     kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+    kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
 };
 use objc2_foundation::{NSString, NSURL};
 use objc2_video_toolbox::{
@@ -40,10 +46,15 @@ use objc2_video_toolbox::{
     kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder,
 };
 
+use crate::mux;
 use crate::timing::FrameIndex;
 
 /// The decoder's output format. gpui's surface shader accepts only full-range biplanar 4:2:0.
 pub const PIXEL_FORMAT: u32 = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
+
+/// The output format of [`Decoder::open_native`]: video range biplanar 4:2:0, what the hardware
+/// decoder produces itself.
+pub const NATIVE_PIXEL_FORMAT: u32 = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
 
 /// The YCbCr matrix of decoded frames.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -150,33 +161,30 @@ impl Decoder {
     /// Like [`Decoder::open`], with frames in the given YCbCr matrix.
     pub fn open_with(path: &Path, matrix: Matrix) -> Result<Self, DecodeError> {
         // AVFoundation autoreleases objects, and a plain thread has no pool to drain them.
-        autoreleasepool(|_| Self::open_in_pool(path, matrix))
+        autoreleasepool(|_| Self::open_in_pool(path, PIXEL_FORMAT, matrix))
     }
 
-    fn open_in_pool(path: &Path, matrix: Matrix) -> Result<Self, DecodeError> {
-        let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
-        let asset = unsafe { AVURLAsset::URLAssetWithURL_options(&url, None) };
-        let media_type = unsafe { AVMediaTypeVideo }.expect("AVFoundation defines the video type");
-        // The async loader hands the track to a block on another thread, and AVAssetTrack is not
-        // Send in objc2. A local file loads at once, so the synchronous call costs nothing.
-        #[allow(deprecated)]
-        let track = unsafe { asset.tracksWithMediaType(media_type) }
-            .firstObject()
-            .ok_or_else(|| DecodeError::NoVideoTrack(path.display().to_string()))?;
+    /// Like [`Decoder::open`], with frames in [`NATIVE_PIXEL_FORMAT`] and the source's matrix.
+    /// No pixel transfer runs, so this is the fast path for export.
+    pub fn open_native(path: &Path) -> Result<Self, DecodeError> {
+        autoreleasepool(|_| Self::open_in_pool(path, NATIVE_PIXEL_FORMAT, Matrix::Source))
+    }
 
-        // One passthrough pass reads timing and sync flags. It reads compressed bytes only.
+    fn open_in_pool(path: &Path, pixel_format: u32, matrix: Matrix) -> Result<Self, DecodeError> {
+        let no_video = || DecodeError::NoVideoTrack(path.display().to_string());
+        let (asset, track) = video_track(path)?;
         let (reader, output) = start_reader(&asset, &track, Duration::ZERO)?;
-        let mut samples = Vec::new();
-        let mut format = None;
-        while let Some(sample) = next_sample(&reader, &output)? {
-            format = format.or_else(|| unsafe { sample.format_description() });
-            samples.push((
-                to_duration(unsafe { sample.presentation_time_stamp() }),
-                is_keyframe(&sample),
-            ));
-        }
+        let first = next_sample(&reader, &output)?.ok_or_else(no_video)?;
+        unsafe { reader.cancelReading() };
+        let format = unsafe { first.format_description() }.ok_or_else(no_video)?;
+        let first = sample_time(&first);
+        // The fragment headers hold every sample's timing. The first sample as AVFoundation
+        // reports it guards against timing the header reader maps differently.
+        let samples = match mux::video_sample_times(path) {
+            Ok(Some(samples)) if samples.first() == Some(&first) => samples,
+            _ => scan(&asset, &track)?,
+        };
         let index = FrameIndex::from_samples(samples);
-        let format = format.ok_or_else(|| DecodeError::NoVideoTrack(path.display().to_string()))?;
         let frame_duration = match index.frames() {
             [first, second, ..] => *second - *first,
             _ => Duration::from_secs(1) / 60,
@@ -210,7 +218,7 @@ impl Decoder {
         );
         let (reader, output) = start_reader(&asset, &track, Duration::ZERO)?;
         Ok(Self {
-            session: create_session(&format, matrix)?,
+            session: create_session(&format, pixel_format, matrix)?,
             asset,
             track,
             index,
@@ -392,8 +400,39 @@ impl Drop for Decoder {
     }
 }
 
+fn video_track(path: &Path) -> Result<(Retained<AVURLAsset>, Retained<AVAssetTrack>), DecodeError> {
+    let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
+    let asset = unsafe { AVURLAsset::URLAssetWithURL_options(&url, None) };
+    let media_type = unsafe { AVMediaTypeVideo }.expect("AVFoundation defines the video type");
+    // The async loader hands the track to a block on another thread, and AVAssetTrack is not
+    // Send in objc2. A local file loads at once, so the synchronous call costs nothing.
+    #[allow(deprecated)]
+    let track = unsafe { asset.tracksWithMediaType(media_type) }
+        .firstObject()
+        .ok_or_else(|| DecodeError::NoVideoTrack(path.display().to_string()))?;
+    Ok((asset, track))
+}
+
+/// Timing and sync flags of every sample, from one passthrough pass over the compressed bytes.
+fn scan(asset: &AVURLAsset, track: &AVAssetTrack) -> Result<Vec<(Duration, bool)>, DecodeError> {
+    let (reader, output) = start_reader(asset, track, Duration::ZERO)?;
+    let mut samples = Vec::new();
+    while let Some(sample) = next_sample(&reader, &output)? {
+        samples.push(sample_time(&sample));
+    }
+    Ok(samples)
+}
+
+fn sample_time(sample: &CMSampleBuffer) -> (Duration, bool) {
+    (
+        to_duration(unsafe { sample.presentation_time_stamp() }),
+        is_keyframe(sample),
+    )
+}
+
 fn create_session(
     format: &CMFormatDescription,
+    pixel_format: u32,
     matrix: Matrix,
 ) -> Result<CFRetained<VTDecompressionSession>, DecodeError> {
     // SAFETY: These statics are constant CF objects defined by the frameworks.
@@ -410,7 +449,7 @@ fn create_session(
     };
     let specification =
         CFDictionary::<CFString, CFType>::from_slices(&[require_hardware], &[true_value]);
-    let pixel_format = CFNumber::new_i32(PIXEL_FORMAT as i32);
+    let pixel_format = CFNumber::new_i32(pixel_format as i32);
     let no_surface_options = CFDictionary::<CFString, CFType>::empty();
     let attributes = CFDictionary::<CFString, CFType>::from_slices(
         &keys,
@@ -537,4 +576,27 @@ fn to_duration(time: CMTime) -> Duration {
 
 fn to_cmtime(time: Duration) -> CMTime {
     unsafe { CMTime::new(time.as_nanos() as i64, 1_000_000_000) }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    #[test]
+    #[ignore = "needs the generated fixtures"]
+    fn the_fragment_index_matches_a_full_scan() {
+        let dir = PathBuf::from(std::env::var_os("SHOT_FIXTURES").expect("SHOT_FIXTURES is set"));
+        for name in ["screen-30s.mp4", "camera-30s.mp4"] {
+            let path = dir.join(name);
+            let (asset, track) = video_track(&path).unwrap();
+            let scanned = autoreleasepool(|_| scan(&asset, &track)).unwrap();
+            assert_eq!(
+                mux::video_sample_times(&path).unwrap(),
+                Some(scanned),
+                "{name}"
+            );
+        }
+    }
 }
