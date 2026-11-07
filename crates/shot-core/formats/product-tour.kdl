@@ -10,3 +10,8 @@ auto-cut confidence=85 {
     filler on=#true
     idle-screen on=#true min=3_000_000
 }
+auto-zoom click typing scale=160 hold=1_500_000
+zoom-motion smooth
+cursor size=140 smoothing=120_000 ripple=#true
+keystrokes shortcuts
+window padding=64 corners=12 shadow=soft background="#141821" frame=none

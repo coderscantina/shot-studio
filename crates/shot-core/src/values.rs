@@ -24,13 +24,19 @@ impl FromKdl for Micros {
 impl ToKdl for Micros {
     /// Writes digits in groups of three (`12_500_000`) so seconds are readable in a diff.
     fn write_kdl(&self, out: &mut String) {
-        let digits = self.0.to_string();
-        for (i, c) in digits.chars().enumerate() {
-            if i > 0 && (digits.len() - i).is_multiple_of(3) {
-                out.push('_');
-            }
-            out.push(c);
+        write_grouped(self.0, out);
+    }
+}
+
+/// Writes `n` with its digits in groups of three, the canonical form of every integer that is
+/// not a count or a percent.
+pub(crate) fn write_grouped(n: u64, out: &mut String) {
+    let digits = n.to_string();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push('_');
         }
+        out.push(c);
     }
 }
 

@@ -580,6 +580,7 @@ mod tests {
             take: id(take),
             ranges,
             layouts: Vec::new(),
+            reviews: Vec::new(),
             zooms: Vec::new(),
             overlays: Vec::new(),
         }

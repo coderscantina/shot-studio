@@ -61,20 +61,25 @@ impl<'a> Node<'a> {
 
     /// A leaf node with exactly `args` arguments and properties from `props`.
     pub fn expect(self, args: usize, props: &[&str]) -> Result<(), ParseError> {
-        self.check(Some(args), props, false)
+        self.check(ArgCount::Exactly(args), props, false)
     }
 
     /// Like [`Node::expect`], with a child block allowed.
     pub fn expect_block(self, args: usize, props: &[&str]) -> Result<(), ParseError> {
-        self.check(Some(args), props, true)
+        self.check(ArgCount::Exactly(args), props, true)
     }
 
     /// A leaf node with one or more arguments.
     pub fn expect_list(self) -> Result<(), ParseError> {
-        self.check(None, &[], false)
+        self.check(ArgCount::AtLeast(1), &[], false)
     }
 
-    fn check(self, args: Option<usize>, props: &[&str], block: bool) -> Result<(), ParseError> {
+    /// A leaf node with any number of arguments, including none, and properties from `props`.
+    pub fn expect_any(self, props: &[&str]) -> Result<(), ParseError> {
+        self.check(ArgCount::AtLeast(0), props, false)
+    }
+
+    fn check(self, args: ArgCount, props: &[&str], block: bool) -> Result<(), ParseError> {
         let name = self.name();
         if self.node.ty().is_some() {
             return Err(self.error(format!("`{name}` takes no type annotation")));
@@ -101,11 +106,11 @@ impl<'a> Node<'a> {
             }
         }
         match args {
-            Some(n) if count != n => {
+            ArgCount::Exactly(n) if count != n => {
                 return Err(self.error(format!("`{name}` takes {n} argument(s), found {count}")));
             }
-            None if count == 0 => {
-                return Err(self.error(format!("`{name}` takes at least one argument")));
+            ArgCount::AtLeast(n) if count < n => {
+                return Err(self.error(format!("`{name}` takes at least {n} argument(s)")));
             }
             _ => {}
         }
@@ -172,6 +177,12 @@ impl<'a> Node<'a> {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ArgCount {
+    Exactly(usize),
+    AtLeast(usize),
+}
+
 /// Takes a required node out of its slot, or reports it missing at `at`.
 pub(crate) fn required<T>(
     slot: Option<T>,
@@ -235,7 +246,7 @@ macro_rules! integer_kdl {
     )+};
 }
 
-integer_kdl!(u8, u16, i64);
+integer_kdl!(u8, u16, i16, i32, i64);
 
 /// Writes a quoted KDL v2 string.
 pub(crate) fn quote(s: &str, out: &mut String) {

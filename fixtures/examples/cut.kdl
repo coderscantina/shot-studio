@@ -1,11 +1,19 @@
 captions word-pop
 
+caption-fixes {
+    fix "lara vel" "Laravel"
+    fix "jeep UI" "gpui"
+}
+
+music "sources/bed.mp3" gain=-18 duck=-12
+
 chapter "Hook" {
     take t01 {
         keep from=0 to=4_200_000
         remove from=4_200_000 to=5_100_000 by=silence
         keep from=5_100_000 to=12_000_000
-        zoom 112 from=8_000_000 to=9_500_000
+        review from=9_800_000 to=10_400_000 by=filler
+        zoom 112 from=8_000_000 to=9_500_000 by=emphasis
     }
 }
 
@@ -14,6 +22,7 @@ chapter "The rule everyone repeats" {
         keep from=12_000_000 to=31_400_000
         remove from=31_400_000 to=33_000_000 by=retake
         keep from=33_000_000 to=58_000_000
+        ignore from=45_000_000 to=46_100_000 by=pause
         layout split from=20_000_000 to=40_000_000
         overlay link-card from=22_000_000 to=27_000_000 {
             url "https://github.com/coderscantina/shot-studio/pull/1"

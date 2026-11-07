@@ -1,0 +1,13 @@
+chapter "Search filters" {
+    take t01 {
+        keep from=0 to=42_000_000
+        zoom 160 from=6_200_000 to=8_400_000 x=2210 y=640 by=click
+        zoom 160 from=8_400_000 to=11_000_000 x=1480 y=910 by=typing
+        zoom 160 from=30_000_000 to=31_500_000 x=1600 y=900 by=marker
+        overlay code-diff from=12_000_000 to=26_000_000 {
+            diff "sources/query-parse.diff"
+            highlight-line 4
+            highlight-at 21_300_000
+        }
+    }
+}

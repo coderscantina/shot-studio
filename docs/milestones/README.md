@@ -42,8 +42,4 @@ Found by agents and waiting for a task. Remove a line when it's fixed.
 - Pausing the preview stops the sound without a fade, which may click.
 - Old cache chunks and the pre-chunk `.shot/cache/segments/` folder are never cleaned up.
 - Recording fragments are not fsynced, so power loss can lose more than the last fragment.
-
-- Capture-time markers (A, N, M, Z, B and layout hotkeys) have no place in the contract yet. Milestone 05 adds them, most likely as a `marker` kind in `events.jsonl`.
-- Unsure auto-cut results waiting in the review queue are not stored in any file, which breaks the no-hidden-state rule. Milestone 04 adds them to the contract.
-- Caption text fixes (misheard names) are not stored in any file, and burned-in segment hashes will need them. Milestone 04.
 - `script.md` rejects text between a chapter heading and its first beat. Revisit when milestone 08 builds the script editor.
