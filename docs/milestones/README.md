@@ -7,8 +7,8 @@ Mark a milestone complete only after its acceptance criteria pass and an evidenc
 | ID | Milestone | Dependencies | Owner | Status |
 | --- | --- | --- | --- | --- |
 | 01 | [Contracts, fixtures and workspace](01-contracts-and-fixtures.md) | None | Core | Done locally, CI run waits for the GitHub repo. [Evidence](../evidence/m01-contracts-and-fixtures.md) |
-| 02 | [Preview spike](02-preview-spike.md) | 01 | Media, App | GO by Mike on 2026-11-07. The dropped-frame and seek misses move into 03. [Evidence](../evidence/m02-preview-spike.md) |
-| 03 | [A usable opinion video](03-opinion-video.md) | 01, 02 | All roles | Timing, editing and recording criteria pass, four screen gaps open. [Evidence](../evidence/m03-opinion-video.md) |
+| 02 | [Preview spike](02-preview-spike.md) | 01 | Media, App | Complete, GO by Mike on 2026-11-07. [Evidence](../evidence/m02-preview-spike.md) |
+| 03 | [A usable opinion video](03-opinion-video.md) | 01, 02 | All roles | Complete on `milestone/03`. [Evidence](../evidence/m03-opinion-video.md) |
 | 04 | [Auto cut and finish](04-auto-cut-and-finish.md) | 03 | Analysis, Media | Not started |
 | 05 | [Record comfort](05-record-comfort.md) | 03 | Analysis, App | Not started |
 | 06 | [Product videos](06-product-videos.md) | 03 | Media, App | Not started |
@@ -37,6 +37,11 @@ Waiting for Mike. One line each with a recommendation and a link to its record. 
 ## Known gaps
 
 Found by agents and waiting for a task. Remove a line when it's fixed.
+
+- Record does not warn when the camera delivers black frames.
+- Pausing the preview stops the sound without a fade, which may click.
+- Old cache chunks and the pre-chunk `.shot/cache/segments/` folder are never cleaned up.
+- Recording fragments are not fsynced, so power loss can lose more than the last fragment.
 
 - Capture-time markers (A, N, M, Z, B and layout hotkeys) have no place in the contract yet. Milestone 05 adds them, most likely as a `marker` kind in `events.jsonl`.
 - Unsure auto-cut results waiting in the review queue are not stored in any file, which breaks the no-hidden-state rule. Milestone 04 adds them to the contract.

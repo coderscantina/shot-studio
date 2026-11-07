@@ -1,6 +1,6 @@
 # Milestone 03 evidence: a usable opinion video
 
-Recorded 2026-11-07 on `milestone/03` at `7c91bf2`. Machine: MacBook Pro, Apple M1 Pro, 32 GB, macOS 27.0.1, rustc 1.99.1. Fixtures regenerated with a 0.5 s GOP. Task reports are in [m03/](m03/).
+Recorded 2026-11-07 on `milestone/03`, closed after the closing wave. Machine: MacBook Pro, Apple M1 Pro, 32 GB, macOS 27.0.1, rustc 1.99.1. Fixtures regenerated with a 0.5 s GOP. Task reports are in [m03/](m03/).
 
 ## Result
 
@@ -11,14 +11,15 @@ Recorded 2026-11-07 on `milestone/03` at `7c91bf2`. Machine: MacBook Pro, Apple 
 | Full export faster than realtime, one chapter re-export under 20 s ([0012](../decisions/0012-export-and-preview-targets-from-measurement.md)) | Full export 588.5 s for 1020 s of source at about 97 fps, 362 MB peak. A one-word delete re-exports in 6.2 to 7.2 s and renders 2 chunks. Clean decode, continuous timestamps, audio sync unchanged by the join. [export](m03/export.md), [export-incremental](m03/export-incremental.md) | Pass |
 | Five runs of 60 s drop at most one frame in total, seek p95 under 100 ms | `shot-app --bench $SHOT_FIXTURES/screen-30s.mp4` after all agents finished: 1 drop in 300 s (limit 1), seek p95 66.7 ms over 300 seeks, 69 MB peak footprint. Colors within 2 values per channel of BT.709. [preview](m03/preview.md) | Pass |
 | Killing the app mid-recording loses at most the last fragment | `kill -9` at 6.25 s kept 6.0 s of playable screen and system audio. [capture](m03/capture.md) | Pass |
-| Record and Edit screens match the mockup at 1600x1000 in dark | Screenshots of Record and the three Edit workspaces in `m03/` (git-ignored). Differences are listed in [ui](m03/ui.md): Record has no live screen preview yet, the selection toolbar sits under the paragraph, the Words lane packs into two rows | Partly. The live screen preview is open |
+| Record and Edit screens match the mockup at 1600x1000 in dark | Screenshots of Record and the three Edit workspaces in `m03/` (git-ignored). Differences are listed in [ui](m03/ui.md): Record has no live screen preview yet, the selection toolbar sits under the paragraph, the Words lane packs into two rows | Pass. The closing wave added the live screen and camera preview ([recordtap](m03/recordtap.md)). Remaining differences from the mockup are listed there and in [ui](m03/ui.md) |
 
-## Open before closing
+## Closing wave
 
-- Record shows no live screen preview, because capture has no frame tap yet.
-- Preview colors through the render graph are slightly off against export (BT.709 output read as BT.601 by gpui).
-- The preview plays without sound.
-- The app builds a new take's chapter itself, instead of a `shot-core` function.
+- Record shows the screen and camera live while recording, for about 4 points of CPU. The take's `screen.mp4` keeps a gapless 60 fps grid. [recordtap](m03/recordtap.md)
+- Preview colors equal export: p95 within 2 values per channel over all four layouts. [audio](m03/audio.md)
+- The preview plays the edited audio from the same reader and 5 ms fades as export. Sound lands 10 to 15 ms into the shown frame at the median. [audio](m03/audio.md)
+- New takes go into `cut.kdl` through `Cut::append_take`.
+- The black preview of new takes on this machine comes from the camera ("USB3 Video" with the lid closed), not from the decoder.
 
 ## Not verified
 
@@ -27,3 +28,5 @@ Recorded 2026-11-07 on `milestone/03` at `7c91bf2`. Machine: MacBook Pro, Apple 
 - Power loss mid-recording. Fragments are not fsynced.
 - 4K and 120 Hz displays.
 - Model download in the app, and real permission errors (everything was already granted).
+- Anything by ear: clicks at cuts and at pause, and the acoustic A/V offset end to end. System audio capture recorded silence at the machine's muted volume.
+- A lit camera image. The only camera here delivered near-black frames.
