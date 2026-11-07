@@ -15,7 +15,7 @@ Mark a milestone complete only after its acceptance criteria pass and an evidenc
 | 07 | [Overlays and derived cuts](07-overlays-and-derived-cuts.md) | 04, 05 | Media, Core | Complete, face reframing proven on a stand-in face only. [Evidence](../evidence/m07-overlays-and-derived-cuts.md) |
 | 08 | [Planning, agents and ship](08-planning-agents-and-ship.md) | 03, 04, 07 | Core, Agents | Complete, the real YouTube upload waits for Mike's OAuth client. [Evidence](../evidence/m08-planning-agents-and-ship.md) |
 | 10 | [Semantic core](10-semantic-core.md) | 07, 08 | Core, Analysis, Media, App | Items 1 to 4 and 8 on `milestone/10-12` |
-| 11 | [Motion system and effects as styles](11-effects-as-styles.md) | 10 (items 1 to 4 can start earlier) | Media, App | Not started |
+| 11 | [Motion system and effects as styles](11-effects-as-styles.md) | 10 (items 1 to 4 can start earlier) | Media, App | Items 1 to 4 on `milestone/10-12` |
 | 12 | [Styled monitor and watch builds](12-styled-monitor-and-watch-builds.md) | 10, 11 | App, Media, Agents | Not started |
 | 09 | [Release gate](09-release-gate.md) | 01 to 08, 10 to 12 | Core | Not started |
 
@@ -57,6 +57,9 @@ Waiting for Mike. One line each with a recommendation and a link to its record. 
 Found by agents and waiting for a task. Remove a line when it's fixed.
 
 - Record does not warn when the camera delivers black frames.
+- `shot-app --bench` measures the milestone 02 player, not the editor engine, so preview frame drops with motion, glass and motion blur on are unmeasured.
+- Text slots and kinetic type use the system sans until brand fonts reach the renderer. A synthetic 4K test source dropped glyphs, possibly a vello buffer limit.
+- The feel-control mapping (tempo, bounce, density, stagger to spring values) lives in the m11 motion report, not yet in the contract.
 - `shot-analyze` has copies of shot-render's URL finder and on-screen text matcher (elements `mentions.rs`, `screen.rs`) to avoid a dependency cycle. Milestone 10 item 5 moves the rules out of shot-render and should delete one copy.
 - Element gaps: two `{name}` tags on one beat collide on (kind, t), cursor dwell has no element kind, M markers carry no label, `code` and `expression` have no detector, takes recorded without the prompter get no beat or chapter elements.
 - A channel-level rule proposal (brand or channel format) branches off and merges into one video's branch, so the change never reaches the default branch the other videos read. Channel proposals should branch off and merge into the default branch.
