@@ -90,6 +90,7 @@ pub(crate) fn apply(overlay: &Overlay, stage: &mut Stage) {
                 crop: Rect::UNIT,
                 radius: 0.0,
                 blur: 0.0,
+                shutter: Rect::ZERO,
             }];
             // Nothing of the take shows through a hard cut.
             stage.drawing.under.clear();

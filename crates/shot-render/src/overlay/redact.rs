@@ -81,6 +81,7 @@ pub(crate) fn apply_blur(overlay: &Overlay, stage: &mut Stage) {
         crop: Rect::new(left, top, right, bottom),
         radius: 0.0,
         blur: (strength * view.scale()).max(2.0),
+        shutter: Rect::ZERO,
     });
 }
 

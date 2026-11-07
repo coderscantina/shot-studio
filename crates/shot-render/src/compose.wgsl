@@ -17,8 +17,12 @@ struct Layer {
     target_video_range: f32,
     // Block size in canvas pixels of a blurred layer, 0 for a sharp one.
     blur: f32,
+    // Motion blur samples, 1 when the layer holds still.
+    samples: f32,
     // Luma weights Kr and Kb of the source matrix, then of the target matrix.
     weights: vec4<f32>,
+    // How the crop changes over the shutter, in texture coordinates.
+    shutter: vec4<f32>,
 }
 
 // RGB from normalized luma and centered chroma with luma weights Kr and Kb.
@@ -38,6 +42,8 @@ struct Varyings {
     @builtin(position) position: vec4<f32>,
     @location(0) canvas: vec2<f32>,
     @location(1) uv: vec2<f32>,
+    // How this point's texture coordinate moves over the shutter.
+    @location(2) motion: vec2<f32>,
 }
 
 // A triangle strip over the layer's frame.
@@ -46,7 +52,8 @@ fn vertex(@builtin(vertex_index) index: u32) -> Varyings {
     let corner = vec2<f32>(f32(index & 1u), f32((index >> 1u) & 1u));
     let canvas = mix(layer.frame.xy, layer.frame.zw, corner);
     let ndc = vec2<f32>(canvas.x / layer.canvas.x * 2.0 - 1.0, 1.0 - canvas.y / layer.canvas.y * 2.0);
-    return Varyings(vec4<f32>(ndc, 0.0, 1.0), canvas, mix(layer.crop.xy, layer.crop.zw, corner));
+    let uv = mix(layer.crop.xy, layer.crop.zw, corner);
+    return Varyings(vec4<f32>(ndc, 0.0, 1.0), canvas, uv, mix(layer.shutter.xy, layer.shutter.zw, corner));
 }
 
 fn source_rgb(uv: vec2<f32>) -> vec3<f32> {
@@ -86,11 +93,21 @@ fn blurred_rgb(uv: vec2<f32>) -> vec3<f32> {
     return mix(mix(a, b, t.x), mix(c, d, t.x), t.y);
 }
 
-fn layer_rgb(uv: vec2<f32>) -> vec3<f32> {
+// The source averaged over the shutter: evenly spaced samples along the point's path.
+fn layer_rgb(uv: vec2<f32>, motion: vec2<f32>) -> vec3<f32> {
     if layer.blur > 0.0 {
         return blurred_rgb(uv);
     }
-    return source_rgb(uv);
+    let count = i32(layer.samples);
+    if count <= 1 {
+        return source_rgb(uv);
+    }
+    var sum = vec3<f32>(0.0);
+    for (var i = 0; i < count; i++) {
+        let at = f32(i) / f32(count - 1) - 0.5;
+        sum += source_rgb(uv + motion * at);
+    }
+    return sum / f32(count);
 }
 
 // Luma, Cb, Cr in the target's range.
@@ -115,13 +132,13 @@ fn coverage(canvas: vec2<f32>) -> f32 {
 
 @fragment
 fn luma_plane(input: Varyings) -> @location(0) vec4<f32> {
-    let ycbcr = target_ycbcr(layer_rgb(input.uv));
+    let ycbcr = target_ycbcr(layer_rgb(input.uv, input.motion));
     return vec4<f32>(ycbcr.x, 0.0, 0.0, coverage(input.canvas));
 }
 
 // Runs once per 2x2 block of canvas pixels, at the block's center.
 @fragment
 fn chroma_plane(input: Varyings) -> @location(0) vec4<f32> {
-    let ycbcr = target_ycbcr(layer_rgb(input.uv));
+    let ycbcr = target_ycbcr(layer_rgb(input.uv, input.motion));
     return vec4<f32>(ycbcr.y, ycbcr.z, 0.0, coverage(input.canvas));
 }

@@ -17,6 +17,8 @@ use crate::RenderError;
 use crate::drawing::Drawing;
 use crate::frame::Frame;
 use crate::layout::{Canvas, Scene, Sources};
+use crate::material_pass::MaterialPass;
+use crate::materials;
 use crate::surface::{Matrix, Plane, Range, plane_texture, size};
 use crate::vector::VectorPass;
 
@@ -26,7 +28,7 @@ const MAX_LAYERS: usize = 8;
 /// Bytes per layer in the uniform buffer, the minimum dynamic offset alignment.
 const LAYER_STRIDE: u64 = 256;
 /// Size of the shader's `Layer` struct.
-const LAYER_SIZE: u64 = 80;
+const LAYER_SIZE: u64 = 96;
 
 pub struct Renderer {
     device: wgpu::Device,
@@ -39,6 +41,8 @@ pub struct Renderer {
     uniforms: wgpu::Buffer,
     /// The drawing under and over the layers, see [`crate::vector`].
     vector: Mutex<VectorPass>,
+    /// Shadows and sheets between them, see [`crate::material_pass`].
+    material: Mutex<MaterialPass>,
 }
 
 impl Renderer {
@@ -150,6 +154,7 @@ impl Renderer {
             mapped_at_creation: false,
         });
         let vector = Mutex::new(VectorPass::new(&device)?);
+        let material = Mutex::new(MaterialPass::new(&device));
         Ok(Self {
             device,
             queue,
@@ -159,6 +164,7 @@ impl Renderer {
             sampler,
             uniforms,
             vector,
+            material,
         })
     }
 
@@ -238,12 +244,16 @@ impl Renderer {
                 video_flag(source_range),
                 video_flag(target_range),
                 layer.blur,
-                0.0,
+                materials::samples(layer.travel(), canvas) as f32,
                 0.0,
                 source_kr,
                 source_kb,
                 target_kr,
                 target_kb,
+                layer.shutter.left,
+                layer.shutter.top,
+                layer.shutter.right,
+                layer.shutter.bottom,
             ];
             let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_ne_bytes()).collect();
             self.queue.write_buffer(&self.uniforms, offset, &bytes);
@@ -288,39 +298,51 @@ impl Renderer {
             target_range,
             target_matrix,
         )?;
+        let material = &mut *self.material.lock().expect("material pass poisoned");
+        let materials = material.prepare(
+            &self.device,
+            &self.queue,
+            &mut vector,
+            drawing,
+            canvas,
+            target_range,
+            target_matrix,
+        )?;
+        let glass = materials.as_ref().is_some_and(|m| m.has_glass());
+        let usage = if glass {
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING
+        } else {
+            wgpu::TextureUsages::RENDER_ATTACHMENT
+        };
+        let [luma, chroma] = Plane::BOTH.map(|plane| {
+            plane_texture(&self.device, &self.metal, target, plane, usage)
+                .map(|texture| texture.create_view(&Default::default()))
+        });
+        let views = [luma?, chroma?];
         let background = ycbcr(scene.background, target_range, target_matrix);
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        for plane in Plane::BOTH {
-            let texture = plane_texture(
-                &self.device,
-                &self.metal,
-                target,
-                plane,
-                wgpu::TextureUsages::RENDER_ATTACHMENT,
-            )?;
-            let view = texture.create_view(&Default::default());
-            let clear = match plane {
+        if let Some(prepared) = &materials {
+            material.encode_shadow_blurs(&mut encoder, prepared);
+        }
+        // Up to three passes over both planes: the layers, the shadows, then what sits on the
+        // backdrop glass reads back.
+        let load = |plane: Plane, clear: bool| {
+            if !clear {
+                return wgpu::LoadOp::Load;
+            }
+            let color = match plane {
                 Plane::Luma => [background[0], 0.0],
                 Plane::Chroma => [background[1], background[2]],
             };
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("compose"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: f64::from(clear[0]),
-                            g: f64::from(clear[1]),
-                            b: 0.0,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                ..Default::default()
-            });
+            wgpu::LoadOp::Clear(wgpu::Color {
+                r: f64::from(color[0]),
+                g: f64::from(color[1]),
+                b: 0.0,
+                a: 1.0,
+            })
+        };
+        for plane in Plane::BOTH {
+            let mut pass = begin_pass(&mut encoder, &views[plane as usize], load(plane, true));
             if let Some(under) = &under {
                 vector.draw(&mut pass, plane, under);
             }
@@ -329,8 +351,25 @@ impl Renderer {
                 pass.set_bind_group(0, &layer.group, &[layer.offset]);
                 pass.draw(0..4, 0..1);
             }
+            if let Some(prepared) = &materials {
+                material.draw_shadows(&mut pass, plane, prepared);
+                if glass {
+                    continue;
+                }
+                material.draw_sheets(&mut pass, plane, prepared);
+            }
             if let Some(over) = &over {
                 vector.draw(&mut pass, plane, over);
+            }
+        }
+        if let (Some(prepared), true) = (&materials, glass) {
+            material.encode_backdrops(&self.device, &mut encoder, prepared, [&views[0], &views[1]]);
+            for plane in Plane::BOTH {
+                let mut pass = begin_pass(&mut encoder, &views[plane as usize], load(plane, false));
+                material.draw_sheets(&mut pass, plane, prepared);
+                if let Some(over) = &over {
+                    vector.draw(&mut pass, plane, over);
+                }
             }
         }
         self.queue.submit([encoder.finish()]);
@@ -339,6 +378,26 @@ impl Renderer {
             .map_err(|e| RenderError::Gpu(e.to_string()))?;
         Ok(())
     }
+}
+
+fn begin_pass<'a>(
+    encoder: &'a mut wgpu::CommandEncoder,
+    view: &wgpu::TextureView,
+    load: wgpu::LoadOp<wgpu::Color>,
+) -> wgpu::RenderPass<'a> {
+    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("compose"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load,
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        ..Default::default()
+    })
 }
 
 fn video_flag(range: Range) -> f32 {
