@@ -237,7 +237,7 @@ The file is [JSON Lines](https://jsonlines.org): one JSON object per line, UTF-8
 | `x`, `y` | integer | cursor position in pixels of the screen track, origin top left. On every kind except `key` |
 | `button` | string | `left`, `right` or `other`. On `down` and `up` |
 | `dx`, `dy` | integer | scroll distance in pixels. On `scroll` |
-| `key` | string | the key pressed, lowercase (`a`, `enter`, `tab`, `escape`, `left`, `f5`). On `key` |
+| `key` | string | the key pressed, lowercase (`a`, `space`, `enter`, `tab`, `escape`, `left`, `f5`). On `key` |
 | `mods` | array of strings | held modifiers from `cmd`, `shift`, `alt`, `ctrl`, `fn`, in that order. On `key`, may be empty |
 
 Readers ignore fields they don't know, so capture can add fields without breaking them. A new `kind` is a change to this contract.

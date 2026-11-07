@@ -18,19 +18,24 @@ Read [docs/README.md](docs/README.md) and follow its reading order. The technica
 
 ## Checks
 
-Once milestone 01 scaffolds the workspace, run the checks for the paths you changed:
+Run the checks for the paths you changed:
 
 - Rust: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`
+- Fixtures: `bash -n scripts/fixtures.sh` and `shellcheck scripts/fixtures.sh` after editing the generator. Tests that need generated media are `#[ignore]`d: run them with `SHOT_FIXTURES=$HOME/.cache/shot-studio-fixtures cargo test -p <crate> -- --ignored`
 
 Documentation names a command only after the code adds it.
 
 ## Demo
 
-Filled in once the app runs: build command, the generated demo channel repo, fixture project, and how to point the app at them. The `demo` skill reads this section.
+Data comes from `SHOT_FIXTURES=$HOME/.cache/shot-studio-fixtures scripts/fixtures.sh all` (about 8 min the first time, then it skips unchanged groups): `target-project/` is the 17 min 4K60 video folder, `demo-channel/` the board repo. See [fixtures/README.md](fixtures/README.md). The app itself does not run yet; its build command lands here with milestone 03. The `demo` skill reads this section.
 
 ## Gotchas
 
 One line for each trap that cost an agent time and that no config reveals.
+
+- In a worktree, set `CARGO_TARGET_DIR=$HOME/.cache/shot-studio-target` and `SHOT_FIXTURES=$HOME/.cache/shot-studio-fixtures`. `git worktree remove` deletes ignored files, so media generated inside a worktree is lost.
+- gpui is the crates.io `gpui-pre` snapshot that gpui-component uses. Adding gpui from Zed git builds a second, incompatible gpui.
+- ffmpeg's `sendcmd` filter is not deterministic. Drive animated fixtures with expressions of `t`.
 
 ## Writing
 
