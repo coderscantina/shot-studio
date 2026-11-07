@@ -149,8 +149,8 @@ Rust edition 2024, `rust-version = "1.99"`, Cargo resolver 3, shared dependencie
 | Encode/decode | VideoToolbox, FFmpeg (`rsmpeg`) for muxing and odd inputs | Hardware video engines |
 | Composition | One wgpu render graph, WGSL effects, LUT only for color | Preview equals export |
 | Overlays | vello + parley, typed templates with parameters and keyframes | Replaces Remotion without Node. Agents fill a template spec instead of writing code |
-| Transcription | `whisper-rs` large-v3-turbo with Metal, streaming, word timestamps. Parakeet via `ort` as the faster option | Local and free. Separate tracks make speaker detection unnecessary |
-| Analysis | Silero VAD (`ort`), transcript similarity for retakes, frame diffs for idle screen, Apple Vision for faces | Auto cut, reframing, thumbnails |
+| Transcription | `whisper-rs` large-v3-turbo with Metal, streaming with local agreement, DTW word timestamps, whisper.cpp's Silero VAD to skip silence. Parakeet via `ort` as the faster option | Local and free. Separate tracks make speaker detection unnecessary |
+| Analysis | Silero VAD (the same whisper.cpp ggml model), transcript similarity for retakes, frame diffs for idle screen, Apple Vision for faces | Auto cut, reframing, thumbnails |
 | Audio | DeepFilterNet, biquad EQ and compressor, sidechain ducking, `ebur128` | Built-in voice chain |
 | Storage | Project folder in git, SQLite via sqlx in `.shot/cache` for peaks, thumbnails, transcripts and render cache | Delete the cache and nothing is lost |
 | Export | Parallel chapter renders, hardware encode, stream-copy concat, segments cached by content hash | Incremental builds |
