@@ -1,31 +1,50 @@
-//! Project model, cut.kdl and timeline evaluation. No IO: files are parsed from `&str` and
-//! written to `String`.
+//! Project model, cut.kdl, style cascade and timeline evaluation. No IO: files are parsed
+//! from `&str` and written to `String`.
 //!
 //! The grammar of each file is in `docs/contracts/project-files.md`.
 
+mod brand;
 mod cut;
 mod edit;
+mod element;
+mod engine;
 mod error;
 mod format;
 mod kdl_io;
+mod lock;
 mod script;
+mod style;
 mod timeline;
 mod transcript;
 mod values;
 mod video;
 
+pub use brand::{
+    Bookend, Brand, BundledFont, Camera, CameraShape, Colors, Font, Fonts, Import, LottieTemplate,
+    Motion, Phase, Preset, PresetName, Slot, SlotType, SoundEffect, SoundKey, Stinger,
+};
 pub use cut::{
     CaptionFix, Chapter, Clip, Cut, DerivedCut, DerivedKind, LayoutChange, Music, Overlay,
-    ParamValue, Point, RangeEdit, RemovedBy, Review, TakeEdit, Zoom, ZoomBy,
+    Override, OverrideEffect, ParamValue, Point, RangeEdit, RemovedBy, Review, TakeEdit, Zoom,
+    ZoomBy,
 };
 pub use edit::{Decision, EditError, TakeAt, WordState, WordView};
+pub use element::{Attr, AttrValue, DuplicateElement, Element, ElementKind, Elements};
+pub use engine::{StyleError, StyleInput, build};
 pub use error::ParseError;
 pub use format::{
     AutoCut, AutoZoom, CaptionStyle, Color, CursorStyle, DeviceFrame, Effects, Format, FormatKind,
-    Keystrokes, Layout, Pacing, PrompterMode, RuleKind, Shadow, TimedRule, WindowStyle, ZoomMotion,
-    ZoomTrigger,
+    FormatLayer, Keystrokes, Layout, Pacing, PrompterMode, RuleKind, Shadow, TimedRule,
+    WindowStyle, ZoomMotion, ZoomTrigger,
+};
+pub use lock::{
+    Applied, Asset, ElementRef, Instance, LOCK_VERSION, Lock, LockTake, Orphan, Provenance,
 };
 pub use script::{Beat, Script, ScriptChapter};
+pub use style::{
+    ActiveRule, Effect, EffectKey, Filter, Layer, Rule, RuleBody, Selector, StyleSheet,
+    TRANSITION_LENGTH, Target, TransitionKind,
+};
 pub use timeline::{
     ChapterSegments, ContentHash, MediaId, Output, OutputKind, RENDERER_VERSION, Segment, Timeline,
 };

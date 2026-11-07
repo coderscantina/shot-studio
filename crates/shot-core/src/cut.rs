@@ -2,8 +2,11 @@ use std::collections::HashSet;
 
 use kdl::KdlValue;
 
-use crate::kdl_io::{FromKdl, Node, Source, ToKdl, Writer, keyword_enum};
-use crate::{CaptionStyle, Id, Layout, ParseError, RuleKind, TimeRange};
+use crate::kdl_io::{Bare, FromKdl, Node, Source, ToKdl, Writer, keyword_enum};
+use crate::{
+    CaptionStyle, Decision, Effect, EffectKey, ElementKind, Id, Layout, Micros, ParseError,
+    RuleKind, Target, TimeRange,
+};
 
 /// `cut.kdl`: the edit. Everything is addressed by take id and the take's media time.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -16,7 +19,49 @@ pub struct Cut {
     pub music: Option<Music>,
     /// The main cut, in output order.
     pub chapters: Vec<Chapter>,
+    /// Changes to what the style rules gave single elements, in canonical order: by take in
+    /// cut order, then `at`, then kind. Each (take, kind, `at`) once.
+    pub overrides: Vec<Override>,
     pub derived: Vec<DerivedCut>,
+}
+
+/// An `override` node: what one element gets instead of what the rules gave it. It names the
+/// element by take, kind and start time, the element's identity ([0019]). The build binds it
+/// to the nearest element of that kind within [`Override::TOLERANCE`], so the override follows
+/// a re-analysis that shifts the element a little, and `shot check` lists one that lost it.
+///
+/// [0019]: ../../../docs/decisions/0019-semantic-video-elements-and-style.md
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Override {
+    pub take: Id,
+    pub kind: ElementKind,
+    pub at: Micros,
+    /// `keep` or `cut`: the answer to the review queue. `keep` drops the rule's cut and the
+    /// review item, `cut` applies the rule's cut whatever the confidence.
+    pub decision: Option<Decision>,
+    /// In canonical key order, one per key.
+    pub effects: Vec<OverrideEffect>,
+}
+
+impl Override {
+    /// How far an override's `at` may be from its element's `t`.
+    pub const TOLERANCE: Micros = Micros(500_000);
+}
+
+/// One effect of an override: a replacement for the rules' effect of that key, or `off`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OverrideEffect {
+    Set(Effect),
+    Off(EffectKey),
+}
+
+impl OverrideEffect {
+    pub fn key(&self) -> EffectKey {
+        match self {
+            Self::Set(effect) => effect.key(),
+            Self::Off(key) => key.clone(),
+        }
+    }
 }
 
 /// Replaces every run of transcript words that reads `heard` (ignoring case) with `said`
@@ -192,6 +237,7 @@ impl Cut {
         let mut cut = Self::default();
         let (mut captions, mut fixes, mut music) = (None, None, None);
         let mut derived_clips = Vec::new();
+        let mut overrides = Vec::new();
         for node in src.nodes(&doc) {
             match node.name() {
                 "captions" => {
@@ -201,6 +247,7 @@ impl Cut {
                 "caption-fixes" => node.set_once(&mut fixes, CaptionFix::read_all(node)?)?,
                 "music" => node.set_once(&mut music, Music::read(node)?)?,
                 "chapter" => cut.chapters.push(Chapter::read(node)?),
+                "override" => overrides.push((Override::read(node)?, node)),
                 name @ ("short" | "x-clip") => {
                     let kind = if name == "short" {
                         DerivedKind::Short
@@ -231,6 +278,34 @@ impl Cut {
         {
             return Err(node.error(format!("take `{take}` is not in the main cut")));
         }
+        let take_order: Vec<&Id> = {
+            let mut order = Vec::new();
+            for take in cut.chapters.iter().flat_map(|c| &c.takes) {
+                if !order.contains(&&take.take) {
+                    order.push(&take.take);
+                }
+            }
+            order
+        };
+        for (o, node) in &overrides {
+            if !takes.contains(&o.take) {
+                return Err(node.error(format!("take `{}` is not in the main cut", o.take)));
+            }
+            let same =
+                |other: &Override| other.take == o.take && other.kind == o.kind && other.at == o.at;
+            if overrides.iter().filter(|(other, _)| same(other)).count() > 1 {
+                return Err(node.error(format!(
+                    "duplicate override of `{}` at {} in {}",
+                    o.kind, o.at.0, o.take
+                )));
+            }
+        }
+        let position = |o: &Override| {
+            let take = take_order.iter().position(|t| **t == o.take);
+            (take, o.at, o.kind)
+        };
+        overrides.sort_by_key(|(o, _)| position(o));
+        cut.overrides = overrides.into_iter().map(|(o, _)| o).collect();
         Ok(cut)
     }
 
@@ -265,6 +340,12 @@ impl Cut {
         for chapter in &self.chapters {
             separate(&mut w);
             chapter.write(&mut w);
+        }
+        if !self.overrides.is_empty() {
+            separate(&mut w);
+            for o in &self.overrides {
+                o.write(&mut w);
+            }
         }
         for derived in &self.derived {
             separate(&mut w);
@@ -507,6 +588,91 @@ impl Overlay {
         w.open();
         for (name, value) in &self.params {
             w.node(name.as_str()).arg(value).end();
+        }
+        w.close();
+    }
+}
+
+impl Override {
+    fn read(node: Node<'_>) -> Result<Self, ParseError> {
+        node.expect_block(2, &["at"])?;
+        let kind: ElementKind = node.arg(1)?;
+        let mut decision = None;
+        let mut effects: Vec<OverrideEffect> = Vec::new();
+        for child in node.children() {
+            match child.name() {
+                "keep" | "cut" => {
+                    child.expect(0, &[])?;
+                    let answer = if child.name() == "keep" {
+                        Decision::Keep
+                    } else {
+                        Decision::Cut
+                    };
+                    if decision.replace(answer).is_some() {
+                        return Err(child.error("an override answers `keep` or `cut` once"));
+                    }
+                }
+                name if Effect::is_effect(name) => {
+                    let args: Vec<KdlValue> = child.args()?;
+                    let effect = match args.last().and_then(KdlValue::as_string) {
+                        Some("off") => {
+                            child.expect(args.len(), &[])?;
+                            let key = match (name, args.len()) {
+                                ("overlay", 2) => EffectKey::Overlay(child.arg(0)?),
+                                ("layout", 1) => EffectKey::Layout,
+                                ("zoom", 1) => EffectKey::Zoom,
+                                ("sfx", 1) => EffectKey::Sfx,
+                                ("transition", 1) => EffectKey::Transition,
+                                ("music", 1) => EffectKey::Music,
+                                ("captions", 1) => EffectKey::Captions,
+                                _ => {
+                                    return Err(child.error(format!("`{name} off` takes no value")));
+                                }
+                            };
+                            OverrideEffect::Off(key)
+                        }
+                        _ => OverrideEffect::Set(Effect::read(child, Target::Kind(kind))?),
+                    };
+                    if effects.iter().any(|e| e.key() == effect.key()) {
+                        return Err(child.error(format!("duplicate `{name}`")));
+                    }
+                    effects.push(effect);
+                }
+                _ => return Err(child.unknown()),
+            }
+        }
+        if decision.is_none() && effects.is_empty() {
+            return Err(node.error("an override changes at least one thing"));
+        }
+        effects.sort_by_key(OverrideEffect::key);
+        Ok(Self {
+            take: node.arg(0)?,
+            kind,
+            at: node.prop("at")?,
+            decision,
+            effects,
+        })
+    }
+
+    fn write(&self, w: &mut Writer) {
+        w.node("override")
+            .arg(&self.take)
+            .arg(&self.kind)
+            .prop("at", &self.at)
+            .open();
+        match self.decision {
+            Some(Decision::Keep) => w.node("keep").end(),
+            Some(Decision::Cut) => w.node("cut").end(),
+            None => {}
+        }
+        for effect in &self.effects {
+            match effect {
+                OverrideEffect::Set(effect) => effect.write(w),
+                OverrideEffect::Off(key) => {
+                    key.write(w);
+                    w.arg(&Bare("off")).end();
+                }
+            }
         }
         w.close();
     }

@@ -1,0 +1,11 @@
+{"kind":"word","t":800000,"to":1150000,"confidence":97,"by":"whisper@large-v3-turbo","text":"Everyone"}
+{"kind":"silence","t":4200000,"to":5100000,"confidence":96,"by":"vad@silero-5"}
+{"kind":"click","t":6200000,"by":"events","x":2210,"y":640}
+{"kind":"emphasis","t":8000000,"to":9500000,"confidence":74,"by":"prosody@1"}
+{"kind":"filler","t":9800000,"to":10400000,"confidence":60,"by":"whisper@large-v3-turbo","text":"um"}
+{"kind":"url","t":22000000,"to":23400000,"by":"transcript","url":"https://github.com/coderscantina/shot-studio/pull/1","host":"github"}
+{"kind":"click","t":30000000,"by":"events","x":1480,"y":910}
+{"kind":"punchline","t":40100000,"to":42800000,"confidence":81,"by":"claude"}
+{"kind":"pause","t":45000000,"to":46100000,"confidence":55,"by":"vad@silero-5"}
+{"kind":"silence","t":50000000,"to":50400000,"confidence":99,"by":"vad@silero-5"}
+{"kind":"silence","t":52000000,"to":57000000,"confidence":70,"by":"vad@silero-5"}

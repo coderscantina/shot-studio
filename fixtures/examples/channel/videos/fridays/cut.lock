@@ -1,0 +1,52 @@
+lock 1
+import "https://github.com/coderscantina/shot-styles" rev="3f2a91c" style=cantina
+asset "brand/fonts/Display-Bold.otf" hash="b7f51d701001de0d680fcf3f5349ef79ff4866a7add74de38b1840cfea81ebd1"
+asset "brand/logo.svg" hash="8595c8e98ad0199f70b4a16ff64710a32d46adf783ae5171f86c6f1a977640c4"
+asset "brand/quote-card.json" hash="6085d355041b11738d00721674979b4cc7e8262e07ea48d94a3054c78c1fcddb"
+asset "brand/stinger.json" hash="def0196fef1d93feb7d7413fbb3ade2a2a7c9c1a9df45aad8de5de1e079e4e51"
+
+brand {
+    fonts heading="brand/fonts/Display-Bold.otf" body=geist mono=geist-mono
+    colors accent="#ff7a59" text="#f4f6f8" card="#141821" background="#101418"
+    logo "brand/logo.svg"
+    sounds zoom=whoosh card-travel=whoosh card-settle=tick click=click transition=swoosh pop-settle=pop
+    intro bumper="brand/media/intro.mp4" title=#true
+    outro bumper="brand/media/outro.mp4"
+    end-card length=12_000_000
+    camera shape=rounded corners=24 border=0 shadow=soft
+    motion reaction=reactive opinion=editorial product-tour=launch tutorial=calm
+    preset reactive tempo=80 bounce=60 density=70 stagger=40 beat-sync=#true
+    preset launch tempo=40 bounce=10 density=30 stagger=60 beat-sync=#false
+    transition stinger="brand/stinger.json" peak=400_000
+    template quote-card file="brand/quote-card.json" {
+        slot quote text required=#true
+        slot author text
+        slot accent color
+    }
+}
+
+take t01 {
+    overlay chapter-band from=0 to=2_500_000 on=chapter-start t=0 layer=brand rule="chapter-start"
+    sfx swoosh at=0 on=chapter-start t=0 layer=brand rule="chapter-start"
+    transition dip at=0 length=500_000 on=chapter-start t=0 layer=brand rule="chapter-start"
+    cut from=4_450_000 to=4_850_000 on=silence t=4_200_000 layer=video rule="silence min=500_000"
+    zoom 112 from=8_000_000 to=9_500_000 on=emphasis t=8_000_000 layer=format rule="emphasis"
+    overlay chapter-band from=12_000_000 to=14_500_000 on=chapter-start t=12_000_000 layer=brand rule="chapter-start"
+    sfx swoosh at=12_000_000 on=chapter-start t=12_000_000 layer=brand rule="chapter-start"
+    sfx tick at=12_000_000 on=chapter-end t=12_000_000 layer=import rule="chapter-end"
+    transition dip at=12_000_000 length=500_000 on=chapter-start t=12_000_000 layer=brand rule="chapter-start"
+    overlay link-card from=22_000_000 to=28_000_000 on=url t=22_000_000 layer=override override=22_000_000 {
+        url "https://github.com/coderscantina/shot-studio/pull/1"
+        accent #true
+    }
+    sfx pop at=22_000_000 on=url t=22_000_000 layer=brand rule="url host=github"
+    zoom 160 from=30_000_000 to=31_500_000 x=1480 y=910 on=click t=30_000_000 layer=format rule="click"
+    cut from=45_250_000 to=45_850_000 on=pause t=45_000_000 layer=override override=45_000_000
+    cut from=52_250_000 to=56_750_000 on=silence t=52_000_000 layer=video rule="silence min=4_000_000 confidence=50"
+}
+
+take t02 {
+    cut from=20_000_000 to=20_500_000 on=filler t=20_000_000 layer=video rule="filler"
+    sfx tick at=44_000_000 on=chapter-end t=44_000_000 layer=import rule="chapter-end"
+    orphan filler at=30_000_000
+}

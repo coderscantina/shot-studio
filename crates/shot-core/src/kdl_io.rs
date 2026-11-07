@@ -79,6 +79,11 @@ impl<'a> Node<'a> {
         self.check(ArgCount::AtLeast(0), props, false)
     }
 
+    /// Like [`Node::expect_any`], with a child block allowed.
+    pub fn expect_any_block(self, props: &[&str]) -> Result<(), ParseError> {
+        self.check(ArgCount::AtLeast(0), props, true)
+    }
+
     fn check(self, args: ArgCount, props: &[&str], block: bool) -> Result<(), ParseError> {
         let name = self.name();
         if self.node.ty().is_some() {
@@ -200,6 +205,21 @@ pub(crate) trait ToKdl {
     fn write_kdl(&self, out: &mut String);
 }
 
+impl FromKdl for KdlValue {
+    fn from_kdl(value: &KdlValue) -> Result<Self, String> {
+        Ok(value.clone())
+    }
+}
+
+/// A keyword written bare, for the few places a value is not a typed enum.
+pub(crate) struct Bare(pub &'static str);
+
+impl ToKdl for Bare {
+    fn write_kdl(&self, out: &mut String) {
+        out.push_str(self.0);
+    }
+}
+
 impl FromKdl for String {
     fn from_kdl(value: &KdlValue) -> Result<Self, String> {
         value
@@ -246,7 +266,7 @@ macro_rules! integer_kdl {
     )+};
 }
 
-integer_kdl!(u8, u16, i16, i32, i64);
+integer_kdl!(u8, u16, u32, i16, i32, i64);
 
 /// Writes a quoted KDL v2 string.
 pub(crate) fn quote(s: &str, out: &mut String) {
