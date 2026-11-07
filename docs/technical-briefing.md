@@ -138,7 +138,7 @@ crates/
 
 The `shot` crate name on crates.io is taken, so every crate is prefixed `shot-` and only the binary is called `shot`.
 
-Rust edition 2024, `rust-version = "1.99"`, Cargo resolver 3, shared dependencies in `[workspace.dependencies]`. gpui is pinned to a Zed git revision, vello and parley to exact versions, all recorded in [sources/manifest.json](../sources/manifest.json).
+Rust edition 2024, `rust-version = "1.99"`, Cargo resolver 3, shared dependencies in `[workspace.dependencies]`. gpui, gpui-component, vello and parley are pinned to exact versions. gpui comes from the `gpui-pre` crates.io snapshot of a Zed commit, the same one gpui-component builds against, all recorded in [sources/manifest.json](../sources/manifest.json).
 
 | Layer | Choice | Why |
 | --- | --- | --- |

@@ -11,7 +11,7 @@ No dependencies. Core owns the root `Cargo.toml`, `crates/shot-core`, `docs/cont
 ## Work
 
 1. Scaffold the cargo workspace: every crate from the [architecture](../technical-briefing.md#architecture) as an empty library or binary, edition 2024, `rust-version = "1.99"`, resolver 3, `[workspace.dependencies]`, MIT license metadata, `publish = false`.
-2. Pin gpui to a Zed git revision, `gpui-component`, vello and parley to exact versions. Record name, revision, license and purpose of each in `sources/manifest.json`.
+2. Pin gpui (the `gpui-pre` snapshot gpui-component uses), `gpui-component`, vello and parley to exact versions. Record name, revision, license and purpose of each in `sources/manifest.json`.
 3. Write the grammar of `video.kdl`, `cut.kdl` and `format.kdl` into [the contract](../contracts/project-files.md), with one example per file. Implement parse and write in `shot-core` with round-trip tests and line-numbered errors.
 4. Write the four format presets (reaction, opinion, product tour, tutorial) as `format.kdl` files.
 5. Add a fixture generator script that produces, outside Git under an ignored directory:

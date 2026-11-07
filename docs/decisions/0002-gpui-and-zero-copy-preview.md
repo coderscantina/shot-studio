@@ -14,7 +14,7 @@ The preview has to scrub 4K60 without dropped frames, and the timeline, waveform
 
 ## Choice
 
-gpui, with `gpui-component` restyled with our tokens for standard widgets. Frames decode through VideoToolbox into IOSurface and reach gpui as a Metal texture. gpui is pinned to a Zed git revision.
+gpui, with `gpui-component` restyled with our tokens for standard widgets. Frames decode through VideoToolbox into IOSurface and reach gpui as a Metal texture. gpui is pinned to the exact `gpui-pre` crates.io snapshot of a Zed commit that gpui-component builds against, so only one gpui is compiled.
 
 ## Rejected alternatives
 
