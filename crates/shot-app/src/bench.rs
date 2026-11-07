@@ -1,19 +1,33 @@
-//! `--bench`: plays for a fixed time, then runs random seeks, and prints what it measured.
+//! `--bench`: plays for a fixed time, then runs random seeks, repeated for several runs, and prints
+//! what it measured with a pass or fail verdict. The process exits 0 on pass and 1 on fail.
 //!
 //! Playback counts frames by their timestamps against the clock: a due frame replaced before it
 //! was shown is dropped. Seek latency runs from the seek request to the render that hands the
 //! decoded frame to gpui; the GPU puts it on screen at the next display refresh.
+//!
+//! Every render interval over 1.5 refreshes is reported with what the main thread did meanwhile:
+//! its CPU time and where a watchdog found it, see [`StallWatch`]. An idle main thread with a
+//! late render means the display link did not call in time, which is outside our code; a busy or
+//! blocked main thread names the function it was in.
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use crate::metrics;
+use crate::metrics::{self, StallSample, StallWatch};
 use crate::preview::{PlaybackStats, Preview};
 
 const WARM_UP: Duration = Duration::from_secs(1);
 
+/// The acceptance limit for seek p95.
+const SEEK_P95_LIMIT: Duration = Duration::from_millis(100);
+
+/// A render interval over this means a 60 Hz refresh went by without a render.
+const LONG_INTERVAL: Duration = Duration::from_micros(25_000);
+
 pub struct BenchOptions {
     pub seconds: u64,
     pub seeks: usize,
+    pub runs: usize,
 }
 
 enum Phase {
@@ -30,70 +44,170 @@ enum Phase {
     },
 }
 
-struct PlaybackResult {
+/// A render interval over [`LONG_INTERVAL`] and what the main thread did during it.
+struct Gap {
+    at: Duration,
+    interval: Duration,
+    main_cpu: Duration,
+    samples: Vec<StallSample>,
+    load: f64,
+}
+
+impl Gap {
+    fn cause(&self) -> String {
+        let idle = self
+            .samples
+            .iter()
+            .filter(|sample| sample.is_idle())
+            .count();
+        let busy = self.samples.iter().filter(|sample| !sample.waiting).count();
+        let blocked = self.samples.len() - idle - busy;
+        let top = |filter: &dyn Fn(&StallSample) -> bool| {
+            let mut counts: HashMap<String, usize> = HashMap::new();
+            for sample in self.samples.iter().filter(|sample| filter(sample)) {
+                *counts
+                    .entry(
+                        sample
+                            .frames
+                            .iter()
+                            .take(4)
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(" < "),
+                    )
+                    .or_default() += 1;
+            }
+            counts
+                .into_iter()
+                .max_by_key(|(_, count)| *count)
+                .map(|(stack, _)| stack)
+                .unwrap_or_default()
+        };
+        let summary = format!(
+            "{} samples: {idle} idle, {blocked} blocked, {busy} running",
+            self.samples.len()
+        );
+        if self.samples.is_empty() {
+            format!("{summary}, the watchdog missed it")
+        } else if idle * 2 >= self.samples.len() {
+            format!("{summary}. Main thread idle in its run loop, the display link called late")
+        } else if busy >= blocked && self.main_cpu * 2 < self.interval {
+            format!(
+                "{summary}. Main thread runnable but not on a core, in {}",
+                top(&|sample| !sample.waiting)
+            )
+        } else if busy >= blocked {
+            format!(
+                "{summary}. Main thread busy in {}",
+                top(&|sample| !sample.waiting)
+            )
+        } else {
+            format!(
+                "{summary}. Main thread blocked in {}",
+                top(&|sample| sample.waiting && !sample.is_idle())
+            )
+        }
+    }
+}
+
+/// Render timing of the playback phase.
+#[derive(Default)]
+struct RenderTiming {
+    last: Option<(Instant, Duration)>,
+    intervals: Vec<Duration>,
+    /// Main thread CPU time per render interval: our render plus gpui's layout, paint and submit.
+    main_cpu: Vec<Duration>,
+    /// Time spent in `Preview::render`.
+    render: Vec<Duration>,
+    gaps: Vec<Gap>,
+}
+
+struct Run {
     seconds: f64,
     /// Media time advanced per host second. Below 1 when locked to a display slower than the video.
     clock_rate: f64,
     stats: PlaybackStats,
     cpu_percent: f64,
     service_cpu_percent: f64,
-    max_render_gap: Duration,
-    long_render_gaps: Vec<Duration>,
+    timing: RenderTiming,
+    /// Latency of each seek with the number of frames decoded before the target.
+    seeks: Vec<(Duration, u32)>,
+    wrong_frames: usize,
+}
+
+impl Run {
+    fn seek_percentile(&self, p: f64) -> Duration {
+        percentile(self.seeks.iter().map(|(latency, _)| *latency).collect(), p)
+    }
+
+    fn passed(&self) -> bool {
+        let stats = self.stats;
+        stats.dropped == 0
+            && stats.late == 0
+            && stats.underruns == 0
+            && self.wrong_frames == 0
+            && self.seek_percentile(0.95) < SEEK_P95_LIMIT
+    }
 }
 
 pub struct Bench {
     options: BenchOptions,
     phase: Phase,
+    stalls: StallWatch,
     rng: u64,
     renders: u64,
-    last_render: Option<Instant>,
-    max_render_gap: Duration,
-    long_render_gaps: Vec<Duration>,
     peak_footprint: u64,
     peak_resident: u64,
-    playback: Option<PlaybackResult>,
-    /// Latency of each seek with the number of frames decoded before the target.
-    seek_latencies: Vec<(Duration, u32)>,
-    wrong_frames: usize,
+    timing: RenderTiming,
+    /// The playback half of the run in progress, until its seeks are done.
+    current: Option<Run>,
+    runs: Vec<Run>,
 }
 
 impl Bench {
+    /// Call on the main thread, which the bench watches for stalls.
     pub fn new(options: BenchOptions) -> Self {
         Self {
             options,
             phase: Phase::Starting,
+            stalls: StallWatch::start(),
             rng: 0x5eed,
             renders: 0,
-            last_render: None,
-            max_render_gap: Duration::ZERO,
-            long_render_gaps: Vec::new(),
             peak_footprint: 0,
             peak_resident: 0,
-            playback: None,
-            seek_latencies: Vec::new(),
-            wrong_frames: 0,
+            timing: RenderTiming::default(),
+            current: None,
+            runs: Vec::new(),
         }
     }
 
     pub fn phase_label(&self) -> String {
+        let run = format!("run {}/{}", self.runs.len() + 1, self.options.runs);
         match &self.phase {
-            Phase::Starting => "starting".into(),
-            Phase::Playing { started, .. } => {
-                format!(
-                    "playing {:.0}/{} s",
-                    started.elapsed().as_secs_f64(),
-                    self.options.seconds
-                )
-            }
+            Phase::Starting => format!("{run} starting"),
+            Phase::Playing { started, .. } => format!(
+                "{run} playing {:.0}/{} s",
+                started.elapsed().as_secs_f64(),
+                self.options.seconds
+            ),
             Phase::Seeking { .. } => {
-                format!("seek {}/{}", self.seek_latencies.len(), self.options.seeks)
+                let done = self.current.as_ref().map_or(0, |run| run.seeks.len());
+                format!("{run} seek {done}/{}", self.options.seeks)
             }
         }
     }
 
-    /// Advances the bench by one render. Returns true when it printed its report.
-    pub fn step(&mut self, preview: &mut Preview) -> bool {
+    /// Records how long `Preview::render` took, while playing.
+    pub fn rendered(&mut self, took: Duration) {
+        if matches!(self.phase, Phase::Playing { .. }) {
+            self.timing.render.push(took);
+        }
+    }
+
+    /// Advances the bench by one render. Returns the verdict once every run is done.
+    pub fn step(&mut self, preview: &mut Preview) -> Option<bool> {
         self.renders += 1;
+        let samples = self.stalls.rendered();
         if self.renders.is_multiple_of(30) {
             let (footprint, resident) = metrics::memory();
             self.peak_footprint = self.peak_footprint.max(footprint);
@@ -108,6 +222,7 @@ impl Bench {
                 }
                 if preview.pacer.clock.is_playing() {
                     preview.stats = PlaybackStats::default();
+                    self.timing = RenderTiming::default();
                     self.phase = Phase::Playing {
                         started: Instant::now(),
                         media_start: preview.pacer.clock.media_time(preview.host_now()),
@@ -123,21 +238,29 @@ impl Bench {
                 service_cpu,
             } => {
                 let now = Instant::now();
-                if let Some(last) = self.last_render {
-                    let gap = now - last;
-                    self.max_render_gap = self.max_render_gap.max(gap);
-                    // A gap of more than 1.5 frames at 60 Hz means a refresh slot went by without a render.
-                    if gap > Duration::from_micros(25_000) {
-                        self.long_render_gaps.push(started.elapsed());
+                let main_cpu = metrics::thread_cpu_time();
+                if let Some((last, last_cpu)) = self.timing.last {
+                    let interval = now - last;
+                    let cpu = main_cpu.saturating_sub(last_cpu);
+                    self.timing.intervals.push(interval);
+                    self.timing.main_cpu.push(cpu);
+                    if interval > LONG_INTERVAL {
+                        self.timing.gaps.push(Gap {
+                            at: started.elapsed(),
+                            interval,
+                            main_cpu: cpu,
+                            samples,
+                            load: metrics::load_average(),
+                        });
                     }
                 }
-                self.last_render = Some(now);
+                self.timing.last = Some((now, main_cpu));
 
                 let played = preview.pacer.clock.media_time(preview.host_now()) - *media_start;
                 if played >= Duration::from_secs(self.options.seconds) {
                     let wall = started.elapsed().as_secs_f64();
                     let percent = |cpu: Duration| 100.0 * cpu.as_secs_f64() / wall;
-                    self.playback = Some(PlaybackResult {
+                    self.current = Some(Run {
                         seconds: played.as_secs_f64(),
                         clock_rate: played.as_secs_f64() / wall,
                         stats: preview.stats,
@@ -145,8 +268,9 @@ impl Bench {
                         service_cpu_percent: percent(
                             metrics::decoder_service_cpu_time().saturating_sub(*service_cpu),
                         ),
-                        max_render_gap: self.max_render_gap,
-                        long_render_gaps: self.long_render_gaps.clone(),
+                        timing: std::mem::take(&mut self.timing),
+                        seeks: Vec::with_capacity(self.options.seeks),
+                        wrong_frames: 0,
                     });
                     preview.set_playing(false);
                     self.phase = Phase::Seeking {
@@ -157,8 +281,9 @@ impl Bench {
             }
             Phase::Seeking { target, settle } => {
                 if preview.pending_seek.is_some() {
-                    return false;
+                    return None;
                 }
+                let run = self.current.as_mut().expect("seeking follows playback");
                 if let Some(requested) = target.take() {
                     let (latency, shown) = preview.last_seek.expect("a finished seek");
                     let info = preview.player.info();
@@ -166,126 +291,97 @@ impl Bench {
                     let forward = ((plan.target - plan.keyframe).as_secs_f64()
                         / info.frame_duration.as_secs_f64())
                     .round() as u32;
-                    self.seek_latencies.push((latency, forward));
+                    run.seeks.push((latency, forward));
                     if plan.target != shown {
-                        self.wrong_frames += 1;
+                        run.wrong_frames += 1;
                     }
+                    // Roughly a fast scrub.
                     *settle = 3;
                 }
                 if *settle > 0 {
                     *settle -= 1;
-                    return false;
+                    return None;
                 }
-                if self.seek_latencies.len() >= self.options.seeks {
-                    self.report(preview);
-                    return true;
+                if run.seeks.len() < self.options.seeks {
+                    let next = preview
+                        .player
+                        .info()
+                        .duration
+                        .mul_f64(next_random(&mut self.rng));
+                    *target = Some(next);
+                    preview.seek(next);
+                    return None;
                 }
-                let next = preview
-                    .player
-                    .info()
-                    .duration
-                    .mul_f64(next_random(&mut self.rng));
-                *target = Some(next);
-                preview.seek(next);
+                let run = self.current.take().expect("seeking follows playback");
+                print_run(self.runs.len() + 1, self.options.runs, &run, preview);
+                self.runs.push(run);
+                if self.runs.len() < self.options.runs {
+                    self.phase = Phase::Starting;
+                    return None;
+                }
+                return Some(self.report(preview));
             }
         }
-        false
+        None
     }
 
-    fn report(&self, preview: &Preview) {
+    /// Prints the summary over all runs and returns whether every run passed.
+    fn report(&self, preview: &Preview) -> bool {
         let info = preview.player.info();
-        let fps = 1.0 / info.frame_duration.as_secs_f64();
-        println!("shot-app bench");
         println!(
             "video: {} frames, {} keyframes, {:.3} s, {:.2} fps, hardware decode {}",
             info.index.len(),
             info.index.keyframe_count(),
             info.duration.as_secs_f64(),
-            fps,
+            1.0 / info.frame_duration.as_secs_f64(),
             info.hardware_decode
         );
         if let Some(frame) = &preview.current {
             println!(
-                "frame: {}x{}, pixel format {}, IOSurface {}",
+                "frame: {}x{}, pixel format {}, matrix {}, IOSurface {}",
                 frame.width(),
                 frame.height(),
                 fourcc(frame.pixel_format()),
+                frame.ycbcr_matrix().as_deref().unwrap_or("untagged"),
                 frame.is_iosurface_backed()
             );
         }
-        println!("zoom: {:.1}x", preview.zoom.get());
         println!(
-            "pacing: {}",
+            "zoom {:.1}x, pacing {}",
+            preview.zoom.get(),
             if preview.pacer.is_locked() {
                 "locked to display"
             } else {
                 "wall clock"
             }
         );
-        if let Some(playback) = &self.playback {
-            let stats = playback.stats;
-            println!(
-                "playback: {:.1} s, expected {:.0} frames, presented {}, dropped {}, late {}, underruns {}",
-                playback.seconds,
-                playback.seconds * fps,
-                stats.presented,
-                stats.dropped,
-                stats.late,
-                stats.underruns
-            );
-            println!(
-                "clock rate: {:.5} (media seconds per host second)",
-                playback.clock_rate
-            );
-            let at: Vec<String> = playback
-                .long_render_gaps
-                .iter()
-                .map(|time| format!("{:.2} s", time.as_secs_f64()))
-                .collect();
-            println!(
-                "render gaps: max {:.1} ms, over 25 ms {} [{}]",
-                playback.max_render_gap.as_secs_f64() * 1000.0,
-                playback.long_render_gaps.len(),
-                at.join(", ")
-            );
-            println!(
-                "cpu: app {:.1}%, VTDecoderXPCService {:.1}% (of one core)",
-                playback.cpu_percent, playback.service_cpu_percent
-            );
-        }
-        let mut latencies: Vec<f64> = self
-            .seek_latencies
-            .iter()
-            .map(|(latency, _)| latency.as_secs_f64() * 1000.0)
-            .collect();
-        latencies.sort_by(f64::total_cmp);
-        let percentile = |p: f64| {
-            let rank = ((latencies.len() as f64 * p).ceil() as usize).clamp(1, latencies.len());
-            latencies[rank - 1]
-        };
+        let seeks: Vec<(Duration, u32)> =
+            self.runs.iter().flat_map(|run| run.seeks.clone()).collect();
+        let latencies: Vec<Duration> = seeks.iter().map(|(latency, _)| *latency).collect();
         if !latencies.is_empty() {
             println!(
-                "seeks: {}, p50 {:.1} ms, p95 {:.1} ms, max {:.1} ms, over 100 ms {}, wrong frame {}",
+                "all seeks: {}, p50 {}, p95 {}, max {}",
                 latencies.len(),
-                percentile(0.5),
-                percentile(0.95),
-                latencies[latencies.len() - 1],
-                latencies.iter().filter(|&&ms| ms >= 100.0).count(),
-                self.wrong_frames
+                ms(percentile(latencies.clone(), 0.5)),
+                ms(percentile(latencies.clone(), 0.95)),
+                ms(percentile(latencies, 1.0)),
             );
         }
-        for (low, high) in [(0, 19), (20, 39), (40, 59)] {
-            let bucket: Vec<f64> = self
-                .seek_latencies
+        let longest = seeks.iter().map(|(_, forward)| *forward).max().unwrap_or(0);
+        for low in (0..=longest).step_by(10) {
+            let bucket: Vec<Duration> = seeks
                 .iter()
-                .filter(|(_, forward)| (low..=high).contains(forward))
-                .map(|(latency, _)| latency.as_secs_f64() * 1000.0)
+                .filter(|(_, forward)| (low..low + 10).contains(forward))
+                .map(|(latency, _)| *latency)
                 .collect();
-            if let Some(max) = bucket.iter().copied().reduce(f64::max) {
-                let mean = bucket.iter().sum::<f64>() / bucket.len() as f64;
+            if !bucket.is_empty() {
+                let mean = bucket.iter().sum::<Duration>() / bucket.len() as u32;
                 println!(
-                    "seeks decoding {low}-{high} frames past the keyframe: {}, mean {mean:.1} ms, max {max:.1} ms",
-                    bucket.len()
+                    "  decoding {low}-{} frames past the keyframe: {}, mean {}, max {}",
+                    low + 9,
+                    bucket.len(),
+                    ms(mean),
+                    ms(percentile(bucket, 1.0))
                 );
             }
         }
@@ -294,10 +390,86 @@ impl Bench {
             self.peak_footprint as f64 / 1e6,
             self.peak_resident as f64 / 1e6
         );
+        let failed = self.runs.iter().filter(|run| !run.passed()).count();
+        let dropped: u64 = self.runs.iter().map(|run| run.stats.dropped).sum();
+        let worst_p95 = self
+            .runs
+            .iter()
+            .map(|run| run.seek_percentile(0.95))
+            .max()
+            .unwrap_or_default();
+        let verdict = if failed == 0 { "PASS" } else { "FAIL" };
+        println!(
+            "{verdict}: {} of {} runs passed, {dropped} dropped frames, worst seek p95 {} (limit {})",
+            self.runs.len() - failed,
+            self.runs.len(),
+            ms(worst_p95),
+            ms(SEEK_P95_LIMIT)
+        );
+        failed == 0
     }
 }
 
-/// Uniform in [0, 1). The bench starts from a fixed seed, so every run seeks to the same places.
+fn print_run(number: usize, runs: usize, run: &Run, preview: &Preview) {
+    let fps = 1.0 / preview.player.info().frame_duration.as_secs_f64();
+    let stats = run.stats;
+    println!(
+        "run {number}/{runs}: {}. played {:.1} s, presented {} of {:.0}, dropped {}, late {}, underruns {}; seeks p50 {}, p95 {}, max {}, wrong frame {}",
+        if run.passed() { "pass" } else { "FAIL" },
+        run.seconds,
+        stats.presented,
+        run.seconds * fps,
+        stats.dropped,
+        stats.late,
+        stats.underruns,
+        ms(run.seek_percentile(0.5)),
+        ms(run.seek_percentile(0.95)),
+        ms(run.seek_percentile(1.0)),
+        run.wrong_frames,
+    );
+    let timing = &run.timing;
+    println!(
+        "  render interval p50 {}, p99 {}, max {}; main thread cpu per frame p50 {}, p99 {}, max {}; Preview::render p99 {}, max {}",
+        ms(percentile(timing.intervals.clone(), 0.5)),
+        ms(percentile(timing.intervals.clone(), 0.99)),
+        ms(percentile(timing.intervals.clone(), 1.0)),
+        ms(percentile(timing.main_cpu.clone(), 0.5)),
+        ms(percentile(timing.main_cpu.clone(), 0.99)),
+        ms(percentile(timing.main_cpu.clone(), 1.0)),
+        ms(percentile(timing.render.clone(), 0.99)),
+        ms(percentile(timing.render.clone(), 1.0)),
+    );
+    println!(
+        "  clock rate {:.5}, cpu app {:.1}%, VTDecoderXPCService {:.1}% of one core",
+        run.clock_rate, run.cpu_percent, run.service_cpu_percent
+    );
+    for gap in &timing.gaps {
+        println!(
+            "  gap at {:.2} s: {}, main thread cpu {}, load {:.1}, {}",
+            gap.at.as_secs_f64(),
+            ms(gap.interval),
+            ms(gap.main_cpu),
+            gap.load,
+            gap.cause()
+        );
+    }
+}
+
+/// The nearest-rank percentile, zero for no values.
+fn percentile(mut values: Vec<Duration>, p: f64) -> Duration {
+    if values.is_empty() {
+        return Duration::ZERO;
+    }
+    values.sort_unstable();
+    let rank = ((values.len() as f64 * p).ceil() as usize).clamp(1, values.len());
+    values[rank - 1]
+}
+
+fn ms(duration: Duration) -> String {
+    format!("{:.1} ms", duration.as_secs_f64() * 1000.0)
+}
+
+/// Uniform in [0, 1). The bench starts from a fixed seed, so every bench seeks to the same places.
 fn next_random(state: &mut u64) -> f64 {
     *state = state
         .wrapping_mul(6_364_136_223_846_793_005)

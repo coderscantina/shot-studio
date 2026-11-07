@@ -1,7 +1,8 @@
 //! A decode thread that keeps a few frames ahead of the screen and loops the clip.
 //!
 //! The UI thread pops due frames with [`Player::take_due`]; a seek drops the queued frames and
-//! restarts decoding, and a newer seek cancels one still decoding.
+//! restarts decoding. A seek still decoding runs to the end, and its frame is queued even when a
+//! newer seek is waiting, so a fast scrub keeps showing frames instead of cancelling every one.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -10,7 +11,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crate::timing::{FrameIndex, take_due};
-use crate::videotoolbox::{DecodeError, Decoder, Frame};
+use crate::videotoolbox::{DecodeError, Decoder, Frame, Matrix};
 
 /// Frames decoded ahead while playing. 8 frames of 4K 4:2:0 are about 100 MB and cover 133 ms at 60 fps.
 pub const RING_FRAMES: usize = 8;
@@ -36,6 +37,8 @@ struct State {
     /// Counts seeks, so a frame decoded for an older seek is not queued.
     generation: u64,
     seek: Option<Duration>,
+    /// A seek was requested and its frame is not queued yet.
+    seeking: bool,
     quit: bool,
     error: Option<String>,
 }
@@ -47,6 +50,7 @@ impl Default for State {
             lookahead: RING_FRAMES,
             generation: 0,
             seek: None,
+            seeking: false,
             quit: false,
             error: None,
         }
@@ -72,7 +76,8 @@ pub struct Player {
 }
 
 impl Player {
-    /// Opens `path` on a new decode thread. `make_stage` runs once on that thread.
+    /// Opens `path` on a new decode thread, with frames in the matrix gpui's surface shader expects.
+    /// `make_stage` runs once on that thread.
     pub fn spawn(
         path: PathBuf,
         make_stage: impl FnOnce() -> Option<FrameStage> + Send + 'static,
@@ -83,19 +88,22 @@ impl Player {
             .name("shot-decode".into())
             .spawn({
                 let shared = shared.clone();
-                move || match Decoder::open(&path) {
-                    Ok(decoder) => {
-                        let info = VideoInfo {
-                            index: decoder.index().clone(),
-                            frame_duration: decoder.frame_duration(),
-                            duration: decoder.duration(),
-                            hardware_decode: decoder.uses_hardware(),
-                        };
-                        let _ = opened_tx.send(Ok(info));
-                        decode_loop(decoder, make_stage(), &shared);
-                    }
-                    Err(error) => {
-                        let _ = opened_tx.send(Err(error));
+                move || {
+                    set_user_interactive();
+                    match Decoder::open_with(&path, Matrix::Bt601) {
+                        Ok(decoder) => {
+                            let info = VideoInfo {
+                                index: decoder.index().clone(),
+                                frame_duration: decoder.frame_duration(),
+                                duration: decoder.duration(),
+                                hardware_decode: decoder.uses_hardware(),
+                            };
+                            let _ = opened_tx.send(Ok(info));
+                            decode_loop(decoder, make_stage(), &shared);
+                        }
+                        Err(error) => {
+                            let _ = opened_tx.send(Err(error));
+                        }
                     }
                 }
             })
@@ -118,7 +126,13 @@ impl Player {
         state.queue.clear();
         state.generation += 1;
         state.seek = Some(time);
+        state.seeking = true;
         self.shared.changed.notify_all();
+    }
+
+    /// Whether a seek was requested and its frame is not queued yet.
+    pub fn seeking(&self) -> bool {
+        self.shared.lock().seeking
     }
 
     /// Decodes a full ring ahead while playing, and one frame while paused.
@@ -145,11 +159,13 @@ impl Player {
     }
 
     /// Pops the oldest queued frame regardless of time, for showing a seek result while paused.
-    pub fn take_next(&self) -> Option<Frame> {
+    /// The flag is false for a frame of an older seek, shown while the latest one still decodes.
+    pub fn take_next(&self) -> Option<(Frame, bool)> {
         let mut state = self.shared.lock();
-        let frame = state.queue.pop_front();
+        let frame = state.queue.pop_front()?;
+        let latest = !state.seeking;
         self.shared.changed.notify_all();
-        frame
+        Some((frame, latest))
     }
 
     /// Presentation time of the oldest queued frame.
@@ -166,6 +182,18 @@ impl Drop for Player {
             let _ = thread.join();
         }
     }
+}
+
+/// Runs the calling thread at the QoS of the main thread. The screen waits on this thread, and
+/// at a lower class a busy machine can hold it off a core, or off a lock the main thread needs.
+fn set_user_interactive() {
+    /// `QOS_CLASS_USER_INTERACTIVE` from `<sys/qos.h>`.
+    const USER_INTERACTIVE: u32 = 0x21;
+    unsafe extern "C" {
+        fn pthread_set_qos_class_self_np(class: u32, relative_priority: i32) -> i32;
+    }
+    // SAFETY: Changes only the calling thread's scheduling class.
+    unsafe { pthread_set_qos_class_self_np(USER_INTERACTIVE, 0) };
 }
 
 fn decode_loop(mut decoder: Decoder, mut stage: Option<FrameStage>, shared: &Shared) {
@@ -188,7 +216,7 @@ fn decode_loop(mut decoder: Decoder, mut stage: Option<FrameStage>, shared: &Sha
             Some(time) => {
                 let clip_time = time.min(clip.saturating_sub(decoder.frame_duration()));
                 loop_offset = Duration::ZERO;
-                decoder.seek(clip_time, || shared.lock().seek.is_some())
+                decoder.seek(clip_time, || false)
             }
             None => match decoder.next_frame() {
                 Ok(None) => {
@@ -213,9 +241,14 @@ fn decode_loop(mut decoder: Decoder, mut stage: Option<FrameStage>, shared: &Sha
         }
 
         let mut state = shared.lock();
-        if state.generation == generation && state.seek.is_none() {
+        if state.generation == generation {
+            state.seeking = false;
             state.queue.push_back(frame);
-            shared.changed.notify_all();
+        } else if seek.is_some() && state.seek.is_some() {
+            // An older seek's frame stands in until the newer seek finishes.
+            state.queue.clear();
+            state.queue.push_back(frame);
         }
+        shared.changed.notify_all();
     }
 }

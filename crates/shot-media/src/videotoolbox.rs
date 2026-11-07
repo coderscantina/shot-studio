@@ -1,6 +1,9 @@
 //! Hardware decode: `AVAssetReader` hands over compressed samples untouched, a
 //! `VTDecompressionSession` that must run on the hardware decoder turns them into
 //! IOSurface-backed `CVPixelBuffer`s that Metal samples in place. No pixel ever touches the CPU.
+//!
+//! The decoder outputs video range, so VideoToolbox runs a hardware pixel transfer to full range.
+//! [`Matrix::Bt601`] lets the same transfer also re-encode the colors for gpui's surface shader.
 
 use std::collections::VecDeque;
 use std::path::Path;
@@ -9,7 +12,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use block2::RcBlock;
-use objc2::rc::Retained;
+use objc2::rc::{Retained, autoreleasepool};
 use objc2_av_foundation::{
     AVAssetReader, AVAssetReaderStatus, AVAssetReaderTrackOutput, AVAssetTrack, AVMediaTypeVideo,
     AVURLAsset,
@@ -23,14 +26,17 @@ use objc2_core_media::{
 };
 use objc2_core_video::{
     CVImageBuffer, CVPixelBuffer, CVPixelBufferGetHeight, CVPixelBufferGetIOSurface,
-    CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidth, kCVPixelBufferIOSurfacePropertiesKey,
+    CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidth, kCVImageBufferYCbCrMatrix_ITU_R_601_4,
+    kCVImageBufferYCbCrMatrixKey, kCVPixelBufferIOSurfacePropertiesKey,
     kCVPixelBufferMetalCompatibilityKey, kCVPixelBufferPixelFormatTypeKey,
     kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
 };
 use objc2_foundation::{NSString, NSURL};
 use objc2_video_toolbox::{
     VTDecodeFrameFlags, VTDecodeInfoFlags, VTDecompressionSession, VTSessionCopyProperty,
+    VTSessionSetProperty, kVTDecompressionPropertyKey_PixelTransferProperties,
     kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder,
+    kVTPixelTransferPropertyKey_DestinationYCbCrMatrix,
     kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder,
 };
 
@@ -38,6 +44,17 @@ use crate::timing::FrameIndex;
 
 /// The decoder's output format. gpui's surface shader accepts only full-range biplanar 4:2:0.
 pub const PIXEL_FORMAT: u32 = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
+
+/// The YCbCr matrix of decoded frames.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Matrix {
+    /// The source's own matrix, BT.709 for our recordings.
+    #[default]
+    Source,
+    /// BT.601, the matrix gpui's surface shader decodes with. The hardware pixel transfer
+    /// re-encodes each frame into it, so a BT.709 source shows its true colors in gpui.
+    Bt601,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum DecodeError {
@@ -47,6 +64,8 @@ pub enum DecodeError {
     Reader(String),
     #[error("creating the hardware decoder failed with OSStatus {0}")]
     Session(i32),
+    #[error("configuring the decoder's pixel transfer failed with OSStatus {0}")]
+    PixelTransfer(i32),
     #[error("decoding a frame failed with OSStatus {0}")]
     Decode(i32),
 }
@@ -77,6 +96,19 @@ impl Frame {
 
     pub fn is_iosurface_backed(&self) -> bool {
         CVPixelBufferGetIOSurface(Some(&self.buffer)).is_some()
+    }
+
+    /// The YCbCr matrix the buffer is tagged with, such as `ITU_R_709_2`.
+    pub fn ycbcr_matrix(&self) -> Option<String> {
+        // SAFETY: A null mode pointer is allowed, and the key names a CFString attachment.
+        let value = unsafe {
+            self.buffer
+                .attachment(kCVImageBufferYCbCrMatrixKey, ptr::null_mut())
+        }?;
+        value
+            .downcast::<CFString>()
+            .ok()
+            .map(|name| name.to_string())
     }
 }
 
@@ -112,6 +144,16 @@ pub struct Decoder {
 impl Decoder {
     /// Opens the first video track, indexes its keyframes and starts at the first frame.
     pub fn open(path: &Path) -> Result<Self, DecodeError> {
+        Self::open_with(path, Matrix::Source)
+    }
+
+    /// Like [`Decoder::open`], with frames in the given YCbCr matrix.
+    pub fn open_with(path: &Path, matrix: Matrix) -> Result<Self, DecodeError> {
+        // AVFoundation autoreleases objects, and a plain thread has no pool to drain them.
+        autoreleasepool(|_| Self::open_in_pool(path, matrix))
+    }
+
+    fn open_in_pool(path: &Path, matrix: Matrix) -> Result<Self, DecodeError> {
         let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
         let asset = unsafe { AVURLAsset::URLAssetWithURL_options(&url, None) };
         let media_type = unsafe { AVMediaTypeVideo }.expect("AVFoundation defines the video type");
@@ -168,7 +210,7 @@ impl Decoder {
         );
         let (reader, output) = start_reader(&asset, &track, Duration::ZERO)?;
         Ok(Self {
-            session: create_session(&format)?,
+            session: create_session(&format, matrix)?,
             asset,
             track,
             index,
@@ -222,6 +264,10 @@ impl Decoder {
     /// Decodes the next frame in presentation order, or `None` at the end of the track.
     /// Keeps a few frames in flight so the hardware decoder works on them in parallel.
     pub fn next_frame(&mut self) -> Result<Option<Frame>, DecodeError> {
+        autoreleasepool(|_| self.next_frame_in_pool())
+    }
+
+    fn next_frame_in_pool(&mut self) -> Result<Option<Frame>, DecodeError> {
         loop {
             while !self.end_of_track && self.in_flight < PIPELINE_DEPTH {
                 match next_sample(&self.reader, &self.output)? {
@@ -246,6 +292,15 @@ impl Decoder {
         time: Duration,
         cancelled: impl Fn() -> bool,
     ) -> Result<Option<Frame>, DecodeError> {
+        // Each seek starts a new reader, whose autoreleased objects would pile up without a pool.
+        autoreleasepool(|_| self.seek_in_pool(time, cancelled))
+    }
+
+    fn seek_in_pool(
+        &mut self,
+        time: Duration,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<Option<Frame>, DecodeError> {
         let Some(plan) = self.index.plan(time) else {
             return Ok(None);
         };
@@ -256,7 +311,7 @@ impl Decoder {
                 self.submit(&sample, true)?;
                 return match self.take_output()? {
                     Some(frame) => Ok(Some(frame)),
-                    None => self.next_frame(),
+                    None => self.next_frame_in_pool(),
                 };
             }
             if cancelled() {
@@ -339,6 +394,7 @@ impl Drop for Decoder {
 
 fn create_session(
     format: &CMFormatDescription,
+    matrix: Matrix,
 ) -> Result<CFRetained<VTDecompressionSession>, DecodeError> {
     // SAFETY: These statics are constant CF objects defined by the frameworks.
     let (true_value, require_hardware, keys): (&CFType, _, _) = unsafe {
@@ -373,11 +429,35 @@ fn create_session(
             NonNull::from(&mut session),
         )
     };
-    match NonNull::new(session) {
+    let session = match NonNull::new(session) {
         // SAFETY: Create returns an owned session on success.
-        Some(session) if status == 0 => Ok(unsafe { CFRetained::from_raw(session) }),
-        _ => Err(DecodeError::Session(status)),
+        Some(session) if status == 0 => unsafe {
+            CFRetained::<VTDecompressionSession>::from_raw(session)
+        },
+        _ => return Err(DecodeError::Session(status)),
+    };
+    if matrix == Matrix::Bt601 {
+        // SAFETY: Constant CF strings defined by the frameworks.
+        let (key, bt601) = unsafe {
+            (
+                kVTPixelTransferPropertyKey_DestinationYCbCrMatrix,
+                kCVImageBufferYCbCrMatrix_ITU_R_601_4,
+            )
+        };
+        let transfer = CFDictionary::<CFString, CFString>::from_slices(&[key], &[bt601]);
+        // SAFETY: The property takes a dictionary of pixel transfer properties.
+        let status = unsafe {
+            VTSessionSetProperty(
+                &session,
+                kVTDecompressionPropertyKey_PixelTransferProperties,
+                Some(transfer.as_opaque()),
+            )
+        };
+        if status != 0 {
+            return Err(DecodeError::PixelTransfer(status));
+        }
     }
+    Ok(session)
 }
 
 /// Starts a passthrough reader at `start`. Passthrough means no decode and no pixel format conversion.

@@ -1,6 +1,15 @@
 //! gpui UI, bundled as shot.app.
 //!
-//! For now the milestone 02 preview spike: `shot-app [--bench] [--zoom] [--wall-clock] [--seconds N] [--seeks N] <video>`.
+//! For now the preview spike window: `shot-app [flags] <video>`.
+//!
+//! - `--bench`: play, then seek at random, for several runs, print the measurements and a PASS or
+//!   FAIL line, exit 0 on pass and 1 on fail. A run passes when no frame is dropped, late or
+//!   missing, every seek shows its exact frame and seek p95 stays under 100 ms.
+//! - `--runs N`: bench runs, default 5.
+//! - `--seconds N`: playback per run, default 60.
+//! - `--seeks N`: random seeks per run, default 60.
+//! - `--zoom`: start with the 2x punch-in, a wgpu pass on every frame.
+//! - `--wall-clock`: pace by wall clock alone instead of locking to the display, for comparison.
 
 mod bench;
 mod metrics;
@@ -18,7 +27,7 @@ fn main() -> ExitCode {
         Ok(options) => options,
         Err(message) => {
             eprintln!(
-                "{message}\nusage: shot-app [--bench] [--zoom] [--wall-clock] [--seconds N] [--seeks N] <video>"
+                "{message}\nusage: shot-app [--bench] [--runs N] [--seconds N] [--seeks N] [--zoom] [--wall-clock] <video>"
             );
             return ExitCode::FAILURE;
         }
@@ -34,6 +43,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Options, String> {
     let mut bench = false;
     let mut seconds = 60;
     let mut seeks = 60;
+    let mut runs = 5;
     let mut args = args.peekable();
     while let Some(arg) = args.next() {
         let mut number = |name: &str| {
@@ -47,6 +57,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Options, String> {
             "--wall-clock" => display_lock = false,
             "--seconds" => seconds = number("--seconds")?,
             "--seeks" => seeks = number("--seeks")? as usize,
+            "--runs" => runs = number("--runs")?.max(1) as usize,
             flag if flag.starts_with("--") => return Err(format!("unknown flag {flag}")),
             path => video = Some(PathBuf::from(path)),
         }
@@ -55,6 +66,10 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Options, String> {
         video: video.ok_or("missing video path")?,
         zoom,
         display_lock,
-        bench: bench.then_some(BenchOptions { seconds, seeks }),
+        bench: bench.then_some(BenchOptions {
+            seconds,
+            seeks,
+            runs,
+        }),
     })
 }
