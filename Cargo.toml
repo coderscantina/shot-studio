@@ -51,6 +51,8 @@ objc2-audio-toolbox = { version = "0.3.2", default-features = false, features = 
 wgpu = "30.0.1"
 pollster = "0.4.0"
 libc = "0.2.191"
+# The NSView behind a gpui window, for the prompter's borderless placement and mirror. Same as gpui.
+raw-window-handle = "0.6.2"
 tempfile = "3.27.0"
 # Official MCP Rust SDK. The client feature is only enabled for tests.
 rmcp = { version = "3.9.0", default-features = false, features = ["server", "macros", "transport-io"] }

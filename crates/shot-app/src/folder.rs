@@ -71,15 +71,29 @@ impl VideoFolder {
         self.load_transcripts()
     }
 
-    /// Appends a chapter that keeps all of a new take, and writes `cut.kdl`.
+    /// Writes `format` as canonical `format.kdl` and makes it the project's format.
+    pub fn write_format(&mut self, format: Format) -> Result<(), String> {
+        let path = self.dir.join("format.kdl");
+        fs::write(&path, format.to_kdl()).map_err(|e| format!("{}: {e}", path.display()))?;
+        self.project.format = format;
+        Ok(())
+    }
+
+    /// Appends a chapter that keeps all of a new take, with its layout and zoom hotkey markers
+    /// as nodes, and writes `cut.kdl`.
     pub fn append_take(&mut self, take: Id, duration: Micros) -> Result<(), String> {
         let Some(range) = TimeRange::new(Micros(0), duration) else {
             return Err(format!("take {take} is empty"));
         };
-        let cut = self
+        let mut cut = self
             .project
             .cut
             .append_take(take.clone(), format!("Take {take}"), range);
+        let markers = shot_capture::events::read_markers(&self.media(&take, "events.jsonl"))
+            .map_err(|e| format!("{take}/events.jsonl: {e}"))?;
+        if let Some(edit) = cut.chapters.last_mut().and_then(|c| c.takes.last_mut()) {
+            shot_prompter::apply_markers(edit, &markers, &self.project.format);
+        }
         self.write_cut(cut)
     }
 

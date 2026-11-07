@@ -6210,10 +6210,14 @@ dependencies = [
  "objc2-io-surface",
  "objc2-metal 0.3.2",
  "pollster",
+ "raw-window-handle",
+ "serde",
+ "serde_json",
  "shot-analyze",
  "shot-capture",
  "shot-core",
  "shot-media",
+ "shot-prompter",
  "shot-render",
  "tempfile",
  "wgpu",
@@ -6320,6 +6324,12 @@ dependencies = [
 [[package]]
 name = "shot-prompter"
 version = "26.11.7"
+dependencies = [
+ "shot-analyze",
+ "shot-capture",
+ "shot-core",
+ "whisper-rs",
+]
 
 [[package]]
 name = "shot-render"

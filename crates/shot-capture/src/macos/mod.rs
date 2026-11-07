@@ -18,6 +18,7 @@ use shot_core::{Id, Micros};
 
 use self::av::{AvCapture, Kind};
 use self::event_tap::EventTap;
+pub use self::event_tap::Marks;
 use self::screen::Screen;
 use self::tap::Sources;
 pub use self::tap::{Preview, PreviewFrame};
@@ -145,6 +146,7 @@ impl Session {
             &dir.join("events.jsonl"),
             crate::clock::nanos(origin.value, origin.timescale),
             screen.geometry,
+            config.hotkeys,
         ) {
             Ok(events) => events,
             Err(e) => {
@@ -185,6 +187,11 @@ impl Session {
     /// so take it once and clone it.
     pub fn preview(&self) -> Preview {
         Preview::start(self.frames.clone())
+    }
+
+    /// Writes record hotkey markers into this take's `events.jsonl`.
+    pub fn marks(&self) -> Marks {
+        self.events.marks()
     }
 
     /// Media time recorded so far.

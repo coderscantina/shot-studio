@@ -1,13 +1,13 @@
-//! Cursor and key events from a listen-only CGEventTap, written to `events.jsonl` as they happen.
+//! Cursor and key events from a listen-only CGEventTap, written to `events.jsonl` as they happen,
+//! and the markers record hotkeys write through [`Marks`].
 
 use std::ffi::c_void;
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 use std::ptr::NonNull;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
 
 use objc2_core_foundation::{CFMachPort, CFRetained, CFRunLoop, kCFRunLoopDefaultMode};
@@ -18,7 +18,7 @@ use objc2_core_graphics::{
 use objc2_core_media::CMClock;
 
 use crate::clock::{MediaClock, nanos};
-use crate::events::{Button, DisplayGeometry, Event, EventKind, key_name, modifiers};
+use crate::events::{Button, DisplayGeometry, Event, EventKind, Hotkey, Mark, key_name, modifiers};
 use crate::{CaptureError, Permission};
 
 pub fn check_permission() -> Result<(), CaptureError> {
@@ -32,59 +32,101 @@ pub fn check_permission() -> Result<(), CaptureError> {
 /// A running event tap on its own run loop thread.
 pub struct EventTap {
     stop: Arc<AtomicBool>,
-    count: Arc<AtomicU64>,
-    thread: JoinHandle<Result<(), String>>,
+    log: Arc<Mutex<Log>>,
+    thread: JoinHandle<()>,
+}
+
+/// The open event log. The tap and [`Marks`] take the time under its lock, so lines stay sorted.
+struct Log {
+    file: File,
+    clock: MediaClock,
+    geometry: DisplayGeometry,
+    hotkeys: Vec<Hotkey>,
+    count: u64,
+    error: Option<String>,
+}
+
+impl Log {
+    fn write(&mut self, host: &CMClock, kind: EventKind) {
+        if self.error.is_some() {
+            return;
+        }
+        let now = unsafe { host.time() };
+        let Some(t) = self.clock.media_time(nanos(now.value, now.timescale)) else {
+            return;
+        };
+        let mut line = Event::new(t, kind).to_line();
+        line.push('\n');
+        match self.file.write_all(line.as_bytes()) {
+            Ok(()) => self.count += 1,
+            Err(e) => self.error = Some(e.to_string()),
+        }
+    }
 }
 
 struct State {
-    file: File,
-    clock: MediaClock,
+    log: Arc<Mutex<Log>>,
     host: CFRetained<CMClock>,
-    geometry: DisplayGeometry,
-    count: Arc<AtomicU64>,
     port: Option<CFRetained<CFMachPort>>,
-    error: Option<String>,
+}
+
+/// Writes record hotkey markers into the running take's event log, at the media time of the
+/// call and the cursor position at that moment. Cheap to clone and usable from any thread.
+#[derive(Clone)]
+pub struct Marks {
+    log: Arc<Mutex<Log>>,
+}
+
+impl Marks {
+    pub fn write(&self, mark: Mark) {
+        let cursor = CGEvent::new(None).map(|e| CGEvent::location(Some(&e)));
+        let mut log = self.log.lock().expect("event log");
+        let (x, y) = cursor.map_or((0, 0), |at| log.geometry.to_pixels(at.x, at.y));
+        let host = unsafe { CMClock::host_time_clock() };
+        log.write(&host, EventKind::Marker { x, y, mark });
+    }
 }
 
 impl EventTap {
     /// Starts logging to `path`. `origin_nanos` is media time zero on the host clock.
+    /// `hotkeys` are key presses left out of the log as `key` events.
     pub fn start(
         path: &Path,
         origin_nanos: i64,
         geometry: DisplayGeometry,
+        hotkeys: Vec<Hotkey>,
     ) -> Result<Self, CaptureError> {
         let file = File::create(path).map_err(|e| CaptureError::Write {
             file: "events.jsonl",
             message: e.to_string(),
         })?;
         let stop = Arc::new(AtomicBool::new(false));
-        let count = Arc::new(AtomicU64::new(0));
+        let log = Arc::new(Mutex::new(Log {
+            file,
+            clock: MediaClock::new(origin_nanos),
+            geometry,
+            hotkeys,
+            count: 0,
+            error: None,
+        }));
         let (ready, started) = mpsc::channel();
         let thread = std::thread::Builder::new()
             .name("events.jsonl".into())
             .spawn({
                 let stop = stop.clone();
-                let count = count.clone();
+                let log = log.clone();
                 move || {
                     let state = State {
-                        file,
-                        clock: MediaClock::new(origin_nanos),
+                        log,
                         host: unsafe { CMClock::host_time_clock() },
-                        geometry,
-                        count,
                         port: None,
-                        error: None,
                     };
                     run(state, &stop, ready)
                 }
             })
             .expect("spawning the event thread");
         match started.recv() {
-            Ok(true) => Ok(Self {
-                stop,
-                count,
-                thread,
-            }),
+            Ok(true) => Ok(Self { stop, log, thread }),
             _ => {
                 let _ = thread.join();
                 Err(CaptureError::Permission(Permission::InputMonitoring))
@@ -92,21 +134,33 @@ impl EventTap {
         }
     }
 
-    /// Stops the tap and returns the number of events written.
+    pub fn marks(&self) -> Marks {
+        Marks {
+            log: self.log.clone(),
+        }
+    }
+
+    /// Stops the tap and returns the number of events written. Markers written after this are
+    /// still appended, until the last [`Marks`] is dropped.
     pub fn stop(self) -> Result<u64, CaptureError> {
         self.stop.store(true, Ordering::Relaxed);
-        self.thread
-            .join()
-            .expect("event thread panicked")
-            .map_err(|message| CaptureError::Write {
-                file: "events.jsonl",
-                message,
-            })?;
-        Ok(self.count.load(Ordering::Relaxed))
+        let error = |message| CaptureError::Write {
+            file: "events.jsonl",
+            message,
+        };
+        self.thread.join().expect("event thread panicked");
+        let mut log = self.log.lock().expect("event log");
+        match log.error.take() {
+            Some(message) => Err(error(message)),
+            None => {
+                log.file.sync_all().map_err(|e| error(e.to_string()))?;
+                Ok(log.count)
+            }
+        }
     }
 }
 
-fn run(state: State, stop: &AtomicBool, ready: mpsc::Sender<bool>) -> Result<(), String> {
+fn run(state: State, stop: &AtomicBool, ready: mpsc::Sender<bool>) {
     let mask = [
         CGEventType::MouseMoved,
         CGEventType::LeftMouseDown,
@@ -138,7 +192,7 @@ fn run(state: State, stop: &AtomicBool, ready: mpsc::Sender<bool>) -> Result<(),
     let Some(port) = port else {
         drop(unsafe { Box::from_raw(state) });
         let _ = ready.send(false);
-        return Ok(());
+        return;
     };
     let source = CFMachPort::new_run_loop_source(None, Some(&port), 0);
     let run_loop = CFRunLoop::current().expect("a thread has a run loop");
@@ -152,12 +206,7 @@ fn run(state: State, stop: &AtomicBool, ready: mpsc::Sender<bool>) -> Result<(),
     }
     CGEvent::tap_enable(&port, false);
     run_loop.remove_source(source.as_deref(), mode);
-    let mut state = unsafe { Box::from_raw(state) };
-    state.port = None;
-    match state.error.take() {
-        Some(message) => Err(message),
-        None => state.file.sync_all().map_err(|e| e.to_string()),
-    }
+    drop(unsafe { Box::from_raw(state) });
 }
 
 unsafe extern "C-unwind" fn callback(
@@ -178,19 +227,12 @@ unsafe extern "C-unwind" fn callback(
         }
         return event.as_ptr();
     }
-    let now = unsafe { state.host.time() };
-    if let (Some(t), Some(kind)) = (
-        state.clock.media_time(nanos(now.value, now.timescale)),
-        event_kind(kind, event_ref, &state.geometry),
-    ) && state.error.is_none()
-    {
-        let mut line = Event::new(t, kind).to_line();
-        line.push('\n');
-        match state.file.write_all(line.as_bytes()) {
-            Ok(()) => {
-                state.count.fetch_add(1, Ordering::Relaxed);
-            }
-            Err(e) => state.error = Some(e.to_string()),
+    let mut log = state.log.lock().expect("event log");
+    if let Some(kind) = event_kind(kind, event_ref, &log.geometry) {
+        let hotkey = matches!(&kind, EventKind::Key { key, mods }
+            if log.hotkeys.iter().any(|h| &h.key == key && &h.mods == mods));
+        if !hotkey {
+            log.write(&state.host, kind);
         }
     }
     event.as_ptr()

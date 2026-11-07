@@ -20,10 +20,12 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::progress::Progress;
 use objc2_core_video::{CVPixelBufferGetHeight, CVPixelBufferGetWidth};
 use shot_analyze::{Transcriber, cache, models};
+use shot_capture::events::Hotkey;
 use shot_capture::{Devices, Preview, PreviewFrame, Session, SessionConfig, Source};
 use shot_core::{Id, Micros, Transcript};
 
 use crate::folder::VideoFolder;
+use crate::prompter::{Live, PrompterPane};
 use crate::theme::*;
 use crate::ui::{self, alert, hint, icon, label, mono};
 
@@ -60,7 +62,7 @@ struct Choice {
 }
 
 enum Command {
-    Start(PathBuf, Choice),
+    Start(PathBuf, Choice, Arc<Live>, Vec<Hotkey>),
     Stop,
 }
 
@@ -97,6 +99,7 @@ pub struct RecordScreen {
     focus: FocusHandle,
     scroll: ScrollHandle,
     error: Option<String>,
+    prompter: Entity<PrompterPane>,
 }
 
 impl EventEmitter<Recorded> for RecordScreen {}
@@ -132,6 +135,7 @@ impl RecordScreen {
                 move || recorder(rx, &shared)
             })
             .expect("spawning the recorder thread");
+        let prompter = cx.new(|cx| PrompterPane::new(folder.clone(), cx));
         Self {
             folder,
             devices,
@@ -142,6 +146,7 @@ impl RecordScreen {
             focus: cx.focus_handle(),
             scroll: ScrollHandle::new(),
             error: None,
+            prompter,
         }
     }
 
@@ -160,7 +165,14 @@ impl RecordScreen {
                 self.error = None;
                 let dir = self.folder.read(cx).dir.clone();
                 self.shared.set(Phase::Loading);
-                let _ = self.commands.send(Command::Start(dir, self.choice.clone()));
+                let (live, hotkeys) = self.prompter.update(cx, |prompter, cx| {
+                    prompter.reset(cx);
+                    prompter.arm();
+                    (prompter.live(), prompter.log_filter())
+                });
+                let _ = self
+                    .commands
+                    .send(Command::Start(dir, self.choice.clone(), live, hotkeys));
                 self.open = None;
                 self.poll(cx);
             }
@@ -181,7 +193,14 @@ impl RecordScreen {
                     .await;
                 let Ok(phase) = this.update(cx, |this, cx| {
                     cx.notify();
-                    this.phase()
+                    let phase = this.phase();
+                    if matches!(
+                        phase,
+                        Phase::Finishing | Phase::Finished { .. } | Phase::Idle | Phase::Failed(_)
+                    ) {
+                        this.prompter.update(cx, |prompter, _| prompter.disarm());
+                    }
+                    phase
                 }) else {
                     break;
                 };
@@ -241,10 +260,10 @@ fn free_space(dir: &std::path::Path) -> Option<u64> {
 
 fn recorder(commands: Receiver<Command>, shared: &Shared) {
     while let Ok(command) = commands.recv() {
-        let Command::Start(dir, choice) = command else {
+        let Command::Start(dir, choice, live, hotkeys) = command else {
             continue;
         };
-        match record(&dir, choice, &commands, shared) {
+        match record(&dir, choice, &live, hotkeys, &commands, shared) {
             Ok((take, duration)) => shared.set(Phase::Finished { take, duration }),
             Err(error) => shared.set(Phase::Failed(error)),
         }
@@ -255,6 +274,8 @@ fn recorder(commands: Receiver<Command>, shared: &Shared) {
 fn record(
     dir: &std::path::Path,
     choice: Choice,
+    live: &Arc<Live>,
+    hotkeys: Vec<Hotkey>,
     commands: &Receiver<Command>,
     shared: &Shared,
 ) -> Result<(Id, Micros), String> {
@@ -275,6 +296,7 @@ fn record(
             };
             let whisper = fetch(models::whisper_model())?;
             let vad = fetch(models::vad_model())?;
+            let follow = fetch(shot_prompter::follow_model())?;
             shared.set(Phase::Loading);
             let sink = WordSink::default();
             let on_word = {
@@ -283,7 +305,11 @@ fn record(
             };
             let transcriber = Transcriber::new(&whisper, &vad, expected.clone(), on_word)
                 .map_err(|e| e.to_string())?;
-            Some((Arc::new(transcriber), sink))
+            let listener = shot_prompter::Listener::new(&follow, {
+                let live = live.clone();
+                move |words| live.lock().hear(words)
+            })?;
+            Some((Arc::new(transcriber), sink, listener))
         }
         None => None,
     };
@@ -293,22 +319,28 @@ fn record(
     config.camera = choice.camera.map_or(Source::Off, Source::Named);
     config.mic = choice.mic.map_or(Source::Off, Source::Named);
     config.system_audio = choice.system_audio;
+    config.hotkeys = hotkeys;
     let level = Arc::new(AtomicU32::new(f32::NEG_INFINITY.to_bits()));
-    if let Some((transcriber, _)) = &transcriber {
-        let transcriber = transcriber.clone();
+    let transcriber = transcriber.map(|(transcriber, sink, listener)| {
+        let tap = transcriber.clone();
         let level = level.clone();
+        // The tap owns the listener, so voice follow stops with the mic.
         config.mic_tap = Some(Box::new(move |t, samples, rate| {
             let peak = samples.iter().fold(0f32, |p, s| p.max(s.abs()));
             level.store((20.0 * peak.max(1e-6).log10()).to_bits(), Ordering::Relaxed);
-            transcriber.feed(t, samples, rate);
+            tap.feed(t, samples, rate);
+            listener.feed(samples, rate);
         }));
-    }
+        (transcriber, sink)
+    });
     let session = Session::start(config).map_err(|e| e.to_string())?;
+    live.set_marks(Some(session.marks()));
     *shared.preview.lock().expect("preview") = Some(session.preview());
     shared.set(Phase::Recording {
         take: session.id().clone(),
         started: Instant::now(),
     });
+    let mut last = Instant::now();
     loop {
         match commands.recv_timeout(Duration::from_millis(16)) {
             Ok(Command::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -317,11 +349,14 @@ fn record(
         if let Some((_, sink)) = &transcriber {
             sink.drain_into(&shared.words);
         }
+        live.lock().tick(last.elapsed());
+        last = Instant::now();
         shared
             .level
             .store(level.load(Ordering::Relaxed), Ordering::Relaxed);
     }
     shared.set(Phase::Finishing);
+    live.set_marks(None);
     shared.preview.lock().expect("preview").take();
     let take = session.stop().map_err(|e| e.to_string())?;
     if let Some((transcriber, sink)) = transcriber {
@@ -392,7 +427,22 @@ impl Render for RecordScreen {
             .pb(px(8.))
             .child(self.tracks(busy, cx))
             .child(self.stage(&phase, cx))
-            .child(self.transcript(&phase))
+            .map(|row| {
+                // Without beats the prompter has nothing to show, so the live transcript stays.
+                if self
+                    .folder
+                    .read(cx)
+                    .project
+                    .script
+                    .chapters
+                    .iter()
+                    .any(|c| !c.beats.is_empty())
+                {
+                    row.child(self.prompter.clone())
+                } else {
+                    row.child(self.transcript(&phase))
+                }
+            })
     }
 }
 
@@ -731,6 +781,11 @@ impl RecordScreen {
                         stage.child(div().text_color(MUTED).child(detail))
                     }),
             )
+            .children(
+                self.prompter
+                    .update(cx, |prompter, _| prompter.toast())
+                    .map(|toast| div().flex().justify_center().child(toast)),
+            )
             .child(
                 div()
                     .flex()
@@ -773,7 +828,14 @@ impl RecordScreen {
                                 .font_weight(FontWeight::MEDIUM),
                             ),
                     )
-                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .justify_center()
+                            .when(recording, |row| row.child(self.prompter.read(cx).legend())),
+                    )
                     .child(hint("Space", if recording { "Stop" } else { "Start" })),
             )
     }
