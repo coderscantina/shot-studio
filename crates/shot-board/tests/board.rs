@@ -119,6 +119,21 @@ fn reads_the_branch_tip_and_falls_back_to_the_default_branch() {
 }
 
 #[test]
+fn reads_a_video_file_from_its_tip() {
+    let channel = Channel::new(&[("alpha", VIDEO)]);
+    let board = channel.board();
+    board.move_card("alpha", Status::Scripting).unwrap();
+
+    let video = board.read_file("alpha", "video.kdl").unwrap().unwrap();
+    assert!(video.contains("status scripting"));
+    assert_eq!(board.read_file("alpha", "cut.kdl").unwrap(), None);
+    assert!(matches!(
+        board.read_file("alpha", "../beta/video.kdl"),
+        Err(Error::InvalidPath(_))
+    ));
+}
+
+#[test]
 fn moving_a_card_is_one_commit_and_the_board_rebuilds_from_git() {
     let channel = Channel::new(&[("alpha", VIDEO)]);
     let main = channel.sha("main");

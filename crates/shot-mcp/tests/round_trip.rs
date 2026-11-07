@@ -174,7 +174,7 @@ async fn failures_are_tool_errors_with_the_reason() {
     .await;
     assert!(error && text.contains("videos/broken/video.kdl:2:"));
     let (error, text) = call(&client, "read_video", json!({ "slug": "../x" })).await;
-    assert!(error && text.contains("not a valid slug"));
+    assert!(error && text.contains("not a valid name"));
 }
 
 /// Needs `SHOT_FIXTURES=<dir> scripts/fixtures.sh demo`; run with `-- --ignored`.

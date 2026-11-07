@@ -11,7 +11,6 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::path::PathBuf;
 
-use git2::{BranchType, Repository};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{Implementation, ServerCapabilities, ServerConfig};
@@ -195,48 +194,20 @@ impl ShotServer {
 
     /// Reads the project files from the branch tip of the video, else from the default branch.
     fn read_video_files(&self, slug: &str) -> Result<String, String> {
-        let valid = !slug.is_empty()
-            && !slug.starts_with('-')
-            && slug
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
-        if !valid {
-            return Err(format!(
-                "`{slug}` is not a valid slug, use lowercase letters, digits and dashes"
-            ));
-        }
-        self.board()?;
-        let git = |e: git2::Error| e.to_string();
-        let repo = Repository::open(&self.repo).map_err(git)?;
-        let tip = [format!("video/{slug}"), "main".into(), "master".into()]
-            .iter()
-            .find_map(|name| {
-                repo.find_branch(name, BranchType::Local)
-                    .ok()?
-                    .get()
-                    .peel_to_commit()
-                    .ok()
-            })
-            .or_else(|| repo.head().ok()?.peel_to_commit().ok())
-            .ok_or_else(|| "the repo has no commits".to_owned())?;
-        let tree = tip.tree().map_err(git)?;
-
+        let board = self.board()?;
         let mut out = String::new();
         let mut found = false;
         for file in VIDEO_FILES {
-            let path = format!("videos/{slug}/{file}");
             let _ = writeln!(out, "== {file} ==");
-            match tree.get_path(path.as_ref()) {
-                Ok(entry) => {
+            match board.read_file(slug, file).map_err(|e| e.to_string())? {
+                Some(content) => {
                     found = true;
-                    let blob = repo.find_blob(entry.id()).map_err(git)?;
-                    let content = String::from_utf8_lossy(blob.content());
                     out.push_str(&content);
                     if !content.ends_with('\n') {
                         out.push('\n');
                     }
                 }
-                Err(_) => out.push_str("(missing)\n"),
+                None => out.push_str("(missing)\n"),
             }
         }
         if found {

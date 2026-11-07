@@ -186,7 +186,7 @@ fn proposal_branch(slug: &str, name: &str) -> String {
 }
 
 /// A relative path that stays inside the folder.
-fn is_inside(path: &str) -> bool {
+pub(crate) fn is_inside(path: &str) -> bool {
     !path.is_empty()
         && !path.contains('\\')
         && Path::new(path)
