@@ -21,6 +21,7 @@ mod metrics;
 mod model;
 mod peaks;
 mod preview;
+mod prompter;
 mod record;
 mod sound;
 mod studio;

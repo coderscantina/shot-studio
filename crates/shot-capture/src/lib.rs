@@ -48,7 +48,7 @@ use std::path::PathBuf;
 use shot_core::{Id, Micros};
 
 #[cfg(target_os = "macos")]
-pub use macos::{Preview, PreviewFrame, Session, list_devices};
+pub use macos::{Marks, Preview, PreviewFrame, Session, list_devices};
 
 /// Receives mic samples during a recording: the media time of the first sample, mono samples
 /// and their sample rate. It runs on the mic's capture queue, so it must return quickly; hand
@@ -65,6 +65,9 @@ pub struct SessionConfig {
     pub mic: Source,
     pub system_audio: bool,
     pub mic_tap: Option<MicTap>,
+    /// Record hotkeys. Their presses are markers written through [`Session::marks`], so the
+    /// log leaves them out as `key` events.
+    pub hotkeys: Vec<events::Hotkey>,
 }
 
 impl SessionConfig {
@@ -77,6 +80,7 @@ impl SessionConfig {
             mic: Source::Default,
             system_audio: true,
             mic_tap: None,
+            hotkeys: Vec::new(),
         }
     }
 }

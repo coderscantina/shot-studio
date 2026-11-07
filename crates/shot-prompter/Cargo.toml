@@ -8,3 +8,9 @@ publish.workspace = true
 repository.workspace = true
 
 [dependencies]
+shot-core = { path = "../shot-core" }
+shot-analyze = { path = "../shot-analyze" }
+shot-capture = { path = "../shot-capture" }
+whisper-rs.workspace = true
+
+[dev-dependencies]

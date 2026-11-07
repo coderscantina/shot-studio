@@ -1,8 +1,11 @@
 //! `events.jsonl` lines, as the cursor and key event log in `docs/contracts/project-files.md`
 //! defines them.
 
-use serde::Serialize;
-use shot_core::Micros;
+use std::io::BufRead;
+use std::path::Path;
+
+use serde::{Deserialize, Serialize};
+use shot_core::{Layout, Micros};
 
 /// One line of the event log.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -26,11 +29,130 @@ impl Event {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum EventKind {
-    Move { x: i32, y: i32 },
-    Down { x: i32, y: i32, button: Button },
-    Up { x: i32, y: i32, button: Button },
-    Scroll { x: i32, y: i32, dx: i32, dy: i32 },
-    Key { key: String, mods: Vec<Modifier> },
+    Move {
+        x: i32,
+        y: i32,
+    },
+    Down {
+        x: i32,
+        y: i32,
+        button: Button,
+    },
+    Up {
+        x: i32,
+        y: i32,
+        button: Button,
+    },
+    Scroll {
+        x: i32,
+        y: i32,
+        dx: i32,
+        dy: i32,
+    },
+    Key {
+        key: String,
+        mods: Vec<Modifier>,
+    },
+    /// A record hotkey, with the cursor position at the press.
+    Marker {
+        x: i32,
+        y: i32,
+        #[serde(flatten)]
+        mark: Mark,
+    },
+}
+
+/// The record hotkey a marker stands for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mark", rename_all = "kebab-case")]
+pub enum Mark {
+    /// A, with the beat the prompter shows after the press, numbered from 1 across the script.
+    Again { beat: u32 },
+    /// N, with the beat the prompter shows after the press.
+    Next { beat: u32 },
+    /// M
+    Marker,
+    /// Z, zoom on the cursor.
+    Zoom,
+    /// B
+    BRoll,
+    /// 1 to 4, the layout chosen.
+    Layout {
+        #[serde(with = "layout_name")]
+        layout: Layout,
+    },
+}
+
+mod layout_name {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use shot_core::Layout;
+
+    pub fn serialize<S: Serializer>(layout: &Layout, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(layout.as_str())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Layout, D::Error> {
+        let name = String::deserialize(d)?;
+        Layout::ALL
+            .iter()
+            .copied()
+            .find(|l| l.as_str() == name)
+            .ok_or_else(|| serde::de::Error::custom(format!("unknown layout `{name}`")))
+    }
+}
+
+/// A marker read back from the event log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Marker {
+    pub t: Micros,
+    /// Cursor position in screen track pixels.
+    pub x: i32,
+    pub y: i32,
+    pub mark: Mark,
+}
+
+#[derive(Deserialize)]
+struct MarkerLine {
+    t: u64,
+    x: i32,
+    y: i32,
+    #[serde(flatten)]
+    mark: Mark,
+}
+
+/// The markers of a take's `events.jsonl`, in time order. A take without an event log has none.
+/// A torn last line, as a crash leaves it, is skipped.
+pub fn read_markers(path: &Path) -> std::io::Result<Vec<Marker>> {
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut markers = Vec::new();
+    for line in std::io::BufReader::new(file).lines() {
+        let line = line?;
+        if !line.contains(r#""kind":"marker""#) {
+            continue;
+        }
+        if let Ok(m) = serde_json::from_str::<MarkerLine>(&line) {
+            markers.push(Marker {
+                t: Micros(m.t),
+                x: m.x,
+                y: m.y,
+                mark: m.mark,
+            });
+        }
+    }
+    Ok(markers)
+}
+
+/// A key press the event log keeps out of `key` events, because it is a record hotkey and
+/// becomes a marker instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hotkey {
+    /// The key name as `key` events write it.
+    pub key: String,
+    pub mods: Vec<Modifier>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -108,6 +230,10 @@ const NAMED_KEYS: &[(u16, &str)] = &[
     (105, "f13"),
     (107, "f14"),
     (113, "f15"),
+    (106, "f16"),
+    (64, "f17"),
+    (79, "f18"),
+    (80, "f19"),
 ];
 
 /// Arrows, function and navigation keys: the named keys after escape in the table.
@@ -208,6 +334,65 @@ mod tests {
                 r#"{"t":2104000,"kind":"key","key":"p","mods":["cmd","shift"]}"#,
                 r#"{"t":2350000,"kind":"key","key":"enter","mods":[]}"#,
             ]
+        );
+    }
+
+    #[test]
+    fn markers_round_trip_like_the_contract_example() {
+        let lines = [
+            r#"{"t":4210000,"kind":"marker","x":2210,"y":640,"mark":"again","beat":2}"#,
+            r#"{"t":9800000,"kind":"marker","x":2210,"y":640,"mark":"next","beat":3}"#,
+            r#"{"t":12000000,"kind":"marker","x":1480,"y":910,"mark":"zoom"}"#,
+            r#"{"t":15500000,"kind":"marker","x":1480,"y":910,"mark":"layout","layout":"split"}"#,
+        ];
+        let marks = [
+            Mark::Again { beat: 2 },
+            Mark::Next { beat: 3 },
+            Mark::Zoom,
+            Mark::Layout {
+                layout: Layout::Split,
+            },
+        ];
+        let written: Vec<String> = lines
+            .iter()
+            .zip(marks)
+            .map(|(line, mark)| {
+                let m: MarkerLine = serde_json::from_str(line).unwrap();
+                Event::new(
+                    Micros(m.t),
+                    EventKind::Marker {
+                        x: m.x,
+                        y: m.y,
+                        mark,
+                    },
+                )
+                .to_line()
+            })
+            .collect();
+        assert_eq!(written, lines);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let log = format!(
+            "{}\n{}\n{}\n{{\"t\":16000000,\"kind\":\"mar",
+            r#"{"t":0,"kind":"move","x":1920,"y":1080}"#,
+            lines[2],
+            r#"{"t":12500000,"kind":"marker","x":1,"y":2,"mark":"b-roll"}"#,
+        );
+        std::fs::write(&path, log).unwrap();
+        let markers = read_markers(&path).unwrap();
+        assert_eq!(
+            markers.iter().map(|m| (m.t, m.mark)).collect::<Vec<_>>(),
+            [
+                (Micros(12_000_000), Mark::Zoom),
+                (Micros(12_500_000), Mark::BRoll)
+            ]
+        );
+        assert_eq!((markers[0].x, markers[0].y), (1480, 910));
+        assert!(
+            read_markers(&dir.path().join("missing.jsonl"))
+                .unwrap()
+                .is_empty()
         );
     }
 
