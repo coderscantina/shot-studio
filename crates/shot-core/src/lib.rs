@@ -9,6 +9,7 @@ mod format;
 mod kdl_io;
 mod script;
 mod timeline;
+mod transcript;
 mod values;
 mod video;
 
@@ -24,6 +25,7 @@ pub use script::{Beat, Script, ScriptChapter};
 pub use timeline::{
     ChapterSegments, ContentHash, Output, OutputKind, RENDERER_VERSION, Segment, Timeline,
 };
+pub use transcript::{Transcript, Word};
 pub use values::{Id, Micros, TimeRange};
 pub use video::{Date, Status, Video};
 
