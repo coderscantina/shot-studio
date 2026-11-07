@@ -26,8 +26,8 @@ The pacing adds jump cuts and 112% punch-ins, auto zoom adds zooms on clicks and
 
 ## Consequences
 
-The rough cut is one larger diff when the take is appended; every later diff is the change itself. `shot-capture` writes markers, `shot-analyze` writes zooms with `by`, the app shows provenance per zoom.
+The rough cut is one larger diff when the take is appended; every later diff is the change itself. `shot-capture` writes markers, `shot-analyze` writes the jump-cut and emphasis zooms, `shot-render` writes the click, typing and cursor zooms (it already reads the event log, and the renderer must not depend on analysis), and the app shows provenance per zoom.
 
 ## Affected contracts
 
-[Project files](../contracts/project-files.md#cutkdl), `shot-capture`, `shot-analyze`, `shot-prompter`.
+[Project files](../contracts/project-files.md#cutkdl), `shot-capture`, `shot-analyze`, `shot-render`, `shot-prompter`.
