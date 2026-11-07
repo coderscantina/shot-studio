@@ -6210,7 +6210,12 @@ dependencies = [
  "objc2-io-surface",
  "objc2-metal 0.3.2",
  "pollster",
+ "shot-analyze",
+ "shot-capture",
+ "shot-core",
  "shot-media",
+ "shot-render",
+ "tempfile",
  "wgpu",
 ]
 
