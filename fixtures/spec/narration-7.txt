@@ -1,0 +1,7 @@
+Export is a build. The timeline is split into chapters, and each chapter is rendered on its own and cached.
+
+When you change something inside one chapter, only that chapter is rendered again. The rest comes straight from the cache, and the final file is stitched together without re-encoding the unchanged parts.
+
+The renderer uses the hardware video engines on the chip, so a long four k sixty video takes minutes, not hours. It also checks loudness at the end and reports it, so you know the audio is ready for upload.
+
+You can export a full video, a short clip for social media, or just the audio. Each preset sets resolution, frame rate, and bitrate for you.

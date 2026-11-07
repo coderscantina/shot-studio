@@ -1,0 +1,9 @@
+Let us start with the setup. The first time you open the app, it downloads the speech model once, and it checks that the screen and microphone permissions are granted.
+
+The download is large, so it shows a progress bar and verifies the checksum when it is done. If the network drops, it picks up where it stopped.
+
+Next you pick a channel folder. That is just a git repository. The app creates a board with a few columns, and every video you plan becomes a card on that board.
+
+You can also drive all of this from the command line. The same commands that the app uses are available to scripts and to coding agents, which makes the whole workflow easy to automate.
+
+Once the permissions are green, we are ready to create our first video.

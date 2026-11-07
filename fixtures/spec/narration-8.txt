@@ -1,0 +1,5 @@
+That is the whole workflow. Plan the video on the board, record it in one go, let the auto cut do the first pass, review the notes, and export.
+
+If you want to try it, the project is open source, and the test media is generated, so you do not need any of my recordings to run it.
+
+Thanks for watching. If this saved you some time, tell a friend who edits videos, and I will see you in the next one.

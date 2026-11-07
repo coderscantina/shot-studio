@@ -1,0 +1,7 @@
+Welcome to the channel. In this video we walk through a full recording session, from the first take to the finished export.
+
+The goal is simple. You record yourself and your screen, and the editor does the boring parts for you. It finds the silences, throws away the retakes, and leaves you with a rough cut you can review in a few minutes.
+
+Before we start, here is the plan. First we set up a project. Then we record a short take. After that we let the auto cut run, read the notes, and export the result.
+
+Nothing here needs a cloud service. Everything runs on this laptop, and the project is a plain folder in git.

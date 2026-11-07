@@ -1,0 +1,7 @@
+After the cut comes review. The editor reads the whole transcript against your script and writes a list of notes.
+
+A note can say that a claim has no source, that a chapter runs longer than planned, or that the screen sat idle for ten seconds. Each note points at a time in the timeline, so you can jump straight to it.
+
+You answer a note by fixing the cut, or by dismissing it with a short comment. Open notes block the export, so nothing slips through by accident.
+
+This is the same loop you know from code review. Somebody proposes a change, you look at it, and then you merge it. The difference is that the thing being reviewed is a video.

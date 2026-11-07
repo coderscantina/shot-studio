@@ -1,0 +1,7 @@
+A video is a folder. Inside it you will find a script, a project file, a cut file, and a media directory that stays out of git.
+
+The script is plain markdown. It holds the outline, the key points, and the markers where you want a screen recording or a b roll shot. The project file lists the tracks and the chapters, and it is short enough to read in one glance.
+
+The cut file is the interesting one. It records every decision the editor made, such as which silence was removed and which take was kept. Because it is text, you can review it like a pull request.
+
+When two people work on the same video, git merges these files for you. Conflicts are rare, and when they happen they are easy to read.
