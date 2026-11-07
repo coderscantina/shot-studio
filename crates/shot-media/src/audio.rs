@@ -117,6 +117,12 @@ impl PcmReader {
         }
         Ok(())
     }
+
+    /// Whether every sample from `at` on lies past the end of the track. Known only once a
+    /// read has reached the end.
+    pub fn ended_before(&self, at: u64) -> bool {
+        self.end_of_track && at >= self.buffer_start + self.buffer.len() as u64
+    }
 }
 
 impl Drop for PcmReader {

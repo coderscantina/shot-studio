@@ -43,9 +43,8 @@ pub fn loudness(path: &Path) -> Result<(Option<f64>, f64), MediaError> {
     loop {
         samples.clear();
         reader.read(at, at + block, &mut samples).map_err(audio)?;
-        // The reader pads past the end with silence; a block of digital silence after the
-        // first is the end of the track.
-        if at > 0 && samples.iter().all(|s| *s == 0.0) {
+        // The reader pads past the end with silence, which must not count as audio.
+        if reader.ended_before(at) {
             break;
         }
         meter.add(&samples);
