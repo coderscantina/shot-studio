@@ -15,7 +15,7 @@ Output goes to `$SHOT_FIXTURES`, by default `fixtures/generated/` (git-ignored).
 | Path | Content |
 | --- | --- |
 | `speech/*.wav`, `speech/*.txt` | Six clips, mono 48 kHz PCM, and the spoken text: `clean`, `retake`, `self-correction`, `filler`, `long-silence` (8 s), `mid-pause` (1.5 s) |
-| `screen-30s.mp4` | 3840x2160, 60 fps, HEVC, fragmented MP4, 1 s GOP |
+| `screen-30s.mp4` | 3840x2160, 60 fps, HEVC, fragmented MP4, 0.5 s GOP (30 frames) |
 | `screen-30s.events.jsonl` | Cursor, clicks and keys of the screen clip |
 | `camera-30s.mp4` | 1920x1080, 60 fps, HEVC, fragmented MP4, synthetic face |
 | `target/screen.mp4`, `camera.mp4` | 17 min, same formats as above |

@@ -34,7 +34,7 @@ SEG_US=$((SEG_SECONDS * 1000000))
 SMALL_REPS=5
 
 # Single frame thread and no thread pool: x265 output does not depend on the core count.
-X265="log-level=error:frame-threads=1:pools=none:keyint=$FPS:min-keyint=$FPS:bframes=0:scenecut=0:open-gop=0:repeat-headers=1"
+X265="log-level=error:frame-threads=1:pools=none:keyint=$((FPS / 2)):min-keyint=$((FPS / 2)):bframes=0:scenecut=0:open-gop=0:repeat-headers=1"
 # Deterministic muxing: no encoder or tool tags, no creation times, no metadata.
 BITEXACT=(-fflags +bitexact -flags +bitexact -map_metadata -1 -map_chapters -1)
 FRAG=(-movflags +frag_keyframe+empty_moov+default_base_moof)
