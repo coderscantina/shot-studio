@@ -1,6 +1,6 @@
 # 0002: gpui UI with a zero-copy video preview
 
-Status: Adopted by Mike on 2026-11-07, to be confirmed by the [milestone 02](../milestones/02-preview-spike.md) measurements.
+Status: Adopted by Mike on 2026-11-07. Confirmed by Mike on 2026-11-07 after the [milestone 02 spike](../evidence/m02-preview-spike.md): no CPU copy and 276 MB peak passed, the small dropped-frame and seek misses are carried into milestone 03.
 
 ## Problem
 

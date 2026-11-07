@@ -22,7 +22,7 @@ SHOT_FIXTURES=$HOME/.cache/shot-studio-fixtures cargo test -p shot-board -- --ig
 
 - Output 2.5 GB in `$SHOT_FIXTURES`. Media: libx265 single-threaded, bitexact muxing, speech by `say` voice Samantha.
 - Target media: 3840x2160 and 1920x1080 at 60 fps, 1020.000 s, 61200 packets, 1020 `moof` boxes each. The mic runs 1020.021 s because of AAC priming.
-- Demo channel: seven videos across all six columns, `video/<slug>` branches, tag `v2026.42`, one open proposal. Ref shas are fixed, for example `refs/tags/v2026.42` at `49a8d40`.
+- Demo channel: seven videos across all six columns, `video/<slug>` branches, one release tag, one open proposal. Ref shas are fixed. The tag was `v2026.42` at `49a8d40` when this was recorded and became `v26.10.14` (`3ee5e19`) when release tags moved to date CalVer.
 - Checksums of the small set, for example `screen-30s.mp4` `1fd7a17b…f426e0a`. The full list is `$SHOT_FIXTURES/checksums.txt`.
 
 ## Not verified

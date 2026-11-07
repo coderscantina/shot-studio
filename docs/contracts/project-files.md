@@ -258,4 +258,4 @@ Readers ignore fields they don't know, so capture can add fields without breakin
 
 - **Video branch**: `video/<slug>`. A card's state is read from its tip, falling back to the default branch for ideas without a branch yet. Moving a card is one commit on this branch, subject `🚚 move <slug> to <status>`.
 - **Proposal branch**: `proposal/<slug>/<name>` off `video/<slug>`, holding commits that change the video's files. Paths are relative to the video folder. The diff is against the merge base with the video branch. Accept merges (fast-forward when possible), reject deletes the branch, and a conflicting accept changes nothing and lists the paths. See [0004](../decisions/0004-proposals-as-branches.md).
-- **Release tag**: annotated `v<YYYY>.<WW>` with the ISO week zero-padded (`v2026.05`), on the tip of a video branch whose status is `shipped`. Message `🚀 ship <slug>`.
+- **Release tag**: annotated CalVer `vYY.M.D` of the release date (`v26.11.7`), on the tip of a video branch whose status is `shipped`. A later release on the same day gets `.2`, `.3` and so on. Tags sort by their numeric parts. Message `🚀 ship <slug>`.

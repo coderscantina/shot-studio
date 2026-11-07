@@ -1,6 +1,6 @@
 # 0010: Acceptance thresholds beyond the targets
 
-Status: Proposed
+Status: Adopted by Mike on 2026-11-07
 
 ## Problem
 
@@ -22,7 +22,7 @@ Some milestone briefs need numbers the agreed [targets](../technical-briefing.md
 
 ## Consequences
 
-Once adopted, these move into the targets table of the briefing.
+They are part of the [targets table](../technical-briefing.md#targets).
 
 ## Affected contracts
 

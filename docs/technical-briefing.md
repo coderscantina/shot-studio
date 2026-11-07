@@ -64,7 +64,7 @@ The first release is the whole concept, built in the order of the [milestone ind
 - Columns: Ideas, Scripting, Ready to record, Recorded, Editing, Shipped.
 - The board is one channel repo (for example `coderscantina/videos`). Each video is a folder with `video.kdl`, `script.md`, `cut.kdl`, `format.kdl` and `sources/`. Media is git-ignored.
 - Moving a card commits the new status. Claude's work shows up as commits on the video's branch, so `git log` is the activity feed.
-- Shipped videos are git tags (`v2026.46`).
+- Shipped videos are CalVer git tags `vYY.M.D` (`v26.11.7`), with `.N` for a later release the same day.
 - Ideas come from notes, Linear issues, saved links or comments. "Plan the week with Claude" proposes which ideas to script next against the cadence.
 
 **Write the script with an agent**
@@ -145,7 +145,7 @@ Rust edition 2024, `rust-version = "1.99"`, Cargo resolver 3, shared dependencie
 | UI | gpui with `gpui-component`, restyled with our tokens | Metal rendering and custom elements for timeline, waveform and transcript. A webview would add a frame copy on every preview frame. See [0002](decisions/0002-gpui-and-zero-copy-preview.md) |
 | Preview | VideoToolbox decode into IOSurface, shown as a Metal texture in a gpui surface | No CPU copy. Proven first by [milestone 02](milestones/02-preview-spike.md) |
 | Capture | ScreenCaptureKit and AVFoundation via `objc2`, no OBS | Separate tracks, cursor as data |
-| Recording | Fragmented MP4, short-GOP HEVC, ProRes for camera | Crash safe, scrubbing without proxies |
+| Recording | Fragmented MP4, HEVC with a 0.5 s GOP, ProRes for camera | Crash safe, scrubbing without proxies |
 | Encode/decode | VideoToolbox, FFmpeg (`rsmpeg`) for muxing and odd inputs | Hardware video engines |
 | Composition | One wgpu render graph, WGSL effects, LUT only for color | Preview equals export |
 | Overlays | vello + parley, typed templates with parameters and keyframes | Replaces Remotion without Node. Agents fill a template spec instead of writing code |
@@ -196,6 +196,9 @@ Measured on the reference machine: MacBook Pro, Apple M1 Pro, 32 GB, macOS 26 or
 | Re-export after one chapter changed | under 20 s |
 | Preview while scrubbing 4K60 | no dropped frames |
 | App memory, excluding the loaded model | under 2 GB |
+| Seek in the 4K60 preview until a frame shows | under 100 ms |
+| Voice-follow lag, word spoken to highlight | under 300 ms at the median |
+| Exported loudness | -14 LUFS integrated, within 0.5 LU |
 
 Relaxing a target is Mike's decision.
 
