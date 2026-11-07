@@ -224,6 +224,24 @@ Markdown with a fixed shape, read line by line:
 - Small diffs, feature flags, one-click rollback [notes](sources/rollback-notes.md)
 ```
 
+## Take folder
+
+`shot-capture` writes one folder per recording session, `media/<take>/`, named by its take id.
+
+```
+media/t03/
+  screen.mp4    the display without the cursor: HEVC, display resolution, constant 60 fps
+  camera.mp4    HEVC at the camera's format, when a camera was recorded
+  mic.mp4       AAC 48 kHz mono, when a mic was recorded
+  system.mp4    AAC 48 kHz stereo, when system audio was recorded
+  events.jsonl  cursor and key events, see below
+```
+
+- **Take ids** are `t` and a number, at least two digits: `t01`, `t02`, ... `t100`. A new take gets the number after the highest take folder in `media/`, so an id is never reused while its folder exists, and a gap left by a deleted take is never filled. Segment cache keys hash the take id, so they rely on this. Deleting the newest take frees its id for the next recording, so delete `.shot/cache` along with it.
+- **One clock.** Every track and the event log share the take's media time, 0 at session start. A track may begin a little after 0 when its device delivers its first sample late.
+- **Fragmented MP4.** Each file is an initialization segment (`ftyp`, `moov`) followed by `moof` and `mdat` fragments of about 0.5 s, appended as they are encoded. Video has a keyframe every 0.5 s and no B-frames. A killed recording keeps every complete fragment and stays playable.
+- A track that is missing was not recorded. Readers do not assume a camera or system audio.
+
 ## Cursor and key event log
 
 Capture writes `media/<take>/events.jsonl` next to the take's tracks. The cursor is saved as events, not burned in, so zooms, click ripples, cursor size and the keystroke overlay are render settings.
