@@ -27,7 +27,7 @@ use shot_ship::script_check::{self, ScriptFinding, ScriptReport};
 
 use crate::agent::{self, AgentRun};
 use crate::theme::*;
-use crate::ui::{Segment, icon, kbd, label, mono, pane, segmented};
+use crate::ui::{ActionLook, Segment, icon, label, mono, pane, proposal_action, segmented};
 use proposal::{Change, Piece};
 
 const CONTEXT: &str = "ScriptScreen";
@@ -570,37 +570,9 @@ impl ScriptScreen {
                 .child(text.clone()),
             Piece::Added(text) => div().text_color(INSERTED).child(text.clone()),
         });
-        let action =
-            |id: &'static str, text: &'static str, keys: Option<&'static str>, accent: bool| {
-                div()
-                    .id(SharedString::from(format!("{id}-{}", proposal.name)))
-                    .h(px(30.))
-                    .px(px(14.))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .rounded(px(9.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_size(px(14.))
-                    .cursor_pointer()
-                    .when(accent, |this| this.bg(ACCENT).text_color(ON_ACCENT))
-                    .when(!accent && keys.is_some(), |this| {
-                        this.bg(RAISED).hover(|s| s.bg(FLOAT))
-                    })
-                    .when(keys.is_none(), |this| {
-                        this.text_color(MUTED).hover(|s| s.text_color(TEXT))
-                    })
-                    .child(text)
-                    .when_some(keys, |this, keys| {
-                        this.child(if accent {
-                            kbd(keys)
-                                .bg(Hsla::from(ON_ACCENT).opacity(0.14))
-                                .text_color(ON_ACCENT)
-                        } else {
-                            kbd(keys)
-                        })
-                    })
-            };
+        let action = |id: &'static str, text, keys, look| {
+            proposal_action(format!("{id}-{}", proposal.name), text, None, keys, look)
+        };
         div()
             .id(SharedString::from(format!(
                 "proposal-{}-{}",
@@ -658,19 +630,23 @@ impl ScriptScreen {
                     .gap(px(8.))
                     .mt(px(4.))
                     .child(
-                        action("accept", "Accept", Some("Tab"), true).on_click(cx.listener({
-                            let name = name.clone();
-                            move |this, _, _, cx| this.accept(&name, cx)
-                        })),
+                        action("accept", "Accept", Some("Tab"), ActionLook::Accent).on_click(
+                            cx.listener({
+                                let name = name.clone();
+                                move |this, _, _, cx| this.accept(&name, cx)
+                            }),
+                        ),
                     )
                     .child(
-                        action("reject", "Reject", Some("Esc"), false).on_click(cx.listener({
-                            let name = name.clone();
-                            move |this, _, _, cx| this.reject(&name, cx)
-                        })),
+                        action("reject", "Reject", Some("Esc"), ActionLook::Plain).on_click(
+                            cx.listener({
+                                let name = name.clone();
+                                move |this, _, _, cx| this.reject(&name, cx)
+                            }),
+                        ),
                     )
                     .child(
-                        action("again", "Another take", None, false).on_click(
+                        action("again", "Another take", None, ActionLook::Quiet).on_click(
                             cx.listener(move |this, _, _, cx| this.another_take(&name, cx)),
                         ),
                     ),

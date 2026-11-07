@@ -137,6 +137,19 @@ fn word_diff(old: &[String], new: &[String]) -> Vec<Piece> {
     .collect()
 }
 
+/// Appends `piece`, joining it to the last run when they are the same kind.
+pub fn push(pieces: &mut Vec<Piece>, piece: Piece) {
+    match (pieces.last_mut(), piece) {
+        (Some(Piece::Same(a)), Piece::Same(b))
+        | (Some(Piece::Removed(a)), Piece::Removed(b))
+        | (Some(Piece::Added(a)), Piece::Added(b)) => {
+            a.push(' ');
+            a.push_str(&b);
+        }
+        (_, piece) => pieces.push(piece),
+    }
+}
+
 fn lcs_diff(old: &[String], new: &[String]) -> Vec<Piece> {
     let (n, m) = (old.len(), new.len());
     let mut lcs = vec![vec![0u32; m + 1]; n + 1];
@@ -150,15 +163,7 @@ fn lcs_diff(old: &[String], new: &[String]) -> Vec<Piece> {
         }
     }
     let mut pieces: Vec<Piece> = Vec::new();
-    let mut push = |piece: Piece| match (pieces.last_mut(), piece) {
-        (Some(Piece::Same(a)), Piece::Same(b))
-        | (Some(Piece::Removed(a)), Piece::Removed(b))
-        | (Some(Piece::Added(a)), Piece::Added(b)) => {
-            a.push(' ');
-            a.push_str(&b);
-        }
-        (_, piece) => pieces.push(piece),
-    };
+    let mut push = |piece: Piece| push(&mut pieces, piece);
     let (mut i, mut j) = (0, 0);
     while i < n || j < m {
         if i < n && j < m && old[i] == new[j] {

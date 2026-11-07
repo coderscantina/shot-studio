@@ -8,11 +8,13 @@ mod overlays;
 mod parts;
 mod picture;
 mod product;
+mod proposals;
 mod text;
 mod timeline;
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -22,9 +24,11 @@ use gpui::{
     actions, div, prelude::*,
 };
 use shot_core::{Cut, EditError, Id, Micros, TakeAt, TimeRange, WordState};
+use shot_mcp::bridge::Claude;
 use shot_media::timing::ClockFollower;
 use shot_render::export::{self, ExportOptions};
 
+use crate::agent::AgentRun;
 use crate::engine::{Engine, Plan, PreviewFrame};
 use crate::folder::VideoFolder;
 use crate::model::{
@@ -54,6 +58,8 @@ actions!(
         NextWord,
         ExtendPrevious,
         ExtendNext,
+        AcceptProposal,
+        ShowProposal,
     ]
 );
 
@@ -75,6 +81,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("right", NextWord, context),
         KeyBinding::new("shift-left", ExtendPrevious, context),
         KeyBinding::new("shift-right", ExtendNext, context),
+        KeyBinding::new("tab", AcceptProposal, context),
+        KeyBinding::new("g", ShowProposal, context),
     ]);
 }
 
@@ -145,6 +153,17 @@ pub struct EditScreen {
     product: product::ProductState,
     /// What the overlay rules last added, for the Overlays pane.
     overlay_note: Option<String>,
+    /// The channel repo and slug when the folder is a video of one, for agent proposals.
+    channel: Option<(PathBuf, String)>,
+    proposals: Vec<proposals::CutProposal>,
+    cards: Vec<proposals::Card>,
+    /// The proposal Tab and Esc act on.
+    proposal: Option<String>,
+    /// Scroll the transcript to the selected proposal on the next render.
+    scroll_to_card: bool,
+    claude: Option<Claude>,
+    /// Claude writing another take.
+    run: Option<AgentRun>,
 }
 
 impl EditScreen {
@@ -156,6 +175,7 @@ impl EditScreen {
         .detach();
         let product_tour =
             folder.read(cx).project.video.format == shot_core::FormatKind::ProductTour;
+        let channel = crate::studio::channel(&folder.read(cx).dir);
         let mut this = Self {
             folder,
             workspace: if product_tour {
@@ -190,6 +210,13 @@ impl EditScreen {
             overview_bounds: Rc::default(),
             product: product::ProductState::default(),
             overlay_note: None,
+            channel,
+            proposals: Vec::new(),
+            cards: Vec::new(),
+            proposal: None,
+            scroll_to_card: false,
+            claude: Claude::find(),
+            run: None,
         };
         this.rebuild(cx);
         this
@@ -245,6 +272,7 @@ impl EditScreen {
         for take in takes {
             self.load_peaks(take, cx);
         }
+        self.reload_proposals(cx);
     }
 
     fn load_peaks(&mut self, take: Id, cx: &mut Context<Self>) {
@@ -376,6 +404,7 @@ impl EditScreen {
     // Selection.
 
     fn select_word(&mut self, at: TakeAt, index: usize, extend: bool, cx: &mut Context<Self>) {
+        self.proposal = None;
         self.selection = match self.selection {
             Some(selection) if extend && selection.at == at => Some(Selection {
                 head: index,
@@ -597,9 +626,13 @@ impl Render for EditScreen {
             .on_action(cx.listener(Self::delete_selection))
             .on_action(cx.listener(Self::restore_selection))
             .on_action(cx.listener(|this, _: &ClearSelection, _, cx| {
-                this.selection = None;
+                if !this.reject_selected(cx) {
+                    this.selection = None;
+                }
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &AcceptProposal, _, cx| this.accept_selected(cx)))
+            .on_action(cx.listener(|this, _: &ShowProposal, _, cx| this.show_next_proposal(cx)))
             .on_action(cx.listener(|this, _: &Layout1, _, cx| this.set_layout(0, cx)))
             .on_action(cx.listener(|this, _: &Layout2, _, cx| this.set_layout(1, cx)))
             .on_action(cx.listener(|this, _: &Layout3, _, cx| this.set_layout(2, cx)))

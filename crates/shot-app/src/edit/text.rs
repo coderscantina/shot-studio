@@ -9,6 +9,7 @@ use shot_core::{TakeAt, WordState};
 
 use super::EditScreen;
 use super::parts::{self, layout_name, row};
+use super::proposals::{self, Card};
 use crate::model::{BlockDoc, CutRun, Item, Paragraph, seconds, timecode};
 use crate::theme::*;
 use crate::ui::{self, icon, kbd, label, mono};
@@ -110,7 +111,7 @@ fn outline(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement 
         )
 }
 
-fn document(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement {
+fn document(this: &mut EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement {
     let title = this
         .map
         .chapters
@@ -128,6 +129,10 @@ fn document(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement
         .filter(|b| b.at.chapter == this.chapter)
         .collect();
     let mut rows: Vec<Div> = Vec::new();
+    let mut scroll_to = None;
+    if let Some(note) = proposals::agent_note(this) {
+        rows.push(doc_row(rail(None, None), note));
+    }
     for block in blocks {
         if !block.transcribed {
             rows.push(doc_row(
@@ -139,7 +144,29 @@ fn document(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement
             ));
             continue;
         }
-        for (index, paragraph) in block.paragraphs.iter().enumerate() {
+        let mut index = 0;
+        while let Some(paragraph) = block.paragraphs.get(index) {
+            let here: Vec<&Card> = this
+                .cards
+                .iter()
+                .filter(|c| c.at == block.at && c.paragraphs.start == index)
+                .collect();
+            if let Some(end) = here.iter().map(|c| c.paragraphs.end).max() {
+                for card in here {
+                    if this.scroll_to_card
+                        && this.proposal.as_deref()
+                            == Some(this.proposals[card.proposal].name.as_str())
+                    {
+                        scroll_to = Some(rows.len());
+                    }
+                    rows.push(doc_row(
+                        rail(paragraph.start, Some(layout_name(paragraph.layout))),
+                        proposals::card_element(this, card, false, cx),
+                    ));
+                }
+                index = end;
+                continue;
+            }
             let current = paragraph.start.is_some_and(|start| start <= this.playhead)
                 && block
                     .paragraphs
@@ -151,8 +178,13 @@ fn document(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement
                     .when(current, |rail| rail.text_color(MUTED)),
                 paragraph_element(this, block, paragraph, cx),
             ));
+            index += 1;
         }
     }
+    if let Some(row) = scroll_to {
+        this.scroll.scroll_to_top_of_item(row);
+    }
+    this.scroll_to_card = false;
     ui::pane()
         .flex_1()
         .flex()
@@ -181,22 +213,21 @@ fn document(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement
                 .track_scroll(&this.scroll)
                 .px(px(28.))
                 .py(px(26.))
-                .child(
-                    div()
-                        .mx_auto()
-                        .w_full()
-                        .max_w(px(132. + 24. + 680.))
-                        .flex()
-                        .flex_col()
-                        .gap(px(22.))
-                        .children(rows),
-                ),
+                .flex()
+                .flex_col()
+                .gap(px(22.))
+                .children(rows),
         )
 }
 
+/// A row of the transcript: the rail and its content, centered at the document's width.
 fn doc_row(rail: Div, content: impl IntoElement) -> Div {
     div()
+        .mx_auto()
+        .w_full()
+        .max_w(px(132. + 24. + 680.))
         .flex()
+        .flex_none()
         .gap(px(24.))
         .child(rail)
         .child(div().flex_1().min_w_0().max_w(px(680.)).child(content))

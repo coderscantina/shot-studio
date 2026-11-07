@@ -186,6 +186,9 @@ pub fn overview(
             )
             .size_full(),
         )
+        .when(this.workspace != super::Workspace::Timeline, |bar| {
+            bar.children(super::proposals::sparks(this, cx))
+        })
 }
 
 /// The footer of Text and Picture: playhead and length, and the overview bar.

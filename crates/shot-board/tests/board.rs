@@ -280,6 +280,29 @@ fn accept_merges_when_the_video_branch_moved_on() {
 }
 
 #[test]
+fn reads_a_proposal_file_where_it_branched_and_at_its_head() {
+    let channel = Channel::new(&[("alpha", VIDEO)]);
+    let board = channel.board();
+    board
+        .create_proposal(
+            "alpha",
+            "cut",
+            "✂️ first cut",
+            &files(&[("script.md", "# Shorter\n")]),
+        )
+        .unwrap();
+    board.move_card("alpha", Status::Recorded).unwrap();
+    assert_eq!(
+        board.proposal_file("alpha", "cut", "script.md").unwrap(),
+        (Some("# Title\n".to_owned()), Some("# Shorter\n".to_owned()))
+    );
+    assert_eq!(
+        board.proposal_file("alpha", "cut", "cut.kdl").unwrap(),
+        (None, None)
+    );
+}
+
+#[test]
 fn reject_leaves_no_branch() {
     let channel = Channel::new(&[("alpha", VIDEO)]);
     let board = channel.board();

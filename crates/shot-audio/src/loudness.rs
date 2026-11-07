@@ -1,14 +1,14 @@
-//! EBU R128 measurement, gain to the target loudness and a peak limiter.
+//! EBU R128 measurement, gain to the target loudness and the true-peak limiter.
 
 use crate::SAMPLE_RATE;
+use crate::limiter::{self, TruePeakLimiter};
 use ebur128::{EbuR128, Mode};
 
 pub const TARGET_LUFS: f64 = -14.0;
 pub const CEILING_DBTP: f64 = -1.0;
 
-/// Margin under the ceiling for inter-sample peaks the sample-domain limiter cannot see.
-const ISP_MARGIN_DB: f64 = 0.5;
-const RELEASE_S: f32 = 0.050;
+/// Margin under the ceiling for the AAC encode, whose output peaks higher than its input.
+pub const CODEC_HEADROOM_DB: f64 = 1.0;
 
 /// Integrated loudness and true peak of a stream, EBU R128.
 pub struct Meter(EbuR128);
@@ -44,38 +44,39 @@ impl Default for Meter {
     }
 }
 
-/// Gain to the target loudness, then a peak limiter (instant attack, smooth release, no
-/// lookahead) at the ceiling.
+/// Gain, then the [`TruePeakLimiter`] at the ceiling less [`CODEC_HEADROOM_DB`], streaming. The
+/// output runs [`Finish::LATENCY`] samples behind the input, like the voice chain's.
 pub struct Finish {
     gain: f32,
-    limit: f32,
-    reduction: f32,
-    release: f32,
+    limiter: TruePeakLimiter,
 }
 
 impl Finish {
-    /// `measured` is the pass-1 loudness of the chain's output. A non-finite value applies no gain.
-    pub fn new(measured: f64, target_lufs: f64, ceiling_dbtp: f64) -> Self {
-        let gain_db = if measured.is_finite() {
-            target_lufs - measured
-        } else {
-            0.0
-        };
+    /// Samples the output is delayed against the input.
+    pub const LATENCY: usize = limiter::LATENCY;
+
+    pub fn new(gain_db: f64, ceiling_dbtp: f64) -> Self {
         Self {
             gain: 10f64.powf(gain_db / 20.0) as f32,
-            limit: 10f64.powf((ceiling_dbtp - ISP_MARGIN_DB) / 20.0) as f32,
-            reduction: 1.0,
-            release: 1.0 - (-1.0 / (RELEASE_S * SAMPLE_RATE as f32)).exp(),
+            limiter: TruePeakLimiter::new(
+                10f64.powf((ceiling_dbtp - CODEC_HEADROOM_DB) / 20.0) as f32
+            ),
         }
     }
 
+    /// Processes `samples` in place; state carries across calls. Output sample `i` is input
+    /// sample `i - LATENCY`.
     pub fn process(&mut self, samples: &mut [f32]) {
-        for s in samples {
-            let x = *s * self.gain;
-            self.reduction += self.release * (1.0 - self.reduction);
-            let needed = self.limit / x.abs().max(f32::MIN_POSITIVE);
-            self.reduction = self.reduction.min(needed);
-            *s = x * self.reduction;
+        for s in samples.iter_mut() {
+            *s *= self.gain;
         }
+        self.limiter.process(samples);
+    }
+
+    /// Appends the final `LATENCY` samples of the stream to `out`.
+    pub fn flush(&mut self, out: &mut Vec<f32>) {
+        let start = out.len();
+        out.resize(start + Self::LATENCY, 0.0);
+        self.process(&mut out[start..]);
     }
 }
