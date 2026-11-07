@@ -15,6 +15,7 @@ use crate::edit::{self, EditScreen};
 use crate::folder::VideoFolder;
 use crate::record::{self, RecordScreen, Recorded};
 use crate::script::{self, ScriptScreen};
+use crate::ship::{self, ShipScreen};
 use crate::theme::*;
 use crate::ui::icon;
 
@@ -25,6 +26,7 @@ enum Screen {
     Record,
     Cut,
     Edit,
+    Ship,
 }
 
 pub struct Studio {
@@ -33,6 +35,7 @@ pub struct Studio {
     record: Entity<RecordScreen>,
     cut: Entity<CutScreen>,
     edit: Entity<EditScreen>,
+    ship: Entity<ShipScreen>,
     /// Present when the video folder sits in a channel repo, `<repo>/videos/<slug>`.
     planning: Option<(Entity<BoardScreen>, Entity<ScriptScreen>)>,
     _recorded: Subscription,
@@ -46,6 +49,7 @@ pub fn open(dir: &Path, cx: &mut App) -> Result<(), String> {
     record::bind_keys(cx);
     cut::bind_keys(cx);
     script::bind_keys(cx);
+    ship::bind_keys(cx);
     let bounds = Bounds::centered(None, size(px(1600.), px(1000.)), cx);
     cx.open_window(
         WindowOptions {
@@ -78,6 +82,7 @@ impl Studio {
         let record = cx.new(|cx| RecordScreen::new(folder.clone(), cx));
         let cut = cx.new(|cx| CutScreen::new(folder.clone(), cx));
         let edit = cx.new(|cx| EditScreen::new(folder.clone(), cx));
+        let ship = cx.new(|cx| ShipScreen::new(folder.clone(), cx));
         let recorded = cx.subscribe_in(&record, window, |this, _, _: &Recorded, window, cx| {
             this.edit.update(cx, |edit, cx| edit.show_last_chapter(cx));
             this.show(Screen::Cut, window, cx);
@@ -101,6 +106,7 @@ impl Studio {
             record,
             cut,
             edit,
+            ship,
             planning,
             _recorded: recorded,
             _continue: continue_to_edit,
@@ -126,6 +132,10 @@ impl Studio {
             Screen::Edit => {
                 self.edit.update(cx, |edit, cx| edit.reload_proposals(cx));
                 window.focus(&self.edit.focus_handle(cx), cx);
+            }
+            Screen::Ship => {
+                self.ship.update(cx, |ship, cx| ship.reload(cx));
+                window.focus(&self.ship.focus_handle(cx), cx);
             }
         }
         cx.notify();
@@ -164,7 +174,7 @@ impl Studio {
                         .child("Recording")
                 })
                 .into_any_element(),
-            Screen::Cut | Screen::Board | Screen::Script => div().into_any_element(),
+            Screen::Cut | Screen::Board | Screen::Script | Screen::Ship => div().into_any_element(),
         };
         let nav =
             |id: &'static str, name: &'static str, icon_name: &'static str, screen: Screen| {
@@ -227,7 +237,8 @@ impl Studio {
                     })
                     .child(nav("nav-record", "Record", "record", Screen::Record))
                     .child(nav("nav-cut", "Cut", "cut", Screen::Cut))
-                    .child(nav("nav-edit", "Edit", "edit", Screen::Edit)),
+                    .child(nav("nav-edit", "Edit", "edit", Screen::Edit))
+                    .child(nav("nav-ship", "Ship", "export", Screen::Ship)),
             )
             .child(
                 div()
@@ -250,6 +261,7 @@ impl Render for Studio {
             (Screen::Record, _) => self.record.clone().into_any_element(),
             (Screen::Cut, _) => self.cut.clone().into_any_element(),
             (Screen::Edit, _) => self.edit.clone().into_any_element(),
+            (Screen::Ship, _) => self.ship.clone().into_any_element(),
         };
         div()
             .size_full()

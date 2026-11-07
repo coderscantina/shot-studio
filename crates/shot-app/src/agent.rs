@@ -37,12 +37,35 @@ impl AgentRun {
         request: String,
         prompt: String,
     ) -> Result<Self, String> {
+        Self::start_with(claude, repo, request, prompt, false)
+    }
+
+    /// Starts a frame task ([0005]): the one kind of run whose tools may return still frames.
+    /// Only call it from an explicit action of the person, such as a thumbnail pick.
+    ///
+    /// [0005]: ../../../docs/decisions/0005-privacy-text-only-to-claude.md
+    pub fn start_frame_task(
+        claude: Claude,
+        repo: &Path,
+        request: String,
+        prompt: String,
+    ) -> Result<Self, String> {
+        Self::start_with(claude, repo, request, prompt, true)
+    }
+
+    fn start_with(
+        claude: Claude,
+        repo: &Path,
+        request: String,
+        prompt: String,
+        frame_task: bool,
+    ) -> Result<Self, String> {
         let session = Session {
             log_dir: new_log_dir(repo),
             repo: repo.to_owned(),
             shot: shot_executable()?,
             prompt,
-            frame_task: false,
+            frame_task,
         };
         let (send, events) = mpsc::channel();
         std::thread::spawn(move || {

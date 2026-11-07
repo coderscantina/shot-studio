@@ -1,6 +1,6 @@
 # Milestone 08 evidence: planning, agents and ship
 
-Recorded 2026-11-07 on `task/m08-agents`, work items 3 to 7. Items 1 and 2 (board, proposals) were done before this task in `shot-board`, `shot-cli` and `shot-mcp`. Item 8 is pending, see [shot ship pending](#shot-ship-pending).
+Recorded 2026-11-07 on `task/m08-agents`, work items 3 to 7. Items 1 and 2 (board, proposals) were done before this task in `shot-board`, `shot-cli` and `shot-mcp`. Item 8 was added on `task/m08-ship`, see [shot ship](#shot-ship).
 
 Machine: MacBook Pro, Apple M1 Pro, 32 GB, macOS 27, rustc 1.99.1, Claude Code 2.1.318. Milestone 07 built and measured in the same shared target dir at the same time, so timings carry that noise. Screenshots are in `m08/` (git-ignored), 1600x1000 in dark.
 
@@ -14,7 +14,7 @@ The demo data is a copy of `$SHOT_FIXTURES/demo-channel` with one more video, `o
 | A network capture of a script agent session shows only text leaving the machine | [Privacy](#privacy-what-leaves-the-machine): `lsof` sampled every 0.5 s during a bridge run, plus the byte logs of six sessions. The `claude` process talked only to Anthropic's API (160.79.104.10:443, 2607:6bc0::10:443), the `shot` processes opened no socket, every MCP reply was text, no image block | Pass, with the limits listed there |
 | Proposals render inline and accept/reject work | Script screen screenshots; Esc rejected `tighten` (branch gone), picking hook B merged it and deleted `hook-a` and `hook-c`, Tab on a selected card merged `b-roll-notes` | Pass |
 | Screens at 1600x1000 in dark against the mockup | `m08/board*.png`, `m08/script*.png` next to `m08/mockup-*.png`, differences [below](#differences-from-the-mockup) | Pass with listed differences |
-| `shot ship` against a private test upload | Not in this task | Pending |
+| `shot ship` against a private test upload | [shot ship](#shot-ship): the upload flow passes against a local stand-in for Google's endpoints, a dry run rendered, checked and planned the target project. No real upload: Mike's OAuth client does not exist yet | Not verified against YouTube |
 
 ## What was built
 
@@ -141,6 +141,84 @@ Script (`script-*.png` against `mockup-script.png`):
 - **Thumbnail scoring on a real face**, see above.
 - **A packet capture**: needs root; `lsof` sampling and byte logs stand in.
 
-## shot ship pending
+## shot ship
 
-Item 8, `shot ship` (YouTube upload of main and Shorts with chapters, description and thumbnail, OAuth token in Keychain, X clip as a file, release tag), waits for milestone 07's derived cuts and for Mike's Google OAuth desktop client ([0009](../decisions/0009-ship-to-youtube.md)). What it can build on from here: `shot_ship::describe` for the description and word-accurate chapters, `shot check` as the gate, `.shot/export/main.png` as the thumbnail, and `Board::tag_release` for the tag.
+Recorded 2026-11-07 on `task/m08-ship`. **The real YouTube upload is unverified**: there is no OAuth client yet. Everything below runs against the real API shapes, but only a local mock server has answered them.
+
+### What was built
+
+- `shot_ship::youtube`: a resumable `videos.insert` (session from the metadata, 8 MiB chunks with `Content-Range`, 308 with the received `Range`). After a network error or a 5xx it asks the session what arrived (`bytes */<size>`) and continues, with backoff 1, 2, 4, 8, 16 s. A 401 refreshes the access token once, a 404 or 410 session starts a new one, `quotaExceeded` stops right away with a message about the midnight Pacific reset. `thumbnails.set` uploads the thumbnail, scaled to 1280x720 JPEG when the PNG is over 2 MB. Privacy defaults to private, `selfDeclaredMadeForKids` is always sent (false unless `--made-for-kids`), category Science & Technology. Title and description are checked against YouTube's limits (100 characters, 5000 bytes, no `<` or `>`) before anything is sent.
+- `shot_ship::oauth`: desktop OAuth with a loopback redirect on `127.0.0.1:<free port>`, PKCE S256 and a `state` check, scope `youtube.upload`. The client comes from `~/Library/Application Support/Shot Studio/youtube-client.json` (the JSON Google's console downloads) or `$SHOT_YOUTUBE_CLIENT`. Without it, `shot ship` and the Ship screen say how to create one. The refresh token is a generic password in the login Keychain (`security-framework` 3.7.0, service "Shot Studio YouTube", account the client id). A revoked token is removed and asks for a new sign-in.
+- `shot_ship::ship`: `plan` (main and Shorts go to YouTube, X clips stay files), `prepare` (render every cut through the chunk cache, then `shot check`), `publish` (main first so the Shorts link to it as "Full video: https://youtu.be/<id>", thumbnail, card to `shipped`, CalVer tag through `Board::tag_release`). Every step is written to `.shot/ship/record.json`, so a second run resumes an unfinished upload and never uploads a cut twice. A thumbnail YouTube refuses (unverified channel) does not stop the release.
+- `shot ship --video <dir> [--dry-run] [--force] [--privacy private|unlisted|public] [--made-for-kids]`: runs the checks first and refuses on problems unless `--force`. It checks the channel card and the OAuth client before minutes of rendering.
+- The contract's [ship artifacts](../contracts/project-files.md#ship-artifacts) section and [0022](../decisions/0022-ship-artifacts-outside-git.md) (Proposed) settle where exports, the thumbnail and the record live. The thumbnail stays at `.shot/export/main.png`. The description is drafted on every run, not stored.
+- The Ship screen (`crates/shot-app/src/ship.rs`): the cuts, the `cut.kdl` diff, checks, a preview still per aspect ratio, thumbnail candidates, privacy and the ship button (⌘⏎).
+
+### Mock server tests
+
+`crates/shot-ship/tests/youtube.rs` runs a fake Google on a local port that speaks the resumable protocol. Nine tests pass:
+
+- the upload goes in chunks with private, not-made-for-kids metadata and returns the video id
+- a 503 mid-upload resumes from the byte the server reports
+- a saved session continues without opening a new one
+- an access token that expires mid-upload is refreshed and the upload goes on
+- a quota error stops after one request
+- a revoked refresh token is removed from the store
+- sign-in through a loopback redirect, where the fake token endpoint checks the PKCE verifier against the challenge
+- publish on a temp channel repo: main then the Short (with the main link), the thumbnail, card `shipped`, tag `v26.11.7`, record written; a second run sends nothing and makes no second tag
+- a refused thumbnail still tags the release
+
+The Keychain store passed its ignored round-trip test against the real login Keychain (`cargo test -p shot-ship --lib keychain -- --ignored`).
+
+### Dry run
+
+The data was a copy of `demo-channel` with the target project added as `videos/opinion-target` (media hard-linked, transcribed, 983 words) and an X clip added with `shot derived add the-rule --kind x-clip --take t01 --from 60 --to 120`. `shot ship --dry-run` took 13:37 from an empty cache, with another agent building at the same time:
+
+```
+main: captions: 9 words heard with low confidence: "In" at 0:01, "For" at 0:07, ... add a caption fix where it was misheard
+main: thumbnail: no thumbnail yet, pick one from `shot thumbnails`
+intro-hook: loudness: true peak is -0.8 dBTP, above the -1 dBTP ceiling
+intro-hook: captions: 2 words heard with low confidence: "In" at 0:01, "For" at 0:07; ...
+the-rule: loudness: the audio is silent
+the-rule: captions: 1 word heard with low confidence: "microphone" at 0:37; ...
+
+main  16:9  15:37  .shot/export/main.mp4 (6435.2 MB) to YouTube, private, not made for kids
+  title: A full recording session from first take to export
+  | Welcome, and what this video covers: first take to finished export
+  |
+  | Chapters
+  | 0:00 Intro
+  | 1:27 Install and setup
+  ...
+  | 14:10 Wrap up
+  thumbnail: none, YouTube picks a frame
+
+short intro-hook  9:16  0:29  .shot/export/intro-hook.mp4 (41.7 MB) to YouTube, private, not made for kids
+x-clip the-rule  1:1  0:53  .shot/export/the-rule.mp4 (49.3 MB) to a file to post by hand
+
+then: move opinion-target to shipped and tag the release v26.11.7 (or its next .N)
+a real ship stops here: no YouTube OAuth client at ~/Library/Application Support/Shot Studio/youtube-client.json. ...
+a real ship stops here: 6 check problems, fix them or pass --force
+dry run: nothing uploaded, nothing tagged
+```
+
+"the audio is silent" for `the-rule` is a false positive of the loudness check: the fixture mic is digitally silent from 60 to 97 s, and `media::loudness` stops at the first all-zero second after the start. ffmpeg reads the clip at -14.4 LUFS.
+
+### Ship screen against the mockup
+
+`m08/ship-main.png`, `m08/ship-short.png` and `m08/ship-setup.png` next to `m08/mockup-ship.png`, 1600x1000 in dark. Differences:
+
+- No "New cut from a selection": derived cuts are added in Edit or with `shot derived`.
+- The diff is `cut.kdl` against the video branch ("not yet on video/<slug>, so not in the release tag"), not "since the last render": nothing records which `cut.kdl` an export was made from. A derived cut shows its own block as added lines, like the mockup.
+- Checks show "ok" or a count instead of measured values such as "-14.1 LUFS": `shot check` returns only problems. The problems are listed in the amber strip, with Render and check, or Render again.
+- One button ships everything (main, Shorts, X clip files, tag) whatever cut is selected, and its label counts known problems ("Ship with 6 problems and tag"). The mockup has one action per cut.
+- A privacy switch (Private, Unlisted, Public) sits above the button. The title is shown, not editable: it comes from `video.kdl`.
+- The thumbnail row shows "Find candidates" until `shot thumbnails` wrote some. "Ask Claude" runs the frame task ([0005](../decisions/0005-privacy-text-only-to-claude.md)) and rings Claude's pick; clicking a still picks it. Not exercised: the fixture face yields no candidates.
+- The nav uses the export icon, the mockup a rocket: adding an icon is a change to the shared asset list.
+- No branch chip and no render estimate in the title bar.
+- The setup message wraps long and pushes the ship button below the fold of the right pane.
+
+### Not verified
+
+- **A real upload, sign-in, Keychain token from a real Google sign-in, thumbnail set and quota behavior on YouTube**: waits for Mike's OAuth client. To verify: save the client JSON as above and run `shot ship --video <dir>` on a private test video.
+- The ship button's full run in the app (it stopped at the missing client, as expected) and the Claude thumbnail pick.
