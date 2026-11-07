@@ -58,6 +58,11 @@ impl Speech {
         Some(10.0 * power.max(1e-10).log10())
     }
 
+    /// The end of the take as the levels cover it.
+    pub fn end(&self) -> Micros {
+        Micros(self.levels_from.0 + self.levels.len() as u64 * LEVEL_STEP.0)
+    }
+
     /// Whether any speech overlaps `range`.
     pub fn speaks_in(&self, range: TimeRange) -> bool {
         let first = self.ranges.partition_point(|s| s.to() <= range.from());

@@ -9,8 +9,8 @@
 //! ([0014](../../../docs/decisions/0014-auto-edits-as-written-nodes.md)).
 
 mod edit;
-mod rules;
-mod zoom;
+pub(crate) mod rules;
+pub(crate) mod zoom;
 
 use std::collections::HashMap;
 use std::path::Path;

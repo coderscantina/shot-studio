@@ -9,10 +9,12 @@
 //! - [`again_markers`]: the `again` hotkey presses of a take's event log.
 //! - [`autocut`]: the rough cut, rules and pacing written into `cut.kdl`.
 //! - [`vision`]: faces and on-screen text with Apple Vision, for reframing and highlights.
+//! - [`elements`]: the facts of a take in `elements/<take>.jsonl`, from all of the above.
 
 mod audio;
 pub mod autocut;
 pub mod cache;
+pub mod elements;
 mod events;
 pub mod idle;
 pub mod models;
@@ -26,7 +28,7 @@ pub use events::again_markers;
 pub use speech::{LEVEL_STEP, Speech, SpeechDetector};
 pub use transcribe::{Transcriber, normalize};
 
-/// Errors of model downloads, decoding, transcription and the transcript cache.
+/// Errors of model downloads, decoding, transcription, the caches and the elements file.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
@@ -47,4 +49,8 @@ pub enum Error {
     Whisper(String),
     #[error("bad transcript cache: {0}")]
     Cache(String),
+    #[error(transparent)]
+    Vision(#[from] vision::VisionError),
+    #[error(transparent)]
+    Parse(#[from] shot_core::ParseError),
 }

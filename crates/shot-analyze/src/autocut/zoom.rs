@@ -10,7 +10,7 @@ const MIN_ZOOM: Micros = Micros(1_000_000);
 /// An emphasis zoom holds at most this long.
 const MAX_EMPHASIS: Micros = Micros(3_000_000);
 /// A word this much louder than the take's median word is emphasis.
-const EMPHASIS_DB: f32 = 6.0;
+pub(crate) const EMPHASIS_DB: f32 = 6.0;
 const MIN_EMPHASIS_WORD: Micros = Micros(200_000);
 /// At most one emphasis zoom starts within this.
 const EMPHASIS_SPACING: Micros = Micros(10_000_000);
@@ -64,9 +64,36 @@ fn jump_cuts(edit: &TakeEdit) -> Vec<Zoom> {
     zooms
 }
 
-/// Kept words said clearly louder than the take's typical word, punched in until the clause
-/// ends.
+/// Kept emphasis punched in, at most one starting within [`EMPHASIS_SPACING`].
 fn emphasis(edit: &TakeEdit, words: &[Word], speech: &Speech) -> Vec<Zoom> {
+    let mut zooms = Vec::new();
+    let mut next_allowed = Micros(0);
+    for loud in loud_words(words, speech) {
+        let from = loud.range.from();
+        if from < next_allowed || !edit.keeps(loud.word) {
+            continue;
+        }
+        let to = loud.range.to().max(Micros(from.0 + MIN_ZOOM.0));
+        if let Some(range) = TimeRange::new(from, to) {
+            zooms.push(punch_in(range, ZoomBy::Emphasis));
+            next_allowed = Micros(from.0 + EMPHASIS_SPACING.0);
+        }
+    }
+    zooms
+}
+
+/// A word said clearly louder than the take's typical word.
+pub(crate) struct Loud {
+    /// The word itself.
+    pub word: TimeRange,
+    /// From the word to the end of its clause, at most [`MAX_EMPHASIS`].
+    pub range: TimeRange,
+    /// How much louder than the median word, in dB.
+    pub over: f32,
+}
+
+/// Words at least [`EMPHASIS_DB`] louder than the take's median word, in order.
+pub(crate) fn loud_words(words: &[Word], speech: &Speech) -> Vec<Loud> {
     let levels: Vec<Option<f32>> = words.iter().map(|w| speech.level(w.range)).collect();
     let mut sorted: Vec<f32> = levels.iter().flatten().copied().collect();
     if sorted.len() < 20 {
@@ -74,15 +101,12 @@ fn emphasis(edit: &TakeEdit, words: &[Word], speech: &Speech) -> Vec<Zoom> {
     }
     sorted.sort_by(f32::total_cmp);
     let median = sorted[sorted.len() / 2];
-    let mut zooms = Vec::new();
-    let mut next_allowed = Micros(0);
+    let mut out = Vec::new();
     for (i, word) in words.iter().enumerate() {
-        let loud = levels[i].is_some_and(|l| l >= median + EMPHASIS_DB);
-        if !loud
-            || word.range.from() < next_allowed
-            || word.range.duration() < MIN_EMPHASIS_WORD
-            || !edit.keeps(word.range)
-        {
+        let Some(level) = levels[i].filter(|l| *l >= median + EMPHASIS_DB) else {
+            continue;
+        };
+        if word.range.duration() < MIN_EMPHASIS_WORD {
             continue;
         }
         let clause_end = words[i..]
@@ -90,15 +114,16 @@ fn emphasis(edit: &TakeEdit, words: &[Word], speech: &Speech) -> Vec<Zoom> {
             .find(|w| w.text.trim_end().ends_with(['.', '?', '!', ',']))
             .map_or(word.range.to(), |w| w.range.to());
         let from = word.range.from();
-        let to = clause_end
-            .min(Micros(from.0 + MAX_EMPHASIS.0))
-            .max(Micros(from.0 + MIN_ZOOM.0));
+        let to = clause_end.min(Micros(from.0 + MAX_EMPHASIS.0));
         if let Some(range) = TimeRange::new(from, to) {
-            zooms.push(punch_in(range, ZoomBy::Emphasis));
-            next_allowed = Micros(from.0 + EMPHASIS_SPACING.0);
+            out.push(Loud {
+                word: word.range,
+                range,
+                over: level - median,
+            });
         }
     }
-    zooms
+    out
 }
 
 #[cfg(test)]
