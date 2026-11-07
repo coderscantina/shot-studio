@@ -1,6 +1,6 @@
 use shot_core::{
     CaptionStyle, Cut, DerivedKind, Format, FormatKind, Id, Layout, Micros, OutputKind, Project,
-    RangeEdit, Script, Timeline, Video,
+    RangeEdit, Script, TakeAt, TimeRange, Timeline, Transcript, Video, Word,
 };
 
 const VIDEO: &str = include_str!("../../../fixtures/examples/video.kdl");
@@ -165,4 +165,42 @@ fn script_parses_chapters_beats_and_sources() {
 
     let err = Script::parse("# Title\n\n- a beat before any chapter\n").unwrap_err();
     assert_eq!((err.file, err.line), ("script.md", 3));
+}
+
+#[test]
+fn deleting_words_changes_only_the_hashes_of_its_chapter() {
+    let mut project = project();
+    let before = Timeline::evaluate(&project);
+
+    let mut transcript = Transcript::new(Id::new("t01").unwrap());
+    for start in (12_000_000..13_000_000).step_by(500_000) {
+        let range = TimeRange::new(Micros(start), Micros(start + 400_000)).unwrap();
+        let word = Word {
+            text: "word".to_owned(),
+            range,
+            confidence: 90,
+        };
+        transcript.push(word).unwrap();
+    }
+    let at = TakeAt {
+        chapter: 1,
+        take: 0,
+    };
+    let selection = TimeRange::new(Micros(12_000_000), Micros(12_100_000)).unwrap();
+    project.cut = project
+        .cut
+        .delete_words(at, &transcript, selection)
+        .unwrap();
+    let after = Timeline::evaluate(&project);
+
+    let hashes = |t: &Timeline, chapter: usize| -> Vec<_> {
+        t.main().chapters[chapter]
+            .segments
+            .iter()
+            .map(|s| s.hash)
+            .collect()
+    };
+    assert_eq!(hashes(&before, 0), hashes(&after, 0));
+    assert_ne!(hashes(&before, 1), hashes(&after, 1));
+    assert_eq!(hashes(&before, 2), hashes(&after, 2));
 }

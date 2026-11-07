@@ -4,6 +4,7 @@
 //! The grammar of each file is in `docs/contracts/project-files.md`.
 
 mod cut;
+mod edit;
 mod error;
 mod format;
 mod kdl_io;
@@ -17,6 +18,7 @@ pub use cut::{
     Chapter, Clip, Cut, DerivedCut, DerivedKind, LayoutChange, Overlay, ParamValue, RangeEdit,
     RemovedBy, TakeEdit, Zoom,
 };
+pub use edit::{EditError, TakeAt, WordState, WordView};
 pub use error::ParseError;
 pub use format::{
     AutoCut, CaptionStyle, Format, FormatKind, Layout, Pacing, PrompterMode, RuleKind, TimedRule,
