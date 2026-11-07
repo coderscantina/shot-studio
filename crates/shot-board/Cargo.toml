@@ -8,3 +8,9 @@ publish.workspace = true
 repository.workspace = true
 
 [dependencies]
+shot-core = { path = "../shot-core" }
+git2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
