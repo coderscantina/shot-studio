@@ -3,6 +3,8 @@
 //! Every board subcommand is one call into `shot-board`. The words come from `shot_mcp::text`, so the
 //! CLI and the MCP tools print the same thing.
 
+mod autocut;
+mod caption_fix;
 mod models;
 mod record;
 mod transcribe;
@@ -71,6 +73,10 @@ enum Command {
     },
     /// Transcribe a take's mic track into the transcript cache.
     Transcribe(transcribe::TranscribeArgs),
+    /// Run the auto-cut rules on a take and write the rough cut into cut.kdl.
+    Autocut(autocut::AutocutArgs),
+    /// Add, change or remove a caption fix: words the transcript mishears and what captions show.
+    CaptionFix(caption_fix::CaptionFixArgs),
 }
 
 #[derive(Args)]
@@ -115,6 +121,8 @@ fn run(cli: Cli) -> Result<(), String> {
     match cli.command {
         Command::Models { action } => return models::run(action),
         Command::Transcribe(args) => return transcribe::run(args),
+        Command::Autocut(args) => return autocut::run(args),
+        Command::CaptionFix(args) => return caption_fix::run(args),
         _ => {}
     }
     if let Command::Mcp = cli.command {
@@ -188,7 +196,12 @@ fn run(cli: Cli) -> Result<(), String> {
             board.reject_proposal(&slug, &name).map_err(fail)?;
             println!("rejected {slug}/{name}");
         }
-        Command::Mcp | Command::Record(_) | Command::Models { .. } | Command::Transcribe(_) => {
+        Command::Mcp
+        | Command::Record(_)
+        | Command::Models { .. }
+        | Command::Transcribe(_)
+        | Command::Autocut(_)
+        | Command::CaptionFix(_) => {
             unreachable!("handled before opening the board")
         }
         #[cfg(target_os = "macos")]

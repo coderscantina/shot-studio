@@ -24,7 +24,7 @@ use whisper_rs::{
 };
 
 use crate::Error;
-use crate::resample::{Resampler, WHISPER_RATE};
+use crate::resample::{Timeline16k, WHISPER_RATE};
 
 const SECOND: usize = WHISPER_RATE as usize;
 const MIN_STEP: usize = SECOND;
@@ -100,9 +100,7 @@ impl Transcriber {
                     on_word: Box::new(on_word),
                     transcript: Transcript::new(take),
                     agreement: Agreement::default(),
-                    input: None,
-                    origin: None,
-                    timeline: 0,
+                    timeline: Timeline16k::default(),
                     incoming: Vec::new(),
                     window: Vec::new(),
                     window_start: 0,
@@ -144,11 +142,7 @@ struct Worker {
     on_word: Box<dyn FnMut(&Word) + Send>,
     transcript: Transcript,
     agreement: Agreement,
-    input: Option<Resampler>,
-    /// Media time of 16 kHz sample 0.
-    origin: Option<Micros>,
-    /// 16 kHz samples produced so far, including silence for gaps.
-    timeline: u64,
+    timeline: Timeline16k,
     incoming: Vec<f32>,
     window: Vec<f32>,
     /// Timeline index of `window[0]`.
@@ -174,11 +168,8 @@ impl Worker {
                     Err(TryRecvError::Empty) => break,
                 }
             }
-            if finishing && let Some(input) = &mut self.input {
-                let before = self.incoming.len();
-                input.flush(&mut self.incoming);
-                self.timeline += (self.incoming.len() - before) as u64;
-                self.input = None;
+            if finishing {
+                self.timeline.flush(&mut self.incoming);
             }
 
             let take = self
@@ -247,7 +238,7 @@ impl Worker {
 
     /// Timeline index of a media time.
     fn index(&self, t: Micros) -> u64 {
-        t.0.saturating_sub(self.origin.unwrap_or(Micros(0)).0) * u64::from(WHISPER_RATE) / 1_000_000
+        self.timeline.index(t)
     }
 
     /// Drops the window audio before timeline index `cut`.
@@ -260,30 +251,11 @@ impl Worker {
     }
 
     fn accept(&mut self, t: Micros, samples: &[f32], rate: u32) {
-        let origin = *self.origin.get_or_insert(t);
-        if self.input.as_ref().is_some_and(|r| r.rate() != rate) {
-            let mut old = self.input.take().expect("checked above");
-            let before = self.incoming.len();
-            old.flush(&mut self.incoming);
-            self.timeline += (self.incoming.len() - before) as u64;
-        }
-        let input = self.input.get_or_insert_with(|| Resampler::new(rate));
-        let expected = (t.0.saturating_sub(origin.0)) * WHISPER_RATE as u64 / 1_000_000;
-        // The resampler holds back a few samples, so a gap counts only past 20 ms.
-        let gap = expected.saturating_sub(self.timeline);
-        if gap > u64::from(WHISPER_RATE) / 50 {
-            let silence = vec![0.0; (gap * u64::from(rate) / u64::from(WHISPER_RATE)) as usize];
-            let before = self.incoming.len();
-            input.push(&silence, &mut self.incoming);
-            self.timeline += (self.incoming.len() - before) as u64;
-        }
-        let before = self.incoming.len();
-        input.push(samples, &mut self.incoming);
-        self.timeline += (self.incoming.len() - before) as u64;
+        self.timeline.push(t, samples, rate, &mut self.incoming);
     }
 
     fn time(&self, index: u64) -> Micros {
-        Micros(self.origin.unwrap_or(Micros(0)).0 + index * 1_000_000 / u64::from(WHISPER_RATE))
+        self.timeline.time(index)
     }
 
     fn decode(&mut self) -> Result<Vec<Hyp>, Error> {

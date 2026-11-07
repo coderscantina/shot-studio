@@ -1,4 +1,4 @@
-//! The app window for one video folder: the title bar with the Record and Edit screens.
+//! The app window for one video folder: the title bar with the Record, Cut and Edit screens.
 
 use std::path::Path;
 
@@ -8,6 +8,7 @@ use gpui::{
 };
 use gpui_component::Root;
 
+use crate::cut::{self, ContinueToEdit, CutScreen};
 use crate::edit::{self, EditScreen};
 use crate::folder::VideoFolder;
 use crate::record::{self, RecordScreen, Recorded};
@@ -17,6 +18,7 @@ use crate::ui::icon;
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Screen {
     Record,
+    Cut,
     Edit,
 }
 
@@ -24,8 +26,10 @@ pub struct Studio {
     folder: Entity<VideoFolder>,
     screen: Screen,
     record: Entity<RecordScreen>,
+    cut: Entity<CutScreen>,
     edit: Entity<EditScreen>,
     _recorded: Subscription,
+    _continue: Subscription,
 }
 
 pub fn open(dir: &Path, cx: &mut App) -> Result<(), String> {
@@ -33,6 +37,7 @@ pub fn open(dir: &Path, cx: &mut App) -> Result<(), String> {
     crate::theme::init(cx);
     edit::bind_keys(cx);
     record::bind_keys(cx);
+    cut::bind_keys(cx);
     let bounds = Bounds::centered(None, size(px(1600.), px(1000.)), cx);
     cx.open_window(
         WindowOptions {
@@ -63,18 +68,25 @@ pub fn open(dir: &Path, cx: &mut App) -> Result<(), String> {
 impl Studio {
     fn new(folder: Entity<VideoFolder>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let record = cx.new(|cx| RecordScreen::new(folder.clone(), cx));
+        let cut = cx.new(|cx| CutScreen::new(folder.clone(), cx));
         let edit = cx.new(|cx| EditScreen::new(folder.clone(), cx));
         let recorded = cx.subscribe_in(&record, window, |this, _, _: &Recorded, window, cx| {
             this.edit.update(cx, |edit, cx| edit.show_last_chapter(cx));
-            this.show(Screen::Edit, window, cx);
+            this.show(Screen::Cut, window, cx);
         });
+        let continue_to_edit =
+            cx.subscribe_in(&cut, window, |this, _, _: &ContinueToEdit, window, cx| {
+                this.show(Screen::Edit, window, cx);
+            });
         window.focus(&edit.focus_handle(cx), cx);
         Self {
             folder,
             screen: Screen::Edit,
             record,
+            cut,
             edit,
             _recorded: recorded,
+            _continue: continue_to_edit,
         }
     }
 
@@ -82,6 +94,7 @@ impl Studio {
         self.screen = screen;
         match screen {
             Screen::Record => window.focus(&self.record.focus_handle(cx), cx),
+            Screen::Cut => window.focus(&self.cut.focus_handle(cx), cx),
             Screen::Edit => window.focus(&self.edit.focus_handle(cx), cx),
         }
         cx.notify();
@@ -120,6 +133,7 @@ impl Studio {
                         .child("Recording")
                 })
                 .into_any_element(),
+            Screen::Cut => div().into_any_element(),
         };
         let nav =
             |id: &'static str, name: &'static str, icon_name: &'static str, screen: Screen| {
@@ -177,6 +191,7 @@ impl Studio {
                     .flex()
                     .gap(px(2.))
                     .child(nav("nav-record", "Record", "record", Screen::Record))
+                    .child(nav("nav-cut", "Cut", "cut", Screen::Cut))
                     .child(nav("nav-edit", "Edit", "edit", Screen::Edit)),
             )
             .child(
@@ -195,6 +210,7 @@ impl Render for Studio {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let screen = match self.screen {
             Screen::Record => self.record.clone().into_any_element(),
+            Screen::Cut => self.cut.clone().into_any_element(),
             Screen::Edit => self.edit.clone().into_any_element(),
         };
         div()

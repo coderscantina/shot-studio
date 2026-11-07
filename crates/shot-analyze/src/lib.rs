@@ -4,14 +4,24 @@
 //! - [`Transcriber`]: streaming mic audio into a word-timed transcript.
 //! - [`cache`]: the transcript cache file, its format is documented there.
 //! - [`decode_mono`]: a recorded audio track as mono PCM.
+//! - [`SpeechDetector`]: streaming mic audio into speech ranges and loudness levels.
+//! - [`idle`]: stretches where the screen track does not change.
+//! - [`again_markers`]: the `again` hotkey presses of a take's event log.
+//! - [`autocut`]: the rough cut, rules and pacing written into `cut.kdl`.
 
 mod audio;
+pub mod autocut;
 pub mod cache;
+mod events;
+pub mod idle;
 pub mod models;
 mod resample;
+mod speech;
 mod transcribe;
 
 pub use audio::decode_mono;
+pub use events::again_markers;
+pub use speech::{LEVEL_STEP, Speech, SpeechDetector};
 pub use transcribe::{Transcriber, normalize};
 
 /// Errors of model downloads, decoding, transcription and the transcript cache.

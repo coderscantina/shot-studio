@@ -14,6 +14,7 @@
 //! - `--wall-clock`: pace by wall clock alone instead of locking to the display, for comparison.
 
 mod bench;
+mod cut;
 mod edit;
 mod engine;
 mod folder;

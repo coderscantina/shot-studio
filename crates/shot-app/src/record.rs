@@ -19,7 +19,7 @@ use gpui::{
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::progress::Progress;
 use objc2_core_video::{CVPixelBufferGetHeight, CVPixelBufferGetWidth};
-use shot_analyze::{Transcriber, cache, models};
+use shot_analyze::{SpeechDetector, Transcriber, cache, models};
 use shot_capture::{Devices, Preview, PreviewFrame, Session, SessionConfig, Source};
 use shot_core::{Id, Micros, Transcript};
 
@@ -189,7 +189,9 @@ impl RecordScreen {
                     Phase::Finished { take, duration } => {
                         this.update(cx, |this, cx| {
                             let result = this.folder.update(cx, |folder, cx| {
-                                let result = folder.append_take(take, duration);
+                                let result = folder
+                                    .append_take(take.clone(), duration)
+                                    .and_then(|()| crate::cut::run::rough_cut(folder, &take));
                                 cx.notify();
                                 result
                             });
@@ -287,6 +289,14 @@ fn record(
         }
         None => None,
     };
+    // Speech for the auto-cut rules, detected while recording like the transcript.
+    let speech = match &transcriber {
+        Some(_) => Some(Arc::new(
+            SpeechDetector::new(&models::vad_model().path(&models::models_dir()))
+                .map_err(|e| e.to_string())?,
+        )),
+        None => None,
+    };
 
     let mut config = SessionConfig::new(dir);
     config.display = choice.display;
@@ -296,11 +306,15 @@ fn record(
     let level = Arc::new(AtomicU32::new(f32::NEG_INFINITY.to_bits()));
     if let Some((transcriber, _)) = &transcriber {
         let transcriber = transcriber.clone();
+        let speech = speech.clone();
         let level = level.clone();
         config.mic_tap = Some(Box::new(move |t, samples, rate| {
             let peak = samples.iter().fold(0f32, |p, s| p.max(s.abs()));
             level.store((20.0 * peak.max(1e-6).log10()).to_bits(), Ordering::Relaxed);
             transcriber.feed(t, samples, rate);
+            if let Some(speech) = &speech {
+                speech.feed(t, samples, rate);
+            }
         }));
     }
     let session = Session::start(config).map_err(|e| e.to_string())?;
@@ -339,6 +353,13 @@ fn record(
             moved
         };
         cache::write_cached(dir, &transcript).map_err(|e| e.to_string())?;
+    }
+    if let Some(speech) = speech {
+        let speech = Arc::try_unwrap(speech)
+            .map_err(|_| "the mic tap still holds the speech detector".to_owned())?
+            .finish()
+            .map_err(|e| e.to_string())?;
+        cache::write_speech(dir, &take.id, &speech).map_err(|e| e.to_string())?;
     }
     Ok((take.id, take.duration))
 }

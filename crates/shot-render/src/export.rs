@@ -7,7 +7,9 @@
 //!   session, with a keyframe forced at each chunk start.
 //! - **Audio** is cut from each take's mic track and encoded to AAC once per export, on its own
 //!   thread while video renders. One continuous AAC stream has no encoder delay or padding at the
-//!   joins, so they cannot click or drift. Where the source jumps, the cut fades over 5 ms.
+//!   joins, so they cannot click or drift. Where the source jumps, the cut fades over 5 ms. The
+//!   voice chain, music bed and loudness of [`crate::voice`] finish it.
+//! - **Captions** of the main cut go next to the output as a WebVTT sidecar, `<out>.vtt`.
 //! - **The join** runs alongside both. It writes one init segment, then copies each chunk's
 //!   fragments with shifted decode times as soon as the chunk is cached, with the audio packets
 //!   for the same span after each one as they come out of the encoder.
@@ -34,6 +36,7 @@ use crate::graph::Renderer;
 use crate::layout::{Canvas, LayoutSpec, Source, Sources, UnsupportedLayout};
 use crate::plan::{ExportPlan, PlannedChunk, PlannedSegment, frame_time};
 use crate::surface::size;
+use crate::voice::{self, Bed};
 
 /// Output frame rate.
 pub const FPS: u32 = 60;
@@ -45,7 +48,6 @@ const KEYFRAME_INTERVAL: u32 = FPS / 2;
 /// VideoToolbox quality for the master. See docs/evidence/m03/export.md for the measurement.
 const QUALITY: f32 = 0.75;
 const AUDIO_BITRATE: u32 = 128_000;
-const SAMPLES_PER_FRAME: u64 = (SAMPLE_RATE / FPS) as u64;
 
 /// The tracks of a take, by file name inside `media/<take>/`.
 const SCREEN_FILE: &str = "screen.mp4";
@@ -152,6 +154,13 @@ pub fn export(
     }
     let media = Media {
         root: video_dir.join("media"),
+        music: project.cut.music.as_ref().map(|m| {
+            (
+                video_dir.join(&m.file),
+                f32::from(m.gain),
+                f32::from(m.duck),
+            )
+        }),
     };
     let ids: HashMap<&Id, MediaId> = output
         .chapters
@@ -181,6 +190,8 @@ pub fn export(
     let rendered_frames = jobs.iter().map(Job::frames).sum();
 
     let (render_time, join_time) = run(&plan, jobs, &media, &cache, out, options, progress)?;
+    crate::captions::write_sidecar(video_dir, &plan, output, out)
+        .map_err(io_error(&out.with_extension("vtt")))?;
     Ok(ExportReport {
         output: out.to_owned(),
         chunks: plan.segments.iter().map(|s| s.chunks.len()).sum(),
@@ -233,6 +244,8 @@ impl<'a> Job<'a> {
 
 struct Media {
     root: PathBuf,
+    /// The music bed's file and its gain and duck in dB.
+    music: Option<(PathBuf, f32, f32)>,
 }
 
 impl Media {
@@ -708,17 +721,21 @@ fn encode_audio(
         FPS,
         move |take| root.join(take.as_str()).join(MIC_FILE),
     );
-    let mut samples = Vec::new();
-    for planned in &plan.segments {
-        let start = planned.output_frame * SAMPLES_PER_FRAME;
-        samples.clear();
-        audio.read(
-            start..start + planned.frames() * SAMPLES_PER_FRAME,
-            &mut samples,
-        )?;
-        encoder.push(&samples).map_err(ExportError::AudioEncode)?;
-        send(encoder.take())?;
-    }
+    let bed = match &media.music {
+        Some((path, gain, duck)) => {
+            Some(
+                Bed::read(path, *gain, *duck).map_err(|source| TimelineAudioError {
+                    path: path.clone(),
+                    source,
+                })?,
+            )
+        }
+        None => None,
+    };
+    voice::finish(&mut audio, bed.as_ref(), |samples| {
+        encoder.push(samples).map_err(ExportError::AudioEncode)?;
+        send(encoder.take())
+    })?;
     send(encoder.finish().map_err(ExportError::AudioEncode)?)
 }
 

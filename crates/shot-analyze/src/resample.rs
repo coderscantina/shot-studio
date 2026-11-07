@@ -2,6 +2,8 @@
 
 use std::f64::consts::PI;
 
+use shot_core::Micros;
+
 pub const WHISPER_RATE: u32 = 16_000;
 
 /// Zero crossings of the sinc on each side, at the output rate.
@@ -79,6 +81,58 @@ impl Resampler {
             sum += f64::from(self.input[i as usize]) * self.cutoff * sinc * window;
         }
         sum as f32
+    }
+}
+
+/// Media-timed audio at any rate on one gapless 16 kHz timeline. A gap in media time is filled
+/// with silence, so a timeline index and a media time convert into each other.
+#[derive(Default)]
+pub struct Timeline16k {
+    input: Option<Resampler>,
+    /// Media time of timeline index 0.
+    origin: Option<Micros>,
+    /// Samples produced so far, including silence for gaps.
+    len: u64,
+}
+
+impl Timeline16k {
+    /// Appends the 16 kHz samples for `samples` at `rate`, whose first sample is at media time
+    /// `t`, to `out`.
+    pub fn push(&mut self, t: Micros, samples: &[f32], rate: u32, out: &mut Vec<f32>) {
+        let origin = *self.origin.get_or_insert(t);
+        if self.input.as_ref().is_some_and(|r| r.rate() != rate) {
+            self.flush(out);
+        }
+        let before = out.len();
+        let input = self.input.get_or_insert_with(|| Resampler::new(rate));
+        let expected = (t.0.saturating_sub(origin.0)) * WHISPER_RATE as u64 / 1_000_000;
+        // The resampler holds back a few samples, so a gap counts only past 20 ms.
+        let gap = expected.saturating_sub(self.len);
+        if gap > u64::from(WHISPER_RATE) / 50 {
+            let silence = vec![0.0; (gap * u64::from(rate) / u64::from(WHISPER_RATE)) as usize];
+            input.push(&silence, out);
+        }
+        input.push(samples, out);
+        self.len += (out.len() - before) as u64;
+    }
+
+    /// Emits the resampler's delayed tail. The next push starts a new resampler.
+    pub fn flush(&mut self, out: &mut Vec<f32>) {
+        if let Some(mut input) = self.input.take() {
+            let before = out.len();
+            input.flush(out);
+            self.len += (out.len() - before) as u64;
+        }
+    }
+
+    /// Media time of a timeline index.
+    pub fn time(&self, index: u64) -> Micros {
+        Micros(self.origin.unwrap_or(Micros(0)).0 + index * 1_000_000 / u64::from(WHISPER_RATE))
+    }
+
+    /// Timeline index of a media time.
+    pub fn index(&self, t: Micros) -> u64 {
+        t.0.saturating_sub(self.origin.unwrap_or(Micros(0)).0) * u64::from(WHISPER_RATE) / 1_000_000
     }
 }
 

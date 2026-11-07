@@ -6395,6 +6395,8 @@ dependencies = [
  "objc2-metal 0.3.2",
  "parley",
  "pollster",
+ "shot-analyze",
+ "shot-audio",
  "shot-core",
  "shot-media",
  "tempfile",
