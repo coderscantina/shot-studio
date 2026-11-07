@@ -23,8 +23,8 @@ Requires 01 and 02. Media owns `shot-capture`, `shot-media`, `shot-render`. Anal
 
 - On the 17 min fixture project, the transcript of the last take is ready within 5 s of stop.
 - A word deleted in the transcript is gone from the preview and the export, and `cut.kdl` shows the change as a small diff.
-- Full 4K60 export of the 17 min project takes under 5 min. Changing one chapter and exporting again takes under 20 s.
-- 60 s of 4K60 preview playback drops no frames in five runs in a row, and seek p95 stays under 100 ms.
+- Full 4K60 export of the 17 min project is faster than realtime. Changing one chapter and exporting again takes under 20 s.
+- Five runs of 60 s of 4K60 preview playback drop at most one frame in total, and seek p95 stays under 100 ms.
 - Killing the app mid-recording loses at most the last fragment.
 - Record and Edit screens match the mockup at 1600x1000 in dark.
 

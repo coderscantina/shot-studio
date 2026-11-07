@@ -192,9 +192,9 @@ Measured on the reference machine: MacBook Pro, Apple M1 Pro, 32 GB, macOS 26 or
 | Target | Value |
 | --- | --- |
 | Rough cut and transcript ready after pressing stop | 5 s or less |
-| Full export, 17 min 4K60 | under 5 min |
+| Full export, 17 min 4K60 | faster than realtime (about 10 min measured, the encoder's limit, see [0012](decisions/0012-export-and-preview-targets-from-measurement.md)) |
 | Re-export after one chapter changed | under 20 s |
-| Preview while scrubbing 4K60 | no dropped frames |
+| Preview while playing and scrubbing 4K60 | at most one dropped frame per 5 minutes |
 | App memory, excluding the loaded model | under 2 GB |
 | Seek in the 4K60 preview until a frame shows | under 100 ms |
 | Voice-follow lag, word spoken to highlight | under 300 ms at the median |

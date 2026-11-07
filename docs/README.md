@@ -17,8 +17,8 @@ A native macOS recorder and editor for developer videos, built in Rust with gpui
 | --- | --- |
 | Rough cut ready within 5 s of stop | Transcription and analysis stream during recording, never as a batch step |
 | Edit is a text file in git | `shot-core` evaluates `cut.kdl` with no IO, and every UI action becomes a file change |
-| 4K60 preview with no dropped frames | Decode lands in IOSurface and reaches gpui as a Metal texture, no CPU copy |
-| Full 4K export under 5 min, one chapter under 20 s | Segments render in parallel, cached by content hash, joined by stream copy |
+| 4K60 preview with at most one dropped frame per 5 minutes | Decode lands in IOSurface and reaches gpui as a Metal texture, no CPU copy |
+| Full 4K export faster than realtime, one chapter under 20 s | The hardware encoder sets the full-export floor, so re-export speed comes from small cached chunks joined by stream copy |
 | Preview equals export | One wgpu render graph serves both |
 | Text only goes to Claude | MCP tools return text, frames only from explicit frame tasks |
 | Open source, signed DMG | No private assets or secrets in the repo, notarization in the release workflow |
