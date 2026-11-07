@@ -4,7 +4,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use shot_core::{Cut, Format, Micros, Project, RangeEdit, Script, Timeline, Video};
+use shot_core::{
+    Cut, Format, Id, Layout, Micros, Project, RangeEdit, Script, TakeAt, TimeRange, Timeline,
+    Transcript, Video, Word,
+};
 
 const CHAPTERS_TSV: &str = include_str!("../../../fixtures/spec/chapters.tsv");
 
@@ -119,5 +122,79 @@ fn committed_scripts_parse() {
     for path in paths {
         Script::parse(&fs::read_to_string(&path).unwrap())
             .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    }
+}
+
+/// Half-second words from `from` to `to` microseconds of take `t01`.
+fn words(from: u64, to: u64) -> Transcript {
+    let mut transcript = Transcript::new(Id::new("t01").unwrap());
+    for start in (from..to - 500_000).step_by(500_000) {
+        let range = TimeRange::new(Micros(start), Micros(start + 400_000)).unwrap();
+        let word = Word {
+            text: "word".to_owned(),
+            range,
+            confidence: 90,
+        };
+        transcript.push(word).unwrap();
+    }
+    transcript
+}
+
+/// The line span of the `n`th take block in `cut.kdl` text.
+fn take_block(kdl: &str, n: usize) -> std::ops::Range<usize> {
+    let lines: Vec<&str> = kdl.lines().collect();
+    let start = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.starts_with("    take "))
+        .nth(n)
+        .unwrap()
+        .0;
+    let end = start + lines[start..].iter().position(|l| *l == "    }").unwrap();
+    start..end + 1
+}
+
+#[test]
+fn an_edit_changes_only_the_lines_of_its_take_block() {
+    let cut = Cut::parse(&target_file("cut.kdl")).unwrap();
+    let before = cut.to_kdl();
+    let at = TakeAt {
+        chapter: 1,
+        take: 0,
+    };
+    let transcript = words(96_800_000, 136_200_000);
+    let selection = TimeRange::new(Micros(110_000_000), Micros(112_000_000)).unwrap();
+
+    let edits = [
+        cut.delete_words(at, &transcript, selection).unwrap(),
+        cut.restore(
+            at,
+            TimeRange::new(Micros(96_000_000), Micros(97_000_000)).unwrap(),
+        )
+        .unwrap(),
+        cut.set_layout(at, selection, Layout::Face).unwrap(),
+    ];
+    for edited in edits {
+        let after = edited.to_kdl();
+        assert_ne!(before, after);
+        let (before_lines, after_lines): (Vec<_>, Vec<_>) =
+            (before.lines().collect(), after.lines().collect());
+        let head = before_lines
+            .iter()
+            .zip(&after_lines)
+            .take_while(|(a, b)| a == b)
+            .count();
+        let tail = before_lines
+            .iter()
+            .rev()
+            .zip(after_lines.iter().rev())
+            .take_while(|(a, b)| a == b)
+            .count();
+        let block = take_block(&before, 1);
+        let changed = head..before_lines.len() - tail;
+        assert!(
+            block.start <= changed.start && changed.end <= block.end,
+            "changed lines {changed:?} leave the take block {block:?}"
+        );
     }
 }
