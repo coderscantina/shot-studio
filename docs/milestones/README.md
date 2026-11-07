@@ -24,6 +24,7 @@ Once 03 lands, 04, 05 and 06 run in parallel. The board and proposal tasks of 08
 
 Waiting for Mike. One line each with a recommendation and a link to its record. Remove the line once the record says Adopted.
 
+- Release tag for a second video shipped in the same week: `v2026.46` already exists, so shipping fails today. Recommend `v2026.46.2` for the second, matching the app's CalVer rule for a second release in a day.
 - Thresholds beyond the targets: 100 ms seek, 300 ms voice-follow lag, 0.5 LU loudness tolerance. Recommend adopting as written, they are measurable and match what a viewer notices. [0010](../decisions/0010-acceptance-thresholds.md)
 
 ## Prerequisites from Mike

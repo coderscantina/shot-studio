@@ -252,6 +252,10 @@ Readers ignore fields they don't know, so capture can add fields without breakin
 {"t":2350000,"kind":"key","key":"enter","mods":[]}
 ```
 
-## Proposals
+## Branches and tags in the channel repo
 
-An agent proposal is a branch `proposal/<video>/<slug>` off the video's branch, holding a commit that changes these files. Accept merges it, reject deletes it. See [0004](../decisions/0004-proposals-as-branches.md).
+`shot-board` implements these. It writes through refs and trees only, so a checked-out video branch's working tree goes stale after a board write.
+
+- **Video branch**: `video/<slug>`. A card's state is read from its tip, falling back to the default branch for ideas without a branch yet. Moving a card is one commit on this branch, subject `🚚 move <slug> to <status>`.
+- **Proposal branch**: `proposal/<slug>/<name>` off `video/<slug>`, holding commits that change the video's files. Paths are relative to the video folder. The diff is against the merge base with the video branch. Accept merges (fast-forward when possible), reject deletes the branch, and a conflicting accept changes nothing and lists the paths. See [0004](../decisions/0004-proposals-as-branches.md).
+- **Release tag**: annotated `v<YYYY>.<WW>` with the ISO week zero-padded (`v2026.05`), on the tip of a video branch whose status is `shipped`. Message `🚀 ship <slug>`.
