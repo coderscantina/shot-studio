@@ -25,6 +25,10 @@ Once 03 lands, 04, 05 and 06 run in parallel. The board and proposal tasks of 08
 Waiting for Mike. One line each with a recommendation and a link to its record. Remove the line once the record says Adopted.
 
 - Cache as plain files named by key under `.shot/cache/` instead of SQLite. Recommend adopting: lookups are by one key and segments are files anyway. Milestone 03 already builds on it. [0011](../decisions/0011-cache-as-plain-files.md)
+- Review queue as `review` and `ignore` nodes in `cut.kdl`. Recommend adopting: no hidden state, one-line diffs, re-runs never ask twice. Milestone 04 builds on it. [0013](../decisions/0013-review-queue-in-cut-kdl.md)
+- Auto edits (jump-cut and auto zooms) written as ordinary nodes with provenance, markers as `events.jsonl` events. Recommend adopting: the file shows what the export shows. [0014](../decisions/0014-auto-edits-as-written-nodes.md)
+- Caption fixes as a "heard, said" dictionary in `cut.kdl`. Recommend adopting: survives re-transcription. [0015](../decisions/0015-caption-fixes-as-a-dictionary.md)
+- Product video effects as optional `format.kdl` settings, code from git as an overlay template. Recommend adopting: existing files stay valid. [0016](../decisions/0016-product-effects-as-format-settings.md)
 
 ## Prerequisites from Mike
 
