@@ -15,6 +15,10 @@
 //! Input Monitoring permission, plus Camera and Microphone for those sources; a missing one is a
 //! [`CaptureError::Permission`].
 //!
+//! [`Session::preview`] gives the Record screen the newest screen and camera frames as
+//! IOSurface-backed `420f` buffers, converted and scaled in hardware on a thread of their own, so
+//! the recording never waits for the preview.
+//!
 //! The live mic tap hands the mic samples to the caller as they arrive, for streaming
 //! transcription:
 //!
@@ -44,7 +48,7 @@ use std::path::PathBuf;
 use shot_core::{Id, Micros};
 
 #[cfg(target_os = "macos")]
-pub use macos::{Session, list_devices};
+pub use macos::{Preview, PreviewFrame, Session, list_devices};
 
 /// Receives mic samples during a recording: the media time of the first sample, mono samples
 /// and their sample rate. It runs on the mic's capture queue, so it must return quickly; hand
