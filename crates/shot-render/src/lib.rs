@@ -9,10 +9,13 @@
 //! - [`plan`]: an evaluated output snapped to the frame grid.
 //! - [`cursor`]: the frame of a video track on screen at a time, decoding forward.
 //! - [`audio`]: the mic audio of an output, cut and faded like its video.
+//! - [`voice`]: that audio finished: voice chain, music bed, -14 LUFS.
+//! - [`captions`]: word-timed captions with the caption fixes, and the WebVTT sidecar.
 //! - [`export`]: renders changed segments in parallel and joins them into one MP4.
 
 pub mod assets;
 pub mod autozoom;
+pub mod captions;
 pub mod code_diff;
 pub mod drawing;
 pub mod events;
@@ -35,6 +38,8 @@ pub mod rules;
 pub mod surface;
 #[cfg(target_os = "macos")]
 mod vector;
+#[cfg(target_os = "macos")]
+pub mod voice;
 
 /// Why a frame could not be drawn.
 #[derive(Debug, thiserror::Error)]

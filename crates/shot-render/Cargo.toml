@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 shot-core = { path = "../shot-core" }
+shot-analyze = { path = "../shot-analyze" }
 thiserror = { workspace = true }
 vello = { workspace = true }
 parley = { workspace = true }
@@ -18,6 +19,7 @@ git2 = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 shot-media = { path = "../shot-media" }
+shot-audio = { path = "../shot-audio" }
 objc2 = { workspace = true }
 objc2-core-foundation = { workspace = true }
 objc2-core-video = { workspace = true, features = ["objc2-io-surface"] }
