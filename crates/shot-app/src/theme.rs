@@ -108,11 +108,13 @@ macro_rules! embedded {
 }
 
 embedded!(
+    "again",
     "alert",
     "board",
     "camera",
     "check",
     "chevron-down",
+    "close",
     "cursor",
     "cut",
     "display",
@@ -126,6 +128,7 @@ embedded!(
     "record",
     "restore",
     "script",
+    "spark",
     "system-audio",
     "text",
     "timeline",

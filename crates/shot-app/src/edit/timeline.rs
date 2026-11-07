@@ -125,33 +125,49 @@ fn change_list(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElem
                     timecode(raw * u64::from(FPS) / 1_000_000)
                 ))),
         )
-        .children(changes.removed.iter().map(|(by, count, length)| {
-            let name = match by {
-                RemovedBy::Manual => "Your cuts".to_owned(),
-                RemovedBy::Rule(rule) => format!("{} cuts", capitalized(rule.as_str())),
-            };
-            line(
-                "cut",
-                CUT,
-                name,
-                *count,
-                format!("−{}", timecode(length.0 * u64::from(FPS) / 1_000_000)),
-            )
+        .child(
+            div()
+                .id("change-lines")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .children(changes.removed.iter().map(|(by, count, length)| {
+                    let name = match by {
+                        RemovedBy::Manual => "Your cuts".to_owned(),
+                        RemovedBy::Rule(rule) => format!("{} cuts", capitalized(rule.as_str())),
+                    };
+                    line(
+                        "cut",
+                        CUT,
+                        name,
+                        *count,
+                        format!("−{}", timecode(length.0 * u64::from(FPS) / 1_000_000)),
+                    )
+                }))
+                .child(line(
+                    "zoom",
+                    ZOOM,
+                    "Punch-in zooms".into(),
+                    changes.zooms,
+                    String::new(),
+                ))
+                .child(line(
+                    "layout",
+                    TEXT,
+                    "Layout changes".into(),
+                    changes.layouts,
+                    String::new(),
+                )),
+        )
+        .children(this.active_card().map(|card| {
+            div()
+                .flex_none()
+                .pt(px(8.))
+                .child(super::proposals::card_element(this, card, true, cx))
         }))
-        .child(line(
-            "zoom",
-            ZOOM,
-            "Punch-in zooms".into(),
-            changes.zooms,
-            String::new(),
-        ))
-        .child(line(
-            "layout",
-            TEXT,
-            "Layout changes".into(),
-            changes.layouts,
-            String::new(),
-        ))
 }
 
 fn capitalized(text: &str) -> String {

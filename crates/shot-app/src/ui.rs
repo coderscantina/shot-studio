@@ -150,3 +150,59 @@ pub fn alert(message: impl Into<SharedString>) -> Div {
         .child(icon("alert", ICON, RECORD_TEXT))
         .child(div().flex_1().child(message.into()))
 }
+
+/// What a proposal action looks like: Accept in lime, Reject with its key, the rest quiet.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ActionLook {
+    Accent,
+    Plain,
+    Quiet,
+}
+
+/// A button of an agent proposal card, with an optional icon and key hint.
+pub fn proposal_action(
+    id: impl Into<SharedString>,
+    text: &'static str,
+    icon_name: Option<&'static str>,
+    keys: Option<&'static str>,
+    look: ActionLook,
+) -> Stateful<Div> {
+    let accent = look == ActionLook::Accent;
+    let color = match look {
+        ActionLook::Accent => Hsla::from(ON_ACCENT),
+        ActionLook::Plain => TEXT.into(),
+        ActionLook::Quiet => MUTED.into(),
+    };
+    div()
+        .id(id.into())
+        .h(px(30.))
+        .px(px(if icon_name.is_some() { 12. } else { 14. }))
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .rounded(px(9.))
+        .font_weight(FontWeight::MEDIUM)
+        .text_size(px(14.))
+        .text_color(color)
+        .cursor_pointer()
+        .when(accent, |this| this.bg(ACCENT))
+        .when(look == ActionLook::Plain, |this| {
+            this.bg(RAISED).hover(|s| s.bg(FLOAT))
+        })
+        .when(look == ActionLook::Quiet, |this| {
+            this.hover(|s| s.text_color(TEXT))
+        })
+        .when_some(icon_name, |this, name| {
+            this.child(icon(name, ICON_SM, color))
+        })
+        .child(text)
+        .when_some(keys, |this, keys| {
+            this.child(if accent {
+                kbd(keys)
+                    .bg(Hsla::from(ON_ACCENT).opacity(0.14))
+                    .text_color(ON_ACCENT)
+            } else {
+                kbd(keys)
+            })
+        })
+}

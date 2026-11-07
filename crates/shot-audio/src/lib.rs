@@ -1,7 +1,8 @@
 //! Voice chain, ducking and loudness.
 //!
-//! Export renders a cut's voice as one 48 kHz mono stream and runs it twice: pass 1 measures the
-//! [`VoiceChain`] output with a [`Meter`], pass 2 repeats the chain and applies [`Finish`].
+//! Export renders a cut's voice as one 48 kHz mono stream and runs it more than once: pass 1
+//! measures the [`VoiceChain`] output with a [`Meter`], later passes repeat the chain and apply
+//! [`Finish`], the gain to the target and a true-peak limiter.
 //! Every stage is deterministic and streaming: the output does not depend on how the input is
 //! split into pieces.
 
@@ -9,6 +10,7 @@ mod compressor;
 mod denoise;
 mod ducking;
 mod eq;
+mod limiter;
 mod loudness;
 
 use compressor::Compressor;
@@ -16,7 +18,7 @@ use denoise::Denoiser;
 use eq::Eq;
 
 pub use ducking::MusicBed;
-pub use loudness::{CEILING_DBTP, Finish, Meter, TARGET_LUFS};
+pub use loudness::{CEILING_DBTP, CODEC_HEADROOM_DB, Finish, Meter, TARGET_LUFS};
 
 pub const SAMPLE_RATE: u32 = 48_000;
 
@@ -147,9 +149,9 @@ mod tests {
         assert_eq!(whole, split);
 
         let mut whole = input.clone();
-        Finish::new(-30.0, TARGET_LUFS, CEILING_DBTP).process(&mut whole);
+        Finish::new(16.0, CEILING_DBTP).process(&mut whole);
         let mut split = input;
-        let mut finish = Finish::new(-30.0, TARGET_LUFS, CEILING_DBTP);
+        let mut finish = Finish::new(16.0, CEILING_DBTP);
         in_pieces(&mut rng, &mut split, |p| finish.process(p));
         assert_eq!(whole, split);
     }
@@ -223,7 +225,7 @@ mod tests {
     }
 
     #[test]
-    fn finish_hits_the_loudness_target() {
+    fn finish_gains_and_keeps_true_peaks_under_the_codec_headroom() {
         let mut signal = voice(secs(20.0), 0.01, 11);
         let mut meter = Meter::new();
         meter.add(&signal);
@@ -235,15 +237,17 @@ mod tests {
         let measured = meter.loudness().unwrap();
         assert!((measured + 30.0).abs() < 0.1);
 
-        Finish::new(measured, TARGET_LUFS, CEILING_DBTP).process(&mut signal);
+        let mut finish = Finish::new(TARGET_LUFS - measured, CEILING_DBTP);
+        finish.process(&mut signal);
+        finish.flush(&mut signal);
         let mut meter = Meter::new();
-        meter.add(&signal);
+        meter.add(&signal[Finish::LATENCY..]);
         let loudness = meter.loudness().unwrap();
         assert!((loudness - TARGET_LUFS).abs() <= 0.5, "loudness {loudness}");
+        let peak = meter.true_peak();
         assert!(
-            meter.true_peak() <= CEILING_DBTP,
-            "true peak {}",
-            meter.true_peak()
+            peak <= CEILING_DBTP - CODEC_HEADROOM_DB + 0.05,
+            "true peak {peak}"
         );
     }
 
@@ -257,7 +261,7 @@ mod tests {
         let music = vec![0.1; 10 * SAMPLE_RATE as usize];
         let mut chain = VoiceChain::new();
         let mut bed = MusicBed::new(music, -18.0, -28.0);
-        let mut finish = Finish::new(-24.0, TARGET_LUFS, CEILING_DBTP);
+        let mut finish = Finish::new(10.0, CEILING_DBTP);
         let mut meter = Meter::new();
         let mut piece = template.clone();
         let start = std::time::Instant::now();

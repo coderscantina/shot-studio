@@ -1,9 +1,10 @@
 //! The finished sound of an output: the cut's voice through the voice chain, the music bed
 //! ducked under it, and the whole at -14 LUFS.
 //!
-//! Loudness needs the whole cut, so the audio runs twice. Pass 1 measures the chain and bed,
-//! pass 2 repeats them with the gain to the target and the peak limiter, and hands the samples
-//! on. Every stage is deterministic, so both passes see the same signal.
+//! Loudness needs the whole cut, so the audio runs more than once. Pass 1 measures the chain and
+//! bed. Trial passes repeat them with the gain to the target and the true-peak limiter, and
+//! correct the gain for what the limiter took off. The last pass hands the samples on. Every
+//! stage is deterministic, so every pass sees the same signal.
 
 use std::path::Path;
 
@@ -18,6 +19,9 @@ const BLOCK: u64 = SAMPLE_RATE as u64 / 4;
 const MUSIC_END: usize = 10 * SAMPLE_RATE as usize;
 /// The longest music file read, 30 min.
 const MUSIC_MAX: usize = 30 * 60 * SAMPLE_RATE as usize;
+/// Trial passes at most, and how close to the target they stop.
+const TRIALS: usize = 3;
+const TOLERANCE_LU: f64 = 0.1;
 
 /// A music bed: mono 48 kHz samples and the gains from `cut.kdl`.
 pub struct Bed {
@@ -49,7 +53,7 @@ impl Bed {
     }
 }
 
-/// Loudness of the finished audio, as pass 2 measured it.
+/// Loudness of the finished audio, as the last pass measured it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Loudness {
     /// Integrated LUFS before and after the gain, `None` for a silent cut.
@@ -58,7 +62,7 @@ pub struct Loudness {
     pub true_peak: f64,
 }
 
-/// Runs both passes over `audio` and hands the finished samples to `sink` in output order,
+/// Runs the passes over `audio` and hands the finished samples to `sink` in output order,
 /// exactly `audio.len()` of them.
 pub fn finish<E: From<TimelineAudioError>>(
     audio: &mut TimelineAudio,
@@ -71,20 +75,52 @@ pub fn finish<E: From<TimelineAudioError>>(
         Ok::<_, E>(())
     })?;
     let before = meter.loudness();
-    let mut finish = before.map(|measured| Finish::new(measured, TARGET_LUFS, CEILING_DBTP));
-    let mut meter = Meter::new();
-    pass(audio, bed, |samples| {
-        if let Some(finish) = &mut finish {
-            finish.process(samples);
+    let mut gain_db = before.map_or(0.0, |measured| TARGET_LUFS - measured);
+    // The limiter takes some loudness off the peaks it holds, so trial passes raise the gain
+    // until the finished audio meets the target.
+    if before.is_some() {
+        for _ in 0..TRIALS {
+            let meter = finished(audio, bed, gain_db, |_| Ok::<_, E>(()))?;
+            match meter.loudness() {
+                Some(after) if (TARGET_LUFS - after).abs() > TOLERANCE_LU => {
+                    gain_db += TARGET_LUFS - after;
+                }
+                _ => break,
+            }
         }
-        meter.add(samples);
-        sink(samples)
-    })?;
+    }
+    let meter = finished(audio, bed, gain_db, &mut sink)?;
     Ok(Loudness {
         before,
         after: meter.loudness(),
         true_peak: meter.true_peak(),
     })
+}
+
+/// A pass through [`Finish`] at `gain_db`, measured, with the limiter's latency taken out.
+fn finished<E: From<TimelineAudioError>>(
+    audio: &mut TimelineAudio,
+    bed: Option<&Bed>,
+    gain_db: f64,
+    mut sink: impl FnMut(&[f32]) -> Result<(), E>,
+) -> Result<Meter, E> {
+    let mut finish = Finish::new(gain_db, CEILING_DBTP);
+    let mut meter = Meter::new();
+    let mut skip = Finish::LATENCY;
+    let mut out = |samples: &[f32]| {
+        let drop = skip.min(samples.len());
+        skip -= drop;
+        meter.add(&samples[drop..]);
+        sink(&samples[drop..])
+    };
+    pass(audio, bed, |samples| {
+        finish.process(samples);
+        out(samples)
+    })?;
+    let mut tail = Vec::with_capacity(Finish::LATENCY);
+    finish.flush(&mut tail);
+    out(&tail)?;
+    Ok(meter)
 }
 
 /// One pass of the chain and bed over the whole output, aligned for the chain's latency.

@@ -123,7 +123,10 @@ impl Studio {
             }
             Screen::Record => window.focus(&self.record.focus_handle(cx), cx),
             Screen::Cut => window.focus(&self.cut.focus_handle(cx), cx),
-            Screen::Edit => window.focus(&self.edit.focus_handle(cx), cx),
+            Screen::Edit => {
+                self.edit.update(cx, |edit, cx| edit.reload_proposals(cx));
+                window.focus(&self.edit.focus_handle(cx), cx);
+            }
         }
         cx.notify();
     }
@@ -263,7 +266,7 @@ impl Render for Studio {
 
 /// The channel repo and slug of a video folder at `<repo>/videos/<slug>`, if the repo opens as
 /// a board.
-fn channel(dir: &Path) -> Option<(std::path::PathBuf, String)> {
+pub(crate) fn channel(dir: &Path) -> Option<(std::path::PathBuf, String)> {
     let dir = std::path::absolute(dir).ok()?;
     let slug = dir.file_name()?.to_str()?.to_owned();
     let videos = dir.parent()?;

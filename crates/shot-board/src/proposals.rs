@@ -121,6 +121,34 @@ impl Board {
         file_diffs(&diff, &video_dir(slug))
     }
 
+    /// The text of `file` (relative to the video folder) where the proposal branched off the
+    /// video and at its head, each `None` where the file does not exist. Read together they
+    /// say what the proposal changes, independent of what the video branch did since.
+    pub fn proposal_file(
+        &self,
+        slug: &str,
+        name: &str,
+        file: &str,
+    ) -> Result<(Option<String>, Option<String>)> {
+        if !is_inside(file) {
+            return Err(Error::InvalidPath(file.to_owned()));
+        }
+        let head = self.proposal_head(slug, name)?;
+        let tip = self.tip(slug)?;
+        let base = self
+            .repo
+            .find_commit(self.repo.merge_base(tip.id(), head.id())?)?;
+        let path = video_path(slug, file);
+        let read = |commit: &Commit<'_>| -> Result<Option<String>> {
+            let Ok(entry) = commit.tree()?.get_path(Path::new(&path)) else {
+                return Ok(None);
+            };
+            let blob = self.repo.find_blob(entry.id())?;
+            Ok(Some(String::from_utf8_lossy(blob.content()).into_owned()))
+        };
+        Ok((read(&base)?, read(&head)?))
+    }
+
     /// Merges the proposal into the video branch, fast-forward when the branch has not moved,
     /// else with a merge commit, then deletes the proposal branch. On a conflict nothing changes
     /// and [`Error::Conflict`] lists the paths.
