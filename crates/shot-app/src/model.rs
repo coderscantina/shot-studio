@@ -6,8 +6,8 @@ use std::collections::HashMap;
 use std::ops::{Range, RangeInclusive};
 
 use shot_core::{
-    Cut, EditError, Id, Layout, Micros, Overlay, Project, RangeEdit, RemovedBy, TakeAt, TimeRange,
-    Timeline, Transcript, WordState, Zoom,
+    Cut, EditError, Id, Layout, MediaId, Micros, Overlay, Project, RangeEdit, RemovedBy, TakeAt,
+    TimeRange, Timeline, Transcript, WordState, Zoom,
 };
 use shot_render::plan::{ExportPlan, frame_time};
 
@@ -115,7 +115,9 @@ impl EditMap {
             ..project.clone()
         };
         let timeline = Timeline::evaluate(&project);
-        Self::new(&project.cut, &ExportPlan::new(timeline.main(), FPS))
+        // Only the time mapping is used here, so cache identity doesn't matter.
+        let plan = ExportPlan::new(timeline.main(), FPS, |_| MediaId::default());
+        Self::new(&project.cut, &plan)
     }
 
     /// Ties each planned segment back to its take block. Segments come in block order, so one
