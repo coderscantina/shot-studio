@@ -1,0 +1,18 @@
+/target/
+.DS_Store
+
+# Agent worktrees, demo data and pinned source checkouts
+.claude/worktrees/
+.demo/
+.sources/
+
+# Generated fixtures and project caches
+/fixtures/generated/
+.shot/
+
+# Evidence screenshots stay local, reports are tracked
+docs/evidence/**/*.png
+docs/evidence/**/*.jpg
+docs/evidence/**/*.gif
+docs/evidence/**/*.mov
+docs/evidence/**/*.mp4
