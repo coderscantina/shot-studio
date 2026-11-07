@@ -27,6 +27,7 @@ mod preview;
 mod prompter;
 mod record;
 mod script;
+mod ship;
 mod sound;
 mod studio;
 mod theme;

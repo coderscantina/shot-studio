@@ -18,6 +18,8 @@ This contract owns the files a video consists of and what each one means. `shot-
         <take>/         one folder per take, named by its take id
           events.jsonl  cursor and key events, see below
       .shot/cache/      SQLite and rendered chunks (ignored, safe to delete)
+      .shot/export/     rendered cuts, caption sidecar, thumbnail (ignored), see ship artifacts
+      .shot/ship/       the upload record (ignored), see ship artifacts
   formats/              the four shipped presets, editable per channel
 ```
 
@@ -399,3 +401,43 @@ Markers are what the record hotkeys write. They are facts about the recording, s
 - **Video branch**: `video/<slug>`. A card's state is read from its tip, falling back to the default branch for ideas without a branch yet. Moving a card is one commit on this branch, subject `🚚 move <slug> to <status>`.
 - **Proposal branch**: `proposal/<slug>/<name>` off `video/<slug>`, holding commits that change the video's files. Paths are relative to the video folder. The diff is against the merge base with the video branch. Accept merges (fast-forward when possible), reject deletes the branch, and a conflicting accept changes nothing and lists the paths. See [0004](../decisions/0004-proposals-as-branches.md).
 - **Release tag**: annotated CalVer `vYY.M.D` of the release date (`v26.11.7`), on the tip of a video branch whose status is `shipped`. A later release on the same day gets `.2`, `.3` and so on. Tags sort by their numeric parts. Message `🚀 ship <slug>`.
+
+## Ship artifacts
+
+`shot export`, `shot thumbnails` and `shot ship` write these into the video folder's `.shot/`, which git ignores. In git, a ship is the card in `shipped` and its release tag ([0022](../decisions/0022-ship-artifacts-outside-git.md)).
+
+| Path | Written by | Holds |
+| --- | --- | --- |
+| `.shot/export/<cut>.mp4` | `shot export`, `shot ship`, the Edit and Ship screens | the rendered cut, `main` or a derived cut's name |
+| `.shot/export/main.vtt` | export of the main cut | the caption sidecar |
+| `.shot/export/main.png` or `main.jpg` | `shot thumbnails --pick`, the Ship screen | the main cut's thumbnail. Derived cuts have none |
+| `.shot/ship/record.json` | `shot ship` | the upload record, below |
+| `.shot/cache/thumbnails/`, `.shot/cache/ship/` | `shot thumbnails`, the Ship screen | thumbnail candidates and preview stills, safe to delete |
+
+The title and description are not stored. `shot ship` drafts them from the project files on every run, as `shot describe` prints them: the title from `video.kdl`, then the hook beat of `script.md`, the chapters at their first spoken word and the links. A Short gets the hook and a link to the main video.
+
+The upload record is JSON. Keys of `uploads` are cut names: `main` and each Short.
+
+```json
+{
+  "uploads": {
+    "main": {
+      "video_id": "Ks-_Mh1QhMc",
+      "size": 812345678,
+      "privacy": "private",
+      "thumbnail": true
+    },
+    "intro-hook": {
+      "session": "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&upload_id=AB",
+      "size": 30123456,
+      "privacy": "private",
+      "thumbnail": false
+    }
+  },
+  "release": "v26.11.7"
+}
+```
+
+- `video_id` is set when an upload finished. A cut with one is never uploaded again.
+- `session` is the resumable session of an unfinished upload of a file of `size` bytes. A run whose export has the same size continues it, otherwise it starts over.
+- `release` is the tag, set once. Deleting the record makes the next run upload every cut again.

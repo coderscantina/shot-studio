@@ -234,7 +234,7 @@ pub fn score(quality: f32, mouth_openness: f32) -> f32 {
     0.6 * quality.clamp(0.0, 1.0) + 0.4 * (mouth_openness / 0.5).clamp(0.0, 1.0)
 }
 
-fn write_png(planes: &Planes<'_>, path: &Path) -> std::io::Result<()> {
+pub(crate) fn write_png(planes: &Planes<'_>, path: &Path) -> std::io::Result<()> {
     let file = std::io::BufWriter::new(fs::File::create(path)?);
     let mut encoder = png::Encoder::new(file, planes.width as u32, planes.height as u32);
     encoder.set_color(png::ColorType::Rgb);

@@ -82,6 +82,22 @@ pub fn sample_frames(path: &Path, length: Micros) -> Result<Vec<FrameSample>, Me
     Ok(samples)
 }
 
+/// Writes the frame of `video` at `at` (or its last frame, if `at` is past the end) as a PNG.
+pub fn still(video: &Path, at: Micros, out: &Path) -> Result<(), MediaError> {
+    let failed = |e: String| MediaError::Video(format!("{}: {e}", video.display()));
+    let mut decoder = Decoder::open_native(video).map_err(|e| failed(e.to_string()))?;
+    let at = at.0.min(decoder.duration().as_micros() as u64);
+    let frame = decoder
+        .seek(Duration::from_micros(at), || false)
+        .map_err(|e| failed(e.to_string()))?
+        .ok_or_else(|| failed("no frame to show".to_owned()))?;
+    if let Some(dir) = out.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| failed(e.to_string()))?;
+    }
+    crate::thumbnails::write_png(&Planes::lock(&frame.buffer), out)
+        .map_err(|e| MediaError::Video(format!("{}: {e}", out.display())))
+}
+
 /// A read-only lock on a decoded 4:2:0 bi-planar frame.
 pub struct Planes<'a> {
     buffer: &'a CVPixelBuffer,

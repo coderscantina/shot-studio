@@ -98,6 +98,9 @@ enum Command {
     /// Draft the title and description with chapters at their first spoken word.
     #[cfg(target_os = "macos")]
     Describe(ship::DescribeArgs),
+    /// Render, check and upload the main cut and Shorts to YouTube, then tag the release.
+    #[cfg(target_os = "macos")]
+    Ship(ship::ShipArgs),
     /// Download or list the analysis models.
     Models {
         #[command(subcommand)]
@@ -168,6 +171,7 @@ fn run(cli: Cli) -> Result<(), String> {
         Command::Check(args) => return ship::check(args),
         Command::Thumbnails(args) => return ship::thumbnails(args),
         Command::Describe(args) => return ship::describe(args),
+        Command::Ship(args) => return ship::run_ship(args),
         _ => {}
     }
     #[cfg(target_os = "macos")]
@@ -266,7 +270,8 @@ fn run(cli: Cli) -> Result<(), String> {
         | Command::Derived(_)
         | Command::Check(_)
         | Command::Thumbnails(_)
-        | Command::Describe(_) => {
+        | Command::Describe(_)
+        | Command::Ship(_) => {
             unreachable!("handled before opening the board")
         }
     }
