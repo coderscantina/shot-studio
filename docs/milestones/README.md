@@ -8,12 +8,12 @@ Mark a milestone complete only after its acceptance criteria pass and an evidenc
 | --- | --- | --- | --- | --- |
 | 01 | [Contracts, fixtures and workspace](01-contracts-and-fixtures.md) | None | Core | Done locally, CI run waits for the GitHub repo. [Evidence](../evidence/m01-contracts-and-fixtures.md) |
 | 02 | [Preview spike](02-preview-spike.md) | 01 | Media, App | Complete, GO by Mike on 2026-11-07. [Evidence](../evidence/m02-preview-spike.md) |
-| 03 | [A usable opinion video](03-opinion-video.md) | 01, 02 | All roles | Complete on `milestone/03`. [Evidence](../evidence/m03-opinion-video.md) |
-| 04 | [Auto cut and finish](04-auto-cut-and-finish.md) | 03 | Analysis, Media | Complete on `milestone/04-06`. Burned-in caption drawing moved to 07. [Evidence](../evidence/m04-auto-cut-and-finish.md) |
-| 05 | [Record comfort](05-record-comfort.md) | 03 | Analysis, App | Built on `milestone/04-06`, the beam splitter check waits for Mike. [Evidence](../evidence/m05-record-comfort.md) |
-| 06 | [Product videos](06-product-videos.md) | 03 | Media, App | Complete on `milestone/04-06`. [Evidence](../evidence/m06-product-videos.md) |
-| 07 | [Overlays and derived cuts](07-overlays-and-derived-cuts.md) | 04, 05 | Media, Core | Complete on `milestone/07-08`, face reframing proven on a stand-in face only. [Evidence](../evidence/m07-overlays-and-derived-cuts.md) |
-| 08 | [Planning, agents and ship](08-planning-agents-and-ship.md) | 03, 04, 07 | Core, Agents | Items 1 to 7 on `milestone/07-08`, `shot ship` (item 8) in progress. [Evidence](../evidence/m08-planning-agents-and-ship.md) |
+| 03 | [A usable opinion video](03-opinion-video.md) | 01, 02 | All roles | Complete. [Evidence](../evidence/m03-opinion-video.md) |
+| 04 | [Auto cut and finish](04-auto-cut-and-finish.md) | 03 | Analysis, Media | Complete. Burned-in caption drawing moved to 07. [Evidence](../evidence/m04-auto-cut-and-finish.md) |
+| 05 | [Record comfort](05-record-comfort.md) | 03 | Analysis, App | Built, the beam splitter check waits for Mike. [Evidence](../evidence/m05-record-comfort.md) |
+| 06 | [Product videos](06-product-videos.md) | 03 | Media, App | Complete. [Evidence](../evidence/m06-product-videos.md) |
+| 07 | [Overlays and derived cuts](07-overlays-and-derived-cuts.md) | 04, 05 | Media, Core | Complete, face reframing proven on a stand-in face only. [Evidence](../evidence/m07-overlays-and-derived-cuts.md) |
+| 08 | [Planning, agents and ship](08-planning-agents-and-ship.md) | 03, 04, 07 | Core, Agents | Complete, the real YouTube upload waits for Mike's OAuth client. [Evidence](../evidence/m08-planning-agents-and-ship.md) |
 | 10 | [Semantic core](10-semantic-core.md) | 07, 08 | Core, Analysis, Media, App | Not started |
 | 11 | [Motion system and effects as styles](11-effects-as-styles.md) | 10 (items 1 to 4 can start earlier) | Media, App | Not started |
 | 12 | [Styled monitor and watch builds](12-styled-monitor-and-watch-builds.md) | 10, 11 | App, Media, Agents | Not started |
@@ -36,6 +36,7 @@ Waiting for Mike. One line each with a recommendation and a link to its record. 
 - Product video effects as optional `format.kdl` settings, code from git as an overlay template. Recommend adopting: existing files stay valid. [0016](../decisions/0016-product-effects-as-format-settings.md)
 - Derived cuts as windows of main's frames that reuse its cached chunks. Recommend adopting: a Short costs seconds once main is exported. [0017](../decisions/0017-derived-cuts-from-main-chunks.md)
 - Overlay templates as typed specs checked at export, unknown templates refused. Recommend adopting: agents fill parameters instead of writing code. [0018](../decisions/0018-overlay-templates-as-typed-specs.md)
+- Ship artifacts (thumbnail, upload record with the YouTube video ids) stay in git-ignored `.shot/`; git gets the card move and the tag. Recommend adopting now and adding a committed `ship.kdl` once the board should link to YouTube. [0022](../decisions/0022-ship-artifacts-outside-git.md)
 - Semantic video: committed elements per take, cascading style rules, a generated `cut.lock`, pacing as style, review decisions as overrides, shipped videos pinned at their tag. Settled in the effects grill on 2026-11-07; adopt once milestone 10 settles the grammar. [0019](../decisions/0019-semantic-video-elements-and-style.md)
 - A channel `brand/brand.kdl` with partial overrides per video, bundled and repo fonts, bumpers git-ignored, styles imported from git. Settled in the effects grill. [0020](../decisions/0020-channel-brand-and-shared-styles.md)
 - Chapter-edge transitions, automatic and placed SFX, music cues, intro, outro, chapter bands and the end card. Settled in the effects grill. [0021](../decisions/0021-sound-transitions-and-bookends.md)
@@ -54,7 +55,8 @@ Waiting for Mike. One line each with a recommendation and a link to its record. 
 Found by agents and waiting for a task. Remove a line when it's fixed.
 
 - Record does not warn when the camera delivers black frames.
-- Exported audio peaks at about -0.4 dBTP against the -1 dBTP ceiling: the AAC encode overshoots the limiter.
+- The Edit screen writes `cut.kdl` on the checked-out branch while proposals merge into `video/<slug>`, so the two can drift.
+- The music bed detects the end of its file by 10 s of digital silence; `PcmReader::ended_before` now gives the real end.
 - The thumbnail is written to `.shot/export/main.png`; the contract does not name where thumbnails live.
 - Agents sharing the target dir overwrite each other's `release/shot`; copy the binary before measuring or running it from a worktree.
 - Linear ideas are not wired: no Linear MCP server or CLI was available.
