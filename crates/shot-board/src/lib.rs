@@ -203,6 +203,19 @@ impl Board {
         Ok(Some(String::from_utf8_lossy(blob.content()).into_owned()))
     }
 
+    /// The bytes of `path` (relative to the repo root, for example `brand/brand.kdl`) in the
+    /// tree the video is read from, `None` if there is no such file.
+    pub fn read_repo_file(&self, slug: &str, path: &str) -> Result<Option<Vec<u8>>> {
+        if !proposals::is_inside(path) {
+            return Err(Error::InvalidPath(path.to_owned()));
+        }
+        let tip = self.tip(slug)?;
+        let Ok(entry) = tip.tree()?.get_path(Path::new(path)) else {
+            return Ok(None);
+        };
+        Ok(Some(self.repo.find_blob(entry.id())?.content().to_vec()))
+    }
+
     /// The commit a video is read from: its branch tip, else the default branch if it has the
     /// video folder.
     fn tip(&self, slug: &str) -> Result<Commit<'_>> {

@@ -13,6 +13,7 @@
 
 pub mod agents;
 pub mod bridge;
+pub mod style;
 mod tee;
 pub mod text;
 pub mod transcript;
@@ -28,13 +29,17 @@ use rmcp::model::{CallToolResult, ContentBlock, Implementation, ServerCapabiliti
 use rmcp::{ServerHandler, ServiceExt, schemars, tool, tool_handler, tool_router};
 use serde::Deserialize;
 use shot_board::Board;
-use shot_core::{Cut, Decision, Format, Id, Project, Script, Transcript, Video};
+use shot_core::{
+    Cut, Decision, ElementKind, Format, Id, Micros, Project, Script, Selector, Transcript, Video,
+};
 
 use crate::transcript::WordSpan;
 
 /// The files of a video folder that `read_video` returns.
 const VIDEO_FILES: [&str; 4] = ["video.kdl", "script.md", "cut.kdl", "format.kdl"];
 const DEFAULT_ACTIVITY_LIMIT: usize = 20;
+/// The most elements or instances one style tool prints.
+const STYLE_LIMIT: usize = 300;
 
 /// How a server session runs.
 #[derive(Debug, Clone, Default)]
@@ -169,6 +174,86 @@ struct ProposeScriptArgs {
     subject: String,
     /// The whole new script.md: `# title`, `## chapter`, `- beat` with `[label](source)` links.
     script: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct ReadElementsArgs {
+    /// The video slug.
+    slug: String,
+    /// The take id, for example `t01`.
+    take: String,
+    /// Only these element kinds, for example `["click", "filler"]`. Default: all but words.
+    #[serde(default)]
+    kinds: Vec<String>,
+    /// Window start in the take's media time, microseconds.
+    from_us: Option<u64>,
+    /// Window end in microseconds.
+    to_us: Option<u64>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct ReadLockArgs {
+    /// The video slug.
+    slug: String,
+    /// Only this take.
+    take: Option<String>,
+    /// Window start in the take's media time, microseconds.
+    from_us: Option<u64>,
+    /// Window end in microseconds.
+    to_us: Option<u64>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct ExplainArgs {
+    /// The video slug.
+    slug: String,
+    /// The take id.
+    take: String,
+    /// The time to explain, in the take's media time, microseconds.
+    at_us: u64,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct RuleScopeArgs {
+    /// The rule's selector as the lock writes it, for example `silence min=500_000`.
+    selector: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct ProposeRuleArgs {
+    /// The video the proposal branches off. A `format` or `brand` rule applies to every
+    /// unshipped video of the channel once accepted.
+    slug: String,
+    /// Proposal name: lowercase letters, digits and dashes.
+    name: String,
+    /// The commit subject: what the proposal does, in one line.
+    subject: String,
+    /// Where the rule lives: `video` (this video's format.kdl), `format` (the channel's format
+    /// of this video) or `brand` (brand/brand.kdl).
+    layer: String,
+    /// One rule as KDL, for example `on silence min=500_000 { cut breath=250_000 }`. A rule
+    /// with the same selector in that layer is replaced; `on <selector> off` switches the
+    /// selector off for the layers below.
+    rule: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct ProposeOverrideArgs {
+    /// The video slug.
+    slug: String,
+    /// Proposal name: lowercase letters, digits and dashes.
+    name: String,
+    /// The commit subject.
+    subject: String,
+    /// The take id.
+    take: String,
+    /// The element kind, for example `click`.
+    kind: String,
+    /// The element's start `t` in microseconds, as read_elements shows it.
+    at_us: u64,
+    /// The override's children as KDL, one per line: `keep`, `cut`, an effect such as
+    /// `zoom 140 hold=1_000_000`, or `zoom off`.
+    effects: String,
 }
 
 #[tool_router]
@@ -442,6 +527,118 @@ impl ShotServer {
     }
 
     #[tool(
+        description = "The elements (facts) of one take as JSON lines, in take media time: clicks, silences, fillers, urls and the rest, with their t, to, confidence and source. Words are left out unless asked for. Use their t as the identity of an override."
+    )]
+    fn read_elements(
+        &self,
+        Parameters(args): Parameters<ReadElementsArgs>,
+    ) -> Result<String, String> {
+        let take = take_id(&args.take)?;
+        let mut kinds = args
+            .kinds
+            .iter()
+            .map(|k| ElementKind::parse(k).ok_or_else(|| format!("`{k}` is not an element kind")))
+            .collect::<Result<Vec<_>, _>>()?;
+        if kinds.is_empty() {
+            kinds = ElementKind::ALL
+                .iter()
+                .copied()
+                .filter(|k| *k != ElementKind::Word)
+                .collect();
+        }
+        let board = self.board()?;
+        let built = style::build_video(&style::Git(&board), &args.slug)?;
+        let elements = built
+            .elements
+            .iter()
+            .find(|e| *e.take() == take)
+            .ok_or_else(|| {
+                format!(
+                    "take {take} has no elements in the main cut of {}",
+                    args.slug
+                )
+            })?;
+        let window = style::window(args.from_us, args.to_us)?;
+        Ok(style::elements_text(elements, &kinds, window, STYLE_LIMIT))
+    }
+
+    #[tool(
+        description = "The lock of a video, built from its files: every instance (cut, review, zoom, overlay, sfx, transition, layout, captions) with its resolved values and its provenance, `on=` the element, `layer=` and the `rule=` or `override=` that made it. Narrow it by take and time window."
+    )]
+    fn read_lock(&self, Parameters(args): Parameters<ReadLockArgs>) -> Result<String, String> {
+        let take = args.take.as_deref().map(take_id).transpose()?;
+        let board = self.board()?;
+        let built = style::build_video(&style::Git(&board), &args.slug)?;
+        let window = style::window(args.from_us, args.to_us)?;
+        Ok(style::lock_text(
+            &built.lock,
+            take.as_ref(),
+            window,
+            STYLE_LIMIT,
+        ))
+    }
+
+    #[tool(
+        description = "Why a moment looks the way it does: the instances at a time in a take with the layer and rule or override behind each, and the overrides in cut.kdl there (an `off` leaves no instance)."
+    )]
+    fn explain_instance(
+        &self,
+        Parameters(args): Parameters<ExplainArgs>,
+    ) -> Result<String, String> {
+        let take = take_id(&args.take)?;
+        let board = self.board()?;
+        let built = style::build_video(&style::Git(&board), &args.slug)?;
+        Ok(style::explain(&built, Some(&take), Micros(args.at_us)))
+    }
+
+    #[tool(
+        description = "How far a rule reaches: the instances and elements the rule with this selector produces now, in how many of the channel's unshipped videos. Shipped videos keep their lock."
+    )]
+    fn rule_scope(&self, Parameters(args): Parameters<RuleScopeArgs>) -> Result<String, String> {
+        let selector = Selector::parse(&args.selector).map_err(|e| e.to_string())?;
+        let board = self.board()?;
+        let reach = style::reach(&style::Git(&board), &selector)?;
+        Ok(format!("on {selector}\n{reach}"))
+    }
+
+    #[tool(
+        description = "Propose a change of one style rule as a branch, at the layer you choose: this video's format.kdl, the channel's format or the brand. The reply and the proposal's description state the scope: how many instances change in how many videos. Pick the narrowest layer that fits the person's intent."
+    )]
+    fn propose_rule(
+        &self,
+        Parameters(args): Parameters<ProposeRuleArgs>,
+    ) -> Result<String, String> {
+        let layer = style::RuleLayer::parse(&args.layer)?;
+        let board = self.board()?;
+        let repo = style::Git(&board);
+        let files = style::rule_change(&repo, &args.slug, layer, &args.rule)?;
+        self.propose_style(&board, &args.slug, &args.name, &args.subject, files)
+    }
+
+    #[tool(
+        description = "Propose an override for one element as a branch: what this single element gets instead of what the rules gave it, written to cut.kdl. The element must exist (read_elements). The reply states the instances it changes."
+    )]
+    fn propose_override(
+        &self,
+        Parameters(args): Parameters<ProposeOverrideArgs>,
+    ) -> Result<String, String> {
+        let take = take_id(&args.take)?;
+        let kind = ElementKind::parse(&args.kind)
+            .ok_or_else(|| format!("`{}` is not an element kind", args.kind))?;
+        let board = self.board()?;
+        let repo = style::Git(&board);
+        let files = style::override_change(
+            &repo,
+            &args.slug,
+            &take,
+            kind,
+            Micros(args.at_us),
+            &args.effects,
+        )?;
+        self.propose_style(&board, &args.slug, &args.name, &args.subject, files)
+    }
+
+    #[tool(
         description = "Frame task: the thumbnail candidates of a video as still images, best first. Runs only when the person started a thumbnail pick in the app; otherwise it refuses."
     )]
     fn thumbnail_frames(
@@ -567,6 +764,28 @@ impl ShotServer {
         ))
     }
 
+    /// Proposes repo-relative `files` and states in the commit what they reach.
+    fn propose_style(
+        &self,
+        board: &Board,
+        slug: &str,
+        name: &str,
+        subject: &str,
+        files: BTreeMap<String, String>,
+    ) -> Result<String, String> {
+        let impact = style::impact(&style::Git(board), slug, &files)?;
+        let message = format!("{subject}\n\n{impact}");
+        let proposal = board
+            .create_repo_proposal(slug, name, &message, &files)
+            .map_err(|e| e.to_string())?;
+        Ok(format!(
+            "created proposal {}/{} at {}\n{impact}",
+            proposal.slug,
+            proposal.name,
+            short(&proposal.head)
+        ))
+    }
+
     /// Reads the project files from the branch tip of the video, else from the default branch.
     fn read_video_files(&self, slug: &str) -> Result<String, String> {
         let board = self.board()?;
@@ -601,8 +820,10 @@ impl ServerHandler for ShotServer {
             .with_instructions(
                 "Shot Studio channel board. Read videos, transcripts, the review queue and \
                  caption fixes, move cards, and propose changes to a video's cut and script. \
-                 Proposals are branches the human reviews and accepts. A cut only removes or \
-                 restores recorded words.",
+                 Read a take's elements and the lock with its provenance, and propose a rule \
+                 at the narrowest layer or an override for one element; the reply says how \
+                 many instances and videos it reaches. Proposals are branches the human \
+                 reviews and accepts. A cut only removes or restores recorded words.",
             )
     }
 }
@@ -617,6 +838,10 @@ fn validate(file: &str, text: &str) -> Result<(), String> {
         _ => Ok(()),
     };
     parsed.map_err(|e| format!("{file} does not parse: {e}"))
+}
+
+fn take_id(text: &str) -> Result<Id, String> {
+    Id::new(text).ok_or_else(|| format!("`{text}` is not a take id"))
 }
 
 /// Slugs end up in paths, so they are checked before touching the working tree.

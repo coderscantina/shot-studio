@@ -8,6 +8,7 @@ mod autocut;
 mod caption_fix;
 mod models;
 mod record;
+mod style;
 mod transcribe;
 
 use std::path::PathBuf;
@@ -85,6 +86,8 @@ enum Command {
     /// Add, list or remove Shorts and X clips; export one with `export --cut <name>`.
     #[cfg(target_os = "macos")]
     Derived(derived::DerivedArgs),
+    /// Build a video's cut.lock, explain an instance, or measure a rule's scope.
+    Style(style::StyleArgs),
     /// Run the MCP server on stdio.
     Mcp(agent::McpArgs),
     /// Ask Claude through the local Claude Code CLI, with the MCP server attached.
@@ -158,6 +161,7 @@ fn run(cli: Cli) -> Result<(), String> {
         Command::Transcribe(args) => return transcribe::run(args),
         Command::Autocut(args) => return autocut::run(args),
         Command::CaptionFix(args) => return caption_fix::run(args),
+        Command::Style(args) => return style::run(cli.repo, args),
         _ => {}
     }
     if let Command::Mcp(args) = cli.command {
@@ -259,6 +263,7 @@ fn run(cli: Cli) -> Result<(), String> {
         | Command::Models { .. }
         | Command::Transcribe(_)
         | Command::Autocut(_)
+        | Command::Style(_)
         | Command::CaptionFix(_) => {
             unreachable!("handled before opening the board")
         }
