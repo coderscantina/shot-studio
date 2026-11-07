@@ -34,3 +34,9 @@ Waiting for Mike. One line each with a recommendation and a link to its record. 
 ## Known gaps
 
 Found by agents and waiting for a task. Remove a line when it's fixed.
+
+- Capture-time markers (A, N, M, Z, B and layout hotkeys) have no place in the contract yet. Milestone 05 adds them, most likely as a `marker` kind in `events.jsonl`.
+- Unsure auto-cut results waiting in the review queue are not stored in any file, which breaks the no-hidden-state rule. Milestone 04 adds them to the contract.
+- Caption text fixes (misheard names) are not stored in any file, and burned-in segment hashes will need them. Milestone 04.
+- Segment hashes use the take id as the source media id, not a hash of the media. A re-recorded take with the same id would hit a stale cache. Milestone 03 decides before the render cache lands.
+- `script.md` rejects text between a chapter heading and its first beat. Revisit when milestone 08 builds the script editor.
