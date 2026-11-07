@@ -1,6 +1,6 @@
-//! `shot`: the channel board, recording and the MCP server from the terminal.
+//! `shot`: the channel board, recording, export and the MCP server from the terminal.
 //!
-//! Every subcommand is one call into `shot-board`. The words come from `shot_mcp::text`, so the
+//! Every board subcommand is one call into `shot-board`. The words come from `shot_mcp::text`, so the
 //! CLI and the MCP tools print the same thing.
 
 mod models;
@@ -15,6 +15,9 @@ use serde_json::{Value, json};
 use shot_board::{Activity, Board, Card, Proposal};
 use shot_core::Status;
 use shot_mcp::text;
+
+#[cfg(target_os = "macos")]
+mod export;
 
 #[derive(Parser)]
 #[command(name = "shot", version, about = "Shot Studio from the terminal")]
@@ -56,6 +59,9 @@ enum Command {
     },
     /// Record a take into a video folder.
     Record(record::RecordArgs),
+    /// Render a video's cut to an MP4, reusing cached segments.
+    #[cfg(target_os = "macos")]
+    Export(export::ExportArgs),
     /// Run the MCP server on stdio.
     Mcp,
     /// Download or list the analysis models.
@@ -119,6 +125,10 @@ fn run(cli: Cli) -> Result<(), String> {
             .block_on(shot_mcp::serve_stdio(cli.repo))
             .map_err(|e| e.to_string());
     }
+    #[cfg(target_os = "macos")]
+    if let Command::Export(args) = cli.command {
+        return export::run(args);
+    }
 
     if let Command::Record(args) = cli.command {
         return record::run(args);
@@ -181,6 +191,8 @@ fn run(cli: Cli) -> Result<(), String> {
         Command::Mcp | Command::Record(_) | Command::Models { .. } | Command::Transcribe(_) => {
             unreachable!("handled before opening the board")
         }
+        #[cfg(target_os = "macos")]
+        Command::Export(_) => unreachable!("handled before opening the board"),
     }
     Ok(())
 }

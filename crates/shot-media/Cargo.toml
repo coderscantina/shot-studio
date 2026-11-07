@@ -10,6 +10,9 @@ repository.workspace = true
 [dependencies]
 thiserror = { workspace = true }
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { workspace = true }
 objc2-foundation = { workspace = true }
@@ -21,3 +24,6 @@ objc2-av-foundation = { workspace = true, features = ["objc2-core-media"] }
 # Its default features make IOSurfaceRef a CF type, which CVPixelBufferGetIOSurface needs.
 objc2-io-surface = { workspace = true }
 block2 = { workspace = true }
+objc2-audio-toolbox = { workspace = true }
+objc2-core-audio-types = { workspace = true }
+objc2-avf-audio = { workspace = true }

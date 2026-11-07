@@ -4213,6 +4213,7 @@ dependencies = [
  "bitflags 2.13.2",
  "block2 0.6.2",
  "objc2 0.6.5",
+ "objc2-core-audio-types",
  "objc2-foundation 0.3.2",
 ]
 
@@ -6263,6 +6264,7 @@ dependencies = [
  "shot-capture",
  "shot-core",
  "shot-mcp",
+ "shot-render",
  "tokio",
 ]
 
@@ -6294,13 +6296,17 @@ version = "26.11.7"
 dependencies = [
  "block2 0.6.2",
  "objc2 0.6.5",
+ "objc2-audio-toolbox",
  "objc2-av-foundation",
+ "objc2-avf-audio",
+ "objc2-core-audio-types",
  "objc2-core-foundation",
  "objc2-core-media",
  "objc2-core-video",
  "objc2-foundation 0.3.2",
  "objc2-io-surface",
  "objc2-video-toolbox",
+ "tempfile",
  "thiserror 2.0.21",
 ]
 
@@ -6312,8 +6318,19 @@ version = "26.11.7"
 name = "shot-render"
 version = "26.11.7"
 dependencies = [
+ "objc2 0.6.5",
+ "objc2-core-foundation",
+ "objc2-core-video",
+ "objc2-io-surface",
+ "objc2-metal 0.3.2",
  "parley",
+ "pollster",
+ "shot-core",
+ "shot-media",
+ "tempfile",
+ "thiserror 2.0.21",
  "vello",
+ "wgpu",
 ]
 
 [[package]]

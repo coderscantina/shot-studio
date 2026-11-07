@@ -8,5 +8,20 @@ publish.workspace = true
 repository.workspace = true
 
 [dependencies]
+shot-core = { path = "../shot-core" }
+thiserror = { workspace = true }
 vello = { workspace = true }
 parley = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+shot-media = { path = "../shot-media" }
+objc2 = { workspace = true }
+objc2-core-foundation = { workspace = true }
+objc2-core-video = { workspace = true, features = ["objc2-io-surface"] }
+objc2-io-surface = { workspace = true }
+objc2-metal = { workspace = true, features = ["objc2-io-surface"] }
+wgpu = { workspace = true }
+pollster = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

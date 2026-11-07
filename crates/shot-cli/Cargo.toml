@@ -18,6 +18,9 @@ serde_json.workspace = true
 tokio = { workspace = true, features = ["rt"] }
 libc.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+shot-render = { path = "../shot-render" }
+
 [[bin]]
 name = "shot"
 path = "src/main.rs"
