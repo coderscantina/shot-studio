@@ -1,0 +1,20 @@
+chapter "Hook" {
+    take t01 {
+        keep from=0 to=9_000_000
+    }
+}
+
+chapter "What moved" {
+    take t01 {
+        keep from=9_000_000 to=40_000_000
+        remove from=40_000_000 to=41_500_000 by=pause
+        keep from=41_500_000 to=75_000_000
+    }
+}
+
+chapter "Should you switch" {
+    take t01 {
+        keep from=75_000_000 to=100_000_000
+        layout content from=80_000_000 to=90_000_000
+    }
+}
