@@ -8,3 +8,14 @@ publish.workspace = true
 repository.workspace = true
 
 [dependencies]
+shot-core = { path = "../shot-core" }
+whisper-rs.workspace = true
+ureq.workspace = true
+sha2.workspace = true
+symphonia.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

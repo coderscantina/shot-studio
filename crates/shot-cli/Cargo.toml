@@ -12,6 +12,7 @@ shot-core = { path = "../shot-core" }
 shot-board = { path = "../shot-board" }
 shot-mcp = { path = "../shot-mcp" }
 shot-capture = { path = "../shot-capture" }
+shot-analyze = { path = "../shot-analyze" }
 clap.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt"] }

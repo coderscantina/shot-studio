@@ -12,6 +12,16 @@
       "license": "MIT"
     },
     {
+      "name": "silero-vad-ggml",
+      "purpose": "Voice activity detection that keeps silence out of streaming transcription (whisper.cpp ggml format, used by whisper-rs)",
+      "url": "https://huggingface.co/ggml-org/whisper-vad/resolve/9ffd54a1e1ee413ddf265af9913beaf518d1639b/ggml-silero-v6.2.0.bin",
+      "revision": "9ffd54a1e1ee413ddf265af9913beaf518d1639b",
+      "file": "ggml-silero-v6.2.0.bin",
+      "sha256": "2aa269b785eeb53a82983a20501ddf7c1d9c48e33ab63a41391ac6c9f7fb6987",
+      "size": 885098,
+      "license": "MIT"
+    },
+    {
       "name": "silero-vad",
       "purpose": "Voice activity detection for auto cut (onnx, run through ort)",
       "url": "https://raw.githubusercontent.com/snakers4/silero-vad/066409f3d9db45a30d21dfcbf9147826ffdd7052/src/silero_vad/data/silero_vad.onnx",
