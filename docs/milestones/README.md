@@ -13,7 +13,7 @@ Mark a milestone complete only after its acceptance criteria pass and an evidenc
 | 05 | [Record comfort](05-record-comfort.md) | 03 | Analysis, App | Not started |
 | 06 | [Product videos](06-product-videos.md) | 03 | Media, App | Not started |
 | 07 | [Overlays and derived cuts](07-overlays-and-derived-cuts.md) | 04, 05 | Media, Core | Not started |
-| 08 | [Planning, agents and ship](08-planning-agents-and-ship.md) | 03, 04, 07 | Core, Agents | Work items 1 and 2 (board, proposals) merged |
+| 08 | [Planning, agents and ship](08-planning-agents-and-ship.md) | 03, 04, 07 | Core, Agents | Work items 1 and 2 (board, proposals) merged, 3 started: `shot` CLI and MCP server over the board |
 | 09 | [Release gate](09-release-gate.md) | 01 to 08 | Core | Not started |
 
 Milestone 02 is a go/no-go gate. If gpui can't show a 4K60 VideoToolbox decode without a CPU copy, stop and bring the measurements to Mike before 03 starts, because the UI choice changes.
