@@ -27,15 +27,9 @@ const RECENT: usize = RATE * 6 / 10;
 const SILENCE_RMS: f32 = 0.0056;
 const THREADS: i32 = 4;
 
-/// The model the listener loads, pinned like the manifest's models (decision 0008).
+/// The model the listener loads, pinned in `models/manifest.json` (decision 0008).
 pub fn follow_model() -> ModelSpec {
-    ModelSpec {
-        name: "whisper-tiny-en".into(),
-        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-tiny.en.bin".into(),
-        file: "ggml-tiny.en.bin".into(),
-        sha256: "921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f".into(),
-        size: 77_704_715,
-    }
+    shot_analyze::models::follow_model()
 }
 
 /// Streams mic audio into quick, unstable hypotheses for voice follow.

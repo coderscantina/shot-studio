@@ -57,6 +57,11 @@ pub fn whisper_model() -> ModelSpec {
     named("whisper-large-v3-turbo")
 }
 
+/// The small whisper model the prompter's voice follow loads.
+pub fn follow_model() -> ModelSpec {
+    named("whisper-tiny-en")
+}
+
 /// The voice activity model the transcriber loads.
 pub fn vad_model() -> ModelSpec {
     named("silero-vad-ggml")
