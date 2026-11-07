@@ -13,7 +13,7 @@ Mark a milestone complete only after its acceptance criteria pass and an evidenc
 | 05 | [Record comfort](05-record-comfort.md) | 03 | Analysis, App | Built on `milestone/04-06`, the beam splitter check waits for Mike. [Evidence](../evidence/m05-record-comfort.md) |
 | 06 | [Product videos](06-product-videos.md) | 03 | Media, App | Complete on `milestone/04-06`. [Evidence](../evidence/m06-product-videos.md) |
 | 07 | [Overlays and derived cuts](07-overlays-and-derived-cuts.md) | 04, 05 | Media, Core | Complete on `milestone/07-08`, face reframing proven on a stand-in face only. [Evidence](../evidence/m07-overlays-and-derived-cuts.md) |
-| 08 | [Planning, agents and ship](08-planning-agents-and-ship.md) | 03, 04, 07 | Core, Agents | Work items 1 and 2 (board, proposals) merged, 3 started: `shot` CLI and MCP server over the board |
+| 08 | [Planning, agents and ship](08-planning-agents-and-ship.md) | 03, 04, 07 | Core, Agents | Items 1 to 7 on `milestone/07-08`, `shot ship` (item 8) in progress. [Evidence](../evidence/m08-planning-agents-and-ship.md) |
 | 09 | [Release gate](09-release-gate.md) | 01 to 08 | Core | Not started |
 
 Milestone 02 is a go/no-go gate. If gpui can't show a 4K60 VideoToolbox decode without a CPU copy, stop and bring the measurements to Mike before 03 starts, because the UI choice changes.
@@ -45,6 +45,10 @@ Waiting for Mike. One line each with a recommendation and a link to its record. 
 Found by agents and waiting for a task. Remove a line when it's fixed.
 
 - Record does not warn when the camera delivers black frames.
+- Exported audio peaks at about -0.4 dBTP against the -1 dBTP ceiling: the AAC encode overshoots the limiter.
+- The thumbnail is written to `.shot/export/main.png`; the contract does not name where thumbnails live.
+- Agents sharing the target dir overwrite each other's `release/shot`; copy the binary before measuring or running it from a worktree.
+- Linear ideas are not wired: no Linear MCP server or CLI was available.
 - Face reframing is untested on a real face; Vision does not detect the fixture's pixel face.
 - Overlays laid out for 16:9 get cut off inside a Short's 9:16 window.
 - The export job queue starts with the shortest jobs although its comment says longest first.
