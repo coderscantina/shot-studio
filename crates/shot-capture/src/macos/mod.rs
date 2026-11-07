@@ -4,6 +4,7 @@ mod av;
 mod event_tap;
 mod screen;
 mod sink;
+mod tap;
 mod writer;
 
 use std::path::Path;
@@ -18,6 +19,8 @@ use shot_core::{Id, Micros};
 use self::av::{AvCapture, Kind};
 use self::event_tap::EventTap;
 use self::screen::Screen;
+use self::tap::Sources;
+pub use self::tap::{Preview, PreviewFrame};
 use self::writer::{Spec, Track};
 use crate::{CaptureError, Devices, Display, SessionConfig, Take};
 
@@ -36,6 +39,7 @@ pub struct Session {
     av: Option<AvCapture>,
     events: EventTap,
     tracks: Vec<Arc<Track>>,
+    frames: Sources,
 }
 
 impl Session {
@@ -72,12 +76,13 @@ impl Session {
                 },
             )
         });
+        let frames = Sources::default();
         let camera = camera.map(|device| {
             let spec = Spec::Video {
                 fps: CAMERA_FPS,
                 bits_per_pixel: CAMERA_BPP,
             };
-            (device, track("camera.mp4", spec))
+            (device, track("camera.mp4", spec), frames.camera.clone())
         });
         let mic = mic.map(|device| {
             let spec = Spec::Audio {
@@ -91,12 +96,13 @@ impl Session {
             .collect();
         let av_tracks: Vec<_> = camera
             .iter()
-            .map(|(_, t)| t.clone())
+            .map(|(_, t, _)| t.clone())
             .chain(mic.iter().map(|(_, t, _)| t.clone()))
             .collect();
 
         let started = (|| {
-            let mut screen = Screen::start(display, screen_track, system_track)?;
+            let mut screen =
+                Screen::start(display, screen_track, system_track, frames.screen.clone())?;
             let av = match (camera.is_some(), mic.is_some()) {
                 (false, false) => None,
                 _ => match AvCapture::start(camera, mic) {
@@ -158,6 +164,7 @@ impl Session {
             av,
             events,
             tracks: screen_tracks.into_iter().chain(av_tracks).collect(),
+            frames,
         })
     }
 
@@ -172,6 +179,12 @@ impl Session {
     /// The track files this session records, without `events.jsonl`.
     pub fn files(&self) -> Vec<&'static str> {
         self.tracks.iter().map(|t| t.file).collect()
+    }
+
+    /// A live preview of the screen and the camera. Each call starts its own conversion thread,
+    /// so take it once and clone it.
+    pub fn preview(&self) -> Preview {
+        Preview::start(self.frames.clone())
     }
 
     /// Media time recorded so far.

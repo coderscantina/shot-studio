@@ -32,6 +32,7 @@ use objc2_core_video::{
 use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString};
 
 use super::sink::SampleSink;
+use super::tap::Latest;
 use super::writer::{AUDIO_RATE, Track};
 use crate::clock::nanos;
 use crate::{CaptureError, Device, MicTap, Permission, Source};
@@ -165,7 +166,7 @@ pub struct AvCapture {
 
 impl AvCapture {
     pub fn start(
-        camera: Option<(Retained<AVCaptureDevice>, Arc<Track>)>,
+        camera: Option<(Retained<AVCaptureDevice>, Arc<Track>, Arc<Latest>)>,
         mic: Option<(Retained<AVCaptureDevice>, Arc<Track>, Option<MicTap>)>,
     ) -> Result<Self, CaptureError> {
         let fail = |message: String| CaptureError::Source {
@@ -177,7 +178,7 @@ impl AvCapture {
         let mut queues = Vec::new();
         unsafe { session.beginConfiguration() };
 
-        if let Some((device, track)) = camera {
+        if let Some((device, track, latest)) = camera {
             let preset = unsafe { AVCaptureSessionPreset1920x1080 };
             unsafe {
                 session.setSessionPreset(if session.canSetSessionPreset(preset) {
@@ -193,7 +194,12 @@ impl AvCapture {
                 &[ns(unsafe { kCVPixelBufferPixelFormatTypeKey })],
                 &[&*pixel_format],
             );
-            let sink = SampleSink::new(Box::new(move |sample: &CMSampleBuffer| track.push(sample)));
+            let sink = SampleSink::new(Box::new(move |sample: &CMSampleBuffer| {
+                if let Some(image) = unsafe { sample.image_buffer() } {
+                    latest.store(image);
+                }
+                track.push(sample)
+            }));
             let queue = DispatchQueue::new("camera.mp4", None);
             unsafe {
                 output.setVideoSettings(Some(&settings));

@@ -7,10 +7,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use shot_core::{
-    Chapter, Cut, Format, Id, Micros, Project, RangeEdit, Script, TakeEdit, TimeRange, Transcript,
-    Video,
-};
+use shot_core::{Cut, Format, Id, Micros, Project, Script, TimeRange, Transcript, Video};
 
 pub struct VideoFolder {
     pub dir: PathBuf,
@@ -79,17 +76,10 @@ impl VideoFolder {
         let Some(range) = TimeRange::new(Micros(0), duration) else {
             return Err(format!("take {take} is empty"));
         };
-        let mut cut = self.project.cut.clone();
-        cut.chapters.push(Chapter {
-            title: format!("Take {take}"),
-            takes: vec![TakeEdit {
-                take,
-                ranges: vec![RangeEdit::Keep(range)],
-                layouts: Vec::new(),
-                zooms: Vec::new(),
-                overlays: Vec::new(),
-            }],
-        });
+        let cut = self
+            .project
+            .cut
+            .append_take(take.clone(), format!("Take {take}"), range);
         self.write_cut(cut)
     }
 

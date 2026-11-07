@@ -1,7 +1,7 @@
 //! Display video and system audio through ScreenCaptureKit.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -10,20 +10,20 @@ use dispatch2::{DispatchQueue, DispatchRetained};
 use objc2::AnyThread;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::{
     CGDisplayBounds, CGDisplayCopyDisplayMode, CGDisplayMode, CGMainDisplayID,
     CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess, kCGColorSpaceSRGB,
     kCGDisplayStreamYCbCrMatrix_ITU_R_709_2,
 };
 use objc2_core_media::{CMClock, CMSampleBuffer, CMTime};
-use objc2_core_video::{CVImageBuffer, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange};
+use objc2_core_video::kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
 use objc2_foundation::{NSArray, NSError};
 use objc2_screen_capture_kit::{
     SCContentFilter, SCShareableContent, SCStream, SCStreamConfiguration, SCStreamOutputType,
 };
 
 use super::sink::SampleSink;
+use super::tap::Latest;
 use super::writer::{AUDIO_RATE, Track};
 use crate::events::DisplayGeometry;
 use crate::{CaptureError, Permission};
@@ -45,15 +45,6 @@ pub struct Screen {
     latest: Arc<Latest>,
     pacer: Option<(Arc<AtomicBool>, JoinHandle<()>)>,
 }
-
-/// The newest captured frame.
-#[derive(Default)]
-struct Latest(Mutex<Option<CFRetained<CVImageBuffer>>>);
-
-// SAFETY: CoreVideo buffers are reference counted atomically and a captured frame is never
-// mutated, so sharing the handle between the capture queue and the pacer is sound.
-unsafe impl Send for Latest {}
-unsafe impl Sync for Latest {}
 
 /// Moves a ScreenCaptureKit object out of its completion handler.
 struct Handoff<T>(T);
@@ -91,6 +82,7 @@ impl Screen {
         display: u32,
         screen: Arc<Track>,
         system: Option<Arc<Track>>,
+        latest: Arc<Latest>,
     ) -> Result<Self, CaptureError> {
         let fail = |message: String| CaptureError::Source {
             what: "screen capture",
@@ -139,7 +131,6 @@ impl Screen {
             )
         };
 
-        let latest = Arc::new(Latest::default());
         let mut sinks = Vec::new();
         let mut queues = Vec::new();
         let video_sink = {
@@ -147,7 +138,7 @@ impl Screen {
             SampleSink::new(Box::new(move |sample: &CMSampleBuffer| {
                 // Samples without an image are status updates for an unchanged screen.
                 if let Some(image) = unsafe { sample.image_buffer() } {
-                    *latest.0.lock().expect("frame slot poisoned") = Some(image);
+                    latest.store(image);
                 }
             }))
         };
@@ -184,8 +175,8 @@ impl Screen {
         // Open the writer on the first frame now, so the pacer starts on schedule.
         let first_frame = Instant::now() + TIMEOUT;
         while Instant::now() < first_frame {
-            if let Some(image) = latest.0.lock().expect("frame slot poisoned").as_deref() {
-                screen.prepare(image);
+            if let Some(image) = latest.get() {
+                screen.prepare(&image);
                 break;
             }
             std::thread::sleep(Duration::from_millis(5));
@@ -226,7 +217,7 @@ impl Screen {
                             // After a long one, skip to the current slot instead of bursting.
                             k = elapsed.as_nanos() as u64 * u64::from(FPS) / 1_000_000_000;
                         }
-                        let image = latest.0.lock().expect("frame slot poisoned").clone();
+                        let image = latest.get();
                         if let Some(image) = image {
                             let at = unsafe { CMTime::new(k as i64, FPS as i32) };
                             track.push_frame(&image, at, duration);

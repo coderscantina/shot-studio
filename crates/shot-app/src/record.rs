@@ -14,12 +14,13 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     App, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, KeyBinding,
-    ScrollHandle, Window, actions, div, prelude::*, px,
+    ObjectFit, ScrollHandle, Window, actions, div, prelude::*, px, relative, surface,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::progress::Progress;
+use objc2_core_video::{CVPixelBufferGetHeight, CVPixelBufferGetWidth};
 use shot_analyze::{Transcriber, cache, models};
-use shot_capture::{Devices, Session, SessionConfig, Source};
+use shot_capture::{Devices, Preview, PreviewFrame, Session, SessionConfig, Source};
 use shot_core::{Id, Micros, Transcript};
 
 use crate::folder::VideoFolder;
@@ -69,6 +70,8 @@ struct Shared {
     words: Mutex<Vec<String>>,
     /// Mic peak of the last buffer in dBFS, as f32 bits.
     level: AtomicU32,
+    /// The running session's live frames, while there is one.
+    preview: Mutex<Option<Preview>>,
 }
 
 impl Shared {
@@ -119,6 +122,7 @@ impl RecordScreen {
             phase: Mutex::new(Phase::Idle),
             words: Mutex::new(Vec::new()),
             level: AtomicU32::new(f32::NEG_INFINITY.to_bits()),
+            preview: Mutex::new(None),
         });
         let (commands, rx) = mpsc::channel();
         std::thread::Builder::new()
@@ -300,6 +304,7 @@ fn record(
         }));
     }
     let session = Session::start(config).map_err(|e| e.to_string())?;
+    *shared.preview.lock().expect("preview") = Some(session.preview());
     shared.set(Phase::Recording {
         take: session.id().clone(),
         started: Instant::now(),
@@ -317,6 +322,7 @@ fn record(
             .store(level.load(Ordering::Relaxed), Ordering::Relaxed);
     }
     shared.set(Phase::Finishing);
+    shared.preview.lock().expect("preview").take();
     let take = session.stop().map_err(|e| e.to_string())?;
     if let Some((transcriber, sink)) = transcriber {
         let transcriber = Arc::try_unwrap(transcriber)
@@ -361,8 +367,11 @@ impl Focusable for RecordScreen {
 }
 
 impl Render for RecordScreen {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let phase = self.phase();
+        if matches!(phase, Phase::Recording { .. }) {
+            window.request_animation_frame();
+        }
         if let Phase::Failed(error) = &phase {
             self.error.get_or_insert_with(|| error.clone());
         }
@@ -638,6 +647,9 @@ impl RecordScreen {
             _ => Duration::ZERO,
         };
         let recording = matches!(phase, Phase::Recording { .. });
+        let live = self.shared.preview.lock().expect("preview").clone();
+        let screen = live.as_ref().and_then(Preview::screen);
+        let camera = live.as_ref().and_then(Preview::camera);
         ui::pane()
             .flex_1()
             .min_w_0()
@@ -674,7 +686,10 @@ impl RecordScreen {
                     .items_center()
                     .justify_center()
                     .gap(px(14.))
-                    .when(recording, |stage| {
+                    .when_some(screen.clone(), |stage, screen| {
+                        stage.child(live_screen(screen, camera))
+                    })
+                    .when(recording && screen.is_none(), |stage| {
                         stage.child(
                             div()
                                 .size(px(14.))
@@ -712,7 +727,9 @@ impl RecordScreen {
                             )
                         },
                     )
-                    .child(div().text_color(MUTED).child(detail)),
+                    .when(screen.is_none(), |stage| {
+                        stage.child(div().text_color(MUTED).child(detail))
+                    }),
             )
             .child(
                 div()
@@ -800,6 +817,41 @@ impl RecordScreen {
                     ),
             )
     }
+}
+
+/// The screen, 80% of the stage wide, with the camera as a rounded square in its corner.
+fn live_screen(screen: PreviewFrame, camera: Option<PreviewFrame>) -> Div {
+    let aspect = CVPixelBufferGetWidth(&screen.buffer) as f32
+        / CVPixelBufferGetHeight(&screen.buffer) as f32;
+    div()
+        .relative()
+        .w(relative(0.8))
+        .max_h(relative(0.92))
+        .aspect_ratio(aspect)
+        .rounded(px(8.))
+        .overflow_hidden()
+        .shadow_lg()
+        .child(
+            surface(screen.buffer)
+                .size_full()
+                .object_fit(ObjectFit::Contain),
+        )
+        .children(camera.map(|camera| {
+            div()
+                .absolute()
+                .right(relative(0.03))
+                .bottom(relative(0.05))
+                .w(relative(0.26))
+                .aspect_ratio(1.)
+                .rounded(px(16.))
+                .overflow_hidden()
+                .shadow_lg()
+                .child(
+                    surface(camera.buffer)
+                        .size_full()
+                        .object_fit(ObjectFit::Cover),
+                )
+        }))
 }
 
 fn card() -> Div {

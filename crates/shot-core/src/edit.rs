@@ -4,8 +4,8 @@
 use std::fmt;
 
 use crate::{
-    Cut, Id, Layout, LayoutChange, Micros, RangeEdit, RemovedBy, TakeEdit, TimeRange, Transcript,
-    Word,
+    Chapter, Cut, Id, Layout, LayoutChange, Micros, RangeEdit, RemovedBy, TakeEdit, TimeRange,
+    Transcript, Word,
 };
 
 /// One take block of the main cut: the chapter and the take's position in that chapter. A take
@@ -60,6 +60,23 @@ pub struct WordView<'a> {
 }
 
 impl Cut {
+    /// Appends a chapter named `title` with one block of `take` that keeps all of `range`, the
+    /// way a finished recording enters the cut.
+    pub fn append_take(&self, take: Id, title: impl Into<String>, range: TimeRange) -> Cut {
+        let mut cut = self.clone();
+        cut.chapters.push(Chapter {
+            title: title.into(),
+            takes: vec![TakeEdit {
+                take,
+                ranges: vec![RangeEdit::Keep(range)],
+                layouts: Vec::new(),
+                zooms: Vec::new(),
+                overlays: Vec::new(),
+            }],
+        });
+        cut
+    }
+
     /// Removes the media of the words that overlap `selection` as `remove ... by=manual`. The
     /// cut runs from the start of the first word to the end of the last, so no word is half
     /// cut. Material that is already removed keeps its original `by`.
@@ -326,6 +343,19 @@ mod tests {
     }
 
     const MANUAL: RemovedBy = RemovedBy::Manual;
+
+    #[test]
+    fn append_take_adds_a_canonical_chapter_that_keeps_the_whole_take() {
+        let appended = cut(vec![keep(0, 1_000_000)]).append_take(
+            Id::new("t02").unwrap(),
+            "Take t02",
+            range(0, 12_500_000),
+        );
+        assert_eq!(appended.chapters.len(), 2);
+        assert!(appended.to_kdl().ends_with(
+            "chapter \"Take t02\" {\n    take t02 {\n        keep from=0 to=12_500_000\n    }\n}\n"
+        ));
+    }
 
     #[test]
     fn delete_in_the_middle_splits_the_keep() {
