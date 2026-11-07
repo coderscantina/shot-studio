@@ -27,7 +27,7 @@ Documentation names a command only after the code adds it.
 
 ## Demo
 
-Data comes from `SHOT_FIXTURES=$HOME/.cache/shot-studio-fixtures scripts/fixtures.sh all` (about 8 min the first time, then it skips unchanged groups): `target-project/` is the 17 min 4K60 video folder, `demo-channel/` the board repo. See [fixtures/README.md](fixtures/README.md). The app itself does not run yet; its build command lands here with milestone 03. The `demo` skill reads this section.
+Data comes from `SHOT_FIXTURES=$HOME/.cache/shot-studio-fixtures scripts/fixtures.sh all` (about 8 min the first time, then it skips unchanged groups): `target-project/` is the 17 min 4K60 video folder, `demo-channel/` the board repo. See [fixtures/README.md](fixtures/README.md). Run the app on a copy of the target project, never on the shared fixture: `cp -R $SHOT_FIXTURES/target-project /tmp/shot-demo && cargo run --release -p shot-app -- /tmp/shot-demo`. Transcribe the take once with `cargo run --release -p shot-cli -- transcribe --video /tmp/shot-demo --take t01`. `shot export --video <dir>` renders from the terminal, `shot-app --bench $SHOT_FIXTURES/screen-30s.mp4` measures the preview. Recording needs Screen Recording, Camera and Microphone access for the terminal. The `demo` skill reads this section.
 
 ## Gotchas
 
