@@ -17,6 +17,9 @@ gpui-component = { workspace = true }
 shot-core = { path = "../shot-core" }
 shot-analyze = { path = "../shot-analyze" }
 shot-media = { path = "../shot-media" }
+shot-board = { path = "../shot-board" }
+shot-mcp = { path = "../shot-mcp" }
+shot-ship = { path = "../shot-ship" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { workspace = true }
