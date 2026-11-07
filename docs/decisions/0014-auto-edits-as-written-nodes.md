@@ -1,6 +1,6 @@
 # 0014: Auto edits are written nodes with provenance
 
-Status: Proposed
+Status: Proposed, superseded by [0019](0019-semantic-video-elements-and-style.md) once that is adopted
 
 ## Problem
 

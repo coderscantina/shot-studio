@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Shot Studio mockup</title>
+<!-- Generated from canvas.json. Open an artboard's title to see it at full size. -->
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;600;700&amp;display=swap" rel="stylesheet">
+<style>
+body { margin: 0; background: #08090b; color: #e9ecf1; font-family: Geist, system-ui, sans-serif; }
+.canvas { position: relative; width: 6000px; height: 4020px; transform-origin: 0 0; transform: scale(var(--scale)); margin: 24px; }
+h2 { position: absolute; margin: 0; font-size: 72px; font-weight: 700; letter-spacing: -.02em; }
+figure { position: absolute; margin: 0; }
+figcaption { position: absolute; bottom: 100%; padding-bottom: 16px; font-size: 32px; font-weight: 600; }
+figcaption a { color: inherit; text-decoration: none; }
+iframe { display: block; border: 0; border-radius: 14px; background: #08090b; }
+</style>
+</head>
+<body>
+<div class="canvas" style="--scale:1">
+<h2 style="left:0px;top:40px;max-width:6000px">Make it: plan, script, record, cut</h2>
+<h2 style="left:0px;top:1460px;max-width:4960px">Edit it: Text, Picture and Timeline workspaces</h2>
+<h2 style="left:0px;top:2820px;max-width:2960px">Finish it: product demo, ship</h2>
+<figure style="left:0px;top:340px;width:1440px">
+  <figcaption><a href="Main.dc.html">1 Board: Kanban on git</a></figcaption>
+  <iframe src="Main.dc.html" title="1 Board: Kanban on git" width="1440" height="900" loading="lazy"></iframe>
+</figure>
+<figure style="left:1520px;top:340px;width:1440px">
+  <figcaption><a href="Script.dc.html">2 Script: written with an agent</a></figcaption>
+  <iframe src="Script.dc.html" title="2 Script: written with an agent" width="1440" height="900" loading="lazy"></iframe>
+</figure>
+<figure style="left:3040px;top:340px;width:1440px">
+  <figcaption><a href="Record.dc.html">3 Record: Elgato Prompter follows your voice</a></figcaption>
+  <iframe src="Record.dc.html" title="3 Record: Elgato Prompter follows your voice" width="1440" height="900" loading="lazy"></iframe>
+</figure>
+<figure style="left:4560px;top:340px;width:1440px">
+  <figcaption><a href="Review.dc.html">4 Cut: auto cut, you decide the unsure ones</a></figcaption>
+  <iframe src="Review.dc.html" title="4 Cut: auto cut, you decide the unsure ones" width="1440" height="900" loading="lazy"></iframe>
+</figure>
+<figure style="left:0px;top:1760px;width:1600px">
+  <figcaption><a href="Edit.dc.html">5 Edit, Text workspace: the transcript is the edit</a></figcaption>
+  <iframe src="Edit.dc.html" title="5 Edit, Text workspace: the transcript is the edit" width="1600" height="1000" loading="lazy"></iframe>
+</figure>
+<figure style="left:1680px;top:1760px;width:1600px">
+  <figcaption><a href="EditPicture.dc.html">5 Edit, Picture workspace: style on the frame</a></figcaption>
+  <iframe src="EditPicture.dc.html" title="5 Edit, Picture workspace: style on the frame" width="1600" height="1000" loading="lazy"></iframe>
+</figure>
+<figure style="left:3360px;top:1760px;width:1600px">
+  <figcaption><a href="EditTimeline.dc.html">5 Edit, Timeline workspace: lanes for the daily cut</a></figcaption>
+  <iframe src="EditTimeline.dc.html" title="5 Edit, Timeline workspace: lanes for the daily cut" width="1600" height="1000" loading="lazy"></iframe>
+</figure>
+<figure style="left:0px;top:3120px;width:1440px">
+  <figcaption><a href="Product.dc.html">6 Product demo: cursor zoom and code from git</a></figcaption>
+  <iframe src="Product.dc.html" title="6 Product demo: cursor zoom and code from git" width="1440" height="900" loading="lazy"></iframe>
+</figure>
+<figure style="left:1520px;top:3120px;width:1440px">
+  <figcaption><a href="Ship.dc.html">7 Ship: cuts, checks, release</a></figcaption>
+  <iframe src="Ship.dc.html" title="7 Ship: cuts, checks, release" width="1440" height="900" loading="lazy"></iframe>
+</figure>
+</div>
+<script>
+const canvas = document.querySelector(".canvas");
+const fit = () => canvas.style.setProperty("--scale", Math.min(1, (innerWidth - 48) / 6000));
+addEventListener("resize", fit);
+fit();
+</script>
+</body>
+</html>

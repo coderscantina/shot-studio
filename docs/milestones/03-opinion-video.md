@@ -17,7 +17,7 @@ Requires 01 and 02. Media owns `shot-capture`, `shot-media`, `shot-render`. Anal
 5. Layouts face, face + content, split and content, switched by range and drawn by the render graph in preview and export.
 6. Export: render chapters in parallel with hardware encode, cache segments by content hash, join by stream copy. Re-export renders only segments whose hash changed.
 7. Reuse the spike's `shot-media` decoder, player and frame pacer and the IOSurface zoom pass. Find the cause of the missed refreshes from the spike on an idle machine, and fix the BT.601 color conversion for BT.709 sources.
-8. Build the Record and Edit screens to the mockup and [design](../design.md), with the timeline, waveform and transcript elements.
+8. Build the Record and Edit screens to the [mockup](../mockup/README.md) (`Record.dc.html`, and the three Edit workspaces) and [design](../design.md), with the timeline, waveform and transcript elements.
 
 ## Acceptance criteria
 

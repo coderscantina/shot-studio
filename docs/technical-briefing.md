@@ -1,12 +1,12 @@
 # Technical briefing
 
-Revision 1, agreed with Mike on 2026-11-07. Nothing described here is built or measured yet.
+Revision 2, agreed with Mike on 2026-11-07: Shot Studio becomes a semantic video editor ([0019](decisions/0019-semantic-video-elements-and-style.md)), with a channel brand ([0020](decisions/0020-channel-brand-and-shared-styles.md)) and sound, transitions and bookends ([0021](decisions/0021-sound-transitions-and-bookends.md)), built in milestones 10 to 12. Revision 1 was agreed the same day.
 
 This document owns the product scope and architecture. File formats live in [the project files contract](contracts/project-files.md), sequence in [the milestone index](milestones/README.md), and the reasons behind choices in [decisions](decisions/).
 
 ## Product contract
 
-Shot Studio is a macOS desktop app for recording and editing developer videos: reactions and opinions in the style of Theo or ThePrimeagen, plus product tours, feature showcases and tutorials. It treats a video like a software project. The plan lives on a Kanban board backed by git, the script is the spec, auto cut works like a linter, review works like a PR, rendering is an incremental build, and shipping is a tagged release.
+Shot Studio is a macOS desktop app for recording and editing developer videos: reactions and opinions in the style of Theo or ThePrimeagen, plus product tours, feature showcases and tutorials. It defines a category, **semantic video: record what you mean, style how it looks.** A recording becomes a document of meaning (what you said, clicked, showed and marked), and cascading style rules render it into every cut, the way CSS renders HTML. It works like a software project. The plan lives on a Kanban board backed by git, the script is the spec, auto cut works like a linter, review works like a PR, rendering is an incremental build, and shipping is a tagged release.
 
 - Website: shot.app
 - macOS app: `shot.app`, one bundle that also carries the CLI
@@ -18,7 +18,9 @@ Shot Studio is a macOS desktop app for recording and editing developer videos: r
 
 ### The bar
 
-Three things set it apart from Descript, Screen Studio, ScreenFlow and DaVinci Resolve:
+Four things set it apart from Descript, Screen Studio, ScreenFlow and DaVinci Resolve:
+
+- **You style the video, you don't assemble it.** Zooms, cards, cuts, sounds and transitions follow rules over what the recording means. A rebrand or a pacing change is one rule, and you fix exceptions instead of placing instances.
 
 - **The rough cut is ready when you press stop.** Transcription and analysis run while you record, so there is no processing step.
 - **The edit is a plain text file in git.** `cut.kdl` holds ranges, layouts and effects. Alternate cuts (Shorts, X clips) are derived from the main cut, agents propose changes you review as a diff, and every change is reversible.
@@ -50,6 +52,7 @@ Each format is a `format.kdl` you can edit: pacing, layouts, caption style, auto
 | Linter with auto-fix | Auto cut: confident cuts applied, unsure ones queued |
 | PR review | The review queue, plus agent proposals merged like PRs |
 | Source code | `cut.kdl`, readable in a diff and by an agent |
+| Stylesheet and lockfile | The brand, format and video style cascade, and `cut.lock` listing what each rule produced |
 | Branches | Derived cuts: main video, Shorts, X clip |
 | `cargo build` | Render from cached segments |
 | CI | `shot check`: loudness, captions, frames, links, chapters, thumbnail |
@@ -102,7 +105,20 @@ The first release is the whole concept, built in the order of the [milestone ind
 - The transcript is the main editing surface: delete words to cut, select a phrase to add a highlight, zoom or b-roll.
 - Reaction effects: layouts (face, face + content, split, content), on-screen highlights matched to the phrase you react to (OCR on the source), link cards from URLs you say (GitHub PR, repo, tweet, HN, npm), bleep and blur from the transcript.
 - Product video effects: auto zoom from clicks, typing or cursor, click ripples, cursor size, keystroke overlay, window padding, corners, shadow and background, device frames, and code from git (type out a real commit range, then highlight the line you talk about).
-- Audio: denoise, EQ, compressor, -14 LUFS loudness, a music bed that ducks under your voice.
+- Audio: denoise, EQ, compressor, -14 LUFS loudness, music cues that duck under your voice.
+
+**Style it**
+
+- Every automatic edit above is a style rule over the recording's elements: words, silences, fillers, emphasis, URLs and code said, clicks, typing, idle screen, faces, script beats and tags, record markers, and Claude's reading of the transcript (claim, punchline, topic shift).
+- Pacing is a style too: switching Loose, Natural or Tight re-cuts the video. Review decisions and one-off changes are overrides on one element.
+- Every change to a look offers a scope: only here, this video, this format or the channel. Every instance shows the rule that made it.
+- A channel brand sets fonts, colors, logo and sounds. A video overrides only what differs. Styles import from git, and the four presets ship that way.
+- Production-grade motion, not fades: springs with choreography, frosted glass, depth, motion blur and kinetic type, in four presets matched to the formats (reactive, editorial, launch, calm) and tuned by the brand. Motion can land on the music's beat, and sound follows each phase of a move. See [0023](decisions/0023-motion-system-and-lottie-templates.md).
+- Brand animations from Lottie: stings, logo reveals, re-skinned templates, animated emoji and new templates declared with typed slots.
+- Chapter edges cut, dissolve, dip, wipe in the brand's shape, zoom through or play the brand's stinger, with a title band. Intro and outro as a bumper, a generated title, both or none, with a cold open per format, and an end card for YouTube's end screen.
+- Camera styling, callouts that snap to clicks and on-screen text, emoji and text pops, automatic and placed sound effects.
+- Shipped videos stay pinned at their tag. `shot restyle` rebuilds one on purpose.
+- While recording, the monitor shows the styled video. `shot build --watch` rebuilds every cut on each change.
 
 **Ship**
 
@@ -114,7 +130,7 @@ The first release is the whole concept, built in the order of the [milestone ind
 
 ### Out of scope for the first release
 
-Unlimited free-form tracks, a library of transitions, full color grading, keyframes on every property, plugins, a light theme, X upload, Windows and Linux. Linux capture through PipeWire may come later.
+Unlimited free-form tracks, a library of transitions (a channel has its own small set), full color grading, keyframes on every property, plugins, a light theme, X upload, Windows and Linux. Linux capture through PipeWire may come later.
 
 ## Architecture
 
@@ -174,6 +190,7 @@ Rust edition 2024, `rust-version = "1.99"`, Cargo resolver 3, shared dependencie
 - **Cache** is `.shot/cache` (SQLite plus segment files). It is always safe to delete.
 - **Agent proposals** are branches named `proposal/<video>/<slug>`. Accept merges, reject deletes the branch. See [0004](decisions/0004-proposals-as-branches.md).
 - **Models** download on first use into `~/Library/Application Support/Shot Studio/models`, pinned by URL and SHA-256. See [0008](decisions/0008-models-download-on-first-use.md).
+- **Style** is a cascade: `brand/brand.kdl` for the channel, `formats/` for each format, the video's `format.kdl` for what differs, overrides in `cut.kdl` for one moment. Elements are committed per take in `elements/`, and every build writes a committed `cut.lock` listing each instance and the rule that made it. See the [semantic video draft](contracts/semantic-video.md).
 - **Import** of other editors' projects is not in scope. Plain media files can be added to `sources/` as b-roll.
 
 ## Security and privacy
@@ -214,7 +231,9 @@ See [0006](decisions/0006-mit-open-source-and-distribution.md).
 ## Risks
 
 - **gpui** is young and lightly documented. The video surface path is unproven until the spike runs.
-- **vello and parley** still change between versions. Pin them and keep the template format independent of the renderer.
-- **Scope**: the effect list stays this short until a real video needs more.
+- **vello and parley** still change between versions. Pin them and keep the template format independent of the renderer. velato, the Lottie renderer, lags vello by a version, so Shot Studio carries a patched copy until upstream catches up.
+- **Motion cost**: glass and motion blur spend the export headroom (96 fps at 4K with every 07 overlay). Milestone 11 measures it against the targets.
+- **Scope**: revision 2 widened the effect list. New effects arrive as style rules over the closed element and effect sets, and the sets grow only when a real video needs more.
+- **Semantic model**: style evaluation must fit the 5 s rough-cut target and the preview budget, and a cascade can surprise. Provenance on every instance and a scope on every change are the answer; milestone 10 measures both.
 - **Elgato Prompter**: whether it mirrors the image for the beam splitter is unknown until tested on the device ([milestone 05](milestones/05-record-comfort.md)).
 - **Voice follow** may be too slow on streaming whisper and need a keyword matcher on top ([milestone 05](milestones/05-record-comfort.md)).

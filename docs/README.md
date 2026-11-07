@@ -5,7 +5,7 @@ A native macOS recorder and editor for developer videos, built in Rust with gpui
 ## Read in this order
 
 1. [Technical briefing](technical-briefing.md): scope, architecture, privacy, targets, release.
-2. [Project files contract](contracts/project-files.md): the video folder, `video.kdl`, `script.md`, `cut.kdl`, `format.kdl` and the cache.
+2. [Project files contract](contracts/project-files.md): the video folder, `video.kdl`, `script.md`, `cut.kdl`, `format.kdl` and the cache. The [semantic video draft](contracts/semantic-video.md) is what milestone 10 changes it to.
 3. [Milestone index](milestones/README.md): dependency order, parallel work, briefs.
 4. [Development workflow](development-workflow.md): ownership, shared interfaces, completion evidence.
 5. [Design](design.md): visual rules for the app.

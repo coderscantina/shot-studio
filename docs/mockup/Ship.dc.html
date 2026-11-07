@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Shot Studio Ship</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700;800&amp;family=Geist+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#08090B;color:#E9ECF1;font-family:Geist,system-ui,sans-serif;font-size:15px;-webkit-font-smoothing:antialiased}
+a{color:#C8F25A}a:hover{color:#DDFB8E}
+.bar{height:50px;flex:none;display:flex;align-items:center;gap:16px;padding:0 8px;flex-wrap:wrap;user-select:none}
+.logo{width:26px;height:26px;border-radius:8px;background:#C8F25A;display:flex;align-items:center;justify-content:center}
+.chip{font-family:'Geist Mono',monospace;font-size:13px;color:#AAB2BF;padding:3px 8px;border-radius:6px;background:#15181C}
+.nav{display:flex;gap:2px;padding:3px;background:#111316;border-radius:11px}
+.nav a{color:#7F8794;text-decoration:none;padding:6px 14px;border-radius:8px;font-size:14px;font-weight:500}
+.nav a:hover{color:#E9ECF1;background:#181B20}
+.nav a.on{color:#F5F7FA;background:#23272E;box-shadow:0 1px 3px rgba(0,0,0,.45),inset 0 1px 0 rgba(255,255,255,.05)}
+.pane{background:#111316;border-radius:14px;box-sizing:border-box;min-height:0}
+.muted{color:#828A97}
+.mono{font-family:'Geist Mono',ui-monospace,monospace;font-variant-numeric:tabular-nums}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:34px;padding:0 14px;border-radius:9px;border:0;background:#1E2127;color:#E9ECF1;font:500 14px Geist,sans-serif;cursor:pointer;text-decoration:none}
+.btn:hover{background:#262A31;color:#E9ECF1}
+.acc{background:#C8F25A;color:#0A0B0D}
+.acc:hover{background:#D6F77E;color:#0A0B0D}
+.kbd{font-family:'Geist Mono',monospace;font-size:12px;padding:1px 6px;border-radius:5px;color:#A3ABB8;background:#262A31}
+.acc .kbd{background:rgba(10,11,13,.14);color:#0A0B0D}
+.lbl{font-size:13px;color:#828A97;font-weight:500;user-select:none}
+.row{display:flex;align-items:center;gap:10px;width:100%;padding:11px 12px;border-radius:10px;border:0;background:transparent;color:#E9ECF1;font:400 15px Geist,sans-serif;text-align:left;cursor:pointer}
+.row:hover{background:#171A1F}
+.dl{font-family:'Geist Mono',monospace;font-size:13px;line-height:23px;padding:0 16px;white-space:pre}
+.chk{display:flex;align-items:center;gap:10px;padding:8px 2px;color:#A9B0BC}
+.input{background:#0D0E11;border:0;border-radius:9px;padding:9px 11px;color:#E9ECF1;font:400 15px Geist,sans-serif;outline:none}
+.ico{width:18px;height:18px;flex:none}
+.nav a{display:inline-flex;align-items:center;gap:7px}
+</style>
+</helmet>
+<div style="width:100%;height:900px;display:flex;flex-direction:column;gap:8px;padding:0 8px 8px;box-sizing:border-box;background:#08090B;overflow:hidden">
+
+<header class="bar">
+  <div style="display:flex;align-items:center;gap:10px">
+    <div class="logo"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#0A0B0D" stroke-width="2.6" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="7"></circle><circle cx="12" cy="12" r="2"></circle></svg></div>
+    <span style="font-weight:700;letter-spacing:-0.01em">Shot Studio</span>
+    <span class="muted">/</span>
+    <span style="font-weight:500">The end of the IDE</span>
+    <span class="chip">{{branch.ref}}</span>
+  </div>
+  <nav class="nav" aria-label="Workflow" style="margin-left:auto;margin-right:auto">
+    <a href="Main.dc.html"><svg class="ico" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3 12C3 15.7497 3 17.6246 3.95491 18.9389C4.26331 19.3634 4.6366 19.7367 5.06107 20.0451C6.3754 21 8.25027 21 12 21C15.7497 21 17.6246 21 18.9389 20.0451C19.3634 19.7367 19.7367 19.3634 20.0451 18.9389C21 17.6246 21 15.7497 21 12C21 8.25027 21 6.3754 20.0451 5.06107C19.7367 4.6366 19.3634 4.26331 18.9389 3.95491C17.6246 3 15.7497 3 12 3C8.25027 3 6.3754 3 5.06107 3.95491C4.6366 4.26331 4.26331 4.6366 3.95491 5.06107C3 6.3754 3 8.25027 3 12Z" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/><path d="M12 7V11M17 7V17M7 7V14" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/></svg>Board</a>
+    <a href="Script.dc.html"><svg class="ico" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12.8809 7.01656L17.6538 8.28825M11.8578 10.8134L14.2442 11.4492M11.9765 17.9664L12.9311 18.2208C15.631 18.9401 16.981 19.2998 18.0445 18.6893C19.108 18.0787 19.4698 16.7363 20.1932 14.0516L21.2163 10.2548C21.9398 7.57005 22.3015 6.22768 21.6875 5.17016C21.0735 4.11264 19.7235 3.75295 17.0235 3.03358L16.0689 2.77924C13.369 2.05986 12.019 1.70018 10.9555 2.31074C9.89196 2.9213 9.53023 4.26367 8.80678 6.94841L7.78366 10.7452C7.0602 13.4299 6.69848 14.7723 7.3125 15.8298C7.92652 16.8874 9.27651 17.2471 11.9765 17.9664Z" stroke="currentColor" stroke-linecap="round" stroke-width="1.5"/><path d="M12 20.9462L11.0477 21.2055C8.35403 21.939 7.00722 22.3057 5.94619 21.6832C4.88517 21.0607 4.52429 19.692 3.80253 16.9546L2.78182 13.0833C2.06006 10.3459 1.69918 8.97718 2.31177 7.89892C2.84167 6.96619 4 7.00015 5.5 7.00003" stroke="currentColor" stroke-linecap="round" stroke-width="1.5"/></svg>Script</a>
+    <a href="Record.dc.html"><svg class="ico" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="8" stroke="currentColor" stroke-linejoin="round" stroke-width="1.5"/></svg>Record</a>
+    <a href="Review.dc.html"><svg class="ico" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M21 6C21 7.65685 19.6569 9 18 9C16.3431 9 15 7.65685 15 6C15 4.34315 16.3431 3 18 3C19.6569 3 21 4.34315 21 6Z" stroke="currentColor" stroke-width="1.5"/><path d="M21 18C21 19.6569 19.6569 21 18 21C16.3431 21 15 19.6569 15 18C15 16.3431 16.3431 15 18 15C19.6569 15 21 16.3431 21 18Z" stroke="currentColor" stroke-width="1.5"/><path d="M15 8L3 19" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/><path d="M15.0003 16L11 12" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/><path d="M3 5.00011L8.5 10" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/></svg>Cut</a>
+    <a href="Edit.dc.html"><svg class="ico" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M17.7001 21.3351C16.5281 21.4998 14.9996 21.4998 12.9501 21.4998H11.0501C7.01955 21.4998 5.0043 21.4998 3.75218 20.2476C2.50006 18.9955 2.50006 16.9803 2.50006 12.9498V11.0498C2.50006 7.01925 2.50006 5.00399 3.75218 3.75187C5.0043 2.49976 7.01955 2.49976 11.0501 2.49976H12.9501C16.9806 2.49976 18.9958 2.49976 20.2479 3.75187C21.5001 5.00399 21.5001 7.01925 21.5001 11.0498V12.9498C21.5001 14.158 21.5001 15.1851 21.4663 16.0648C21.4393 16.7699 21.4258 17.1224 21.1588 17.2541C20.8918 17.3859 20.5932 17.1746 19.9958 16.752L18.6501 15.7998" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/><path d="M14.9453 12.3948C14.7686 13.0215 13.9333 13.4644 12.2629 14.3502C10.648 15.2064 9.8406 15.6346 9.18992 15.4625C8.9209 15.3913 8.6758 15.2562 8.47812 15.07C8 14.6198 8 13.7465 8 12C8 10.2535 8 9.38018 8.47812 8.92995C8.6758 8.74381 8.9209 8.60868 9.18992 8.53753C9.8406 8.36544 10.648 8.79357 12.2629 9.64983C13.9333 10.5356 14.7686 10.9785 14.9453 11.6052C15.0182 11.8639 15.0182 12.1361 14.9453 12.3948Z" stroke="currentColor" stroke-linejoin="round" stroke-width="1.5"/></svg>Edit</a>
+    <a class="on" href="Ship.dc.html"><svg class="ico" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6.21875 11.618L3.31189 11.2378C2.71644 11.1606 2.31883 10.5841 2.58348 10.0458C3.42523 8.33365 5.6195 6.35437 9.73988 6.68079M6.21875 11.618C7.27445 9.85426 8.57175 8.00435 9.73988 6.68079M6.21875 11.618L11.882 17.2812M9.73988 6.68079C13.4105 2.58986 17.1745 1.728 19.5937 2.06685C20.5508 2.2009 21.2991 2.94917 21.4332 3.90626C21.772 6.32551 20.9101 10.0895 16.8192 13.7601M11.882 17.2812L12.2622 20.1881C12.3394 20.7836 12.9159 21.1812 13.4542 20.9165C15.1664 20.0748 17.1456 17.8805 16.8192 13.7601M11.882 17.2812C13.6457 16.2255 15.4956 14.9282 16.8192 13.7601" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/><path d="M17.5 8C17.5 6.89543 16.6046 6 15.5 6C14.3954 6 13.5 6.89543 13.5 8C13.5 9.10457 14.3954 10 15.5 10C16.6046 10 17.5 9.10457 17.5 8Z" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/><path d="M4 22L8 18M4 17L5.5 15.5" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/></svg>Ship</a>
+  </nav>
+  <span class="muted" style="font-size:13px;padding:0 6px">{{branch.render}}</span>
+</header>
+
+<div style="flex:1;min-height:0;display:flex;gap:8px;flex-wrap:wrap">
+
+  <aside class="pane" style="width:290px;padding:12px;display:flex;flex-direction:column;gap:2px">
+    <div style="padding:4px 12px 8px"><span class="lbl">Cuts</span></div>
+    <sc-for list="{{branches}}" as="b" hint-placeholder-count="3">
+      <button class="row" type="button" onClick="{{b.pick}}" style="{{b.rowStyle}}">
+        <span style="flex:1;display:flex;flex-direction:column;gap:2px;min-width:0">
+          <span style="font-weight:500">{{b.label}}</span>
+          <span class="muted" style="font-size:13px">{{b.meta}}</span>
+        </span>
+        <span class="mono" style="font-size:14px">{{b.length}}</span>
+      </button>
+    </sc-for>
+    <button class="btn" type="button" style="margin:10px 4px 0">New cut from a selection</button>
+    <div style="margin-top:auto;padding:14px 12px 4px;display:flex;flex-direction:column;gap:6px">
+      <span class="lbl">Also from the terminal</span>
+      <span class="mono" style="font-size:13px;color:#A9B0BC;line-height:21px">$ shot check --all<br>$ shot ship youtube --tag</span>
+    </div>
+  </aside>
+
+  <main style="flex:999 1 520px;min-width:0;display:flex;flex-direction:column;gap:8px;min-height:0">
+    <div class="pane" style="overflow:hidden">
+      <div style="display:flex;align-items:center;gap:10px;padding:14px 16px 8px">
+        <span style="font-weight:600">cut.kdl</span>
+        <span class="muted" style="font-size:13px">{{branch.diffTitle}}</span>
+        <span class="mono muted" style="margin-left:auto;font-size:13px">{{branch.diffStat}}</span>
+      </div>
+      <div style="padding:8px 0 12px;margin:0 10px 10px;border-radius:10px;background:#0A0B0D">
+        <sc-for list="{{branch.diff}}" as="d" hint-placeholder-count="9">
+          <div class="dl" style="{{d.style}}">{{d.text}}</div>
+        </sc-for>
+      </div>
+    </div>
+
+    <div class="pane" style="padding:12px 16px 14px;flex:1">
+      <div style="display:flex;align-items:baseline;justify-content:space-between;padding:2px 2px 6px">
+        <span style="font-weight:600">Checks</span>
+        <span class="muted" style="font-size:13px">{{branch.checkSummary}}</span>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:24px">
+        <sc-for list="{{branch.checks}}" as="c" hint-placeholder-count="5">
+          <div class="chk">
+            <span style="display:flex;color:#828A97"><svg class="ico" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 14L8.5 17.5L19 6.5" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/></svg></span>
+            <span style="flex:1">{{c.name}}</span>
+            <span class="mono" style="font-size:14px;color:#E9ECF1">{{c.value}}</span>
+          </div>
+        </sc-for>
+      </div>
+      <div style="margin-top:10px;padding:12px 14px;border-radius:10px;background:rgba(232,212,77,.08);display:flex;align-items:center;gap:12px">
+        <span style="flex:1;color:#E8D44D">{{branch.blocker}}</span>
+        <button class="btn" type="button" style="height:30px">{{branch.fix}}</button>
+      </div>
+    </div>
+  </main>
+
+  <aside class="pane" style="width:400px;padding:14px;display:flex;flex-direction:column;gap:14px;overflow:auto">
+    <div style="display:flex;justify-content:space-between;align-items:baseline"><span style="font-weight:600">Preview</span><span class="muted" style="font-size:13px">{{branch.format}}</span></div>
+    <div style="display:flex;justify-content:center;padding:6px 0;border-radius:12px;background:#0D0E11">
+      <div style="border-radius:10px;background:#20242B;position:relative;overflow:hidden;display:flex;align-items:flex-end;justify-content:center;box-shadow:0 12px 30px rgba(0,0,0,.45);margin:10px 0;{{branch.frame}}">
+        <svg width="62%" height="70%" viewBox="0 0 100 100" aria-hidden="true"><circle cx="50" cy="38" r="20" fill="#4A5163"></circle><path d="M12 100c4-24 20-34 38-34s34 10 38 34z" fill="#4A5163"></path></svg>
+        <sc-if value="{{branch.hasCaption}}" hint-placeholder-val="{{ false }}">
+          <span style="position:absolute;left:8%;right:8%;bottom:18%;text-align:center;font:800 {{branch.capSize}} Geist,sans-serif;color:#fff;text-shadow:0 2px 10px rgba(0,0,0,.7)">{{branch.caption}}</span>
+        </sc-if>
+      </div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <span class="lbl">Thumbnail candidates</span>
+      <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px">
+        <button type="button" aria-label="Frame at 00:12" style="aspect-ratio:16/9;border-radius:7px;background:#1E2229;border:0;cursor:pointer"></button>
+        <button type="button" aria-label="Frame at 03:41" style="aspect-ratio:16/9;border-radius:7px;background:#272C35;border:0;cursor:pointer"></button>
+        <button type="button" aria-label="Frame at 06:58" style="aspect-ratio:16/9;border-radius:7px;background:#1E2229;border:0;cursor:pointer"></button>
+        <button type="button" aria-label="Frame at 12:10" style="aspect-ratio:16/9;border-radius:7px;background:#272C35;border:0;cursor:pointer"></button>
+      </div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:6px">
+      <label class="lbl" for="title">Title</label>
+      <input class="input" id="title" value="{{branch.title}}">
+    </div>
+    <div style="display:flex;flex-direction:column;gap:6px">
+      <span class="lbl">Description</span>
+      <div class="input mono" style="font-size:13px;line-height:20px;color:#A9B0BC;white-space:pre-line">{{branch.description}}</div>
+    </div>
+    <div style="margin-top:auto">
+      <button class="btn acc" type="button" style="width:100%;height:44px;font-size:15px;font-weight:600">{{branch.cta}} <span class="kbd">⌘⏎</span></button>
+    </div>
+  </aside>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  constructor(props) {
+    super(props);
+    this.state = { sel: 0 };
+    const add = 'color:#C8F25A;background:rgba(200,242,90,.07)';
+    const del = 'color:#FF8A80;background:rgba(255,90,82,.08)';
+    const ctx = 'color:#6E7682';
+    const base = [
+      { name: 'Loudness', value: '-14.1 LUFS' },
+      { name: 'No black or frozen frames', value: 'ok' },
+      { name: 'Links resolve', value: '3 of 3' }
+    ];
+    this.data = [
+      { label: 'Main video', ref: 'video/end-of-the-ide', meta: '16:9 · YouTube', length: '14:02', render: '41 of 47 segments cached · renders in 0:38',
+        diffTitle: 'since the last render', diffStat: '+5 −2',
+        diff: [
+          { text: 'chapter "Read the article" {', style: ctx },
+          { text: '    keep take=2 from="02:14.6" to="06:38.2"', style: ctx },
+          { text: '-   cut from="03:02.1" to="03:04.5" reason="pause"', style: del },
+          { text: '+   cut from="03:02.1" to="03:04.5" reason="pause" by="you"', style: add },
+          { text: '+   highlight "read the diff" style="marker" hold=3.0', style: add },
+          { text: '+   broll src="sources/pr-218.diff" at="05:02" for=12', style: add },
+          { text: '-   zoom at="05:20" scale=1.25', style: del },
+          { text: '+   zoom at="05:20" scale=1.12 ease="in"', style: add },
+          { text: '+   captions style="clean" fixed=11', style: add },
+          { text: '}', style: ctx }
+        ],
+        checks: base.concat([{ name: 'Captions', value: 'en · 2,140 words' }, { name: 'Chapters', value: '4' }]),
+        checkSummary: '5 passed', blocker: 'No thumbnail picked yet.', fix: 'Pick one',
+        format: '16:9 · 4K · 14:02', frame: 'width:340px;height:191px', hasCaption: false, capSize: '15px', caption: '',
+        title: 'The IDE is not dead. It became a review tool.',
+        description: 'The end of the IDE? Half right.\n\n00:00 Hook\n00:20 Read the article\n04:50 My take\n13:22 Close',
+        cta: 'Ship to YouTube and tag v2026.46' },
+      { label: 'Short: the diff is the new file tree', ref: 'video/end-of-the-ide+short-1', meta: '9:16 · Shorts · proposed by Claude', length: '0:48', render: 'Reuses 6 segments from main · renders in 0:04',
+        diffTitle: 'cut derived from main', diffStat: '+5 −0',
+        diff: [
+          { text: '+cut "short-1" from="main" {', style: add },
+          { text: '+    frame aspect="9:16" reframe="face"', style: add },
+          { text: '+    select from="06:40.0" to="07:28.0"', style: add },
+          { text: '+    captions style="word-pop" position="middle" burn=true', style: add },
+          { text: '+}', style: add }
+        ],
+        checks: base.concat([{ name: 'Captions burned in', value: 'word pop' }, { name: 'Clear of Shorts UI', value: 'ok' }]),
+        checkSummary: '5 passed', blocker: 'Hook takes 2.1 s. Under 1.5 s keeps more viewers.', fix: 'Trim start',
+        format: '9:16 · 1080 × 1920 · 0:48', frame: 'width:176px;height:313px', hasCaption: true, capSize: '22px', caption: 'THE DIFF IS THE NEW FILE TREE',
+        title: 'The diff is the new file tree',
+        description: 'Full video: the IDE is not dead.\n#programming #ai',
+        cta: 'Ship to Shorts' },
+      { label: 'Clip for X', ref: 'video/end-of-the-ide+x', meta: '1:1 · X', length: '1:30', render: 'Not rendered yet',
+        diffTitle: 'cut derived from main', diffStat: '+4 −0',
+        diff: [
+          { text: '+cut "x" from="main" {', style: add },
+          { text: '+    frame aspect="1:1" reframe="layout"', style: add },
+          { text: '+    select from="00:00" to="01:30"', style: add },
+          { text: '+}', style: add }
+        ],
+        checks: base.concat([{ name: 'Captions burned in', value: 'clean' }]),
+        checkSummary: '4 passed', blocker: 'Needs a render before posting.', fix: 'Render',
+        format: '1:1 · 1080 · 1:30', frame: 'width:250px;height:250px', hasCaption: true, capSize: '18px', caption: 'half right',
+        title: 'Everyone says the IDE is dead',
+        description: 'They are half right. Full video on YouTube.',
+        cta: 'Render and post to X' }
+    ];
+  }
+  renderVals() {
+    const sel = this.state.sel;
+    return {
+      branch: this.data[sel],
+      branches: this.data.map((b, i) => ({
+        label: b.label, meta: b.meta, length: b.length,
+        rowStyle: i === sel ? 'background:#1C1F25;box-shadow:inset 0 1px 0 rgba(255,255,255,.03)' : '',
+        pick: () => this.setState({ sel: i })
+      }))
+    };
+  }
+}
+</script>
+</body>
+</html>

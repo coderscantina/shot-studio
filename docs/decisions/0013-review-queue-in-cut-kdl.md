@@ -1,6 +1,6 @@
 # 0013: The review queue lives in cut.kdl
 
-Status: Proposed
+Status: Proposed, superseded by [0019](0019-semantic-video-elements-and-style.md) once that is adopted
 
 ## Problem
 

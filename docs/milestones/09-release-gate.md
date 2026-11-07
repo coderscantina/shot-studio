@@ -6,7 +6,7 @@ Shot Studio's first release is downloadable as a signed and notarized DMG and th
 
 ## Dependencies and ownership
 
-Requires 01 to 08. Core owns `release.sh`, `.github/workflows/release.yml` and the cask. Every role fixes the failures in its modules.
+Requires 01 to 08 and 10 to 12. Core owns `release.sh`, `.github/workflows/release.yml` and the cask. Every role fixes the failures in its modules.
 
 ## Work
 

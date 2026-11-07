@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Shot Studio Script</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&amp;family=Geist+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#08090B;color:#E9ECF1;font-family:Geist,system-ui,sans-serif;font-size:15px;-webkit-font-smoothing:antialiased}
+a{color:#C8F25A}a:hover{color:#DDFB8E}
+.bar{height:50px;flex:none;display:flex;align-items:center;gap:16px;padding:0 8px;flex-wrap:wrap;user-select:none}
+.logo{width:26px;height:26px;border-radius:8px;background:#C8F25A;display:flex;align-items:center;justify-content:center}
+.chip{font-family:'Geist Mono',monospace;font-size:13px;color:#AAB2BF;padding:3px 8px;border-radius:6px;background:#15181C}
+.nav{display:flex;gap:2px;padding:3px;background:#111316;border-radius:11px}
+.nav a{color:#7F8794;text-decoration:none;padding:6px 14px;border-radius:8px;font-size:14px;font-weight:500}
+.nav a:hover{color:#E9ECF1;background:#181B20}
+.nav a.on{color:#F5F7FA;background:#23272E;box-shadow:0 1px 3px rgba(0,0,0,.45),inset 0 1px 0 rgba(255,255,255,.05)}
+.pane{background:#111316;border-radius:14px;box-sizing:border-box;min-height:0}
+.card{background:#181B20;border-radius:12px}
+.muted{color:#828A97}
+.mono{font-family:'Geist Mono',ui-monospace,monospace;font-variant-numeric:tabular-nums}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:34px;padding:0 14px;border-radius:9px;border:0;background:#1E2127;color:#E9ECF1;font:500 14px Geist,sans-serif;cursor:pointer;text-decoration:none}
+.btn:hover{background:#262A31;color:#E9ECF1}
+.acc{background:#C8F25A;color:#0A0B0D}
+.acc:hover{background:#D6F77E;color:#0A0B0D}
+.kbd{font-family:'Geist Mono',monospace;font-size:12px;padding:1px 6px;border-radius:5px;color:#A3ABB8;background:#262A31}
+.acc .kbd{background:rgba(10,11,13,.14);color:#0A0B0D}
+.lbl{font-size:13px;color:#828A97;font-weight:500;user-select:none}
+.seg{display:flex;gap:2px;padding:3px;background:#0D0E11;border-radius:10px}
+.seg button{height:28px;padding:0 12px;border:0;border-radius:7px;background:transparent;color:#7F8794;font:500 14px Geist,sans-serif;cursor:pointer}
+.seg button.on{background:#23272E;color:#F5F7FA;box-shadow:0 1px 3px rgba(0,0,0,.45)}
+.ol{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:8px;color:#C3C9D3}
+.ch{display:flex;flex-direction:column;gap:10px;padding:16px 18px;border-radius:12px;background:#15171B}
+.chh{display:flex;align-items:baseline;gap:10px}
+.beat{display:flex;gap:10px;line-height:24px;color:#D3D8E0}
+.beat:before{content:"";width:6px;height:6px;border-radius:3px;background:#3A404A;margin-top:9px;flex:none}
+.step{display:flex;align-items:center;gap:10px;font-size:14px;color:#A3ABB8}
+.ico{width:18px;height:18px;flex:none}
+.nav a{display:inline-flex;align-items:center;gap:7px}
+</style>
+</helmet>
+<div style="width:100%;height:900px;display:flex;flex-direction:column;gap:8px;padding:0 8px 8px;box-sizing:border-box;background:#08090B;overflow:hidden">
+
+<header class="bar">
+  <div style="display:flex;align-items:center;gap:10px">
+    <div class="logo"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#0A0B0D" stroke-width="2.6" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="7"></circle><circle cx="12" cy="12" r="2"></circle></svg></div>
+    <span style="font-weight:700;letter-spacing:-0.01em">Shot Studio</span>
+    <span class="muted">/</span>
+    <a href="Main.dc.html" style="color:#E9ECF1;text-decoration:none;font-weight:500">The end of the IDE</a>
+    <span class="chip">video/end-of-the-ide</span>
+  </div>
+  <nav class="nav" aria-label="Workflow" style="margin-left:auto;margin-right:auto">
+    <a href="Main.dc.html"><svg class="ico" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3 12C3 15.7497 3 17.6246 3.95491 18.9389C4.26331 19.3634 4.6366 19.7367 5.06107 20.0451C6.3754 21 8.25027 21 12 21C15.7497 21 17.6246 21 18.9389 20.0451C19.3634 19.7367 19.7367 19.3634 20.0451 18.9389C21 17.6246 21 15.7497 21 12C21 8.25027 21 6.3754 20.0451 5.06107C19.7367 4.6366 19.3634 4.26331 18.9389 3.95491C17.6246 3 15.7497 3 12 3C8.25027 3 6.3754 3 5.06107 3.95491C4.6366 4.26331 4.26331 4.6366 3.95491 5.06107C3 6.3754 3 8.25027 3 12Z" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/><path d="M12 7V11M17 7V17M7 7V14" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/></svg>Board</a>
+    <a class="on" href="Script.dc.html"><svg class="ico" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12.8809 7.01656L17.6538 8.28825M11.8578 10.8134L14.2442 11.4492M11.9765 17.9664L12.9311 18.2208C15.631 18.9401 16.981 19.2998 18.0445 18.6893C19.108 18.0787 19.4698 16.7363 20.1932 14.0516L21.2163 10.2548C21.9398 7.57005 22.3015 6.22768 21.6875 5.17016C21.0735 4.11264 19.7235 3.75295 17.0235 3.03358L16.0689 2.77924C13.369 2.05986 12.019 1.70018 10.9555 2.31074C9.89196 2.9213 9.53023 4.26367 8.80678 6.94841L7.78366 10.7452C7.0602 13.4299 6.69848 14.7723 7.3125 15.8298C7.92652 16.8874 9.27651 17.2471 11.9765 17.9664Z" stroke="currentColor" stroke-linecap="round" stroke-width="1.5"/><path d="M12 20.9462L11.0477 21.2055C8.35403 21.939 7.00722 22.3057 5.94619 21.6832C4.88517 21.0607 4.52429 19.692 3.80253 16.9546L2.78182 13.0833C2.06006 10.3459 1.69918 8.97718 2.31177 7.89892C2.84167 6.96619 4 7.00015 5.5 7.00003" stroke="currentColor" stroke-linecap="round" stroke-width="1.5"/></svg>Script</a>
+    <a href="Record.dc.html"><svg class="ico" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="8" stroke="currentColor" stroke-linejoin="round" stroke-width="1.5"/></svg>Record</a>
+    <a href="Review.dc.html"><svg class="ico" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M21 6C21 7.65685 19.6569 9 18 9C16.3431 9 15 7.65685 15 6C15 4.34315 16.3431 3 18 3C19.6569 3 21 4.34315 21 6Z" stroke="currentColor" stroke-width="1.5"/><path d="M21 18C21 19.6569 19.6569 21 18 21C16.3431 21 15 19.6569 15 18C15 16.3431 16.3431 15 18 15C19.6569 15 21 16.3431 21 18Z" stroke="currentColor" stroke-width="1.5"/><path d="M15 8L3 19" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/><path d="M15.0003 16L11 12" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/><path d="M3 5.00011L8.5 10" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/></svg>Cut</a>
+    <a href="Edit.dc.html"><svg class="ico" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M17.7001 21.3351C16.5281 21.4998 14.9996 21.4998 12.9501 21.4998H11.0501C7.01955 21.4998 5.0043 21.4998 3.75218 20.2476C2.50006 18.9955 2.50006 16.9803 2.50006 12.9498V11.0498C2.50006 7.01925 2.50006 5.00399 3.75218 3.75187C5.0043 2.49976 7.01955 2.49976 11.0501 2.49976H12.9501C16.9806 2.49976 18.9958 2.49976 20.2479 3.75187C21.5001 5.00399 21.5001 7.01925 21.5001 11.0498V12.9498C21.5001 14.158 21.5001 15.1851 21.4663 16.0648C21.4393 16.7699 21.4258 17.1224 21.1588 17.2541C20.8918 17.3859 20.5932 17.1746 19.9958 16.752L18.6501 15.7998" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/><path d="M14.9453 12.3948C14.7686 13.0215 13.9333 13.4644 12.2629 14.3502C10.648 15.2064 9.8406 15.6346 9.18992 15.4625C8.9209 15.3913 8.6758 15.2562 8.47812 15.07C8 14.6198 8 13.7465 8 12C8 10.2535 8 9.38018 8.47812 8.92995C8.6758 8.74381 8.9209 8.60868 9.18992 8.53753C9.8406 8.36544 10.648 8.79357 12.2629 9.64983C13.9333 10.5356 14.7686 10.9785 14.9453 11.6052C15.0182 11.8639 15.0182 12.1361 14.9453 12.3948Z" stroke="currentColor" stroke-linejoin="round" stroke-width="1.5"/></svg>Edit</a>
+    <a href="Ship.dc.html"><svg class="ico" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6.21875 11.618L3.31189 11.2378C2.71644 11.1606 2.31883 10.5841 2.58348 10.0458C3.42523 8.33365 5.6195 6.35437 9.73988 6.68079M6.21875 11.618C7.27445 9.85426 8.57175 8.00435 9.73988 6.68079M6.21875 11.618L11.882 17.2812M9.73988 6.68079C13.4105 2.58986 17.1745 1.728 19.5937 2.06685C20.5508 2.2009 21.2991 2.94917 21.4332 3.90626C21.772 6.32551 20.9101 10.0895 16.8192 13.7601M11.882 17.2812L12.2622 20.1881C12.3394 20.7836 12.9159 21.1812 13.4542 20.9165C15.1664 20.0748 17.1456 17.8805 16.8192 13.7601M11.882 17.2812C13.6457 16.2255 15.4956 14.9282 16.8192 13.7601" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/><path d="M17.5 8C17.5 6.89543 16.6046 6 15.5 6C14.3954 6 13.5 6.89543 13.5 8C13.5 9.10457 14.3954 10 15.5 10C16.6046 10 17.5 9.10457 17.5 8Z" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/><path d="M4 22L8 18M4 17L5.5 15.5" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/></svg>Ship</a>
+  </nav>
+  <button class="btn" type="button"><span class="muted" style="display:inline-flex;align-items:center;gap:7px"><svg class="ico" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M17 17L21 21" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/><path d="M19 11C19 6.58172 15.4183 3 11 3C6.58172 3 3 6.58172 3 11C3 15.4183 6.58172 19 11 19C15.4183 19 19 15.4183 19 11Z" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/></svg>Commands</span><span class="kbd">⌘K</span></button>
+</header>
+
+<div style="flex:1;min-height:0;display:flex;gap:8px;flex-wrap:wrap">
+
+  <aside class="pane" style="width:268px;padding:14px;display:flex;flex-direction:column;gap:18px;overflow:auto">
+    <div style="display:flex;flex-direction:column;gap:4px">
+      <div style="display:flex;justify-content:space-between;padding:0 4px 6px"><span class="lbl">Outline</span><span class="mono muted" style="font-size:13px">11:40</span></div>
+      <div class="ol"><span style="flex:1">Hook</span><span class="mono muted" style="font-size:13px">0:20</span></div>
+      <div class="ol"><span style="flex:1">Read the article</span><span class="mono muted" style="font-size:13px">4:30</span></div>
+      <div class="ol" style="background:#1B1E23;color:#F5F7FA"><span style="flex:1">My take</span><span class="mono muted" style="font-size:13px">6:10</span></div>
+      <div class="ol"><span style="flex:1">Close</span><span class="mono muted" style="font-size:13px">0:40</span></div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <span class="lbl" style="padding:0 4px">Sources</span>
+      <div class="card" style="padding:12px;display:flex;flex-direction:column;gap:3px">
+        <span style="font-weight:500">The end of the IDE</span>
+        <span class="muted" style="font-size:13px">Article · snapshot · 2,140 words</span>
+      </div>
+      <div class="card" style="padding:12px;display:flex;flex-direction:column;gap:3px">
+        <span style="font-weight:500">werkstatt PR #218</span>
+        <span class="muted" style="font-size:13px">Diff ready as code b-roll</span>
+      </div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <span class="lbl" style="padding:0 4px">Checks</span>
+      <div class="step" style="padding:0 4px"><span style="display:flex;color:#828A97"><svg class="ico" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 14L8.5 17.5L19 6.5" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/></svg></span>Hook lands in 9 s</div>
+      <div class="step" style="padding:0 4px"><span style="display:flex;color:#828A97"><svg class="ico" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 14L8.5 17.5L19 6.5" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/></svg></span>Every beat has a source</div>
+      <div style="padding:10px 12px;border-radius:10px;background:rgba(232,212,77,.08);font-size:14px;color:#E8D44D;line-height:20px">My take runs 2:10 without a visual. Add b-roll notes?</div>
+    </div>
+  </aside>
+
+  <main class="pane" style="flex:999 1 520px;min-width:0;display:flex;flex-direction:column">
+    <div style="display:flex;align-items:center;gap:12px;padding:12px 16px;flex-wrap:wrap">
+      <div class="seg"><button type="button">Full script</button><button class="on" type="button">Beats</button></div>
+      <span class="muted" style="font-size:14px">Beats for reactions, full script for tours</span>
+      <button class="btn" type="button" style="margin-left:auto"><span class="dot" style="width:7px;height:7px;border-radius:4px;background:#C8F25A"></span>Elgato Prompter</button>
+    </div>
+    <div style="flex:1;min-height:0;overflow:auto;padding:4px 16px 16px;display:flex;flex-direction:column;gap:8px">
+      <section class="ch">
+        <div class="chh"><span style="font-weight:600;font-size:17px">Hook</span><span class="muted" style="font-size:14px">Face</span><span class="mono muted" style="margin-left:auto;font-size:13px">0:20</span></div>
+        <div class="beat">Everyone says the IDE is dead. I think they are half right.</div>
+      </section>
+      <section class="ch">
+        <div class="chh"><span style="font-weight:600;font-size:17px">Read the article</span><span class="muted" style="font-size:14px">Face + content</span><span class="mono muted" style="margin-left:auto;font-size:13px">4:30</span></div>
+        <div class="beat">"Agents don't need editors": read it out, then react</div>
+        <div class="beat">Where it's right: I barely type code anymore</div>
+        <div class="beat">Where it's wrong: someone still has to read the diff</div>
+      </section>
+      <section class="ch" style="background:#181B20">
+        <div class="chh"><span style="font-weight:600;font-size:17px">My take</span><span class="muted" style="font-size:14px">Split, then content</span><span class="mono muted" style="margin-left:auto;font-size:13px">6:10</span></div>
+        <div class="beat">Demo: reviewing PR #218 in werkstatt, 40 files I didn't write</div>
+        <div style="display:flex;flex-direction:column;gap:6px;padding:12px 14px;border-radius:10px;background:#0E1013">
+          <span class="lbl">Claude suggests · tighter and closer to your voice</span>
+          <div style="color:#8C6D6A;text-decoration:line-through;text-decoration-color:#FF6B63;line-height:24px">Editors turn into review tools</div>
+          <div style="color:#DDFB8E;line-height:24px">Editors don't die. They become the place where you say no.</div>
+          <div style="display:flex;gap:8px;margin-top:4px">
+            <button class="btn acc" type="button" style="height:30px">Accept <span class="kbd">Tab</span></button>
+            <button class="btn" type="button" style="height:30px">Reject <span class="kbd">Esc</span></button>
+            <button class="btn" type="button" style="height:30px;background:transparent;color:#828A97">Another take</button>
+          </div>
+        </div>
+        <div class="beat">The diff is the new file tree</div>
+        <div class="beat" style="color:#828A97">B-roll: diff scrolling, file count ticking up<span style="display:inline-block;width:2px;height:17px;background:#C8F25A;vertical-align:-3px;margin-left:2px"></span></div>
+      </section>
+      <section class="ch" style="opacity:.6">
+        <div class="chh"><span style="font-weight:600;font-size:17px">Close</span><span class="muted" style="font-size:14px">Face</span><span class="mono muted" style="margin-left:auto;font-size:13px">0:40</span></div>
+        <div class="beat">Being written…</div>
+      </section>
+    </div>
+  </main>
+
+  <aside class="pane" style="width:392px;display:flex;flex-direction:column">
+    <div style="display:flex;align-items:center;gap:10px;padding:14px 16px">
+      <span style="font-weight:600">Script agent</span>
+      <span class="muted" style="font-size:13px">Claude · writes to script.md on this branch</span>
+    </div>
+    <div style="flex:1;min-height:0;overflow:auto;padding:0 16px 12px;display:flex;flex-direction:column;gap:14px">
+      <div style="align-self:flex-end;max-width:88%;padding:12px 14px;border-radius:12px;background:#1E2229;line-height:22px">Draft a reaction to the article. My take: editors become review tools. Under 12 minutes, punchy hook, use the werkstatt PR as the demo.</div>
+      <div style="display:flex;flex-direction:column;gap:7px;padding:2px">
+        <div class="step"><span style="display:flex;color:#828A97"><svg class="ico" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 14L8.5 17.5L19 6.5" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/></svg></span>Read the article, 2,140 words</div>
+        <div class="step"><span style="display:flex;color:#828A97"><svg class="ico" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 14L8.5 17.5L19 6.5" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/></svg></span>Picked 4 passages worth reacting to</div>
+        <div class="step"><span style="display:flex;color:#828A97"><svg class="ico" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 14L8.5 17.5L19 6.5" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/></svg></span>Read your last 6 scripts for voice and pace</div>
+        <div class="step"><span style="display:flex;color:#828A97"><svg class="ico" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 14L8.5 17.5L19 6.5" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/></svg></span>Pulled the PR #218 diff</div>
+      </div>
+      <div style="line-height:23px;color:#D3D8E0">Three chapters are drafted, about 11:40 spoken. You open strongest when you disagree first, so here are three hooks:</div>
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <button class="btn" type="button" style="height:auto;padding:11px 14px;justify-content:flex-start;text-align:left;line-height:21px;background:#22272E;box-shadow:inset 0 0 0 1px rgba(200,242,90,.45)">Everyone says the IDE is dead. I think they are half right.</button>
+        <button class="btn" type="button" style="height:auto;padding:11px 14px;justify-content:flex-start;text-align:left;line-height:21px">I haven't typed a function in a month. I still open my editor every day.</button>
+        <button class="btn" type="button" style="height:auto;padding:11px 14px;justify-content:flex-start;text-align:left;line-height:21px">This article is right about agents and wrong about you.</button>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;font-size:14px;color:#C8F25A"><span style="width:7px;height:7px;border-radius:4px;background:#C8F25A"></span>Writing the close</div>
+    </div>
+    <div style="padding:12px;display:flex;flex-direction:column;gap:8px">
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <button class="btn" type="button" style="height:28px;font-size:13px">/tighten</button>
+        <button class="btn" type="button" style="height:28px;font-size:13px">/more opinion</button>
+        <button class="btn" type="button" style="height:28px;font-size:13px">/b-roll notes</button>
+        <button class="btn" type="button" style="height:28px;font-size:13px">/fact check</button>
+      </div>
+      <label for="ask" class="lbl" style="position:absolute;left:-9999px">Ask the script agent</label>
+      <textarea id="ask" placeholder="Ask for changes, or type / for commands" style="height:64px;resize:none;border:0;border-radius:10px;background:#0D0E11;color:#E9ECF1;padding:12px;font:400 15px Geist,sans-serif;outline:none"></textarea>
+    </div>
+  </aside>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>
