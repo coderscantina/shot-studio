@@ -1,0 +1,78 @@
+name: Bug report
+description: Something isn't working as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. A report someone can reproduce without guessing saves hours. Fill in as much as you can.
+  - type: input
+    id: version
+    attributes:
+      label: Shot Studio version
+      description: The release tag you run, or the commit SHA if you built from source.
+      placeholder: "abc1234"
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area affected
+      options:
+        - Recording
+        - Preview
+        - Auto cut
+        - Auto edit and captions
+        - Export
+        - Prompter
+        - Script agent
+        - Board and git
+        - Shipping (checks, YouTube)
+        - CLI or MCP server
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: "26.1"
+    validations:
+      required: true
+  - type: input
+    id: mac-model
+    attributes:
+      label: Mac model
+      description: Model and chip, for example MacBook Pro 14-inch, M1 Pro.
+      placeholder: MacBook Pro 14-inch, M1 Pro, 32 GB
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Be specific. What did you click, record, export or run?
+      placeholder: |
+        1. Open the project ...
+        2. Press ...
+        3. See error
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or screenshots
+      description: Relevant log lines or screenshots. Do not attach real recordings or tokens. This field is rendered as code automatically.
+      render: shell
