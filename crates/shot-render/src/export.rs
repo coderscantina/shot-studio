@@ -21,15 +21,17 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
-use shot_core::{ContentHash, Id, MediaId, OutputKind, Project, Timeline};
+use shot_core::{ContentHash, Effects, Id, MediaId, OutputKind, Project, Timeline};
 use shot_media::audio::{AAC_PACKET_SAMPLES, AacEncoder, AacStream, AudioError, SAMPLE_RATE};
 use shot_media::encode::{EncodeError, EncodedFrame, EncoderSettings, HevcEncoder};
 use shot_media::mux::{self, AudioTrack, Chapter, FragmentedFile, Joiner, Movie, MuxError, Track};
 use shot_media::videotoolbox::{DecodeError, Decoder};
 
 use crate::RenderError;
+use crate::assets::{AssetError, Assets, EVENTS_FILE};
 use crate::audio::{AudioSegment, TimelineAudio, TimelineAudioError};
 use crate::cursor::FrameCursor;
+use crate::frame::{Shot, compose};
 use crate::graph::Renderer;
 use crate::layout::{Canvas, LayoutSpec, Source, Sources, UnsupportedLayout};
 use crate::plan::{ExportPlan, PlannedChunk, PlannedSegment, frame_time};
@@ -51,8 +53,8 @@ const SAMPLES_PER_FRAME: u64 = (SAMPLE_RATE / FPS) as u64;
 const SCREEN_FILE: &str = "screen.mp4";
 const CAMERA_FILE: &str = "camera.mp4";
 const MIC_FILE: &str = "mic.mp4";
-/// The tracks that chunks show. The mic is not cached.
-const VIDEO_FILES: [&str; 2] = [SCREEN_FILE, CAMERA_FILE];
+/// The files chunks draw from: the video tracks and the event log. The mic is not cached.
+const IDENTITY_FILES: [&str; 3] = [SCREEN_FILE, CAMERA_FILE, EVENTS_FILE];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExportOptions {
@@ -115,6 +117,8 @@ pub enum ExportError {
     Encode(#[from] EncodeError),
     #[error(transparent)]
     Render(#[from] RenderError),
+    #[error(transparent)]
+    Assets(#[from] AssetError),
     #[error(transparent)]
     Mux(#[from] MuxError),
     #[error("{path}: {source}")]
@@ -180,7 +184,16 @@ pub fn export(
     let rendered = jobs.iter().map(|job| job.chunks.len()).sum();
     let rendered_frames = jobs.iter().map(Job::frames).sum();
 
-    let (render_time, join_time) = run(&plan, jobs, &media, &cache, out, options, progress)?;
+    let (render_time, join_time) = run(
+        &plan,
+        jobs,
+        &media,
+        output.effects,
+        &cache,
+        out,
+        options,
+        progress,
+    )?;
     Ok(ExportReport {
         output: out.to_owned(),
         chunks: plan.segments.iter().map(|s| s.chunks.len()).sum(),
@@ -236,11 +249,11 @@ struct Media {
 }
 
 impl Media {
-    /// The size and modification time of each video track of `take`. A take recorded again
-    /// under the same id differs in both.
+    /// The size and modification time of each video track and the event log of `take`. A take
+    /// recorded again under the same id differs in both.
     fn id(&self, take: &Id) -> MediaId {
         let mut facts = Vec::new();
-        for file in VIDEO_FILES {
+        for file in IDENTITY_FILES {
             facts.extend_from_slice(file.as_bytes());
             let Ok(metadata) = fs::metadata(self.track(take, file)) else {
                 facts.push(0);
@@ -357,10 +370,12 @@ impl Pending {
 
 /// Renders `jobs` on `options.jobs` threads, encodes the audio on another and joins on a third.
 /// Returns how long rendering and audio took, and how much longer the join ran.
+#[allow(clippy::too_many_arguments)]
 fn run(
     plan: &ExportPlan,
     jobs: Vec<Job>,
     media: &Media,
+    effects: Effects,
     cache: &Cache,
     out: &Path,
     options: ExportOptions,
@@ -381,7 +396,7 @@ fn run(
             .map(|_| {
                 scope.spawn(|| {
                     pending.guard(|| {
-                        let mut worker = Worker::new()?;
+                        let mut worker = Worker::new(media, effects)?;
                         loop {
                             if pending.failed() {
                                 return Err(ExportError::Cancelled);
@@ -419,17 +434,22 @@ fn run(
     })
 }
 
-/// One render thread: its own GPU device, and decoders kept open across segments.
+/// One render thread: its own GPU device, and decoders and assets kept open across segments.
 struct Worker {
     renderer: Renderer,
     cursors: HashMap<PathBuf, FrameCursor>,
+    assets: Assets,
+    effects: Effects,
 }
 
 impl Worker {
-    fn new() -> Result<Self, ExportError> {
+    fn new(media: &Media, effects: Effects) -> Result<Self, ExportError> {
+        let video_dir = media.root.parent().unwrap_or(&media.root);
         Ok(Self {
             renderer: Renderer::new()?,
             cursors: HashMap::new(),
+            assets: Assets::new(video_dir),
+            effects,
         })
     }
 
@@ -442,7 +462,11 @@ impl Worker {
         chunk_done: &dyn Fn(ContentHash),
     ) -> Result<(), ExportError> {
         let planned = job.planned;
-        let spec = LayoutSpec::of(planned.segment.layout)?;
+        let segment = &planned.segment;
+        let spec = LayoutSpec::styled(segment.layout, &self.effects.window)?;
+        let look = self
+            .assets
+            .look(&segment.take, &segment.overlays, self.effects)?;
         let first = job.chunks[0].frames.start;
         let paths = Sources {
             screen: spec
@@ -500,10 +524,16 @@ impl Worker {
                     screen: frames.screen.map_or((1, 1), |f| size(&f.buffer)),
                     camera: frames.camera.map_or((1, 1), |f| size(&f.buffer)),
                 };
-                let scene = spec.scene(canvas, sizes, planned.zoom_at(frame, FPS));
+                let shot = Shot {
+                    layout: segment.layout,
+                    zooms: &segment.zooms,
+                    overlays: &segment.overlays,
+                    time: frame_time(frame, FPS),
+                };
+                let drawn = compose(&shot, &look, canvas, sizes)?;
                 let target = encoder.input_buffer()?;
-                self.renderer.render(
-                    &scene,
+                self.renderer.draw(
+                    &drawn,
                     Sources {
                         screen: frames.screen.map(|f| &*f.buffer),
                         camera: frames.camera.map(|f| &*f.buffer),

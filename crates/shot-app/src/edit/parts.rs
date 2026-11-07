@@ -323,6 +323,12 @@ impl EditScreen {
                         cx.listener(|this, _, _, cx| this.set_workspace(Workspace::Timeline, cx)),
                     )
                     .icon("timeline"),
+                    Segment::new(
+                        "Product",
+                        workspace == Workspace::Product,
+                        cx.listener(|this, _, _, cx| this.set_workspace(Workspace::Product, cx)),
+                    )
+                    .icon("cursor"),
                 ],
             ))
             .child(

@@ -11,9 +11,14 @@ use objc2_core_video::CVPixelBuffer;
 use objc2_metal::MTLDevice;
 use wgpu::hal::api::Metal;
 
+use std::sync::Mutex;
+
 use crate::RenderError;
+use crate::drawing::Drawing;
+use crate::frame::Frame;
 use crate::layout::{Canvas, Scene, Sources};
 use crate::surface::{Matrix, Plane, Range, plane_texture, size};
+use crate::vector::VectorPass;
 
 /// Layers one frame can draw. 04 to 07 add overlays on top of the two sources.
 const MAX_LAYERS: usize = 8;
@@ -32,6 +37,8 @@ pub struct Renderer {
     pipelines: [wgpu::RenderPipeline; 2],
     sampler: wgpu::Sampler,
     uniforms: wgpu::Buffer,
+    /// The drawing under and over the layers, see [`crate::vector`].
+    vector: Mutex<VectorPass>,
 }
 
 impl Renderer {
@@ -44,9 +51,12 @@ impl Renderer {
         let adapter =
             pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
                 .map_err(|e| RenderError::Gpu(e.to_string()))?;
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
-                .map_err(|e| RenderError::Gpu(e.to_string()))?;
+        // vello's compute stages need more than the WebGPU default limits.
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_limits: adapter.limits(),
+            ..Default::default()
+        }))
+        .map_err(|e| RenderError::Gpu(e.to_string()))?;
         // SAFETY: The backend is Metal, so the hal device is the Metal one.
         let metal = unsafe { device.as_hal::<Metal>() }
             .ok_or_else(|| RenderError::Gpu("wgpu is not on Metal".into()))?
@@ -139,6 +149,7 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let vector = Mutex::new(VectorPass::new(&device)?);
         Ok(Self {
             device,
             queue,
@@ -147,7 +158,18 @@ impl Renderer {
             pipelines,
             sampler,
             uniforms,
+            vector,
         })
+    }
+
+    /// Draws `frame`, its layers and its drawing, into `target`. See [`Self::render`].
+    pub fn draw(
+        &self,
+        frame: &Frame,
+        sources: Sources<Option<&CVPixelBuffer>>,
+        target: &CVPixelBuffer,
+    ) -> Result<(), RenderError> {
+        self.render_with(&frame.scene, &frame.drawing, sources, target)
     }
 
     /// Draws `scene` into `target` and waits for the GPU, so the target can go straight to the
@@ -155,6 +177,16 @@ impl Renderer {
     pub fn render(
         &self,
         scene: &Scene,
+        sources: Sources<Option<&CVPixelBuffer>>,
+        target: &CVPixelBuffer,
+    ) -> Result<(), RenderError> {
+        self.render_with(scene, &Drawing::default(), sources, target)
+    }
+
+    fn render_with(
+        &self,
+        scene: &Scene,
+        drawing: &Drawing,
         sources: Sources<Option<&CVPixelBuffer>>,
         target: &CVPixelBuffer,
     ) -> Result<(), RenderError> {
@@ -247,6 +279,15 @@ impl Renderer {
             });
         }
 
+        let mut vector = self.vector.lock().expect("vector pass poisoned");
+        let [under, over] = vector.prepare(
+            &self.device,
+            &self.queue,
+            drawing,
+            canvas,
+            target_range,
+            target_matrix,
+        )?;
         let background = ycbcr(scene.background, target_range, target_matrix);
         let mut encoder = self.device.create_command_encoder(&Default::default());
         for plane in Plane::BOTH {
@@ -280,10 +321,16 @@ impl Renderer {
                 })],
                 ..Default::default()
             });
+            if let Some(under) = &under {
+                vector.draw(&mut pass, plane, under);
+            }
             pass.set_pipeline(&self.pipelines[plane as usize]);
             for layer in &layers {
                 pass.set_bind_group(0, &layer.group, &[layer.offset]);
                 pass.draw(0..4, 0..1);
+            }
+            if let Some(over) = &over {
+                vector.draw(&mut pass, plane, over);
             }
         }
         self.queue.submit([encoder.finish()]);

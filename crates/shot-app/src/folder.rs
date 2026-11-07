@@ -74,7 +74,10 @@ impl VideoFolder {
     /// Writes `format` as canonical `format.kdl` and makes it the project's format.
     pub fn write_format(&mut self, format: Format) -> Result<(), String> {
         let path = self.dir.join("format.kdl");
-        fs::write(&path, format.to_kdl()).map_err(|e| format!("{}: {e}", path.display()))?;
+        let tmp = self.dir.join(".format.kdl.tmp");
+        fs::write(&tmp, format.to_kdl())
+            .and_then(|()| fs::rename(&tmp, &path))
+            .map_err(|e| format!("{}: {e}", path.display()))?;
         self.project.format = format;
         Ok(())
     }

@@ -12,6 +12,9 @@ shot-core = { path = "../shot-core" }
 thiserror = { workspace = true }
 vello = { workspace = true }
 parley = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+git2 = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 shot-media = { path = "../shot-media" }

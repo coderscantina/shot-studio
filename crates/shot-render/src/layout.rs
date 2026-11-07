@@ -8,11 +8,17 @@
 //! | `content` | fills the canvas | not shown |
 //! | `face-content` | fills the canvas | 864x486 inset, 72 px from the bottom right corner, 36 px corners |
 //! | `split` | 2560x1440 panel on the left | 1080x1440 panel on the right, 48 px gap, both 32 px corners, centered |
+//! | `window` | the captured window, 16:9, inside the style's padding and device frame | not shown |
 //!
 //! Sources are scaled to cover their slot and cropped around the center. A zoom punches in on the
-//! layout's primary slot: the camera in `face`, the screen everywhere else.
+//! layout's primary slot: the camera in `face`, the screen everywhere else. On the screen it
+//! centers on the zoom's point, as far as the slot's crop allows.
+//!
+//! Capture does not record window bounds yet, so `window` shows the whole screen as the window.
 
-use shot_core::Layout;
+use shot_core::{DeviceFrame, Effects, Layout, WindowStyle};
+
+use crate::zoom::Punch;
 
 /// The size of the output in pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,12 +98,24 @@ impl Rect {
 
     /// Shrinks the rectangle around its center by `factor`.
     fn shrunk(self, factor: f32) -> Self {
-        let (cx, cy) = (
+        let center = [
             (self.left + self.right) / 2.0,
             (self.top + self.bottom) / 2.0,
-        );
+        ];
+        self.shrunk_at(factor, center)
+    }
+
+    /// Shrinks the rectangle by `factor` around `center`, moved as little as needed to stay
+    /// inside the rectangle.
+    fn shrunk_at(self, factor: f32, center: [f32; 2]) -> Self {
         let (hw, hh) = (self.width() / 2.0 / factor, self.height() / 2.0 / factor);
+        let cx = center[0].clamp(self.left + hw, self.right - hw);
+        let cy = center[1].clamp(self.top + hh, self.bottom - hh);
         Self::new(cx - hw, cy - hh, cx + hw, cy + hh)
+    }
+
+    pub fn contains(self, point: [f32; 2]) -> bool {
+        (self.left..=self.right).contains(&point[0]) && (self.top..=self.bottom).contains(&point[1])
     }
 }
 
@@ -117,6 +135,8 @@ pub struct LayoutSpec {
     pub slots: Vec<Slot>,
     /// The slot a zoom punches in on.
     pub primary: usize,
+    /// The window layout's style, which draws a background, shadow and device frame.
+    pub window: Option<WindowStyle>,
 }
 
 /// A layout the renderer does not draw yet.
@@ -128,7 +148,13 @@ const DESIGN_WIDTH: f32 = 3840.0;
 const FULL: Rect = Rect::new(0.0, 0.0, 3840.0, 2160.0);
 
 impl LayoutSpec {
+    /// The layout as drawn with the default window style.
     pub fn of(layout: Layout) -> Result<Self, UnsupportedLayout> {
+        Self::styled(layout, &Effects::default().window)
+    }
+
+    /// The layout, with `window` placing the captured window in the `window` layout.
+    pub fn styled(layout: Layout, window: &WindowStyle) -> Result<Self, UnsupportedLayout> {
         let slot = |source, frame, radius| Slot {
             source,
             frame,
@@ -138,10 +164,12 @@ impl LayoutSpec {
             Layout::Face => Self {
                 slots: vec![slot(Source::Camera, FULL, 0.0)],
                 primary: 0,
+                window: None,
             },
             Layout::Content => Self {
                 slots: vec![slot(Source::Screen, FULL, 0.0)],
                 primary: 0,
+                window: None,
             },
             Layout::FaceContent => Self {
                 slots: vec![
@@ -153,6 +181,7 @@ impl LayoutSpec {
                     ),
                 ],
                 primary: 0,
+                window: None,
             },
             Layout::Split => Self {
                 slots: vec![
@@ -164,8 +193,18 @@ impl LayoutSpec {
                     ),
                 ],
                 primary: 0,
+                window: None,
             },
-            Layout::Screen | Layout::FaceCorner | Layout::Window => {
+            Layout::Window => Self {
+                slots: vec![slot(
+                    Source::Screen,
+                    window_frame(window),
+                    f32::from(window.corners),
+                )],
+                primary: 0,
+                window: Some(*window),
+            },
+            Layout::Screen | Layout::FaceCorner => {
                 return Err(UnsupportedLayout(layout));
             }
         };
@@ -178,8 +217,8 @@ impl LayoutSpec {
     }
 
     /// The scene of one frame: slots scaled to the canvas, each source cropped to cover its slot,
-    /// and the primary slot punched in by `zoom` (1.0 for none).
-    pub fn scene(&self, canvas: Canvas, sizes: Sources<(u32, u32)>, zoom: f32) -> Scene {
+    /// and the primary slot punched in by `punch`. The camera ignores the punch's center.
+    pub fn scene(&self, canvas: Canvas, sizes: Sources<(u32, u32)>, punch: Punch) -> Scene {
         let scale = canvas.width as f32 / DESIGN_WIDTH;
         let layers = self
             .slots
@@ -189,8 +228,17 @@ impl LayoutSpec {
                 let frame = slot.frame.scaled(scale);
                 let (width, height) = *sizes.get(slot.source);
                 let mut crop = cover(frame, width as f32 / height as f32);
-                if index == self.primary && zoom > 1.0 {
-                    crop = crop.shrunk(zoom);
+                if index == self.primary && punch.scale > 1.0 {
+                    crop = match slot.source {
+                        Source::Camera => crop.shrunk(punch.scale),
+                        Source::Screen => {
+                            let at = [
+                                punch.center[0] / width as f32,
+                                punch.center[1] / height as f32,
+                            ];
+                            crop.shrunk_at(punch.scale, at)
+                        }
+                    };
                 }
                 Layer {
                     source: slot.source,
@@ -201,10 +249,50 @@ impl LayoutSpec {
             })
             .collect();
         Scene {
-            background: BACKGROUND,
+            background: self.window.map_or(BACKGROUND, |w| srgb(w.background.0)),
             layers,
         }
     }
+}
+
+/// Where the window goes on the design canvas: 16:9, as large as the padding and the device
+/// frame's bezel allow, centered.
+fn window_frame(style: &WindowStyle) -> Rect {
+    let padding = f32::from(style.padding);
+    let bezel = bezel(style.frame);
+    let room = Rect::new(
+        padding + bezel.left,
+        padding + bezel.top,
+        DESIGN_WIDTH - padding - bezel.right,
+        FULL.bottom - padding - bezel.bottom,
+    );
+    let width = room.width().min(room.height() * 16.0 / 9.0);
+    let height = width * 9.0 / 16.0;
+    let (cx, cy) = (
+        (room.left + room.right) / 2.0,
+        (room.top + room.bottom) / 2.0,
+    );
+    Rect::new(
+        cx - width / 2.0,
+        cy - height / 2.0,
+        cx + width / 2.0,
+        cy + height / 2.0,
+    )
+}
+
+/// The bezel a device frame draws around the window on each side, in design canvas pixels.
+pub fn bezel(frame: DeviceFrame) -> Rect {
+    match frame {
+        DeviceFrame::None => Rect::new(0.0, 0.0, 0.0, 0.0),
+        // A laptop lid, with the wider base below it.
+        DeviceFrame::Macbook => Rect::new(96.0, 56.0, 96.0, 96.0),
+        DeviceFrame::Iphone => Rect::new(110.0, 60.0, 110.0, 60.0),
+    }
+}
+
+/// Gamma-encoded RGB of an sRGB color.
+pub fn srgb(rgb: [u8; 3]) -> [f32; 3] {
+    rgb.map(|c| f32::from(c) / 255.0)
 }
 
 /// The canvas behind the slots, a near black with a hint of blue.
@@ -251,6 +339,14 @@ mod tests {
         screen: (3840, 2160),
         camera: (1920, 1080),
     };
+    const NONE: Punch = Punch {
+        scale: 1.0,
+        center: [1920.0, 1080.0],
+    };
+
+    fn centered(scale: f32) -> Punch {
+        Punch { scale, ..NONE }
+    }
 
     fn assert_close(a: Rect, b: Rect) {
         let pairs = [
@@ -267,7 +363,7 @@ mod tests {
     #[test]
     fn face_and_content_fill_the_canvas_with_one_source() {
         let face = LayoutSpec::of(Layout::Face).unwrap();
-        let scene = face.scene(Canvas::UHD, SIZES, 1.0);
+        let scene = face.scene(Canvas::UHD, SIZES, NONE);
         assert_eq!(scene.layers.len(), 1);
         assert_eq!(scene.layers[0].source, Source::Camera);
         assert_close(scene.layers[0].frame, FULL);
@@ -276,7 +372,7 @@ mod tests {
 
         let content = LayoutSpec::of(Layout::Content).unwrap();
         assert_eq!(
-            content.scene(Canvas::UHD, SIZES, 1.0).layers[0].source,
+            content.scene(Canvas::UHD, SIZES, NONE).layers[0].source,
             Source::Screen
         );
     }
@@ -288,7 +384,7 @@ mod tests {
             width: 1920,
             height: 1080,
         };
-        let scene = split.scene(half, SIZES, 1.0);
+        let scene = split.scene(half, SIZES, NONE);
         let (screen, camera) = (scene.layers[0], scene.layers[1]);
         assert_close(screen.frame, Rect::new(38.0, 180.0, 1318.0, 900.0));
         assert_close(screen.crop, Rect::UNIT);
@@ -304,20 +400,60 @@ mod tests {
     #[test]
     fn zoom_punches_in_on_the_primary_slot_only() {
         let face_content = LayoutSpec::of(Layout::FaceContent).unwrap();
-        let scene = face_content.scene(Canvas::UHD, SIZES, 1.25);
+        let scene = face_content.scene(Canvas::UHD, SIZES, centered(1.25));
         assert_close(scene.layers[0].crop, Rect::new(0.1, 0.1, 0.9, 0.9));
         assert_close(scene.layers[1].crop, Rect::UNIT);
 
         let face = LayoutSpec::of(Layout::Face).unwrap();
-        let scene = face.scene(Canvas::UHD, SIZES, 2.0);
+        let scene = face.scene(Canvas::UHD, SIZES, centered(2.0));
         assert_close(scene.layers[0].crop, Rect::new(0.25, 0.25, 0.75, 0.75));
     }
 
     #[test]
-    fn layouts_after_03_are_refused() {
+    fn a_centered_zoom_stays_inside_the_source() {
+        let content = LayoutSpec::of(Layout::Content).unwrap();
+        let at = |center| {
+            content
+                .scene(Canvas::UHD, SIZES, Punch { scale: 2.0, center })
+                .layers[0]
+                .crop
+        };
+        assert_close(at([960.0, 540.0]), Rect::new(0.0, 0.0, 0.5, 0.5));
+        // A point near the right edge moves the crop only as far as the edge.
+        assert_close(at([3800.0, 1080.0]), Rect::new(0.5, 0.25, 1.0, 0.75));
+    }
+
+    #[test]
+    fn the_window_sits_inside_padding_and_bezel_on_its_background() {
+        let style = WindowStyle {
+            padding: 64,
+            ..Effects::default().window
+        };
+        let spec = LayoutSpec::styled(Layout::Window, &style).unwrap();
+        let scene = spec.scene(Canvas::UHD, SIZES, NONE);
+        assert_eq!(scene.background, srgb(style.background.0));
+        // 2032 px of height is left, so the 16:9 window is 3612.4 px wide, centered.
+        let frame = scene.layers[0].frame;
+        assert_close(
+            frame,
+            Rect::new(1920.0 - 1806.2222, 64.0, 1920.0 + 1806.2222, 2096.0),
+        );
+        let framed = LayoutSpec::styled(
+            Layout::Window,
+            &WindowStyle {
+                frame: DeviceFrame::Macbook,
+                ..style
+            },
+        )
+        .unwrap();
+        assert!(framed.slots[0].frame.bottom < 2160.0 - 64.0 - 96.0 + 0.01);
+    }
+
+    #[test]
+    fn layouts_after_06_are_refused() {
         assert_eq!(
-            LayoutSpec::of(Layout::Window),
-            Err(UnsupportedLayout(Layout::Window))
+            LayoutSpec::of(Layout::Screen),
+            Err(UnsupportedLayout(Layout::Screen))
         );
     }
 }

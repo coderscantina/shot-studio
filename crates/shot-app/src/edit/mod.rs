@@ -6,6 +6,7 @@
 
 mod parts;
 mod picture;
+mod product;
 mod text;
 mod timeline;
 
@@ -88,6 +89,8 @@ pub enum Workspace {
     Text,
     Picture,
     Timeline,
+    /// The Product demo screen, where product tours open.
+    Product,
 }
 
 /// A frame picked at a render is on screen about one refresh later, so it is picked for the
@@ -138,6 +141,7 @@ pub struct EditScreen {
     scroll: ScrollHandle,
     /// Where the overview bar and the lanes were last painted, for mouse mapping.
     overview_bounds: Rc<Cell<Bounds<Pixels>>>,
+    product: product::ProductState,
 }
 
 impl EditScreen {
@@ -147,9 +151,15 @@ impl EditScreen {
             cx.notify();
         })
         .detach();
+        let product_tour =
+            folder.read(cx).project.video.format == shot_core::FormatKind::ProductTour;
         let mut this = Self {
             folder,
-            workspace: Workspace::Text,
+            workspace: if product_tour {
+                Workspace::Product
+            } else {
+                Workspace::Text
+            },
             view: View::Edited,
             map: EditMap {
                 spans: Vec::new(),
@@ -175,6 +185,7 @@ impl EditScreen {
             focus: cx.focus_handle(),
             scroll: ScrollHandle::new(),
             overview_bounds: Rc::default(),
+            product: product::ProductState::default(),
         };
         this.rebuild(cx);
         this
@@ -207,6 +218,7 @@ impl EditScreen {
             Plan {
                 map: self.map.clone(),
                 media,
+                effects: project.format.effects(),
             },
             frame,
         );
@@ -564,6 +576,7 @@ impl Render for EditScreen {
             Workspace::Text => text::render(self, window, cx).into_any_element(),
             Workspace::Picture => picture::render(self, window, cx).into_any_element(),
             Workspace::Timeline => timeline::render(self, window, cx).into_any_element(),
+            Workspace::Product => product::render(self, window, cx).into_any_element(),
         };
         div()
             .id("edit")

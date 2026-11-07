@@ -18,6 +18,8 @@ use shot_mcp::text;
 
 #[cfg(target_os = "macos")]
 mod export;
+#[cfg(target_os = "macos")]
+mod product;
 
 #[derive(Parser)]
 #[command(name = "shot", version, about = "Shot Studio from the terminal")]
@@ -62,6 +64,12 @@ enum Command {
     /// Render a video's cut to an MP4, reusing cached segments.
     #[cfg(target_os = "macos")]
     Export(export::ExportArgs),
+    /// Write zooms on clicks, typing or the resting cursor, per format.kdl's auto-zoom rule.
+    #[cfg(target_os = "macos")]
+    Autozoom(product::AutoZoomArgs),
+    /// Snapshot a commit range into sources/ and type it out as a code-diff overlay.
+    #[cfg(target_os = "macos")]
+    CodeDiff(product::CodeDiffArgs),
     /// Run the MCP server on stdio.
     Mcp,
     /// Download or list the analysis models.
@@ -129,6 +137,14 @@ fn run(cli: Cli) -> Result<(), String> {
     if let Command::Export(args) = cli.command {
         return export::run(args);
     }
+    #[cfg(target_os = "macos")]
+    if let Command::Autozoom(args) = cli.command {
+        return product::auto_zoom(args);
+    }
+    #[cfg(target_os = "macos")]
+    if let Command::CodeDiff(args) = cli.command {
+        return product::code_diff(args);
+    }
 
     if let Command::Record(args) = cli.command {
         return record::run(args);
@@ -192,7 +208,9 @@ fn run(cli: Cli) -> Result<(), String> {
             unreachable!("handled before opening the board")
         }
         #[cfg(target_os = "macos")]
-        Command::Export(_) => unreachable!("handled before opening the board"),
+        Command::Export(_) | Command::Autozoom(_) | Command::CodeDiff(_) => {
+            unreachable!("handled before opening the board")
+        }
     }
     Ok(())
 }
