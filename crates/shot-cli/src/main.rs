@@ -1,7 +1,9 @@
-//! `shot`: the channel board and the MCP server from the terminal.
+//! `shot`: the channel board, recording and the MCP server from the terminal.
 //!
 //! Every subcommand is one call into `shot-board`. The words come from `shot_mcp::text`, so the
 //! CLI and the MCP tools print the same thing.
+
+mod record;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -50,6 +52,8 @@ enum Command {
         #[command(subcommand)]
         action: ProposalAction,
     },
+    /// Record a take into a video folder.
+    Record(record::RecordArgs),
     /// Run the MCP server on stdio.
     Mcp,
 }
@@ -100,6 +104,10 @@ fn run(cli: Cli) -> Result<(), String> {
             .map_err(|e| e.to_string())?
             .block_on(shot_mcp::serve_stdio(cli.repo))
             .map_err(|e| e.to_string());
+    }
+
+    if let Command::Record(args) = cli.command {
+        return record::run(args);
     }
 
     let board = Board::open(&cli.repo)
@@ -156,7 +164,7 @@ fn run(cli: Cli) -> Result<(), String> {
             board.reject_proposal(&slug, &name).map_err(fail)?;
             println!("rejected {slug}/{name}");
         }
-        Command::Mcp => unreachable!("handled before opening the board"),
+        Command::Mcp | Command::Record(_) => unreachable!("handled before opening the board"),
     }
     Ok(())
 }
