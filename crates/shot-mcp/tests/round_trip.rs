@@ -4,6 +4,7 @@ use git2::{IndexAddOption, Repository, RepositoryInitOptions};
 use rmcp::model::{CallToolRequestParams, ClientConfig};
 use rmcp::{ClientHandler, ServiceExt};
 use serde_json::json;
+use shot_core::{Id, Micros, TimeRange, Transcript, Word};
 use shot_mcp::ShotServer;
 use tempfile::TempDir;
 
@@ -99,12 +100,21 @@ async fn lists_the_tools_and_leaves_review_to_the_human() {
         names,
         [
             "activity",
+            "caption_fixes",
             "create_proposal",
+            "describe",
             "list_proposals",
             "list_videos",
             "move_card",
             "proposal_diff",
+            "propose_cut",
+            "propose_review",
+            "propose_script",
+            "read_transcript",
             "read_video",
+            "review_queue",
+            "script_checks",
+            "thumbnail_frames",
         ]
     );
 }
@@ -175,6 +185,163 @@ async fn failures_are_tool_errors_with_the_reason() {
     assert!(error && text.contains("videos/broken/video.kdl:2:"));
     let (error, text) = call(&client, "read_video", json!({ "slug": "../x" })).await;
     assert!(error && text.contains("not a valid name"));
+}
+
+/// Adds a recorded video `beta` with a cut, a review item and a cached transcript.
+fn with_recording(dir: &Path) {
+    let folder = dir.join("videos/beta");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(
+        folder.join("video.kdl"),
+        "title \"Beta\"\nstatus editing\nformat opinion\n",
+    )
+    .unwrap();
+    std::fs::write(
+        folder.join("script.md"),
+        "# Beta\n\n## Hook\n\n- We ship on fridays\n",
+    )
+    .unwrap();
+    std::fs::write(
+        folder.join("format.kdl"),
+        shot_core::FormatKind::Opinion.preset_source(),
+    )
+    .unwrap();
+    std::fs::write(
+        folder.join("cut.kdl"),
+        "chapter \"Hook\" {\n    take t01 {\n        keep from=0 to=6_000_000\n        review from=1_000_000 to=2_000_000 by=filler\n    }\n}\n",
+    )
+    .unwrap();
+    let mut transcript = Transcript::new(Id::new("t01").unwrap());
+    for (i, text) in ["so", "um", "we", "ship", "on", "fridays"]
+        .iter()
+        .enumerate()
+    {
+        let from = i as u64 * 1_000_000;
+        transcript
+            .push(Word {
+                text: (*text).to_owned(),
+                range: TimeRange::new(Micros(from), Micros(from + 800_000)).unwrap(),
+                confidence: if *text == "fridays" { 30 } else { 90 },
+            })
+            .unwrap();
+    }
+    shot_analyze::cache::write_cached(&folder, &transcript).unwrap();
+    let repo = Repository::open(dir).unwrap();
+    let mut index = repo.index().unwrap();
+    index
+        .add_all(["videos"], IndexAddOption::DEFAULT, None)
+        .unwrap();
+    index.write().unwrap();
+    let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+    let sig = repo.signature().unwrap();
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.commit(Some("HEAD"), &sig, &sig, "beta", &tree, &[&head])
+        .unwrap();
+}
+
+#[tokio::test]
+async fn an_agent_reads_a_transcript_and_proposes_a_cut_of_recorded_words() {
+    let dir = channel();
+    with_recording(dir.path());
+    let client = connect(dir.path()).await;
+
+    let (error, text) = call(&client, "read_transcript", json!({ "slug": "beta" })).await;
+    assert!(!error, "{text}");
+    assert_eq!(
+        text,
+        "## chapter 1 \"Hook\", take t01\n0:00.0 w0 so um we ship on fridays\n\n"
+    );
+
+    let (error, text) = call(
+        &client,
+        "propose_cut",
+        json!({
+            "slug": "beta", "name": "no-filler", "subject": "✂️ cut the um",
+            "remove": [{ "take": "t01", "from_word": 1, "to_word": 1 }],
+        }),
+    )
+    .await;
+    assert!(!error, "{text}");
+    assert!(text.contains("removes t01 w1-w1 \"um\" (0.8 s)"));
+    let (_, diff) = call(
+        &client,
+        "proposal_diff",
+        json!({ "slug": "beta", "name": "no-filler" }),
+    )
+    .await;
+    assert!(
+        diff.contains("+        remove from=1_000_000 to=1_800_000 by=manual"),
+        "{diff}"
+    );
+
+    let (_, queue) = call(&client, "review_queue", json!({ "slug": "beta" })).await;
+    assert_eq!(queue, "#1  t01  filler  1.0 s  \"um\"\n");
+    let (error, _) = call(
+        &client,
+        "propose_review",
+        json!({ "slug": "beta", "name": "keep-um", "subject": "keep it",
+                "decisions": [{ "item": 1, "decision": "keep" }] }),
+    )
+    .await;
+    assert!(!error);
+
+    let (_, fixes) = call(&client, "caption_fixes", json!({ "slug": "beta" })).await;
+    assert!(fixes.contains("\"fridays\" at 0:05"), "{fixes}");
+}
+
+#[tokio::test]
+async fn scripts_are_checked_and_proposed_only_when_they_parse() {
+    let dir = channel();
+    with_recording(dir.path());
+    let client = connect(dir.path()).await;
+
+    let (_, checks) = call(&client, "script_checks", json!({ "slug": "beta" })).await;
+    assert!(checks.contains("a beat in Hook has no source"), "{checks}");
+    let (error, text) = call(
+        &client,
+        "propose_script",
+        json!({ "slug": "beta", "name": "hook-a", "subject": "a hook", "script": "## no title\n" }),
+    )
+    .await;
+    assert!(error && text.contains("script.md does not parse"));
+    let (error, _) = call(
+        &client,
+        "propose_script",
+        json!({ "slug": "beta", "name": "hook-a", "subject": "a hook",
+                "script": "# Beta\n\n## Hook\n\n- Fridays are fine [post](sources/a.md)\n" }),
+    )
+    .await;
+    assert!(!error);
+}
+
+#[tokio::test]
+async fn frame_tasks_refuse_unless_the_person_started_one() {
+    let dir = channel();
+    with_recording(dir.path());
+    let client = connect(dir.path()).await;
+    let (error, text) = call(&client, "thumbnail_frames", json!({ "slug": "beta" })).await;
+    assert!(error && text.contains("frame task"), "{text}");
+
+    let stills = dir.path().join("videos/beta/.shot/cache/thumbnails");
+    std::fs::create_dir_all(&stills).unwrap();
+    std::fs::write(stills.join("t01-2000.png"), b"\x89PNG").unwrap();
+    let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+    let server = ShotServer::new(dir.path().to_path_buf()).with_frame_task(true);
+    tokio::spawn(async move {
+        if let Ok(running) = server.serve(server_io).await {
+            let _ = running.waiting().await;
+        }
+    });
+    let started = Client.serve(client_io).await.unwrap();
+    let result = started
+        .call_tool(
+            CallToolRequestParams::new("thumbnail_frames")
+                .with_arguments(json!({ "slug": "beta" }).as_object().unwrap().clone()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.is_error, Some(false));
+    assert!(result.content.iter().any(|c| c.as_image().is_some()));
 }
 
 /// Needs `SHOT_FIXTURES=<dir> scripts/fixtures.sh demo`; run with `-- --ignored`.

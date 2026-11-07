@@ -3,6 +3,7 @@
 //! Every board subcommand is one call into `shot-board`. The words come from `shot_mcp::text`, so the
 //! CLI and the MCP tools print the same thing.
 
+mod agent;
 mod autocut;
 mod caption_fix;
 mod models;
@@ -26,6 +27,8 @@ mod export;
 mod overlays;
 #[cfg(target_os = "macos")]
 mod product;
+#[cfg(target_os = "macos")]
+mod ship;
 
 #[derive(Parser)]
 #[command(name = "shot", version, about = "Shot Studio from the terminal")]
@@ -83,7 +86,18 @@ enum Command {
     #[cfg(target_os = "macos")]
     Derived(derived::DerivedArgs),
     /// Run the MCP server on stdio.
-    Mcp,
+    Mcp(agent::McpArgs),
+    /// Ask Claude through the local Claude Code CLI, with the MCP server attached.
+    Agent(agent::AgentArgs),
+    /// Check a cut before it ships. Prints only problems.
+    #[cfg(target_os = "macos")]
+    Check(ship::CheckArgs),
+    /// Find thumbnail candidates by expression strength, or pick one.
+    #[cfg(target_os = "macos")]
+    Thumbnails(ship::ThumbnailsArgs),
+    /// Draft the title and description with chapters at their first spoken word.
+    #[cfg(target_os = "macos")]
+    Describe(ship::DescribeArgs),
     /// Download or list the analysis models.
     Models {
         #[command(subcommand)]
@@ -143,13 +157,18 @@ fn run(cli: Cli) -> Result<(), String> {
         Command::CaptionFix(args) => return caption_fix::run(args),
         _ => {}
     }
-    if let Command::Mcp = cli.command {
-        return tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| e.to_string())?
-            .block_on(shot_mcp::serve_stdio(cli.repo))
-            .map_err(|e| e.to_string());
+    if let Command::Mcp(args) = cli.command {
+        return agent::mcp(cli.repo, args);
+    }
+    if let Command::Agent(args) = cli.command {
+        return agent::run(&cli.repo, args);
+    }
+    #[cfg(target_os = "macos")]
+    match cli.command {
+        Command::Check(args) => return ship::check(args),
+        Command::Thumbnails(args) => return ship::thumbnails(args),
+        Command::Describe(args) => return ship::describe(args),
+        _ => {}
     }
     #[cfg(target_os = "macos")]
     if let Command::Export(args) = cli.command {
@@ -230,7 +249,8 @@ fn run(cli: Cli) -> Result<(), String> {
             board.reject_proposal(&slug, &name).map_err(fail)?;
             println!("rejected {slug}/{name}");
         }
-        Command::Mcp
+        Command::Mcp(_)
+        | Command::Agent(_)
         | Command::Record(_)
         | Command::Models { .. }
         | Command::Transcribe(_)
@@ -243,7 +263,10 @@ fn run(cli: Cli) -> Result<(), String> {
         | Command::Autozoom(_)
         | Command::CodeDiff(_)
         | Command::Overlays(_)
-        | Command::Derived(_) => {
+        | Command::Derived(_)
+        | Command::Check(_)
+        | Command::Thumbnails(_)
+        | Command::Describe(_) => {
             unreachable!("handled before opening the board")
         }
     }
@@ -353,5 +376,6 @@ mod tests {
         assert!(parse(&["proposal", "accept", "alpha", "tighter-intro"]).is_ok());
         assert!(parse(&["proposal", "reject", "alpha"]).is_err());
         assert!(parse(&["mcp"]).is_ok());
+        assert!(parse(&["mcp", "--log", "/tmp/x", "--frame-task"]).is_ok());
     }
 }

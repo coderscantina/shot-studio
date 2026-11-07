@@ -1,4 +1,5 @@
-//! The app window for one video folder: the title bar with the Record, Cut and Edit screens.
+//! The app window for one video folder: the title bar with the Record, Cut and Edit screens, and
+//! the Board and Script screens when the folder is a video of a channel repo.
 
 use std::path::Path;
 
@@ -8,15 +9,19 @@ use gpui::{
 };
 use gpui_component::Root;
 
+use crate::board::BoardScreen;
 use crate::cut::{self, ContinueToEdit, CutScreen};
 use crate::edit::{self, EditScreen};
 use crate::folder::VideoFolder;
 use crate::record::{self, RecordScreen, Recorded};
+use crate::script::{self, ScriptScreen};
 use crate::theme::*;
 use crate::ui::icon;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Screen {
+    Board,
+    Script,
     Record,
     Cut,
     Edit,
@@ -28,6 +33,8 @@ pub struct Studio {
     record: Entity<RecordScreen>,
     cut: Entity<CutScreen>,
     edit: Entity<EditScreen>,
+    /// Present when the video folder sits in a channel repo, `<repo>/videos/<slug>`.
+    planning: Option<(Entity<BoardScreen>, Entity<ScriptScreen>)>,
     _recorded: Subscription,
     _continue: Subscription,
 }
@@ -38,6 +45,7 @@ pub fn open(dir: &Path, cx: &mut App) -> Result<(), String> {
     edit::bind_keys(cx);
     record::bind_keys(cx);
     cut::bind_keys(cx);
+    script::bind_keys(cx);
     let bounds = Bounds::centered(None, size(px(1600.), px(1000.)), cx);
     cx.open_window(
         WindowOptions {
@@ -79,12 +87,21 @@ impl Studio {
                 this.show(Screen::Edit, window, cx);
             });
         window.focus(&edit.focus_handle(cx), cx);
+        let planning = channel(&folder.read(cx).dir).map(|(repo, slug)| {
+            let full_script =
+                folder.read(cx).project.format.prompter == shot_core::PrompterMode::FullScript;
+            (
+                cx.new(|cx| BoardScreen::new(repo.clone(), slug.clone(), cx)),
+                cx.new(|cx| ScriptScreen::new(repo, slug, full_script, window, cx)),
+            )
+        });
         Self {
             folder,
             screen: Screen::Edit,
             record,
             cut,
             edit,
+            planning,
             _recorded: recorded,
             _continue: continue_to_edit,
         }
@@ -93,6 +110,17 @@ impl Studio {
     fn show(&mut self, screen: Screen, window: &mut Window, cx: &mut Context<Self>) {
         self.screen = screen;
         match screen {
+            Screen::Board | Screen::Script => {
+                if let Some((board, script)) = &self.planning {
+                    board.update(cx, |board, _| board.reload());
+                    script.update(cx, |script, _| script.reload());
+                    let focus = match screen {
+                        Screen::Board => board.focus_handle(cx),
+                        _ => script.focus_handle(cx),
+                    };
+                    window.focus(&focus, cx);
+                }
+            }
             Screen::Record => window.focus(&self.record.focus_handle(cx), cx),
             Screen::Cut => window.focus(&self.cut.focus_handle(cx), cx),
             Screen::Edit => window.focus(&self.edit.focus_handle(cx), cx),
@@ -133,7 +161,7 @@ impl Studio {
                         .child("Recording")
                 })
                 .into_any_element(),
-            Screen::Cut => div().into_any_element(),
+            Screen::Cut | Screen::Board | Screen::Script => div().into_any_element(),
         };
         let nav =
             |id: &'static str, name: &'static str, icon_name: &'static str, screen: Screen| {
@@ -190,6 +218,10 @@ impl Studio {
                 div()
                     .flex()
                     .gap(px(2.))
+                    .when(self.planning.is_some(), |this| {
+                        this.child(nav("nav-board", "Board", "board", Screen::Board))
+                            .child(nav("nav-script", "Script", "script", Screen::Script))
+                    })
                     .child(nav("nav-record", "Record", "record", Screen::Record))
                     .child(nav("nav-cut", "Cut", "cut", Screen::Cut))
                     .child(nav("nav-edit", "Edit", "edit", Screen::Edit)),
@@ -208,10 +240,13 @@ impl Studio {
 
 impl Render for Studio {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let screen = match self.screen {
-            Screen::Record => self.record.clone().into_any_element(),
-            Screen::Cut => self.cut.clone().into_any_element(),
-            Screen::Edit => self.edit.clone().into_any_element(),
+        let screen = match (self.screen, &self.planning) {
+            (Screen::Board, Some((board, _))) => board.clone().into_any_element(),
+            (Screen::Script, Some((_, script))) => script.clone().into_any_element(),
+            (Screen::Board | Screen::Script, None) => div().into_any_element(),
+            (Screen::Record, _) => self.record.clone().into_any_element(),
+            (Screen::Cut, _) => self.cut.clone().into_any_element(),
+            (Screen::Edit, _) => self.edit.clone().into_any_element(),
         };
         div()
             .size_full()
@@ -224,4 +259,18 @@ impl Render for Studio {
             .child(self.title_bar(cx))
             .child(div().flex_1().min_h_0().flex().flex_col().child(screen))
     }
+}
+
+/// The channel repo and slug of a video folder at `<repo>/videos/<slug>`, if the repo opens as
+/// a board.
+fn channel(dir: &Path) -> Option<(std::path::PathBuf, String)> {
+    let dir = std::path::absolute(dir).ok()?;
+    let slug = dir.file_name()?.to_str()?.to_owned();
+    let videos = dir.parent()?;
+    if videos.file_name()? != "videos" {
+        return None;
+    }
+    let repo = videos.parent()?.to_owned();
+    shot_board::Board::open(&repo).ok()?;
+    Some((repo, slug))
 }

@@ -62,6 +62,19 @@ pub const BLOCK: Rgba = hex(0x2a303b);
 pub const BLOCK_ON: Rgba = hex(0x3a404b);
 pub const WAVE: Rgba = hex(0x3c4352);
 pub const SELECTION: Rgba = hexa(0xc8f25a, 0.18);
+/// Format dots on board cards.
+pub const FORMAT_REACTION: Rgba = hex(0xff9b6a);
+pub const FORMAT_OPINION: Rgba = hex(0xb69cff);
+pub const FORMAT_PRODUCT: Rgba = hex(0x5aa9ff);
+pub const FORMAT_TUTORIAL: Rgba = hex(0xe8d44d);
+/// A check that needs a look, such as a script stretch without a visual.
+pub const WARN: Rgba = hex(0xe8d44d);
+pub const WARN_TINT: Rgba = hexa(0xe8d44d, 0.08);
+/// Words a proposal inserts, and the words it strikes.
+pub const INSERTED: Rgba = hex(0xddfb8e);
+pub const STRUCK: Rgba = hex(0x8c6d6a);
+/// Board columns and proposal cards, sunk below cards.
+pub const SUNK: Rgba = hex(0x0d0e11);
 
 pub const RADIUS_LG: Pixels = px(14.);
 pub const RADIUS_MD: Pixels = px(10.);
@@ -96,6 +109,7 @@ macro_rules! embedded {
 
 embedded!(
     "alert",
+    "board",
     "camera",
     "check",
     "chevron-down",
@@ -111,6 +125,7 @@ embedded!(
     "play",
     "record",
     "restore",
+    "script",
     "system-audio",
     "text",
     "timeline",

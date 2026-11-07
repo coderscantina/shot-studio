@@ -13,7 +13,9 @@
 //! - `--zoom`: start with the 2x punch-in, a wgpu pass on every frame.
 //! - `--wall-clock`: pace by wall clock alone instead of locking to the display, for comparison.
 
+mod agent;
 mod bench;
+mod board;
 mod cut;
 mod edit;
 mod engine;
@@ -24,6 +26,7 @@ mod peaks;
 mod preview;
 mod prompter;
 mod record;
+mod script;
 mod sound;
 mod studio;
 mod theme;
