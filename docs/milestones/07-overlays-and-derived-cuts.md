@@ -15,7 +15,7 @@ Requires 04, and 05 for the `B` and `Z` markers. Media owns vello templates in `
 3. Highlights matched to the phrase you react to, using OCR on the source.
 4. B-roll from sources, git diffs, screen recordings and a library, covering idle stretches over 8 s and every `B` marker.
 5. Bleep and blur from the transcript.
-6. Derived cuts in `cut.kdl`: Shorts at 9:16 reframed on the face with Apple Vision, 1:1 X clip, burned-in captions. Shorts picks go through Claude as text.
+6. Derived cuts in `cut.kdl`: Shorts at 9:16 reframed on the face with Apple Vision, 1:1 X clip, burned-in captions. Milestone 04 computes caption timing and the highlighted word and writes the WebVTT sidecar; drawing them into the frame belongs here, on the vello text pass milestone 06 added. Shorts picks go through Claude as text.
 
 ## Acceptance criteria
 

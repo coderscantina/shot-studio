@@ -13,7 +13,7 @@ Shot Studio is a macOS desktop app for recording and editing developer videos: r
 - CLI: `shot`. MCP server: `shot` (stdio)
 - Repo: `github.com/coderscantina/shot-studio`
 - Bundle id: `com.coderscantina.shotstudio`
-- Mockup: [Shot Studio canvas](https://claude.ai/artifact/P6kQUAKTd96uCBaHTURQsa), 7 linked screens (private until shared)
+- Mockup: [docs/mockup](mockup/README.md), 9 linked screens copied from the [Shot Studio canvas](https://claude.ai/artifact/P6kQUAKTd96uCBaHTURQsa) (private until shared)
 - Background research: Christoph Rumpel's self-built editor "Creditor" (Laravel, React, OBS, Remotion, FFmpeg). Its 17 min 4K export took 34 min at first and 14 min after tuning. ScreenFlow takes about 5 min for the same video, which is the baseline to beat.
 
 ### The bar
@@ -151,7 +151,7 @@ Rust edition 2024, `rust-version = "1.99"`, Cargo resolver 3, shared dependencie
 | Overlays | vello + parley, typed templates with parameters and keyframes | Replaces Remotion without Node. Agents fill a template spec instead of writing code |
 | Transcription | `whisper-rs` large-v3-turbo with Metal, streaming with local agreement, DTW word timestamps, whisper.cpp's Silero VAD to skip silence. Parakeet via `ort` as the faster option | Local and free. Separate tracks make speaker detection unnecessary |
 | Analysis | Silero VAD (the same whisper.cpp ggml model), transcript similarity for retakes, frame diffs for idle screen, Apple Vision for faces | Auto cut, reframing, thumbnails |
-| Audio | DeepFilterNet, biquad EQ and compressor, sidechain ducking, `ebur128` | Built-in voice chain |
+| Audio | Spectral noise filter (DeepFilterNet's Rust crates are unmaintained or pull in a full ONNX runtime), biquad EQ and compressor, sidechain ducking, `ebur128` | Built-in voice chain |
 | Storage | Project folder in git, SQLite via sqlx in `.shot/cache` for peaks, thumbnails, transcripts and render cache | Delete the cache and nothing is lost |
 | Export | Parallel chapter renders, hardware encode, stream-copy concat, segments cached by content hash | Incremental builds |
 | AI | The local `claude` CLI, run headless with the `shot` MCP server attached | No API key in the app. See [0003](decisions/0003-claude-through-local-cli.md) |

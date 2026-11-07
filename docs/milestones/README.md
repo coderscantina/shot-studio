@@ -9,7 +9,7 @@ Mark a milestone complete only after its acceptance criteria pass and an evidenc
 | 01 | [Contracts, fixtures and workspace](01-contracts-and-fixtures.md) | None | Core | Done locally, CI run waits for the GitHub repo. [Evidence](../evidence/m01-contracts-and-fixtures.md) |
 | 02 | [Preview spike](02-preview-spike.md) | 01 | Media, App | Complete, GO by Mike on 2026-11-07. [Evidence](../evidence/m02-preview-spike.md) |
 | 03 | [A usable opinion video](03-opinion-video.md) | 01, 02 | All roles | Complete on `milestone/03`. [Evidence](../evidence/m03-opinion-video.md) |
-| 04 | [Auto cut and finish](04-auto-cut-and-finish.md) | 03 | Analysis, Media | Not started |
+| 04 | [Auto cut and finish](04-auto-cut-and-finish.md) | 03 | Analysis, Media | Complete on `milestone/04-06`. Burned-in caption drawing moved to 07. [Evidence](../evidence/m04-auto-cut-and-finish.md) |
 | 05 | [Record comfort](05-record-comfort.md) | 03 | Analysis, App | Built on `milestone/04-06`, the beam splitter check waits for Mike. [Evidence](../evidence/m05-record-comfort.md) |
 | 06 | [Product videos](06-product-videos.md) | 03 | Media, App | Complete on `milestone/04-06`. [Evidence](../evidence/m06-product-videos.md) |
 | 07 | [Overlays and derived cuts](07-overlays-and-derived-cuts.md) | 04, 05 | Media, Core | Not started |
@@ -43,6 +43,9 @@ Waiting for Mike. One line each with a recommendation and a link to its record. 
 Found by agents and waiting for a task. Remove a line when it's fixed.
 
 - Record does not warn when the camera delivers black frames.
+- The inline retake toast exists in the prompter but nothing calls it: the live retake rule should call `PrompterPane::live().caught(...)`.
+- `PcmReader` in `shot-media` does not expose its length, so the music bed detects the end by looking for 10 s of digital silence.
+- Filler learning only uses Keeps from the current video, not the channel. N markers (next beat) are not used by any rule yet.
 - A `code-diff` chunk's hash covers the snapshot's path, not its content, so rewriting a snapshot in place reuses stale chunks.
 - Capture records no window bounds, so the `window` layout styles the whole screen.
 - Auto zoom may end a zoom shorter than the format's `hold` to keep the cursor in view. The contract calls `hold` a minimum; settle which wins.
