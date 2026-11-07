@@ -4406,6 +4406,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-core-ml"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "201b055e6acfa0f9f15568255d3f03ce2b54bc86d1814442dc69138e36813e18"
+dependencies = [
+ "objc2 0.6.5",
+ "objc2-foundation 0.3.2",
+]
+
+[[package]]
 name = "objc2-core-services"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4643,6 +4653,25 @@ dependencies = [
  "objc2-core-video",
  "objc2-foundation 0.3.2",
  "objc2-metal 0.3.2",
+]
+
+[[package]]
+name = "objc2-vision"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bfc194758a2d5d7540b1ad283bfb9ca318ec608991892326e95b428230b2689b"
+dependencies = [
+ "block2 0.6.2",
+ "objc2 0.6.5",
+ "objc2-av-foundation",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-core-image 0.3.2",
+ "objc2-core-media",
+ "objc2-core-ml",
+ "objc2-core-video",
+ "objc2-foundation 0.3.2",
+ "objc2-image-io",
 ]
 
 [[package]]
@@ -6273,11 +6302,14 @@ dependencies = [
  "serde",
  "serde_json",
  "shot-analyze",
+ "shot-board",
  "shot-capture",
  "shot-core",
+ "shot-mcp",
  "shot-media",
  "shot-prompter",
  "shot-render",
+ "shot-ship",
  "tempfile",
  "wgpu",
 ]
@@ -6338,6 +6370,7 @@ dependencies = [
  "shot-core",
  "shot-mcp",
  "shot-render",
+ "shot-ship",
  "tokio",
 ]
 
@@ -6353,13 +6386,17 @@ dependencies = [
 name = "shot-mcp"
 version = "26.11.7"
 dependencies = [
+ "base64 0.22.1",
  "git2",
  "rmcp",
  "serde",
  "serde_json",
+ "shot-analyze",
  "shot-board",
  "shot-core",
+ "shot-ship",
  "tempfile",
+ "thiserror 2.0.21",
  "tokio",
 ]
 
@@ -6421,6 +6458,19 @@ dependencies = [
 [[package]]
 name = "shot-ship"
 version = "26.11.7"
+dependencies = [
+ "objc2 0.6.5",
+ "objc2-core-foundation",
+ "objc2-core-video",
+ "objc2-foundation 0.3.2",
+ "objc2-vision",
+ "png 0.18.1",
+ "shot-analyze",
+ "shot-audio",
+ "shot-core",
+ "shot-media",
+ "thiserror 2.0.21",
+]
 
 [[package]]
 name = "signal-hook-registry"
