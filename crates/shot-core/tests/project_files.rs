@@ -1,6 +1,7 @@
 use shot_core::{
-    CaptionStyle, Cut, DerivedKind, Format, FormatKind, Id, Layout, Micros, OutputKind, Project,
-    RangeEdit, Script, TakeAt, TimeRange, Timeline, Transcript, Video, Word,
+    CaptionStyle, ContentHash, Cut, DerivedKind, Format, FormatKind, Id, Layout, MediaId, Micros,
+    Output, OutputKind, Project, RangeEdit, Script, Segment, TakeAt, TimeRange, Timeline,
+    Transcript, Video, Word,
 };
 
 const VIDEO: &str = include_str!("../../../fixtures/examples/video.kdl");
@@ -16,6 +17,22 @@ fn project() -> Project {
         format: Format::parse(FORMAT).unwrap(),
         cut: Cut::parse(CUT).unwrap(),
     }
+}
+
+/// The cache key of a whole segment at 60 fps.
+fn key(output: &Output, segment: &Segment, media: MediaId) -> ContentHash {
+    let frame = |t: Micros| t.0 * 60 / 1_000_000;
+    let frames = frame(segment.source.from())..frame(segment.source.to());
+    output.chunk_hash(segment, media, 60, frames)
+}
+
+fn chapter_keys(timeline: &Timeline, chapter: usize) -> Vec<ContentHash> {
+    let main = timeline.main();
+    main.chapters[chapter]
+        .segments
+        .iter()
+        .map(|s| key(main, s, MediaId::default()))
+        .collect()
 }
 
 /// The contract shows the fixture examples verbatim, so the documented examples are the tested ones.
@@ -86,16 +103,20 @@ fn changing_one_chapter_changes_only_its_hashes() {
     project.cut.chapters[1].takes[0].ranges[1] = RangeEdit::Keep(range);
     let after = Timeline::evaluate(&project);
 
-    let hashes = |t: &Timeline, chapter: usize| -> Vec<_> {
-        t.main().chapters[chapter]
-            .segments
-            .iter()
-            .map(|s| s.hash)
-            .collect()
-    };
-    assert_eq!(hashes(&before, 0), hashes(&after, 0));
-    assert_ne!(hashes(&before, 1), hashes(&after, 1));
-    assert_eq!(hashes(&before, 2), hashes(&after, 2));
+    assert_eq!(chapter_keys(&before, 0), chapter_keys(&after, 0));
+    assert_ne!(chapter_keys(&before, 1), chapter_keys(&after, 1));
+    assert_eq!(chapter_keys(&before, 2), chapter_keys(&after, 2));
+}
+
+#[test]
+fn a_take_recorded_again_under_its_old_id_gets_new_keys() {
+    let timeline = Timeline::evaluate(&project());
+    let main = timeline.main();
+    let segment = &main.chapters[0].segments[0];
+    let old = MediaId::of(b"screen.mp4 1000 bytes, modified at 1");
+    let new = MediaId::of(b"screen.mp4 1200 bytes, modified at 2");
+    assert_eq!(key(main, segment, old), key(main, segment, old));
+    assert_ne!(key(main, segment, old), key(main, segment, new));
 }
 
 #[test]
@@ -124,7 +145,11 @@ fn derived_cut_selects_main_material() {
 
     let main_hook = &timeline.main().chapters[0].segments[1];
     assert_eq!(main_hook.source, short.chapters[0].segments[0].source);
-    assert_ne!(main_hook.hash, short.chapters[0].segments[0].hash);
+    let media = MediaId::default();
+    assert_ne!(
+        key(timeline.main(), main_hook, media),
+        key(short, &short.chapters[0].segments[0], media)
+    );
 
     let x_clip = &timeline.outputs[2];
     assert_eq!(x_clip.captions, CaptionStyle::Clean);
@@ -193,14 +218,7 @@ fn deleting_words_changes_only_the_hashes_of_its_chapter() {
         .unwrap();
     let after = Timeline::evaluate(&project);
 
-    let hashes = |t: &Timeline, chapter: usize| -> Vec<_> {
-        t.main().chapters[chapter]
-            .segments
-            .iter()
-            .map(|s| s.hash)
-            .collect()
-    };
-    assert_eq!(hashes(&before, 0), hashes(&after, 0));
-    assert_ne!(hashes(&before, 1), hashes(&after, 1));
-    assert_eq!(hashes(&before, 2), hashes(&after, 2));
+    assert_eq!(chapter_keys(&before, 0), chapter_keys(&after, 0));
+    assert_ne!(chapter_keys(&before, 1), chapter_keys(&after, 1));
+    assert_eq!(chapter_keys(&before, 2), chapter_keys(&after, 2));
 }

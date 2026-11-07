@@ -25,7 +25,7 @@ pub use format::{
 };
 pub use script::{Beat, Script, ScriptChapter};
 pub use timeline::{
-    ChapterSegments, ContentHash, Output, OutputKind, RENDERER_VERSION, Segment, Timeline,
+    ChapterSegments, ContentHash, MediaId, Output, OutputKind, RENDERER_VERSION, Segment, Timeline,
 };
 pub use transcript::{Transcript, Word};
 pub use values::{Id, Micros, TimeRange};

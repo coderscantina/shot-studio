@@ -1,10 +1,11 @@
 use std::fmt;
+use std::ops::Range;
 
 use crate::cut::{DerivedCut, LayoutChange, Overlay, ParamValue, RangeEdit, TakeEdit, Zoom};
 use crate::{CaptionStyle, DerivedKind, Id, Layout, Micros, Project, TimeRange};
 
-/// Bumped whenever the renderer's output changes for the same input, so cached segments expire.
-pub const RENDERER_VERSION: u32 = 1;
+/// Bumped whenever the renderer's output changes for the same input, so cached chunks expire.
+pub const RENDERER_VERSION: u32 = 2;
 
 /// The evaluated project: the main cut followed by each derived cut, in file order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,7 +51,7 @@ pub struct ChapterSegments {
     pub segments: Vec<Segment>,
 }
 
-/// A stretch of output from one take with one layout, the unit of render caching.
+/// A stretch of output from one take with one layout.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Segment {
     pub take: Id,
@@ -59,10 +60,23 @@ pub struct Segment {
     /// Zooms and overlays that overlap the segment, with their full ranges.
     pub zooms: Vec<Zoom>,
     pub overlays: Vec<Overlay>,
-    pub hash: ContentHash,
 }
 
-/// A BLAKE3 hash over everything that affects a segment's pixels and samples.
+/// Identifies the recorded files of a take. Take ids can be reused after the newest take is
+/// deleted, so cache keys hash this too and a take recorded again never matches the old
+/// recording's chunks. The IO side computes it, for example from file sizes and modification
+/// times.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct MediaId([u8; 32]);
+
+impl MediaId {
+    /// The id of a take whose files are described by `facts`.
+    pub fn of(facts: &[u8]) -> Self {
+        Self(*blake3::hash(facts).as_bytes())
+    }
+}
+
+/// A BLAKE3 hash over everything that affects a chunk's pixels.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ContentHash([u8; 32]);
 
@@ -102,7 +116,6 @@ impl Timeline {
                         .takes
                         .iter()
                         .flat_map(|take| take_segments(take, default_layout))
-                        .map(|parts| parts.finish(OutputKind::Main, captions))
                         .collect(),
                 })
                 .collect(),
@@ -123,16 +136,73 @@ impl Timeline {
     }
 }
 
-/// A segment before hashing.
-struct Parts {
-    take: Id,
-    source: TimeRange,
-    layout: Layout,
-    zooms: Vec<Zoom>,
-    overlays: Vec<Overlay>,
+impl Output {
+    /// The cache key of `frames` of `segment`, counted at `fps` from the start of its take: a
+    /// hash over everything those frames show. It covers the renderer version, the output
+    /// aspect, the burned-in caption style, the take and its media, the frames, the layout, and
+    /// the zooms (cut to the frames) and overlays (whole, with their parameters) that overlap
+    /// them. The output position is not part of it, so a chunk stays valid when an edit before
+    /// it moves it.
+    pub fn chunk_hash(
+        &self,
+        segment: &Segment,
+        media: MediaId,
+        fps: u32,
+        frames: Range<u64>,
+    ) -> ContentHash {
+        let time = |frame: u64| Micros(frame * 1_000_000 / u64::from(fps));
+        let span = TimeRange::new(time(frames.start), time(frames.end));
+        let mut h = HashInput(blake3::Hasher::new());
+        h.u64(RENDERER_VERSION.into());
+        let (w, hh) = self.kind.aspect();
+        h.u64(w.into());
+        h.u64(hh.into());
+        h.str(if self.kind.burns_captions() {
+            self.captions.as_str()
+        } else {
+            "sidecar"
+        });
+        h.str(segment.take.as_str());
+        h.0.update(&media.0);
+        h.u64(fps.into());
+        h.u64(frames.start);
+        h.u64(frames.end);
+        h.str(segment.layout.as_str());
+        let zooms: Vec<(u16, TimeRange)> = segment
+            .zooms
+            .iter()
+            .filter_map(|zoom| Some((zoom.scale, zoom.range.intersect(span?)?)))
+            .collect();
+        h.u64(zooms.len() as u64);
+        for (scale, range) in zooms {
+            h.u64(scale.into());
+            h.range(range);
+        }
+        let overlays: Vec<&Overlay> = segment
+            .overlays
+            .iter()
+            .filter(|o| span.is_some_and(|span| o.range.overlaps(span)))
+            .collect();
+        h.u64(overlays.len() as u64);
+        for overlay in overlays {
+            h.str(overlay.template.as_str());
+            h.range(overlay.range);
+            h.u64(overlay.params.len() as u64);
+            for (name, value) in &overlay.params {
+                h.str(name.as_str());
+                match value {
+                    ParamValue::Text(s) => h.tagged(0, s.as_bytes()),
+                    ParamValue::Integer(n) => h.tagged(1, &n.to_le_bytes()),
+                    ParamValue::Bool(b) => h.tagged(2, &[u8::from(*b)]),
+                }
+            }
+        }
+        ContentHash(*h.0.finalize().as_bytes())
+    }
 }
 
-impl Parts {
+impl Segment {
+    /// `zooms` and `overlays` are the take's, cut down to the ones overlapping `source`.
     fn new(
         take: &Id,
         source: TimeRange,
@@ -156,53 +226,10 @@ impl Parts {
                 .collect(),
         }
     }
-
-    fn finish(self, kind: OutputKind, captions: CaptionStyle) -> Segment {
-        let mut h = HashInput(blake3::Hasher::new());
-        h.u64(RENDERER_VERSION.into());
-        let (w, hh) = kind.aspect();
-        h.u64(w.into());
-        h.u64(hh.into());
-        h.str(if kind.burns_captions() {
-            captions.as_str()
-        } else {
-            "sidecar"
-        });
-        h.str(self.take.as_str());
-        h.range(self.source);
-        h.str(self.layout.as_str());
-        h.u64(self.zooms.len() as u64);
-        for zoom in &self.zooms {
-            h.u64(zoom.scale.into());
-            h.range(zoom.range);
-        }
-        h.u64(self.overlays.len() as u64);
-        for overlay in &self.overlays {
-            h.str(overlay.template.as_str());
-            h.range(overlay.range);
-            h.u64(overlay.params.len() as u64);
-            for (name, value) in &overlay.params {
-                h.str(name.as_str());
-                match value {
-                    ParamValue::Text(s) => h.tagged(0, s.as_bytes()),
-                    ParamValue::Integer(n) => h.tagged(1, &n.to_le_bytes()),
-                    ParamValue::Bool(b) => h.tagged(2, &[u8::from(*b)]),
-                }
-            }
-        }
-        Segment {
-            take: self.take,
-            source: self.source,
-            layout: self.layout,
-            zooms: self.zooms,
-            overlays: self.overlays,
-            hash: ContentHash(*h.0.finalize().as_bytes()),
-        }
-    }
 }
 
 /// Kept ranges of one take, split wherever the layout changes.
-fn take_segments(take: &TakeEdit, default_layout: Layout) -> impl Iterator<Item = Parts> + '_ {
+fn take_segments(take: &TakeEdit, default_layout: Layout) -> impl Iterator<Item = Segment> + '_ {
     take.ranges
         .iter()
         .filter_map(|edit| match edit {
@@ -224,7 +251,7 @@ fn take_segments(take: &TakeEdit, default_layout: Layout) -> impl Iterator<Item 
                 .filter_map(|w| TimeRange::new(w[0], w[1]))
                 .map(|source| {
                     let layout = layout_at(&take.layouts, source.from()).unwrap_or(default_layout);
-                    Parts::new(&take.take, source, layout, &take.zooms, &take.overlays)
+                    Segment::new(&take.take, source, layout, &take.zooms, &take.overlays)
                 })
                 .collect::<Vec<_>>()
         })
@@ -251,10 +278,13 @@ fn derive(main: &Output, cut: &DerivedCut, main_captions: CaptionStyle) -> Outpu
                 .filter(move |s| s.take == clip.take)
                 .filter_map(move |s| {
                     let source = s.source.intersect(clip.range)?;
-                    Some(
-                        Parts::new(&s.take, source, s.layout, &s.zooms, &s.overlays)
-                            .finish(kind, captions),
-                    )
+                    Some(Segment::new(
+                        &s.take,
+                        source,
+                        s.layout,
+                        &s.zooms,
+                        &s.overlays,
+                    ))
                 })
         })
         .collect();

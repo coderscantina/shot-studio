@@ -8,6 +8,7 @@
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
+use std::time::Duration;
 
 /// One sample in a track run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -402,6 +403,221 @@ impl FragmentedFile {
     }
 }
 
+/// Presentation times and sync flags of the first video track's samples, in decode order, read
+/// from the `moov` and `moof` headers of any fragmented MP4 without touching sample data.
+///
+/// `None` when the file has samples outside fragments, no video track, or an edit list other
+/// than one plain edit, so the caller reads the samples instead.
+pub fn video_sample_times(path: &Path) -> io::Result<Option<Vec<(Duration, bool)>>> {
+    let mut file = BufReader::new(File::open(path)?);
+    let length = file.get_ref().metadata()?.len();
+    let mut track: Option<SampleTrack> = None;
+    let mut samples = Vec::new();
+    let mut decode_time = 0;
+    let mut offset = 0;
+    while offset < length {
+        let mut header = [0; 8];
+        file.read_exact(&mut header)?;
+        let kind: [u8; 4] = header[4..].try_into().expect("4 bytes");
+        let (size, header_size) = match u32::from_be_bytes(header[..4].try_into().expect("4 bytes"))
+        {
+            0 => (length - offset, 8),
+            1 => {
+                let mut large = [0; 8];
+                file.read_exact(&mut large)?;
+                (u64::from_be_bytes(large), 16)
+            }
+            size => (u64::from(size), 8),
+        };
+        if size < header_size || offset + size > length {
+            return Ok(None);
+        }
+        let body_size = size - header_size;
+        match &kind {
+            b"moov" | b"moof" => {
+                let mut body = vec![0; body_size as usize];
+                file.read_exact(&mut body)?;
+                if &kind == b"moov" {
+                    track = SampleTrack::of(&body);
+                    if track.is_none() {
+                        return Ok(None);
+                    }
+                } else {
+                    let Some(track) = &track else {
+                        return Ok(None);
+                    };
+                    if track
+                        .read_moof(&body, &mut decode_time, &mut samples)
+                        .is_none()
+                    {
+                        return Ok(None);
+                    }
+                }
+            }
+            _ => file.seek_relative(body_size as i64)?,
+        }
+        offset += size;
+    }
+    Ok(track.filter(|_| !samples.is_empty()).map(|_| samples))
+}
+
+/// What reading a video track's fragments needs from the `moov`.
+struct SampleTrack {
+    id: u32,
+    timescale: u32,
+    /// Media time of the first presented sample, from the edit list.
+    start: i64,
+    default_duration: u32,
+    default_flags: u32,
+}
+
+/// The `sample_is_non_sync_sample` bit of ISO/IEC 14496-12 sample flags.
+const NON_SYNC: u32 = 0x0001_0000;
+
+impl SampleTrack {
+    fn of(moov: &[u8]) -> Option<Self> {
+        let trak = children(moov, 0, moov.len())?
+            .into_iter()
+            .filter(|(kind, _, _)| kind == b"trak")
+            .find(|&(_, start, end)| {
+                path_in(moov, start, end, &[b"mdia", b"hdlr"])
+                    .and_then(|(hdlr, _)| moov.get(hdlr + 8..hdlr + 12))
+                    == Some(b"vide")
+            })?;
+        let (_, start, end) = trak;
+        let (tkhd, _) = child(moov, start, end, b"tkhd")?;
+        let id = be32(moov, tkhd + if *moov.get(tkhd)? == 1 { 20 } else { 12 })?;
+        let (mdhd, _) = path_in(moov, start, end, &[b"mdia", b"mdhd"])?;
+        let timescale = be32(moov, mdhd + if *moov.get(mdhd)? == 1 { 20 } else { 12 })?;
+        let (stsz, _) = path_in(moov, start, end, &[b"mdia", b"minf", b"stbl", b"stsz"])?;
+        if be32(moov, stsz + 8)? != 0 || timescale == 0 {
+            return None;
+        }
+        let start = match path_in(moov, start, end, &[b"edts", b"elst"]) {
+            None => 0,
+            Some((elst, _)) => {
+                if be32(moov, elst + 4)? != 1 {
+                    return None;
+                }
+                let (media_time, rate) = if *moov.get(elst)? == 1 {
+                    (be64(moov, elst + 16)? as i64, be32(moov, elst + 24)?)
+                } else {
+                    (
+                        i64::from(be32(moov, elst + 12)? as i32),
+                        be32(moov, elst + 16)?,
+                    )
+                };
+                if media_time < 0 || rate != 0x0001_0000 {
+                    return None;
+                }
+                media_time
+            }
+        };
+        let trex = path(moov, &[b"mvex"]).and_then(|(mvex, mvex_end)| {
+            children(moov, mvex, mvex_end)?
+                .into_iter()
+                .filter(|(kind, _, _)| kind == b"trex")
+                .find(|&(_, at, _)| be32(moov, at + 4) == Some(id))
+        });
+        let (default_duration, default_flags) = match trex {
+            Some((_, at, _)) => (be32(moov, at + 12)?, be32(moov, at + 20)?),
+            None => (0, 0),
+        };
+        Some(Self {
+            id,
+            timescale,
+            start,
+            default_duration,
+            default_flags,
+        })
+    }
+
+    /// Appends the samples of this track in one `moof` body. `decode_time` carries on from the
+    /// previous fragment when a `traf` has no `tfdt`.
+    fn read_moof(
+        &self,
+        moof: &[u8],
+        decode_time: &mut u64,
+        samples: &mut Vec<(Duration, bool)>,
+    ) -> Option<()> {
+        for (kind, start, end) in children(moof, 0, moof.len())? {
+            if &kind != b"traf" {
+                continue;
+            }
+            let (tfhd, _) = child(moof, start, end, b"tfhd")?;
+            let flags = be32(moof, tfhd)? & 0xff_ffff;
+            if be32(moof, tfhd + 4)? != self.id {
+                continue;
+            }
+            // Optional fields in order: base data offset, sample description index, duration,
+            // size, flags.
+            let mut at = tfhd + 8;
+            let mut field = |bit: u32, bytes: usize| {
+                let value = (flags & bit != 0).then(|| be32(moof, at + bytes - 4));
+                if flags & bit != 0 {
+                    at += bytes;
+                }
+                value
+            };
+            field(0x01, 8);
+            field(0x02, 4);
+            let default_duration = field(0x08, 4).unwrap_or(Some(self.default_duration))?;
+            field(0x10, 4);
+            let default_flags = field(0x20, 4).unwrap_or(Some(self.default_flags))?;
+            if let Some((tfdt, _)) = child(moof, start, end, b"tfdt") {
+                *decode_time = if *moof.get(tfdt)? == 1 {
+                    be64(moof, tfdt + 4)?
+                } else {
+                    u64::from(be32(moof, tfdt + 4)?)
+                };
+            }
+            for (kind, trun, _) in children(moof, start, end)? {
+                if &kind != b"trun" {
+                    continue;
+                }
+                let version = *moof.get(trun)?;
+                let flags = be32(moof, trun)? & 0xff_ffff;
+                let count = be32(moof, trun + 4)?;
+                let mut at = trun + 8 + if flags & 0x01 != 0 { 4 } else { 0 };
+                let first_flags = (flags & 0x04 != 0).then(|| be32(moof, at));
+                if first_flags.is_some() {
+                    at += 4;
+                }
+                for i in 0..count {
+                    let mut next = |bit: u32| {
+                        let value = (flags & bit != 0).then(|| be32(moof, at));
+                        if flags & bit != 0 {
+                            at += 4;
+                        }
+                        value
+                    };
+                    let duration = next(0x100).unwrap_or(Some(default_duration))?;
+                    next(0x200);
+                    let sample_flags = match (next(0x400), first_flags) {
+                        (Some(flags), _) => flags?,
+                        (None, Some(first)) if i == 0 => first?,
+                        (None, _) => default_flags,
+                    };
+                    let offset = match next(0x800) {
+                        Some(offset) if version == 0 => i64::from(offset?),
+                        Some(offset) => i64::from(offset? as i32),
+                        None => 0,
+                    };
+                    let pts = *decode_time as i64 + offset - self.start;
+                    let pts = u64::try_from(pts).unwrap_or(0);
+                    let nanos = u128::from(pts) * 1_000_000_000 / u128::from(self.timescale);
+                    samples.push((
+                        Duration::from_nanos(nanos as u64),
+                        sample_flags & NON_SYNC == 0,
+                    ));
+                    *decode_time += u64::from(duration);
+                }
+            }
+        }
+        Some(())
+    }
+}
+
 /// Copies fragments from fragmented files into one output, renumbering them and shifting their
 /// decode times, so the output has one init segment and continuous timestamps.
 pub struct Joiner<W: Write> {
@@ -548,11 +764,14 @@ fn child(data: &[u8], start: usize, end: usize, kind: &[u8; 4]) -> Option<(usize
 }
 
 fn path(data: &[u8], kinds: &[&[u8; 4]]) -> Option<(usize, usize)> {
-    kinds
-        .iter()
-        .try_fold((0, data.len()), |(start, end), kind| {
-            child(data, start, end, kind)
-        })
+    path_in(data, 0, data.len(), kinds)
+}
+
+/// Like [`path`], from inside the box body `start..end`.
+fn path_in(data: &[u8], start: usize, end: usize, kinds: &[&[u8; 4]]) -> Option<(usize, usize)> {
+    kinds.iter().try_fold((start, end), |(start, end), kind| {
+        child(data, start, end, kind)
+    })
 }
 
 fn be32(data: &[u8], at: usize) -> Option<u32> {
@@ -670,6 +889,24 @@ mod tests {
             .collect();
         assert_eq!(times, [(0, 3000), (3000, 2000)]);
         assert_eq!(file.duration(), 5000);
+    }
+
+    #[test]
+    fn sample_times_come_from_the_fragment_headers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.mp4");
+        segment(&path, &[(0, b"abc"), (3000, b"de")]);
+        let at = |ticks: u64| Duration::from_nanos(ticks * 1_000_000_000 / 60_000);
+        assert_eq!(
+            video_sample_times(&path).unwrap().unwrap(),
+            [
+                (at(0), true),
+                (at(1000), false),
+                (at(2000), false),
+                (at(3000), true),
+                (at(4000), false),
+            ]
+        );
     }
 
     #[test]

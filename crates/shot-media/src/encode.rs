@@ -29,7 +29,8 @@ use objc2_video_toolbox::{
     kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality,
     kVTCompressionPropertyKey_ProfileLevel, kVTCompressionPropertyKey_Quality,
     kVTCompressionPropertyKey_RealTime, kVTCompressionPropertyKey_TransferFunction,
-    kVTCompressionPropertyKey_YCbCrMatrix, kVTProfileLevel_HEVC_Main_AutoLevel,
+    kVTCompressionPropertyKey_YCbCrMatrix, kVTEncodeFrameOptionKey_ForceKeyFrame,
+    kVTProfileLevel_HEVC_Main_AutoLevel,
     kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder,
 };
 
@@ -167,6 +168,15 @@ impl HevcEncoder {
 
     /// Submits the next frame. Blocks while too many frames are in flight.
     pub fn encode(&mut self, buffer: &CVPixelBuffer) -> Result<(), EncodeError> {
+        self.submit(buffer, false)
+    }
+
+    /// Like [`Self::encode`], and the frame becomes a keyframe, so the stream can be cut before it.
+    pub fn encode_keyframe(&mut self, buffer: &CVPixelBuffer) -> Result<(), EncodeError> {
+        self.submit(buffer, true)
+    }
+
+    fn submit(&mut self, buffer: &CVPixelBuffer, keyframe: bool) -> Result<(), EncodeError> {
         {
             let mut outputs = self.shared.lock();
             while outputs.pending >= MAX_IN_FLIGHT {
@@ -181,14 +191,22 @@ impl HevcEncoder {
         let pts = unsafe { CMTime::new(self.submitted as i64, self.fps) };
         let duration = unsafe { CMTime::new(1, self.fps) };
         let image: &CVImageBuffer = buffer;
-        // SAFETY: The buffer comes from this session's pool, and the session copies the handler
-        // block for each frame.
+        let force: &CFType = CFBoolean::new(true);
+        // SAFETY: A constant CF string defined by the framework.
+        let properties = keyframe.then(|| {
+            CFDictionary::<CFString, CFType>::from_slices(
+                &[unsafe { kVTEncodeFrameOptionKey_ForceKeyFrame }],
+                &[force],
+            )
+        });
+        // SAFETY: The buffer comes from this session's pool, the frame properties map a
+        // documented key to a CFBoolean, and the session copies the handler block for each frame.
         let status = unsafe {
             self.session.encode_frame_with_output_handler(
                 image,
                 pts,
                 duration,
-                None,
+                properties.as_deref().map(|p| p.as_opaque()),
                 ptr::null_mut(),
                 RcBlock::as_ptr(&self.handler),
             )

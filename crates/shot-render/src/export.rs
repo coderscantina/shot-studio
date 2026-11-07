@@ -1,24 +1,27 @@
-//! Incremental export: render each segment whose content hash has no cached file, in parallel on
-//! the hardware encoder, then join every segment by stream copy into one fragmented MP4.
+//! Incremental export: render each chunk whose content hash has no cached file, in parallel on
+//! the hardware encoder, then join every chunk by stream copy into one fragmented MP4.
 //!
-//! - **Segments** are cached as `.shot/cache/segments/<hash>.mp4`: video only, 4K60 HEVC with a
-//!   keyframe every 0.5 s, one fragment per keyframe interval. A file that exists is reused.
-//!   Stale files are never deleted yet.
+//! - **Chunks** (see [`crate::plan`]) are cached as `.shot/cache/chunks/<hash>.mp4`: video only,
+//!   4K60 HEVC, one fragment that starts with a keyframe. A file that exists is reused. Stale
+//!   files are never deleted yet. Consecutive missing chunks of a segment render in one encoder
+//!   session, with a keyframe forced at each chunk start.
 //! - **Audio** is cut from each take's mic track and encoded to AAC once per export, on its own
 //!   thread while video renders. One continuous AAC stream has no encoder delay or padding at the
 //!   joins, so they cannot click or drift. Where the source jumps, the cut fades over 5 ms.
-//! - **The join** writes one init segment, then copies each segment's fragments with shifted
-//!   decode times, with the audio fragments for the same span after each one.
+//! - **The join** runs alongside both. It writes one init segment, then copies each chunk's
+//!   fragments with shifted decode times as soon as the chunk is cached, with the audio packets
+//!   for the same span after each one as they come out of the encoder.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, BufWriter};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
-use shot_core::{ContentHash, Id, OutputKind, Project, Timeline};
+use shot_core::{ContentHash, Id, MediaId, OutputKind, Project, Timeline};
 use shot_media::audio::{
     AAC_PACKET_SAMPLES, AacEncoder, AacStream, AudioError, PcmReader, SAMPLE_RATE,
 };
@@ -29,7 +32,7 @@ use shot_media::videotoolbox::{DecodeError, Decoder, Frame};
 use crate::RenderError;
 use crate::graph::Renderer;
 use crate::layout::{Canvas, LayoutSpec, Source, Sources, UnsupportedLayout};
-use crate::plan::{ExportPlan, PlannedSegment, frame_time};
+use crate::plan::{ExportPlan, PlannedChunk, PlannedSegment, frame_time};
 use crate::surface::size;
 
 /// Output frame rate.
@@ -50,10 +53,12 @@ const SAMPLES_PER_FRAME: u64 = (SAMPLE_RATE / FPS) as u64;
 const SCREEN_FILE: &str = "screen.mp4";
 const CAMERA_FILE: &str = "camera.mp4";
 const MIC_FILE: &str = "mic.mp4";
+/// The tracks that chunks show. The mic is not cached.
+const VIDEO_FILES: [&str; 2] = [SCREEN_FILE, CAMERA_FILE];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExportOptions {
-    /// Segments rendered at the same time.
+    /// Encoder sessions running at the same time.
     pub jobs: usize,
 }
 
@@ -63,7 +68,7 @@ impl Default for ExportOptions {
     }
 }
 
-/// Progress after each rendered segment.
+/// Progress after each rendered chunk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Progress {
     pub rendered: usize,
@@ -73,13 +78,14 @@ pub struct Progress {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExportReport {
     pub output: PathBuf,
-    /// Segments in the output, and how many of them were rendered rather than reused.
-    pub segments: usize,
+    /// Chunks in the output, and how many of them were rendered rather than reused.
+    pub chunks: usize,
     pub rendered: usize,
     pub frames: u64,
     pub rendered_frames: u64,
-    /// Rendering segments and encoding audio, which run at the same time.
+    /// Rendering chunks and encoding audio, which run at the same time.
     pub render_time: Duration,
+    /// How much longer the join ran after that. It starts with them.
     pub join_time: Duration,
 }
 
@@ -115,7 +121,9 @@ pub enum ExportError {
     Mux(#[from] MuxError),
     #[error("{path}: {source}")]
     Io { path: PathBuf, source: io::Error },
-    #[error("another segment failed")]
+    #[error("the encoder did not start a chunk with a keyframe")]
+    ChunkStart,
+    #[error("another chunk failed")]
     Cancelled,
 }
 
@@ -144,48 +152,85 @@ pub fn export(
     if output.kind != OutputKind::Main {
         return Err(ExportError::DerivedCut(cut.to_owned()));
     }
-    let plan = ExportPlan::new(output, FPS);
+    let media = Media {
+        root: video_dir.join("media"),
+    };
+    let ids: HashMap<&Id, MediaId> = output
+        .chapters
+        .iter()
+        .flat_map(|chapter| &chapter.segments)
+        .map(|segment| &segment.take)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .map(|take| (take, media.id(take)))
+        .collect();
+    let plan = ExportPlan::new(output, FPS, |take| ids[take]);
     if plan.frames == 0 {
         return Err(ExportError::Empty(cut.to_owned()));
     }
     for planned in &plan.segments {
         LayoutSpec::of(planned.segment.layout)?;
     }
-    let media = Media {
-        root: video_dir.join("media"),
-    };
     let cache = Cache {
-        dir: video_dir.join(".shot/cache/segments"),
+        dir: video_dir.join(".shot/cache/chunks"),
     };
     fs::create_dir_all(&cache.dir).map_err(io_error(&cache.dir))?;
 
-    let mut seen = HashSet::new();
-    let mut jobs: Vec<&PlannedSegment> = plan
-        .segments
-        .iter()
-        .filter(|planned| seen.insert(planned.segment.hash))
-        .filter(|planned| !cache.path(planned.segment.hash).exists())
-        .collect();
-    // Longest first, so the last segment to finish is a short one.
-    jobs.sort_by_key(|planned| std::cmp::Reverse(planned.frames()));
-    let rendered = jobs.len();
-    let rendered_frames = jobs.iter().map(|planned| planned.frames()).sum();
+    let mut jobs = jobs(&plan, &cache);
+    // Longest first, so the last job to finish is a short one.
+    jobs.sort_by_key(|job| std::cmp::Reverse(job.frames()));
+    let rendered = jobs.iter().map(|job| job.chunks.len()).sum();
+    let rendered_frames = jobs.iter().map(Job::frames).sum();
 
-    let started = Instant::now();
-    let audio = render(&plan, jobs, &media, &cache, options, progress)?;
-    let render_time = started.elapsed();
-
-    let started = Instant::now();
-    join(&plan, &cache, &audio, out)?;
+    let (render_time, join_time) = run(&plan, jobs, &media, &cache, out, options, progress)?;
     Ok(ExportReport {
         output: out.to_owned(),
-        segments: plan.segments.len(),
+        chunks: plan.segments.iter().map(|s| s.chunks.len()).sum(),
         rendered,
         frames: plan.frames,
         rendered_frames,
         render_time,
-        join_time: started.elapsed(),
+        join_time,
     })
+}
+
+/// Runs of consecutive chunks of one segment that have no cached file, each chunk once.
+fn jobs<'a>(plan: &'a ExportPlan, cache: &Cache) -> Vec<Job<'a>> {
+    let mut seen = HashSet::new();
+    let mut jobs = Vec::new();
+    for planned in &plan.segments {
+        let mut run: Option<Range<usize>> = None;
+        for (index, chunk) in planned.chunks.iter().enumerate() {
+            let missing = seen.insert(chunk.hash) && !cache.path(chunk.hash).exists();
+            match (&mut run, missing) {
+                (Some(run), true) => run.end = index + 1,
+                (None, true) => run = Some(index..index + 1),
+                (Some(_), false) => jobs.extend(run.take().map(|run| Job::new(planned, run))),
+                (None, false) => {}
+            }
+        }
+        jobs.extend(run.map(|run| Job::new(planned, run)));
+    }
+    jobs
+}
+
+/// Chunks that follow each other in one segment, rendered by one encoder session.
+struct Job<'a> {
+    planned: &'a PlannedSegment,
+    chunks: &'a [PlannedChunk],
+}
+
+impl<'a> Job<'a> {
+    fn new(planned: &'a PlannedSegment, chunks: Range<usize>) -> Self {
+        Self {
+            planned,
+            chunks: &planned.chunks[chunks],
+        }
+    }
+
+    fn frames(&self) -> u64 {
+        self.chunks.iter().map(PlannedChunk::frame_count).sum()
+    }
 }
 
 struct Media {
@@ -193,6 +238,28 @@ struct Media {
 }
 
 impl Media {
+    /// The size and modification time of each video track of `take`. A take recorded again
+    /// under the same id differs in both.
+    fn id(&self, take: &Id) -> MediaId {
+        let mut facts = Vec::new();
+        for file in VIDEO_FILES {
+            facts.extend_from_slice(file.as_bytes());
+            let Ok(metadata) = fs::metadata(self.track(take, file)) else {
+                facts.push(0);
+                continue;
+            };
+            let modified = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .unwrap_or_default();
+            facts.push(1);
+            facts.extend_from_slice(&metadata.len().to_le_bytes());
+            facts.extend_from_slice(&modified.as_nanos().to_le_bytes());
+        }
+        MediaId::of(&facts)
+    }
+
     fn track(&self, take: &Id, file: &str) -> PathBuf {
         self.root.join(take.as_str()).join(file)
     }
@@ -218,61 +285,138 @@ impl Cache {
     }
 }
 
-/// Renders `jobs` on `options.jobs` threads and encodes the audio on another.
-fn render(
+/// Chunks that are still rendering, so the join can wait for them, and whether any thread failed.
+struct Pending {
+    hashes: Mutex<HashSet<ContentHash>>,
+    changed: Condvar,
+    failed: AtomicBool,
+}
+
+impl Pending {
+    fn new(jobs: &[Job]) -> Self {
+        Self {
+            hashes: Mutex::new(
+                jobs.iter()
+                    .flat_map(|job| job.chunks)
+                    .map(|chunk| chunk.hash)
+                    .collect(),
+            ),
+            changed: Condvar::new(),
+            failed: AtomicBool::new(false),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashSet<ContentHash>> {
+        self.hashes.lock().expect("pending chunks poisoned")
+    }
+
+    fn done(&self, hash: ContentHash) {
+        self.lock().remove(&hash);
+        self.changed.notify_all();
+    }
+
+    fn fail(&self) {
+        self.failed.store(true, Ordering::Relaxed);
+        let _hashes = self.lock();
+        self.changed.notify_all();
+    }
+
+    fn failed(&self) -> bool {
+        self.failed.load(Ordering::Relaxed)
+    }
+
+    /// Waits until the chunk `hash` is in the cache.
+    fn wait(&self, hash: ContentHash) -> Result<(), ExportError> {
+        let mut hashes = self.lock();
+        while hashes.contains(&hash) {
+            if self.failed() {
+                return Err(ExportError::Cancelled);
+            }
+            hashes = self.changed.wait(hashes).expect("pending chunks poisoned");
+        }
+        Ok(())
+    }
+
+    /// Runs `work`, and marks the export failed when it fails or panics, so no thread waits for
+    /// it forever.
+    fn guard<T>(&self, work: impl FnOnce() -> Result<T, ExportError>) -> Result<T, ExportError> {
+        struct OnUnwind<'a>(&'a Pending);
+        impl Drop for OnUnwind<'_> {
+            fn drop(&mut self) {
+                if std::thread::panicking() {
+                    self.0.fail();
+                }
+            }
+        }
+        let _unwind = OnUnwind(self);
+        let result = work();
+        if result.is_err() {
+            self.fail();
+        }
+        result
+    }
+}
+
+/// Renders `jobs` on `options.jobs` threads, encodes the audio on another and joins on a third.
+/// Returns how long rendering and audio took, and how much longer the join ran.
+fn run(
     plan: &ExportPlan,
-    jobs: Vec<&PlannedSegment>,
+    jobs: Vec<Job>,
     media: &Media,
     cache: &Cache,
+    out: &Path,
     options: ExportOptions,
     progress: &(dyn Fn(Progress) + Sync),
-) -> Result<AacStream, ExportError> {
-    let to_render = jobs.len();
+) -> Result<(Duration, Duration), ExportError> {
+    let started = Instant::now();
+    let to_render = jobs.iter().map(|job| job.chunks.len()).sum();
+    let pending = Pending::new(&jobs);
     let queue = Mutex::new(jobs);
-    let failed = AtomicBool::new(false);
     let done = AtomicUsize::new(0);
+    let (audio_out, audio_in) = mpsc::channel();
     std::thread::scope(|scope| {
-        let audio = scope.spawn(|| encode_audio(plan, media));
+        let pending = &pending;
+        let audio = scope.spawn(move || pending.guard(|| encode_audio(plan, media, &audio_out)));
+        let joiner =
+            scope.spawn(move || pending.guard(|| join(plan, cache, pending, audio_in, out)));
         let workers: Vec<_> = (0..options.jobs.max(1))
             .map(|_| {
                 scope.spawn(|| {
-                    let result = (|| {
+                    pending.guard(|| {
                         let mut worker = Worker::new()?;
                         loop {
-                            if failed.load(Ordering::Relaxed) {
+                            if pending.failed() {
                                 return Err(ExportError::Cancelled);
                             }
                             let Some(job) = queue.lock().expect("job queue poisoned").pop() else {
                                 return Ok(());
                             };
-                            worker.render(job, media, &cache.path(job.segment.hash))?;
-                            let rendered = done.fetch_add(1, Ordering::Relaxed) + 1;
-                            progress(Progress {
-                                rendered,
-                                to_render,
-                            });
+                            worker.render(&job, media, cache, &|hash| {
+                                pending.done(hash);
+                                let rendered = done.fetch_add(1, Ordering::Relaxed) + 1;
+                                progress(Progress {
+                                    rendered,
+                                    to_render,
+                                });
+                            })?;
                         }
-                    })();
-                    if result.is_err() {
-                        failed.store(true, Ordering::Relaxed);
-                    }
-                    result
+                    })
                 })
             })
             .collect();
-        let mut first_error = None;
-        for worker in workers {
-            match worker.join().expect("render worker panicked") {
-                Err(ExportError::Cancelled) | Ok(()) => {}
-                Err(error) => {
-                    first_error.get_or_insert(error);
-                }
-            }
-        }
-        let audio = audio.join().expect("audio thread panicked");
-        match first_error {
+        let mut results: Vec<Result<(), ExportError>> = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("render worker panicked"))
+            .collect();
+        results.push(audio.join().expect("audio thread panicked"));
+        let render_time = started.elapsed();
+        results.push(joiner.join().expect("join thread panicked"));
+        let join_time = started.elapsed() - render_time;
+        let mut errors = results.into_iter().filter_map(Result::err);
+        match errors.find(|error| !matches!(error, ExportError::Cancelled)) {
             Some(error) => Err(error),
-            None => audio,
+            None if pending.failed() => Err(ExportError::Cancelled),
+            None => Ok((render_time, join_time)),
         }
     })
 }
@@ -291,14 +435,17 @@ impl Worker {
         })
     }
 
+    /// Renders the chunks of `job` into the cache, calling `chunk_done` after each one.
     fn render(
         &mut self,
-        planned: &PlannedSegment,
+        job: &Job,
         media: &Media,
-        path: &Path,
+        cache: &Cache,
+        chunk_done: &dyn Fn(ContentHash),
     ) -> Result<(), ExportError> {
+        let planned = job.planned;
         let spec = LayoutSpec::of(planned.segment.layout)?;
-        let first = planned.source_frames.start;
+        let first = job.chunks[0].frames.start;
         let paths = Sources {
             screen: spec
                 .uses(Source::Screen)
@@ -309,7 +456,7 @@ impl Worker {
         };
         for path in [&paths.screen, &paths.camera].into_iter().flatten() {
             if !self.cursors.contains_key(path) {
-                let decoder = Decoder::open(path).map_err(|source| ExportError::Decode {
+                let decoder = Decoder::open_native(path).map_err(|source| ExportError::Decode {
                     path: path.clone(),
                     source,
                 })?;
@@ -330,50 +477,112 @@ impl Worker {
             keyframe_interval: KEYFRAME_INTERVAL,
             quality: QUALITY,
         })?;
-        let partial = path.with_extension("partial");
-        let file = File::create(&partial).map_err(io_error(&partial))?;
-        let mut writer = SegmentWriter::new(BufWriter::new(file), &partial);
-        for frame in planned.source_frames.clone() {
-            let time = to_duration(frame);
-            for path in [&paths.screen, &paths.camera].into_iter().flatten() {
-                self.cursors
-                    .get_mut(path)
-                    .expect("opened above")
-                    .advance(time)?;
-            }
-            let frame_of = |path: &Option<PathBuf>| {
-                path.as_ref()
-                    .and_then(|path| self.cursors.get(path))
-                    .and_then(FrameCursor::current)
-            };
-            let frames = Sources {
-                screen: frame_of(&paths.screen),
-                camera: frame_of(&paths.camera),
-            };
-            let sizes = Sources {
-                screen: frames.screen.map_or((1, 1), |f| size(&f.buffer)),
-                camera: frames.camera.map_or((1, 1), |f| size(&f.buffer)),
-            };
-            let scene = spec.scene(canvas, sizes, planned.zoom_at(frame, FPS));
-            let target = encoder.input_buffer()?;
-            self.renderer.render(
-                &scene,
-                Sources {
-                    screen: frames.screen.map(|f| &*f.buffer),
-                    camera: frames.camera.map(|f| &*f.buffer),
-                },
-                &target,
-            )?;
-            encoder.encode(&target)?;
-            for encoded in encoder.take_encoded()? {
-                writer.push(encoded, &encoder)?;
+        let mut files = ChunkFiles::new(job.chunks, cache, chunk_done);
+        let starts: HashSet<u64> = job.chunks.iter().map(|chunk| chunk.frames.start).collect();
+        for chunk in job.chunks {
+            for frame in chunk.frames.clone() {
+                let time = to_duration(frame);
+                for path in [&paths.screen, &paths.camera].into_iter().flatten() {
+                    self.cursors
+                        .get_mut(path)
+                        .expect("opened above")
+                        .advance(time)?;
+                }
+                let frame_of = |path: &Option<PathBuf>| {
+                    path.as_ref()
+                        .and_then(|path| self.cursors.get(path))
+                        .and_then(FrameCursor::current)
+                };
+                let frames = Sources {
+                    screen: frame_of(&paths.screen),
+                    camera: frame_of(&paths.camera),
+                };
+                let sizes = Sources {
+                    screen: frames.screen.map_or((1, 1), |f| size(&f.buffer)),
+                    camera: frames.camera.map_or((1, 1), |f| size(&f.buffer)),
+                };
+                let scene = spec.scene(canvas, sizes, planned.zoom_at(frame, FPS));
+                let target = encoder.input_buffer()?;
+                self.renderer.render(
+                    &scene,
+                    Sources {
+                        screen: frames.screen.map(|f| &*f.buffer),
+                        camera: frames.camera.map(|f| &*f.buffer),
+                    },
+                    &target,
+                )?;
+                if starts.contains(&frame) {
+                    encoder.encode_keyframe(&target)?;
+                } else {
+                    encoder.encode(&target)?;
+                }
+                for encoded in encoder.take_encoded()? {
+                    files.push(encoded, &encoder)?;
+                }
             }
         }
         for encoded in encoder.finish()? {
-            writer.push(encoded, &encoder)?;
+            files.push(encoded, &encoder)?;
         }
-        writer.finish(&encoder)?;
-        fs::rename(&partial, path).map_err(io_error(path))
+        files.finish(&encoder)
+    }
+}
+
+/// Hands the encoded frames of a job to one chunk file after another.
+struct ChunkFiles<'a> {
+    chunks: std::slice::Iter<'a, PlannedChunk>,
+    cache: &'a Cache,
+    current: Option<(ChunkWriter, ContentHash)>,
+    chunk_done: &'a dyn Fn(ContentHash),
+}
+
+impl<'a> ChunkFiles<'a> {
+    fn new(
+        chunks: &'a [PlannedChunk],
+        cache: &'a Cache,
+        chunk_done: &'a dyn Fn(ContentHash),
+    ) -> Self {
+        Self {
+            chunks: chunks.iter(),
+            cache,
+            current: None,
+            chunk_done,
+        }
+    }
+
+    fn push(&mut self, frame: EncodedFrame, encoder: &HevcEncoder) -> Result<(), ExportError> {
+        if self
+            .current
+            .as_ref()
+            .is_none_or(|(current, _)| current.remaining == 0)
+        {
+            self.finish_current(encoder)?;
+            let chunk = self
+                .chunks
+                .next()
+                .expect("the encoder returns one frame per submitted frame");
+            if !frame.keyframe {
+                return Err(ExportError::ChunkStart);
+            }
+            self.current = Some((
+                ChunkWriter::create(self.cache.path(chunk.hash), chunk.frame_count())?,
+                chunk.hash,
+            ));
+        }
+        let (current, _) = self.current.as_mut().expect("opened above");
+        current.push(frame, encoder)
+    }
+
+    fn finish(mut self, encoder: &HevcEncoder) -> Result<(), ExportError> {
+        self.finish_current(encoder)
+    }
+
+    fn finish_current(&mut self, encoder: &HevcEncoder) -> Result<(), ExportError> {
+        if let Some((current, hash)) = self.current.take() {
+            current.finish(encoder)?;
+            (self.chunk_done)(hash);
+        }
+        Ok(())
     }
 }
 
@@ -449,25 +658,32 @@ impl FrameCursor {
     }
 }
 
-/// Writes a segment file one keyframe interval per fragment. The init segment goes first, once
-/// the encoder has produced its parameter sets.
-struct SegmentWriter<'a> {
+/// Writes one chunk file, one fragment per keyframe interval, under a temporary name until it is
+/// complete. The init segment goes first, once the encoder has produced its parameter sets.
+struct ChunkWriter {
     out: BufWriter<File>,
-    path: &'a Path,
+    partial: PathBuf,
+    path: PathBuf,
     gop: Vec<EncodedFrame>,
     sequence: u32,
     time: u64,
+    /// Frames still to come.
+    remaining: u64,
 }
 
-impl<'a> SegmentWriter<'a> {
-    fn new(out: BufWriter<File>, path: &'a Path) -> Self {
-        Self {
-            out,
+impl ChunkWriter {
+    fn create(path: PathBuf, frames: u64) -> Result<Self, ExportError> {
+        let partial = path.with_extension("partial");
+        let file = File::create(&partial).map_err(io_error(&partial))?;
+        Ok(Self {
+            out: BufWriter::new(file),
+            partial,
             path,
             gop: Vec::new(),
             sequence: 0,
             time: 0,
-        }
+            remaining: frames,
+        })
     }
 
     fn push(&mut self, frame: EncodedFrame, encoder: &HevcEncoder) -> Result<(), ExportError> {
@@ -475,6 +691,7 @@ impl<'a> SegmentWriter<'a> {
             self.flush(encoder)?;
         }
         self.gop.push(frame);
+        self.remaining -= 1;
         Ok(())
     }
 
@@ -483,8 +700,9 @@ impl<'a> SegmentWriter<'a> {
         let file = self
             .out
             .into_inner()
-            .map_err(|error| io_error(self.path)(error.into_error()))?;
-        file.sync_all().map_err(io_error(self.path))
+            .map_err(|error| io_error(&self.partial)(error.into_error()))?;
+        file.sync_all().map_err(io_error(&self.partial))?;
+        fs::rename(&self.partial, &self.path).map_err(io_error(&self.path))
     }
 
     fn flush(&mut self, encoder: &HevcEncoder) -> Result<(), ExportError> {
@@ -498,7 +716,7 @@ impl<'a> SegmentWriter<'a> {
                 tracks: vec![video_track(encoder.hvcc()?)],
                 chapters: Vec::new(),
             };
-            mux::write_init(&mut self.out, &movie).map_err(io_error(self.path))?;
+            mux::write_init(&mut self.out, &movie).map_err(io_error(&self.partial))?;
         }
         self.sequence += 1;
         let samples: Vec<mux::Sample> = self
@@ -516,7 +734,7 @@ impl<'a> SegmentWriter<'a> {
             .flat_map(|f| f.data.iter().copied())
             .collect();
         mux::write_fragment(&mut self.out, self.sequence, 1, self.time, &samples, &data)
-            .map_err(io_error(self.path))?;
+            .map_err(io_error(&self.partial))?;
         self.time += u64::from(FRAME_TICKS) * self.gop.len() as u64;
         self.gop.clear();
         Ok(())
@@ -532,11 +750,18 @@ fn video_track(hvcc: Vec<u8>) -> Track {
     })
 }
 
-/// The mic audio of every segment, in output order, as one AAC stream.
-fn encode_audio(plan: &ExportPlan, media: &Media) -> Result<AacStream, ExportError> {
+/// The mic audio of every segment, in output order, as one AAC stream sent to `out` piece by
+/// piece. The first piece carries the format and no packets.
+fn encode_audio(
+    plan: &ExportPlan,
+    media: &Media,
+    out: &mpsc::Sender<AacStream>,
+) -> Result<(), ExportError> {
+    let send = |stream| out.send(stream).map_err(|_| ExportError::Cancelled);
     let mut readers: HashMap<&Id, PcmReader> = HashMap::new();
     let mut encoder =
         AacEncoder::new(SAMPLE_RATE, AUDIO_BITRATE).map_err(ExportError::AudioEncode)?;
+    send(encoder.take())?;
     let mut samples = Vec::new();
     for (index, planned) in plan.segments.iter().enumerate() {
         let take = &planned.segment.take;
@@ -563,8 +788,9 @@ fn encode_audio(plan: &ExportPlan, media: &Media) -> Result<AacStream, ExportErr
             .is_some_and(|next| next.continues_previous);
         fade(&mut samples, !planned.continues_previous, !continues_next);
         encoder.push(&samples).map_err(ExportError::AudioEncode)?;
+        send(encoder.take())?;
     }
-    encoder.finish().map_err(ExportError::AudioEncode)
+    send(encoder.finish().map_err(ExportError::AudioEncode)?)
 }
 
 /// Fades the start and the end of a cut over [`FADE_SAMPLES`], or half the cut if it is shorter.
@@ -584,50 +810,42 @@ fn fade(samples: &mut [f32], fade_in: bool, fade_out: bool) {
     }
 }
 
-/// Writes the output: one init segment, then every segment's video fragments by stream copy,
-/// each followed by the audio for the same span.
+/// Writes the output: one init segment, then every chunk's video fragments by stream copy,
+/// each followed by the audio for the same span. Waits for chunks still rendering and for audio
+/// still encoding.
 fn join(
     plan: &ExportPlan,
     cache: &Cache,
-    audio: &AacStream,
+    pending: &Pending,
+    audio: mpsc::Receiver<AacStream>,
     out: &Path,
 ) -> Result<(), ExportError> {
-    let mut files: HashMap<ContentHash, FragmentedFile> = HashMap::new();
-    for planned in &plan.segments {
-        let hash = planned.segment.hash;
-        if let std::collections::hash_map::Entry::Vacant(entry) = files.entry(hash) {
-            let file = FragmentedFile::read(&cache.path(hash))?;
-            if file.duration() != planned.frames() * u64::from(FRAME_TICKS) {
-                return Err(MuxError::Format(
-                    cache.path(hash).display().to_string(),
-                    "segment length does not match its range",
-                )
-                .into());
-            }
-            entry.insert(file);
+    let read = |chunk: &PlannedChunk| -> Result<FragmentedFile, ExportError> {
+        pending.wait(chunk.hash)?;
+        let path = cache.path(chunk.hash);
+        let file = FragmentedFile::read(&path)?;
+        if file.duration() != chunk.frame_count() * u64::from(FRAME_TICKS) {
+            return Err(MuxError::Format(
+                path.display().to_string(),
+                "chunk length does not match its range",
+            )
+            .into());
         }
-    }
-    let first = &files[&plan.segments[0].segment.hash].track;
-    if let Some(other) = plan
-        .segments
-        .iter()
-        .find(|planned| &files[&planned.segment.hash].track != first)
-    {
-        return Err(
-            MuxError::CodecMismatch(cache.path(other.segment.hash).display().to_string()).into(),
-        );
-    }
+        Ok(file)
+    };
+    let format = audio.recv().map_err(|_| ExportError::Cancelled)?;
+    let video = read(&plan.segments[0].chunks[0])?.track;
     let movie = Movie {
         timescale: TIMESCALE,
         duration: plan.frames * u64::from(FRAME_TICKS),
         tracks: vec![
-            first.clone(),
+            video.clone(),
             Track::Audio(AudioTrack {
                 sample_rate: SAMPLE_RATE,
                 channels: 1,
-                bitrate: audio.bitrate,
-                config: audio.config.clone(),
-                priming: audio.priming,
+                bitrate: format.bitrate,
+                config: format.config.clone(),
+                priming: format.priming,
             }),
         ],
         chapters: plan
@@ -647,15 +865,21 @@ fn join(
     let file = File::create(&partial).map_err(io_error(&partial))?;
     let mut joiner =
         Joiner::new(BufWriter::with_capacity(1 << 22, file), &movie).map_err(io_error(&partial))?;
-    let mut packets = AudioPackets::new(audio);
+    let mut packets = AudioPackets::new(format, audio, pending);
     for planned in &plan.segments {
-        let path = cache.path(planned.segment.hash);
-        let mut source = File::open(&path).map_err(io_error(&path))?;
-        let start = planned.output_frame * u64::from(FRAME_TICKS);
-        for fragment in &files[&planned.segment.hash].fragments {
-            let base = start + fragment.base_time;
-            joiner.copy(&mut source, fragment, 1, base)?;
-            packets.write_until(&mut joiner, Some(base + fragment.duration), &partial)?;
+        for chunk in &planned.chunks {
+            let file = read(chunk)?;
+            let path = cache.path(chunk.hash);
+            if file.track != video {
+                return Err(MuxError::CodecMismatch(path.display().to_string()).into());
+            }
+            let mut source = File::open(&path).map_err(io_error(&path))?;
+            let start = planned.output_frame_of(chunk) * u64::from(FRAME_TICKS);
+            for fragment in &file.fragments {
+                let base = start + fragment.base_time;
+                joiner.copy(&mut source, fragment, 1, base)?;
+                packets.write_until(&mut joiner, Some(base + fragment.duration), &partial)?;
+            }
         }
     }
     packets.write_until(&mut joiner, None, &partial)?;
@@ -668,17 +892,26 @@ fn join(
     fs::rename(&partial, out).map_err(io_error(out))
 }
 
-/// Hands out the AAC stream in fragments that line up with the video.
+/// Hands out the AAC stream in fragments that line up with the video, receiving packets from the
+/// encoder as they are needed.
 struct AudioPackets<'a> {
-    stream: &'a AacStream,
+    /// Every packet received so far.
+    stream: AacStream,
+    incoming: mpsc::Receiver<AacStream>,
+    ended: bool,
+    pending: &'a Pending,
+    /// The first packet not written yet, and its byte offset.
     next: usize,
     offset: usize,
 }
 
 impl<'a> AudioPackets<'a> {
-    fn new(stream: &'a AacStream) -> Self {
+    fn new(format: AacStream, incoming: mpsc::Receiver<AacStream>, pending: &'a Pending) -> Self {
         Self {
-            stream,
+            stream: format,
+            incoming,
+            ended: false,
+            pending,
             next: 0,
             offset: 0,
         }
@@ -692,18 +925,32 @@ impl<'a> AudioPackets<'a> {
         video_time: Option<u64>,
         path: &Path,
     ) -> Result<(), ExportError> {
-        let first = self.next;
+        let priming = self.stream.priming;
+        // Presentation time of a packet: its media time minus the encoder delay.
         let starts_before = |packet: usize| match video_time {
             None => true,
-            // Presentation time of a packet: its media time minus the encoder delay.
             Some(time) => {
-                let start =
-                    packet as i64 * i64::from(AAC_PACKET_SAMPLES) - i64::from(self.stream.priming);
+                let start = packet as i64 * i64::from(AAC_PACKET_SAMPLES) - i64::from(priming);
                 (start as i128) * i128::from(TIMESCALE) < (time as i128) * i128::from(SAMPLE_RATE)
             }
         };
-        while self.next < self.stream.sizes.len() && starts_before(self.next) {
-            self.next += 1;
+        let first = self.next;
+        loop {
+            while self.next < self.stream.sizes.len() && starts_before(self.next) {
+                self.next += 1;
+            }
+            if self.next < self.stream.sizes.len() || self.ended {
+                break;
+            }
+            match self.incoming.recv() {
+                Ok(piece) => {
+                    self.stream.data.extend_from_slice(&piece.data);
+                    self.stream.sizes.extend_from_slice(&piece.sizes);
+                }
+                // The encoder hung up: at the end of the stream, or because it failed.
+                Err(_) if self.pending.failed() => return Err(ExportError::Cancelled),
+                Err(_) => self.ended = true,
+            }
         }
         if self.next == first {
             return Ok(());

@@ -24,7 +24,7 @@ fn project(cut: &str) -> (tempfile::TempDir, Project) {
 
 #[test]
 #[ignore = "needs the generated target project and the hardware HEVC encoder"]
-fn re_export_renders_only_the_segment_that_changed() {
+fn re_export_renders_only_the_chunks_that_changed() {
     let cut = |end: &str| {
         format!(
             "chapter \"A\" {{\n    take t01 {{\n        keep from=800_000 to=1_800_000\n        layout split from=800_000 to=1_800_000\n    }}\n}}\n\nchapter \"B\" {{\n    take t01 {{\n        keep from=96_800_000 to={end}\n    }}\n}}\n"
@@ -41,10 +41,8 @@ fn re_export_renders_only_the_segment_that_changed() {
         &|_| {},
     )
     .unwrap();
-    assert_eq!(
-        (report.segments, report.rendered, report.frames),
-        (2, 2, 120)
-    );
+    // 48..60, 60..90, 90..108 and 5808..5820, 5820..5850, 5850..5868.
+    assert_eq!((report.chunks, report.rendered, report.frames), (6, 6, 120));
 
     let (_, second) = project(&cut("98_300_000"));
     let report = export(
@@ -56,9 +54,7 @@ fn re_export_renders_only_the_segment_that_changed() {
         &|_| {},
     )
     .unwrap();
-    assert_eq!(
-        (report.segments, report.rendered, report.frames),
-        (2, 1, 150)
-    );
+    // The old last chunk 5850..5868 becomes 5850..5880, and 5880..5898 is new.
+    assert_eq!((report.chunks, report.rendered, report.frames), (7, 2, 150));
     assert!(out.metadata().unwrap().len() > 0);
 }

@@ -333,7 +333,18 @@ impl AacEncoder {
         self.convert()
     }
 
-    /// Flushes the encoder and returns every packet.
+    /// The packets encoded since the last call, with the stream's format, so a muxer can write
+    /// them while encoding goes on.
+    pub fn take(&mut self) -> AacStream {
+        AacStream {
+            data: std::mem::take(&mut self.stream.data),
+            sizes: std::mem::take(&mut self.stream.sizes),
+            config: self.stream.config.clone(),
+            ..self.stream
+        }
+    }
+
+    /// Flushes the encoder and returns every packet not taken yet.
     pub fn finish(mut self) -> Result<AacStream, AudioError> {
         self.input.end_of_stream = true;
         self.convert()?;
