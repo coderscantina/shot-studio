@@ -24,6 +24,7 @@ pub mod drawing;
 pub mod events;
 pub mod frame;
 pub mod layout;
+pub mod lottie;
 pub mod overlay;
 pub mod plan;
 pub mod zoom;

@@ -33,6 +33,14 @@
       "license": "Apache-2.0 OR MIT",
       "contributes": "Text layout for overlays and captions",
       "crate": "parley =0.12.0 (tag v0.12.0)"
+    },
+    {
+      "name": "velato",
+      "repository": "https://github.com/linebender/velato",
+      "revision": "8f9cce6381ae654cbb16332d5a31ac43ca679c98",
+      "license": "Apache-2.0 OR MIT",
+      "contributes": "Lottie animation for brand stings, logo reveals and templates",
+      "crate": "velato =0.12.0 without default features, drawn onto vello 0.11 through shot-render's RenderSink"
     }
   ]
 }
