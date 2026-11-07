@@ -50,6 +50,40 @@ impl Board {
         subject: &str,
         files: &BTreeMap<String, String>,
     ) -> Result<Proposal> {
+        let mut changes = Vec::with_capacity(files.len());
+        for (path, text) in files {
+            if !is_inside(path) {
+                return Err(Error::InvalidPath(path.clone()));
+            }
+            changes.push((video_path(slug, path), text.clone()));
+        }
+        self.propose(slug, name, subject, changes)
+    }
+
+    /// Like [`Board::create_proposal`], with paths relative to the repo root, so a proposal can
+    /// change the channel's `brand/` and `formats/` along with the video. The proposal still
+    /// branches off the video, and accepting it merges those files into the video's branch.
+    pub fn create_repo_proposal(
+        &self,
+        slug: &str,
+        name: &str,
+        subject: &str,
+        files: &BTreeMap<String, String>,
+    ) -> Result<Proposal> {
+        if let Some(path) = files.keys().find(|p| !is_inside(p)) {
+            return Err(Error::InvalidPath(path.clone()));
+        }
+        let changes = files.iter().map(|(p, t)| (p.clone(), t.clone())).collect();
+        self.propose(slug, name, subject, changes)
+    }
+
+    fn propose(
+        &self,
+        slug: &str,
+        name: &str,
+        subject: &str,
+        changes: Vec<(String, String)>,
+    ) -> Result<Proposal> {
         check_name(name)?;
         let base = self.tip(slug)?;
         let branch = proposal_branch(slug, name);
@@ -58,13 +92,6 @@ impl Board {
                 slug: slug.to_owned(),
                 name: name.to_owned(),
             });
-        }
-        let mut changes = Vec::with_capacity(files.len());
-        for (path, text) in files {
-            if !is_inside(path) {
-                return Err(Error::InvalidPath(path.clone()));
-            }
-            changes.push((video_path(slug, path), text.clone()));
         }
         let tree = self.write_files(&base, changes)?;
         if tree == base.tree_id() {
