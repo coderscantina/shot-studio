@@ -35,6 +35,8 @@ One line for each trap that cost an agent time and that no config reveals.
 
 - In a worktree, set `CARGO_TARGET_DIR=$HOME/.cache/shot-studio-target` and `SHOT_FIXTURES=$HOME/.cache/shot-studio-fixtures`. `git worktree remove` deletes ignored files, so media generated inside a worktree is lost.
 - gpui is the crates.io `gpui-pre` snapshot that gpui-component uses. Adding gpui from Zed git builds a second, incompatible gpui.
+- Worktrees share artifacts in the common target dir, because cargo hashes workspace crates by their relative path. After merging, if a build sees an older API of a sibling crate, `touch` its sources and rebuild.
+- gpui needs `inactive_frame_interval: None` (an unfocused window otherwise drops to 30 fps) and the `font-kit` feature (otherwise no text renders).
 - ffmpeg's `sendcmd` filter is not deterministic. Drive animated fixtures with expressions of `t`.
 
 ## Writing
