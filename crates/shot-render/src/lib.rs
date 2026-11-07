@@ -2,7 +2,8 @@
 //!
 //! - [`layout`]: where each source sits in a layout, as plain geometry.
 //! - [`frame`]: everything one output frame shows, with the product video effects of [`drawing`],
-//!   [`zoom`], [`events`] and [`code_diff`]. [`assets`] loads the files they draw from.
+//!   [`zoom`], [`events`] and [`code_diff`], and the overlay templates of [`overlay`]. [`assets`]
+//!   loads the files they draw from.
 //! - [`autozoom`]: the auto-zoom rule, which writes zooms from the event log; [`rules`] runs it
 //!   over a video folder.
 //! - [`graph`]: draws a frame's scene from decoded IOSurface planes into an IOSurface target.
@@ -12,6 +13,8 @@
 //! - [`voice`]: that audio finished: voice chain, music bed, -14 LUFS.
 //! - [`captions`]: word-timed captions with the caption fixes, and the WebVTT sidecar.
 //! - [`export`]: renders changed segments in parallel and joins them into one MP4.
+//! - [`derived`]: Shorts and X clips drawn from the main cut's chunks, reframed and captioned.
+//! - [`overlay_rules`]: link cards, highlights and b-roll slots written into `cut.kdl`.
 
 pub mod assets;
 pub mod autozoom;
@@ -21,6 +24,7 @@ pub mod drawing;
 pub mod events;
 pub mod frame;
 pub mod layout;
+pub mod overlay;
 pub mod plan;
 pub mod zoom;
 
@@ -29,9 +33,13 @@ pub mod audio;
 #[cfg(target_os = "macos")]
 pub mod cursor;
 #[cfg(target_os = "macos")]
+pub mod derived;
+#[cfg(target_os = "macos")]
 pub mod export;
 #[cfg(target_os = "macos")]
 pub mod graph;
+#[cfg(target_os = "macos")]
+pub mod overlay_rules;
 #[cfg(target_os = "macos")]
 pub mod rules;
 #[cfg(target_os = "macos")]

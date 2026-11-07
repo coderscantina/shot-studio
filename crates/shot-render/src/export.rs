@@ -10,6 +10,8 @@
 //!   joins, so they cannot click or drift. Where the source jumps, the cut fades over 5 ms. The
 //!   voice chain, music bed and loudness of [`crate::voice`] finish it.
 //! - **Captions** of the main cut go next to the output as a WebVTT sidecar, `<out>.vtt`.
+//! - **Derived cuts** render in two passes, see [`crate::derived`]: the main chunks they draw
+//!   from first, then their own chunks from those.
 //! - **The join** runs alongside both. It writes one init segment, then copies each chunk's
 //!   fragments with shifted decode times as soon as the chunk is cached, with the audio packets
 //!   for the same span after each one as they come out of the encoder.
@@ -33,6 +35,7 @@ use crate::RenderError;
 use crate::assets::{AssetError, Assets, EVENTS_FILE};
 use crate::audio::{AudioSegment, TimelineAudio, TimelineAudioError};
 use crate::cursor::FrameCursor;
+use crate::derived::{DerivedInputs, DerivedPlan, FaceTrack};
 use crate::frame::{Shot, compose};
 use crate::graph::Renderer;
 use crate::layout::{Canvas, LayoutSpec, Source, Sources, UnsupportedLayout};
@@ -46,9 +49,9 @@ pub const FPS: u32 = 60;
 const TIMESCALE: u32 = FPS * 1000;
 const FRAME_TICKS: u32 = TIMESCALE / FPS;
 /// A keyframe every 0.5 s, like the recordings.
-const KEYFRAME_INTERVAL: u32 = FPS / 2;
+pub(crate) const KEYFRAME_INTERVAL: u32 = FPS / 2;
 /// VideoToolbox quality for the master. See docs/evidence/m03/export.md for the measurement.
-const QUALITY: f32 = 0.75;
+pub(crate) const QUALITY: f32 = 0.75;
 const AUDIO_BITRATE: u32 = 128_000;
 
 /// The tracks of a take, by file name inside `media/<take>/`.
@@ -85,6 +88,10 @@ pub struct ExportReport {
     pub rendered: usize,
     pub frames: u64,
     pub rendered_frames: u64,
+    /// For a derived cut, the main chunks it draws from, and how many of them were rendered
+    /// rather than reused from the main cut's cache.
+    pub base_chunks: usize,
+    pub base_rendered: usize,
     /// Rendering chunks and encoding audio, which run at the same time.
     pub render_time: Duration,
     /// How much longer the join ran after that. It starts with them.
@@ -101,8 +108,6 @@ impl ExportReport {
 pub enum ExportError {
     #[error("there is no cut named {0}")]
     UnknownCut(String),
-    #[error("{0} is a derived cut; derived cuts render from milestone 07")]
-    DerivedCut(String),
     #[error("{0} has nothing to export")]
     Empty(String),
     #[error(transparent)]
@@ -121,6 +126,12 @@ pub enum ExportError {
     Render(#[from] RenderError),
     #[error(transparent)]
     Assets(#[from] AssetError),
+    #[error(transparent)]
+    Template(#[from] crate::overlay::TemplateError),
+    #[error(transparent)]
+    Vision(#[from] shot_analyze::vision::VisionError),
+    #[error("reading transcripts: {0}")]
+    Transcript(shot_analyze::Error),
     #[error(transparent)]
     Mux(#[from] MuxError),
     #[error("{path}: {source}")]
@@ -153,9 +164,6 @@ pub fn export(
         .iter()
         .find(|output| output.name == cut)
         .ok_or_else(|| ExportError::UnknownCut(cut.to_owned()))?;
-    if output.kind != OutputKind::Main {
-        return Err(ExportError::DerivedCut(cut.to_owned()));
-    }
     let media = Media {
         root: video_dir.join("media"),
         music: project.cut.music.as_ref().map(|m| {
@@ -166,7 +174,8 @@ pub fn export(
             )
         }),
     };
-    let ids: HashMap<&Id, MediaId> = output
+    let main = timeline.main();
+    let ids: HashMap<&Id, MediaId> = main
         .chapters
         .iter()
         .flat_map(|chapter| &chapter.segments)
@@ -175,11 +184,34 @@ pub fn export(
         .into_iter()
         .map(|take| (take, media.id(take)))
         .collect();
-    let plan = ExportPlan::new(output, FPS, |take| ids[take]);
+    for segment in output.chapters.iter().flat_map(|c| &c.segments) {
+        for overlay in &segment.overlays {
+            crate::overlay::check(overlay)?;
+        }
+    }
+    let assets = |file: &str| media.asset_id(video_dir, file);
+    let derived = match output.kind {
+        OutputKind::Main => None,
+        OutputKind::Derived(_) => Some(plan_derived(
+            video_dir,
+            main,
+            output,
+            &|take| ids[take],
+            &assets,
+        )?),
+    };
+    let plan = match &derived {
+        Some(derived) => derived.plan.clone(),
+        None => {
+            let mut plan = ExportPlan::new(output, FPS, |take| ids[take]);
+            crate::overlay::key_assets(&mut plan, &assets);
+            plan
+        }
+    };
     if plan.frames == 0 {
         return Err(ExportError::Empty(cut.to_owned()));
     }
-    for planned in &plan.segments {
+    for planned in derived.as_ref().map_or(&plan, |d| &d.main).segments.iter() {
         LayoutSpec::of(planned.segment.layout)?;
     }
     let cache = Cache {
@@ -187,14 +219,32 @@ pub fn export(
     };
     fs::create_dir_all(&cache.dir).map_err(io_error(&cache.dir))?;
 
-    let mut jobs = jobs(&plan, &cache);
+    let mut jobs = jobs(&plan, &cache, |_| true, derived.is_some());
     // Longest first, so the last job to finish is a short one.
     jobs.sort_by_key(|job| std::cmp::Reverse(job.frames()));
-    let rendered = jobs.iter().map(|job| job.chunks.len()).sum();
-    let rendered_frames = jobs.iter().map(Job::frames).sum();
+    let (mut base_chunks, mut base_rendered) = (0, 0);
+    if let Some(derived) = &derived {
+        let needed: HashSet<ContentHash> = jobs
+            .iter()
+            .flat_map(|job| &derived.chunks[job.segment][job.range.clone()])
+            .map(|chunk| chunk.base.hash)
+            .collect();
+        let mut bases = self::jobs(&derived.main, &cache, |c| needed.contains(&c.hash), false);
+        base_chunks = derived.bases().len();
+        base_rendered = bases.iter().map(|job| job.chunks.len()).sum();
+        // The queue pops from the end: every base job is taken before the first derived job,
+        // so a derived job only ever waits for bases that are already rendering.
+        bases.sort_by_key(|job| std::cmp::Reverse(job.frames()));
+        jobs.extend(bases);
+    }
+    // Chunks of the output itself; base chunks are counted apart.
+    let own = |job: &&Job| job.derived == derived.is_some();
+    let rendered = jobs.iter().filter(own).map(|job| job.chunks.len()).sum();
+    let rendered_frames = jobs.iter().filter(own).map(Job::frames).sum();
 
     let (render_time, join_time) = run(
         &plan,
+        derived.as_ref(),
         jobs,
         &media,
         output.effects,
@@ -203,50 +253,133 @@ pub fn export(
         options,
         progress,
     )?;
-    crate::captions::write_sidecar(video_dir, &plan, output, out)
-        .map_err(io_error(&out.with_extension("vtt")))?;
+    if derived.is_none() {
+        crate::captions::write_sidecar(video_dir, &plan, output, out)
+            .map_err(io_error(&out.with_extension("vtt")))?;
+    }
     Ok(ExportReport {
         output: out.to_owned(),
         chunks: plan.segments.iter().map(|s| s.chunks.len()).sum(),
         rendered,
         frames: plan.frames,
         rendered_frames,
+        base_chunks,
+        base_rendered,
         render_time,
         join_time,
     })
 }
 
-/// Runs of consecutive chunks of one segment that have no cached file, each chunk once.
-fn jobs<'a>(plan: &'a ExportPlan, cache: &Cache) -> Vec<Job<'a>> {
+/// Plans a derived output: faces of the takes it reframes on and the transcripts of its
+/// captions, read through their caches.
+fn plan_derived(
+    video_dir: &Path,
+    main: &shot_core::Output,
+    output: &shot_core::Output,
+    media: &dyn Fn(&Id) -> MediaId,
+    assets: &dyn Fn(&str) -> Vec<u8>,
+) -> Result<DerivedPlan, ExportError> {
+    let mut faces = HashMap::new();
+    if output.kind == OutputKind::Derived(shot_core::DerivedKind::Short) {
+        for (take, times) in crate::derived::face_times(output) {
+            if !media_path(video_dir, &take, CAMERA_FILE).exists() {
+                continue;
+            }
+            let track = shot_analyze::vision::face_track(video_dir, &take, &times)?;
+            faces.insert(
+                take,
+                FaceTrack {
+                    size: track.size,
+                    samples: track.samples,
+                },
+            );
+        }
+    }
+    let mut transcripts = HashMap::new();
+    for take in output
+        .chapters
+        .iter()
+        .flat_map(|c| &c.segments)
+        .map(|s| &s.take)
+    {
+        if transcripts.contains_key(take) {
+            continue;
+        }
+        if let Some(transcript) =
+            shot_analyze::cache::read_cached(video_dir, take).map_err(ExportError::Transcript)?
+        {
+            transcripts.insert(take.clone(), transcript);
+        }
+    }
+    Ok(DerivedPlan::new(
+        main,
+        output,
+        &DerivedInputs {
+            fps: FPS,
+            media,
+            assets,
+            faces: &faces,
+            transcripts: &transcripts,
+        },
+    ))
+}
+
+fn media_path(video_dir: &Path, take: &Id, file: &str) -> PathBuf {
+    video_dir.join("media").join(take.as_str()).join(file)
+}
+
+/// Runs of consecutive chunks of one segment that are `wanted` and have no cached file, each
+/// chunk once.
+fn jobs<'a>(
+    plan: &'a ExportPlan,
+    cache: &Cache,
+    wanted: impl Fn(&PlannedChunk) -> bool,
+    derived: bool,
+) -> Vec<Job<'a>> {
     let mut seen = HashSet::new();
     let mut jobs = Vec::new();
-    for planned in &plan.segments {
+    for (segment, planned) in plan.segments.iter().enumerate() {
+        let job = |run| Job::new(planned, segment, run, derived);
         let mut run: Option<Range<usize>> = None;
         for (index, chunk) in planned.chunks.iter().enumerate() {
-            let missing = seen.insert(chunk.hash) && !cache.path(chunk.hash).exists();
+            let missing =
+                wanted(chunk) && seen.insert(chunk.hash) && !cache.path(chunk.hash).exists();
             match (&mut run, missing) {
                 (Some(run), true) => run.end = index + 1,
                 (None, true) => run = Some(index..index + 1),
-                (Some(_), false) => jobs.extend(run.take().map(|run| Job::new(planned, run))),
+                (Some(_), false) => jobs.extend(run.take().map(job)),
                 (None, false) => {}
             }
         }
-        jobs.extend(run.map(|run| Job::new(planned, run)));
+        jobs.extend(run.map(job));
     }
     jobs
 }
 
 /// Chunks that follow each other in one segment, rendered by one encoder session.
-struct Job<'a> {
-    planned: &'a PlannedSegment,
-    chunks: &'a [PlannedChunk],
+pub(crate) struct Job<'a> {
+    pub planned: &'a PlannedSegment,
+    pub chunks: &'a [PlannedChunk],
+    /// The segment's index in its plan and the chunks' indices in the segment.
+    pub segment: usize,
+    pub range: Range<usize>,
+    /// Whether the chunks are a derived cut's, drawn from main chunks.
+    pub derived: bool,
 }
 
 impl<'a> Job<'a> {
-    fn new(planned: &'a PlannedSegment, chunks: Range<usize>) -> Self {
+    fn new(
+        planned: &'a PlannedSegment,
+        segment: usize,
+        range: Range<usize>,
+        derived: bool,
+    ) -> Self {
         Self {
             planned,
-            chunks: &planned.chunks[chunks],
+            chunks: &planned.chunks[range.clone()],
+            segment,
+            range,
+            derived,
         }
     }
 
@@ -284,6 +417,22 @@ impl Media {
         MediaId::of(&facts)
     }
 
+    /// The size and modification time of a file an overlay names, so a file replaced under the
+    /// same name renders again. A missing file is keyed as missing; drawing it fails later.
+    fn asset_id(&self, video_dir: &Path, file: &str) -> Vec<u8> {
+        let mut facts = file.as_bytes().to_vec();
+        if let Ok(metadata) = fs::metadata(video_dir.join(file)) {
+            let modified = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .unwrap_or_default();
+            facts.extend_from_slice(&metadata.len().to_le_bytes());
+            facts.extend_from_slice(&modified.as_nanos().to_le_bytes());
+        }
+        facts
+    }
+
     fn track(&self, take: &Id, file: &str) -> PathBuf {
         self.root.join(take.as_str()).join(file)
     }
@@ -299,18 +448,18 @@ impl Media {
     }
 }
 
-struct Cache {
+pub(crate) struct Cache {
     dir: PathBuf,
 }
 
 impl Cache {
-    fn path(&self, hash: ContentHash) -> PathBuf {
+    pub(crate) fn path(&self, hash: ContentHash) -> PathBuf {
         self.dir.join(format!("{hash}.mp4"))
     }
 }
 
 /// Chunks that are still rendering, so the join can wait for them, and whether any thread failed.
-struct Pending {
+pub(crate) struct Pending {
     hashes: Mutex<HashSet<ContentHash>>,
     changed: Condvar,
     failed: AtomicBool,
@@ -350,7 +499,7 @@ impl Pending {
     }
 
     /// Waits until the chunk `hash` is in the cache.
-    fn wait(&self, hash: ContentHash) -> Result<(), ExportError> {
+    pub(crate) fn wait(&self, hash: ContentHash) -> Result<(), ExportError> {
         let mut hashes = self.lock();
         while hashes.contains(&hash) {
             if self.failed() {
@@ -386,6 +535,7 @@ impl Pending {
 #[allow(clippy::too_many_arguments)]
 fn run(
     plan: &ExportPlan,
+    derived: Option<&DerivedPlan>,
     jobs: Vec<Job>,
     media: &Media,
     effects: Effects,
@@ -417,14 +567,25 @@ fn run(
                             let Some(job) = queue.lock().expect("job queue poisoned").pop() else {
                                 return Ok(());
                             };
-                            worker.render(&job, media, cache, &|hash| {
+                            let chunk_done = |hash| {
                                 pending.done(hash);
                                 let rendered = done.fetch_add(1, Ordering::Relaxed) + 1;
                                 progress(Progress {
                                     rendered,
                                     to_render,
                                 });
-                            })?;
+                            };
+                            match derived.filter(|_| job.derived) {
+                                Some(derived) => crate::derived::render(
+                                    &worker.renderer,
+                                    derived,
+                                    &job,
+                                    cache,
+                                    pending,
+                                    &chunk_done,
+                                )?,
+                                None => worker.render(&job, media, cache, &chunk_done)?,
+                            }
                         }
                     })
                 })
@@ -464,6 +625,24 @@ impl Worker {
             assets: Assets::new(video_dir),
             effects,
         })
+    }
+
+    /// Moves the decoder of `path` to `time`, opening it on first use. A clip shorter than the
+    /// cutaway holds its last frame.
+    fn goto(&mut self, path: &Path, time: Duration) -> Result<(), ExportError> {
+        if !self.cursors.contains_key(path) {
+            let decoder = Decoder::open_native(path).map_err(decode_error(path))?;
+            self.cursors
+                .insert(path.to_owned(), FrameCursor::new(decoder));
+        }
+        let cursor = self.cursors.get_mut(path).expect("opened above");
+        if cursor.goto(time).map_err(decode_error(path))?.is_none() {
+            return Err(ExportError::MediaEnds {
+                path: path.to_owned(),
+                time,
+            });
+        }
+        Ok(())
     }
 
     /// Renders the chunks of `job` into the cache, calling `chunk_done` after each one.
@@ -512,7 +691,7 @@ impl Worker {
             keyframe_interval: KEYFRAME_INTERVAL,
             quality: QUALITY,
         })?;
-        let mut files = ChunkFiles::new(job.chunks, cache, chunk_done);
+        let mut files = ChunkFiles::new(job.chunks, cache, canvas, chunk_done);
         let starts: HashSet<u64> = job.chunks.iter().map(|chunk| chunk.frames.start).collect();
         for chunk in job.chunks {
             for frame in chunk.frames.clone() {
@@ -524,18 +703,15 @@ impl Worker {
                         .goto(time)
                         .map_err(decode_error(path))?;
                 }
-                let frame_of = |path: &Option<PathBuf>| {
+                let current = |cursors: &HashMap<PathBuf, FrameCursor>, path: &Option<PathBuf>| {
                     path.as_ref()
-                        .and_then(|path| self.cursors.get(path))
+                        .and_then(|path| cursors.get(path))
                         .and_then(FrameCursor::current)
-                };
-                let frames = Sources {
-                    screen: frame_of(&paths.screen),
-                    camera: frame_of(&paths.camera),
+                        .map(|f| size(&f.buffer))
                 };
                 let sizes = Sources {
-                    screen: frames.screen.map_or((1, 1), |f| size(&f.buffer)),
-                    camera: frames.camera.map_or((1, 1), |f| size(&f.buffer)),
+                    screen: current(&self.cursors, &paths.screen).unwrap_or((1, 1)),
+                    camera: current(&self.cursors, &paths.camera).unwrap_or((1, 1)),
                 };
                 let shot = Shot {
                     layout: segment.layout,
@@ -543,13 +719,31 @@ impl Worker {
                     overlays: &segment.overlays,
                     time: frame_time(frame, FPS),
                 };
-                let drawn = compose(&shot, &look, canvas, sizes)?;
+                let mut drawn = compose(&shot, &look, canvas, sizes)?;
+                let mut screen = paths.screen.clone();
+                if let Some(cutaway) = &drawn.cutaway {
+                    let path = media
+                        .root
+                        .parent()
+                        .unwrap_or(&media.root)
+                        .join(&cutaway.file);
+                    self.goto(&path, Duration::from_micros(cutaway.time.0))?;
+                    let clip = current(&self.cursors, &Some(path.clone())).unwrap_or((16, 9));
+                    crate::overlay::broll::fit_cutaway(&mut drawn, clip);
+                    screen = Some(path);
+                }
+                let buffer = |path: &Option<PathBuf>| {
+                    path.as_ref()
+                        .and_then(|path| self.cursors.get(path))
+                        .and_then(FrameCursor::current)
+                        .map(|f| &*f.buffer)
+                };
                 let target = encoder.input_buffer()?;
                 self.renderer.draw(
                     &drawn,
                     Sources {
-                        screen: frames.screen.map(|f| &*f.buffer),
-                        camera: frames.camera.map(|f| &*f.buffer),
+                        screen: buffer(&screen),
+                        camera: buffer(&paths.camera),
                     },
                     &target,
                 )?;
@@ -571,28 +765,35 @@ impl Worker {
 }
 
 /// Hands the encoded frames of a job to one chunk file after another.
-struct ChunkFiles<'a> {
+pub(crate) struct ChunkFiles<'a> {
     chunks: std::slice::Iter<'a, PlannedChunk>,
     cache: &'a Cache,
+    canvas: Canvas,
     current: Option<(ChunkWriter, ContentHash)>,
     chunk_done: &'a dyn Fn(ContentHash),
 }
 
 impl<'a> ChunkFiles<'a> {
-    fn new(
+    pub(crate) fn new(
         chunks: &'a [PlannedChunk],
         cache: &'a Cache,
+        canvas: Canvas,
         chunk_done: &'a dyn Fn(ContentHash),
     ) -> Self {
         Self {
             chunks: chunks.iter(),
             cache,
+            canvas,
             current: None,
             chunk_done,
         }
     }
 
-    fn push(&mut self, frame: EncodedFrame, encoder: &HevcEncoder) -> Result<(), ExportError> {
+    pub(crate) fn push(
+        &mut self,
+        frame: EncodedFrame,
+        encoder: &HevcEncoder,
+    ) -> Result<(), ExportError> {
         if self
             .current
             .as_ref()
@@ -607,7 +808,11 @@ impl<'a> ChunkFiles<'a> {
                 return Err(ExportError::ChunkStart);
             }
             self.current = Some((
-                ChunkWriter::create(self.cache.path(chunk.hash), chunk.frame_count())?,
+                ChunkWriter::create(
+                    self.cache.path(chunk.hash),
+                    chunk.frame_count(),
+                    self.canvas,
+                )?,
                 chunk.hash,
             ));
         }
@@ -615,7 +820,7 @@ impl<'a> ChunkFiles<'a> {
         current.push(frame, encoder)
     }
 
-    fn finish(mut self, encoder: &HevcEncoder) -> Result<(), ExportError> {
+    pub(crate) fn finish(mut self, encoder: &HevcEncoder) -> Result<(), ExportError> {
         self.finish_current(encoder)
     }
 
@@ -628,11 +833,11 @@ impl<'a> ChunkFiles<'a> {
     }
 }
 
-fn to_duration(frame: u64) -> Duration {
+pub(crate) fn to_duration(frame: u64) -> Duration {
     Duration::from_micros(frame_time(frame, FPS).0)
 }
 
-fn decode_error(path: &Path) -> impl FnOnce(DecodeError) -> ExportError + '_ {
+pub(crate) fn decode_error(path: &Path) -> impl FnOnce(DecodeError) -> ExportError + '_ {
     |source| ExportError::Decode {
         path: path.to_owned(),
         source,
@@ -650,10 +855,11 @@ struct ChunkWriter {
     time: u64,
     /// Frames still to come.
     remaining: u64,
+    canvas: Canvas,
 }
 
 impl ChunkWriter {
-    fn create(path: PathBuf, frames: u64) -> Result<Self, ExportError> {
+    fn create(path: PathBuf, frames: u64, canvas: Canvas) -> Result<Self, ExportError> {
         let partial = path.with_extension("partial");
         let file = File::create(&partial).map_err(io_error(&partial))?;
         Ok(Self {
@@ -664,6 +870,7 @@ impl ChunkWriter {
             sequence: 0,
             time: 0,
             remaining: frames,
+            canvas,
         })
     }
 
@@ -694,7 +901,7 @@ impl ChunkWriter {
             let movie = Movie {
                 timescale: TIMESCALE,
                 duration: 0,
-                tracks: vec![video_track(encoder.hvcc()?)],
+                tracks: vec![video_track(encoder.hvcc()?, self.canvas)],
                 chapters: Vec::new(),
             };
             mux::write_init(&mut self.out, &movie).map_err(io_error(&self.partial))?;
@@ -722,10 +929,10 @@ impl ChunkWriter {
     }
 }
 
-fn video_track(hvcc: Vec<u8>) -> Track {
+fn video_track(hvcc: Vec<u8>, canvas: Canvas) -> Track {
     Track::Video(mux::VideoTrack {
-        width: Canvas::UHD.width,
-        height: Canvas::UHD.height,
+        width: canvas.width,
+        height: canvas.height,
         timescale: TIMESCALE,
         hvcc,
     })
@@ -743,7 +950,7 @@ fn encode_audio(
         AacEncoder::new(SAMPLE_RATE, AUDIO_BITRATE).map_err(ExportError::AudioEncode)?;
     send(encoder.take())?;
     let root = media.root.clone();
-    let mut audio = TimelineAudio::new(
+    let audio = TimelineAudio::new(
         plan.segments.iter().map(|planned| AudioSegment {
             take: planned.segment.take.clone(),
             source_frames: planned.source_frames.clone(),
@@ -751,6 +958,18 @@ fn encode_audio(
         FPS,
         move |take| root.join(take.as_str()).join(MIC_FILE),
     );
+    let mut bleeps: Vec<(Id, shot_core::TimeRange)> = plan
+        .segments
+        .iter()
+        .flat_map(|planned| {
+            crate::overlay::redact::bleeps(&planned.segment.overlays)
+                .into_iter()
+                .map(|range| (planned.segment.take.clone(), range))
+        })
+        .collect();
+    bleeps.sort_by_key(|(take, range)| (take.to_string(), range.from()));
+    bleeps.dedup();
+    let mut audio = audio.with_bleeps(&bleeps);
     let bed = match &media.music {
         Some((path, gain, duck)) => {
             Some(

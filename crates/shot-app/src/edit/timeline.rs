@@ -1,5 +1,5 @@
-//! The Timeline workspace: preview and change list on top, the whole-video overview, then one
-//! lane per kind around the playhead: Layout, Zoom, Words and Voice.
+//! The Timeline workspace: preview, change list and overlays on top, the whole-video overview,
+//! then one lane per kind around the playhead: Layout, Zoom, B-roll, Highlight, Words and Voice.
 
 use std::sync::Arc;
 
@@ -54,7 +54,8 @@ pub fn render(this: &mut EditScreen, win: &mut Window, cx: &mut Context<EditScre
                         .child(parts::preview(this))
                         .child(parts::transport(this, true, cx)),
                 )
-                .child(change_list(this, cx)),
+                .child(change_list(this, cx))
+                .child(super::overlays::pane(this, cx)),
         )
         .child(lanes(this, window, track, cx))
 }
@@ -256,14 +257,26 @@ fn lanes(
                     "layout",
                     "Layout",
                     px(36.),
-                    layout_lane(this, &window, x),
+                    layout_lane(this, &window, &x),
                 ))
-                .child(lane("zoom", "Zoom", px(36.), zoom_lane(this, &window, x)))
+                .child(lane("zoom", "Zoom", px(36.), zoom_lane(this, &window, &x)))
+                .child(lane(
+                    "picture",
+                    "B-roll",
+                    px(36.),
+                    super::overlays::lane(this, &window, &x, "b-roll"),
+                ))
+                .child(lane(
+                    "edit",
+                    "Highlight",
+                    px(36.),
+                    super::overlays::lane(this, &window, &x, "highlight"),
+                ))
                 .child(lane(
                     "text",
                     "Words",
                     px(96.),
-                    words_lane(this, &window, x, track, cx),
+                    words_lane(this, &window, &x, track, cx),
                 ))
                 .child(lane("mic", "Voice", px(60.), voice_lane(this, &window, cx)))
                 .child(playhead_line(this, &window)),

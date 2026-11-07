@@ -4,6 +4,7 @@
 //! Every edit is a `shot-core` function on the cut, written to `cut.kdl` by [`VideoFolder`]. The
 //! screen keeps only view state: the workspace, the chapter on show, the selection, the playhead.
 
+mod overlays;
 mod parts;
 mod picture;
 mod product;
@@ -142,6 +143,8 @@ pub struct EditScreen {
     /// Where the overview bar and the lanes were last painted, for mouse mapping.
     overview_bounds: Rc<Cell<Bounds<Pixels>>>,
     product: product::ProductState,
+    /// What the overlay rules last added, for the Overlays pane.
+    overlay_note: Option<String>,
 }
 
 impl EditScreen {
@@ -186,6 +189,7 @@ impl EditScreen {
             scroll: ScrollHandle::new(),
             overview_bounds: Rc::default(),
             product: product::ProductState::default(),
+            overlay_note: None,
         };
         this.rebuild(cx);
         this
@@ -487,7 +491,8 @@ impl EditScreen {
 
     // Export.
 
-    pub fn start_export(&mut self, cx: &mut Context<Self>) {
+    /// Exports the cut named `cut`, the main cut or a derived one, to `.shot/export/<cut>.mp4`.
+    pub fn start_export(&mut self, cut: &str, cx: &mut Context<Self>) {
         let running = self.export.as_ref().is_some_and(|s| {
             matches!(
                 *s.lock().expect("export status"),
@@ -505,7 +510,9 @@ impl EditScreen {
             to_render: 0,
         }));
         self.export = Some(status.clone());
-        let out = dir.join(".shot/export/main.mp4");
+        let relative = format!(".shot/export/{cut}.mp4");
+        let out = dir.join(&relative);
+        let cut = cut.to_owned();
         std::thread::Builder::new()
             .name("shot-export".into())
             .spawn({
@@ -520,14 +527,14 @@ impl EditScreen {
                     let result = export::export(
                         &dir,
                         &project,
-                        "main",
+                        &cut,
                         &out,
                         ExportOptions::default(),
                         &progress,
                     );
                     *status.lock().expect("export status") = match result {
                         Ok(report) => ExportStatus::Done {
-                            path: ".shot/export/main.mp4".into(),
+                            path: relative,
                             seconds: (report.render_time + report.join_time).as_secs_f64(),
                         },
                         Err(error) => ExportStatus::Failed(error.to_string()),

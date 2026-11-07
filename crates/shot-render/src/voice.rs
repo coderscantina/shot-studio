@@ -96,12 +96,24 @@ fn pass<E: From<TimelineAudioError>>(
     let mut chain = VoiceChain::new();
     let mut bed = bed.map(|b| MusicBed::new(b.samples.clone(), b.gain_db, b.duck_db));
     let mut skip = VoiceChain::LATENCY;
+    let bleeps = audio.bleeps().to_vec();
+    let mut emitted = 0u64;
     let mut emit = |samples: &mut [f32]| -> Result<(), E> {
         let drop = skip.min(samples.len());
         skip -= drop;
         let samples = &mut samples[drop..];
         if samples.is_empty() {
             return Ok(());
+        }
+        let at = emitted;
+        emitted += samples.len() as u64;
+        for bleep in &bleeps {
+            let from = bleep.start.max(at);
+            let to = bleep.end.min(emitted);
+            for n in from..to {
+                samples[(n - at) as usize] =
+                    crate::overlay::redact::tone(n, n - bleep.start, bleep.end - bleep.start);
+            }
         }
         if let Some(bed) = &mut bed {
             bed.mix(samples);

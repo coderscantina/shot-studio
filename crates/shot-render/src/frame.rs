@@ -6,19 +6,22 @@
 //!   scaled by its size, clipped to the screen's slot. A ripple spreads from every click.
 //! - **Keystrokes**: the latest key press as a label at the bottom, or the typed run of text.
 //! - **Window**: the window layout's shadow and device frame under the window.
-//! - **Overlays**: `code-diff` panels on top.
+//! - **Overlays**: the templates of [`crate::overlay`], in file order, later ones on top.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use shot_core::{DeviceFrame, Effects, Keystrokes, Layout, Micros, Overlay, Shadow, Zoom};
 
-use crate::code_diff::{CodeDiff, CodeDiffOverlay};
+use vello::peniko::ImageData;
+
+use crate::code_diff::CodeDiff;
 use crate::drawing::{Drawing, Rgba, Shape};
 use crate::events::{EventLog, KeyPress, Modifier};
 use crate::layout::{
     Canvas, Layer, LayoutSpec, Rect, Scene, Source, Sources, UnsupportedLayout, bezel,
 };
+use crate::overlay::{self, Cutaway, Stage};
 use crate::zoom::punch_at;
 
 /// The pointer's height at size 100, in pixels of a 2x screen track.
@@ -33,12 +36,14 @@ const TYPING_GAP: Micros = Micros(800_000);
 const RUN_CHARS: usize = 28;
 
 /// What a segment draws beyond its recorded tracks: the format's effects, the take's event log
-/// and the code-diff snapshots its overlays name.
+/// and the files its overlays name: code-diff snapshots and b-roll stills, by their path in the
+/// video folder.
 #[derive(Debug, Clone, Default)]
 pub struct Look {
     pub effects: Effects,
     pub events: Option<Arc<EventLog>>,
     pub diffs: HashMap<String, Arc<CodeDiff>>,
+    pub images: HashMap<String, ImageData>,
 }
 
 /// One moment of a segment.
@@ -55,6 +60,9 @@ pub struct Shot<'a> {
 pub struct Frame {
     pub scene: Scene,
     pub drawing: Drawing,
+    /// When a b-roll clip covers the frame, the file and time its screen layer shows instead
+    /// of the take's screen.
+    pub cutaway: Option<Cutaway>,
 }
 
 /// The frame `shot` shows on `canvas`, for sources of `sizes`.
@@ -90,26 +98,40 @@ pub fn compose(
                 .extend(keystrokes(events, effects.keystrokes, shot.time, canvas));
         }
     }
+    let mut screen = screen.map(|layer| (*layer, ScreenView::new(layer, sizes.screen)));
+    let mut scene = scene;
+    let mut cutaway = None;
     for overlay in shot.overlays {
-        let Some(code) = CodeDiffOverlay::of(overlay) else {
-            continue;
-        };
-        if let Some(diff) = look.diffs.get(&code.diff) {
-            drawing.over.extend(code.draw(diff, shot.time, canvas));
-        }
+        overlay::apply(
+            overlay,
+            &mut Stage {
+                t: shot.time,
+                canvas,
+                look,
+                screen: &mut screen,
+                scene: &mut scene,
+                drawing: &mut drawing,
+                cutaway: &mut cutaway,
+            },
+        );
     }
-    Ok(Frame { scene, drawing })
+    Ok(Frame {
+        scene,
+        drawing,
+        cutaway,
+    })
 }
 
 /// Maps points of the screen track to the canvas through the screen's layer.
-struct ScreenView {
+#[derive(Debug, Clone)]
+pub(crate) struct ScreenView {
     frame: Rect,
     crop: Rect,
     size: [f32; 2],
 }
 
 impl ScreenView {
-    fn new(layer: &Layer, (width, height): (u32, u32)) -> Self {
+    pub(crate) fn new(layer: &Layer, (width, height): (u32, u32)) -> Self {
         Self {
             frame: layer.frame,
             crop: layer.crop,
@@ -117,7 +139,14 @@ impl ScreenView {
         }
     }
 
-    fn map(&self, p: [f32; 2]) -> [f32; 2] {
+    /// A rectangle of the screen track on the canvas.
+    pub(crate) fn map_rect(&self, r: Rect) -> Rect {
+        let [left, top] = self.map([r.left, r.top]);
+        let [right, bottom] = self.map([r.right, r.bottom]);
+        Rect::new(left, top, right, bottom)
+    }
+
+    pub(crate) fn map(&self, p: [f32; 2]) -> [f32; 2] {
         [
             self.frame.left
                 + (p[0] / self.size[0] - self.crop.left) / self.crop.width() * self.frame.width(),
@@ -127,7 +156,7 @@ impl ScreenView {
     }
 
     /// Canvas pixels per screen pixel.
-    fn scale(&self) -> f32 {
+    pub(crate) fn scale(&self) -> f32 {
         self.frame.width() / (self.crop.width() * self.size[0])
     }
 }
@@ -337,6 +366,7 @@ mod tests {
             effects,
             events: Some(Arc::new(EventLog::parse(events).unwrap())),
             diffs: HashMap::new(),
+            images: HashMap::new(),
         }
     }
 

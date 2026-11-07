@@ -237,7 +237,7 @@ impl Renderer {
                 layer.radius,
                 video_flag(source_range),
                 video_flag(target_range),
-                0.0,
+                layer.blur,
                 0.0,
                 0.0,
                 source_kr,

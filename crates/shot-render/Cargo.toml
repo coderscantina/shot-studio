@@ -16,9 +16,11 @@ parley = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 git2 = { workspace = true }
+image = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 shot-media = { path = "../shot-media" }
+shot-capture = { path = "../shot-capture" }
 shot-audio = { path = "../shot-audio" }
 objc2 = { workspace = true }
 objc2-core-foundation = { workspace = true }

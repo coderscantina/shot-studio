@@ -1,6 +1,8 @@
 //! Vector shapes and text a frame draws under and over its source layers, in canvas pixels. Pure
 //! data: [`crate::frame`] decides what to draw, the vector pass draws it with vello and parley.
 
+use vello::peniko::ImageData;
+
 use crate::layout::Rect;
 
 /// Straight-alpha sRGB.
@@ -69,6 +71,33 @@ pub enum Shape {
         radius: f32,
         shapes: Vec<Shape>,
     },
+    /// The outline of a rounded rectangle, `width` wide, centered on its edge.
+    Outline {
+        rect: Rect,
+        radius: f32,
+        width: f32,
+        color: Rgba,
+    },
+    /// The `crop` of an image (fractions of it) scaled into `rect`, with rounded corners.
+    Image {
+        rect: Rect,
+        radius: f32,
+        image: ImageData,
+        crop: Rect,
+        opacity: f32,
+    },
+    /// Caption words wrapped into lines at most `width` wide, centered on `center`, on a
+    /// rounded box. The word at `highlight` draws on an accent pill in the background color.
+    Caption {
+        center: [f32; 2],
+        width: f32,
+        words: Vec<String>,
+        highlight: Option<usize>,
+        size: f32,
+        color: Rgba,
+        accent: Rgba,
+        background: Rgba,
+    },
 }
 
 impl Shape {
@@ -103,6 +132,19 @@ impl Shape {
                 let (w, h) = label_box(text, *size);
                 Rect::new(center[0] - w, center[1] - h, center[0] + w, center[1] + h)
             }
+            Self::Outline { rect, width, .. } => grow(*rect, *width),
+            Self::Image { rect, .. } => *rect,
+            Self::Caption {
+                center,
+                width,
+                size,
+                ..
+            } => Rect::new(
+                center[0] - width / 2.0 - size,
+                center[1] - size * 3.0,
+                center[0] + width / 2.0 + size,
+                center[1] + size * 3.0,
+            ),
             Self::Clip { rect, shapes, .. } => shapes
                 .iter()
                 .map(Shape::bounds)

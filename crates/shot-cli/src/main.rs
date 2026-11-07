@@ -19,7 +19,11 @@ use shot_core::Status;
 use shot_mcp::text;
 
 #[cfg(target_os = "macos")]
+mod derived;
+#[cfg(target_os = "macos")]
 mod export;
+#[cfg(target_os = "macos")]
+mod overlays;
 #[cfg(target_os = "macos")]
 mod product;
 
@@ -72,6 +76,12 @@ enum Command {
     /// Snapshot a commit range into sources/ and type it out as a code-diff overlay.
     #[cfg(target_os = "macos")]
     CodeDiff(product::CodeDiffArgs),
+    /// Find link cards, highlights and b-roll slots, or place a bleep, blur or b-roll.
+    #[cfg(target_os = "macos")]
+    Overlays(overlays::OverlaysArgs),
+    /// Add, list or remove Shorts and X clips; export one with `export --cut <name>`.
+    #[cfg(target_os = "macos")]
+    Derived(derived::DerivedArgs),
     /// Run the MCP server on stdio.
     Mcp,
     /// Download or list the analysis models.
@@ -153,6 +163,14 @@ fn run(cli: Cli) -> Result<(), String> {
     if let Command::CodeDiff(args) = cli.command {
         return product::code_diff(args);
     }
+    #[cfg(target_os = "macos")]
+    if let Command::Overlays(args) = cli.command {
+        return overlays::run(args);
+    }
+    #[cfg(target_os = "macos")]
+    if let Command::Derived(args) = cli.command {
+        return derived::run(args);
+    }
 
     if let Command::Record(args) = cli.command {
         return record::run(args);
@@ -221,7 +239,11 @@ fn run(cli: Cli) -> Result<(), String> {
             unreachable!("handled before opening the board")
         }
         #[cfg(target_os = "macos")]
-        Command::Export(_) | Command::Autozoom(_) | Command::CodeDiff(_) => {
+        Command::Export(_)
+        | Command::Autozoom(_)
+        | Command::CodeDiff(_)
+        | Command::Overlays(_)
+        | Command::Derived(_) => {
             unreachable!("handled before opening the board")
         }
     }

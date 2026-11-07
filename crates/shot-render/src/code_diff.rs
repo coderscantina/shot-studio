@@ -18,9 +18,21 @@ use shot_core::{Id, Micros, Overlay, ParamValue, TimeRange, Word};
 
 use crate::drawing::{Font, Rgba, Shape};
 use crate::layout::{Canvas, Rect};
+use crate::overlay::{ParamKind, ParamSpec, TemplateSpec};
 
 /// The template name in `cut.kdl`.
 pub const TEMPLATE: &str = "code-diff";
+
+pub const SPEC: TemplateSpec = TemplateSpec {
+    name: TEMPLATE,
+    about: "a diff typed out, one line highlighted",
+    params: &[
+        ParamSpec::required("diff", ParamKind::Text, "the snapshot in sources/"),
+        ParamSpec::optional("highlight-line", ParamKind::Integer, "line of the snapshot"),
+        ParamSpec::optional("highlight-at", ParamKind::Time, "when the highlight starts"),
+    ],
+    animated: true,
+};
 
 /// The share of the overlay's range spent typing; the rest holds the full diff.
 const TYPING_SHARE: f32 = 0.6;
