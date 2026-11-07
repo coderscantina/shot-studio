@@ -1,0 +1,232 @@
+//! Agent proposals as branches `proposal/<slug>/<name>` ([0004]).
+//!
+//! File paths in and out are relative to the video folder (`cut.kdl`, `sources/note.md`).
+//!
+//! [0004]: ../../../docs/decisions/0004-proposals-as-branches.md
+
+use std::collections::BTreeMap;
+use std::path::{Component, Path};
+
+use git2::{BranchType, Commit, Delta, Diff, Patch};
+
+use crate::{Board, Error, Result, branch_name, check_name, video_dir, video_path};
+
+const PROPOSAL_PREFIX: &str = "proposal/";
+
+/// A proposal waiting for review.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Proposal {
+    pub slug: String,
+    pub name: String,
+    /// The commit the proposal branch points at.
+    pub head: String,
+    /// The first line of the head commit.
+    pub subject: String,
+}
+
+/// The unified diff of one file of a proposal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileDiff {
+    pub path: String,
+    pub patch: String,
+}
+
+/// The result of accepting a proposal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Accepted {
+    /// The new tip of the video branch.
+    pub head: String,
+    /// False when the video branch had moved on and a merge commit was needed.
+    pub fast_forward: bool,
+}
+
+impl Board {
+    /// Creates `proposal/<slug>/<name>` off the video's branch (or the default branch for an idea
+    /// without one) with one commit that writes `files`, a map of path to new contents.
+    pub fn create_proposal(
+        &self,
+        slug: &str,
+        name: &str,
+        subject: &str,
+        files: &BTreeMap<String, String>,
+    ) -> Result<Proposal> {
+        check_name(name)?;
+        let base = self.tip(slug)?;
+        let branch = proposal_branch(slug, name);
+        if self.repo.find_branch(&branch, BranchType::Local).is_ok() {
+            return Err(Error::ProposalExists {
+                slug: slug.to_owned(),
+                name: name.to_owned(),
+            });
+        }
+        let mut changes = Vec::with_capacity(files.len());
+        for (path, text) in files {
+            if !is_inside(path) {
+                return Err(Error::InvalidPath(path.clone()));
+            }
+            changes.push((video_path(slug, path), text.clone()));
+        }
+        let tree = self.write_files(&base, changes)?;
+        if tree == base.tree_id() {
+            return Err(Error::EmptyProposal);
+        }
+        let head = self.commit(&base, tree, subject)?;
+        self.set_branch(&branch, head)?;
+        Ok(Proposal {
+            slug: slug.to_owned(),
+            name: name.to_owned(),
+            head: head.to_string(),
+            subject: subject.lines().next().unwrap_or_default().to_owned(),
+        })
+    }
+
+    /// Open proposals, optionally of one video only, sorted by slug and name.
+    pub fn proposals(&self, slug: Option<&str>) -> Result<Vec<Proposal>> {
+        let mut found = Vec::new();
+        for branch in self.repo.branches(Some(BranchType::Local))? {
+            let (branch, _) = branch?;
+            let Some((video, name)) = branch
+                .name()?
+                .and_then(|n| n.strip_prefix(PROPOSAL_PREFIX))
+                .and_then(|n| n.split_once('/'))
+            else {
+                continue;
+            };
+            if slug.is_some_and(|s| s != video) {
+                continue;
+            }
+            let head = branch.get().peel_to_commit()?;
+            found.push(Proposal {
+                slug: video.to_owned(),
+                name: name.to_owned(),
+                head: head.id().to_string(),
+                subject: head.summary().ok().flatten().unwrap_or_default().to_owned(),
+            });
+        }
+        found.sort_by(|a, b| (&a.slug, &a.name).cmp(&(&b.slug, &b.name)));
+        Ok(found)
+    }
+
+    /// What the proposal changes compared to where it branched off the video, as one unified
+    /// diff per file. Changes made on the video branch since then are not shown.
+    pub fn proposal_diff(&self, slug: &str, name: &str) -> Result<Vec<FileDiff>> {
+        let head = self.proposal_head(slug, name)?;
+        let tip = self.tip(slug)?;
+        let base = self
+            .repo
+            .find_commit(self.repo.merge_base(tip.id(), head.id())?)?;
+        let diff = self
+            .repo
+            .diff_tree_to_tree(Some(&base.tree()?), Some(&head.tree()?), None)?;
+        file_diffs(&diff, &video_dir(slug))
+    }
+
+    /// Merges the proposal into the video branch, fast-forward when the branch has not moved,
+    /// else with a merge commit, then deletes the proposal branch. On a conflict nothing changes
+    /// and [`Error::Conflict`] lists the paths.
+    pub fn accept_proposal(&self, slug: &str, name: &str) -> Result<Accepted> {
+        let head = self.proposal_head(slug, name)?;
+        let tip = self.tip(slug)?;
+        let branch = branch_name(slug);
+
+        let (new_tip, fast_forward) = if self.repo.graph_descendant_of(head.id(), tip.id())? {
+            (head.id(), true)
+        } else if tip.id() == head.id() || self.repo.graph_descendant_of(tip.id(), head.id())? {
+            (tip.id(), true)
+        } else {
+            let mut merged = self.repo.merge_commits(&tip, &head, None)?;
+            if merged.has_conflicts() {
+                return Err(Error::Conflict {
+                    paths: conflict_paths(&merged)?,
+                });
+            }
+            let tree = merged.write_tree_to(&self.repo)?;
+            let subject = format!("🔀 accept {name} into {slug}");
+            (
+                self.commit_with_parents(&[&tip, &head], tree, &subject)?,
+                false,
+            )
+        };
+        self.set_branch(&branch, new_tip)?;
+        self.delete_proposal(slug, name)?;
+        Ok(Accepted {
+            head: new_tip.to_string(),
+            fast_forward,
+        })
+    }
+
+    /// Deletes the proposal branch.
+    pub fn reject_proposal(&self, slug: &str, name: &str) -> Result<()> {
+        self.proposal_head(slug, name)?;
+        self.delete_proposal(slug, name)
+    }
+
+    fn proposal_head(&self, slug: &str, name: &str) -> Result<Commit<'_>> {
+        check_name(slug)?;
+        check_name(name)?;
+        self.repo
+            .find_branch(&proposal_branch(slug, name), BranchType::Local)
+            .and_then(|b| b.get().peel_to_commit())
+            .map_err(|_| Error::UnknownProposal {
+                slug: slug.to_owned(),
+                name: name.to_owned(),
+            })
+    }
+
+    fn delete_proposal(&self, slug: &str, name: &str) -> Result<()> {
+        self.repo
+            .find_branch(&proposal_branch(slug, name), BranchType::Local)?
+            .delete()?;
+        Ok(())
+    }
+}
+
+fn proposal_branch(slug: &str, name: &str) -> String {
+    format!("{PROPOSAL_PREFIX}{slug}/{name}")
+}
+
+/// A relative path that stays inside the folder.
+fn is_inside(path: &str) -> bool {
+    !path.is_empty()
+        && !path.contains('\\')
+        && Path::new(path)
+            .components()
+            .all(|c| matches!(c, Component::Normal(_)))
+}
+
+fn conflict_paths(index: &git2::Index) -> Result<Vec<String>> {
+    let mut paths = Vec::new();
+    for conflict in index.conflicts()? {
+        let conflict = conflict?;
+        if let Some(entry) = conflict.our.or(conflict.their).or(conflict.ancestor) {
+            paths.push(String::from_utf8_lossy(&entry.path).into_owned());
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+fn file_diffs(diff: &Diff<'_>, folder: &str) -> Result<Vec<FileDiff>> {
+    let mut files = Vec::new();
+    for index in 0..diff.deltas().len() {
+        let Some(mut patch) = Patch::from_diff(diff, index)? else {
+            continue;
+        };
+        let delta = patch.delta();
+        let file = if delta.status() == Delta::Deleted {
+            delta.old_file()
+        } else {
+            delta.new_file()
+        };
+        let path = file.path().unwrap_or(Path::new("")).to_string_lossy();
+        let path = path
+            .strip_prefix(folder)
+            .and_then(|p| p.strip_prefix('/'))
+            .unwrap_or(&path)
+            .to_owned();
+        let patch = String::from_utf8_lossy(&patch.to_buf()?).into_owned();
+        files.push(FileDiff { path, patch });
+    }
+    Ok(files)
+}

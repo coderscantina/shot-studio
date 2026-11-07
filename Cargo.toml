@@ -21,6 +21,10 @@ parley = "=0.12.0"
 # KDL v2 parser for the project files. Spans give line-numbered errors, serde is not needed.
 kdl = { version = "6.7.1", default-features = false, features = ["span"] }
 blake3 = "1.8.7"
+# Vendored libgit2 so the app needs no system git. No https or ssh: the board only works on local repos.
+git2 = { version = "0.21.0", default-features = false, features = ["vendored-libgit2"] }
+thiserror = "2.0.21"
+tempfile = "3.27.0"
 
 [profile.release]
 debug = "line-tables-only"
