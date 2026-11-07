@@ -12,7 +12,7 @@ Mark a milestone complete only after its acceptance criteria pass and an evidenc
 | 04 | [Auto cut and finish](04-auto-cut-and-finish.md) | 03 | Analysis, Media | Complete on `milestone/04-06`. Burned-in caption drawing moved to 07. [Evidence](../evidence/m04-auto-cut-and-finish.md) |
 | 05 | [Record comfort](05-record-comfort.md) | 03 | Analysis, App | Built on `milestone/04-06`, the beam splitter check waits for Mike. [Evidence](../evidence/m05-record-comfort.md) |
 | 06 | [Product videos](06-product-videos.md) | 03 | Media, App | Complete on `milestone/04-06`. [Evidence](../evidence/m06-product-videos.md) |
-| 07 | [Overlays and derived cuts](07-overlays-and-derived-cuts.md) | 04, 05 | Media, Core | Not started |
+| 07 | [Overlays and derived cuts](07-overlays-and-derived-cuts.md) | 04, 05 | Media, Core | Complete on `milestone/07-08`, face reframing proven on a stand-in face only. [Evidence](../evidence/m07-overlays-and-derived-cuts.md) |
 | 08 | [Planning, agents and ship](08-planning-agents-and-ship.md) | 03, 04, 07 | Core, Agents | Work items 1 and 2 (board, proposals) merged, 3 started: `shot` CLI and MCP server over the board |
 | 09 | [Release gate](09-release-gate.md) | 01 to 08 | Core | Not started |
 
@@ -29,6 +29,8 @@ Waiting for Mike. One line each with a recommendation and a link to its record. 
 - Auto edits (jump-cut and auto zooms) written as ordinary nodes with provenance, markers as `events.jsonl` events. Recommend adopting: the file shows what the export shows. [0014](../decisions/0014-auto-edits-as-written-nodes.md)
 - Caption fixes as a "heard, said" dictionary in `cut.kdl`. Recommend adopting: survives re-transcription. [0015](../decisions/0015-caption-fixes-as-a-dictionary.md)
 - Product video effects as optional `format.kdl` settings, code from git as an overlay template. Recommend adopting: existing files stay valid. [0016](../decisions/0016-product-effects-as-format-settings.md)
+- Derived cuts as windows of main's frames that reuse its cached chunks. Recommend adopting: a Short costs seconds once main is exported. [0017](../decisions/0017-derived-cuts-from-main-chunks.md)
+- Overlay templates as typed specs checked at export, unknown templates refused. Recommend adopting: agents fill parameters instead of writing code. [0018](../decisions/0018-overlay-templates-as-typed-specs.md)
 
 ## Prerequisites from Mike
 
@@ -43,6 +45,11 @@ Waiting for Mike. One line each with a recommendation and a link to its record. 
 Found by agents and waiting for a task. Remove a line when it's fixed.
 
 - Record does not warn when the camera delivers black frames.
+- Face reframing is untested on a real face; Vision does not detect the fixture's pixel face.
+- Overlays laid out for 16:9 get cut off inside a Short's 9:16 window.
+- The export job queue starts with the shortest jobs although its comment says longest first.
+- The b-roll lane color and the Overlays pane icons are local stand-ins, not theme tokens and Hugeicons.
+- The app cannot preview a derived cut, and the preview plays no bleep.
 - The inline retake toast exists in the prompter but nothing calls it: the live retake rule should call `PrompterPane::live().caught(...)`.
 - `PcmReader` in `shot-media` does not expose its length, so the music bed detects the end by looking for 10 s of digital silence.
 - Filler learning only uses Keeps from the current video, not the channel. N markers (next beat) are not used by any rule yet.
