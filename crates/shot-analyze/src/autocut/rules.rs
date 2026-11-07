@@ -163,15 +163,7 @@ pub fn find(
         let Some(range) = gap.cut(breath) else {
             continue;
         };
-        let confidence = match (gap.mid_sentence, gap.murmur) {
-            (false, false) => 95,
-            (false, true) => 60,
-            (true, false) => {
-                let over = gap.range.duration().0 as f64 / rule.min.0 as f64 - 1.0;
-                (60.0 + 30.0 * over).clamp(60.0, 90.0) as u8
-            }
-            (true, true) => 50,
-        };
+        let confidence = gap.confidence(rule.min);
         let kind = if gap.mid_sentence {
             RuleKind::Pause
         } else {
@@ -188,18 +180,32 @@ pub struct Gaps {
     gaps: Vec<Gap>,
 }
 
-struct Gap {
-    range: TimeRange,
+pub(crate) struct Gap {
+    pub(crate) range: TimeRange,
     /// Voice before and after, so the cut keeps a breath on that side.
     voiced_before: bool,
     voiced_after: bool,
     /// The last word before does not end a sentence.
-    mid_sentence: bool,
+    pub(crate) mid_sentence: bool,
     /// The VAD hears speech without a recognized word: maybe a missed word, maybe a breath.
     murmur: bool,
 }
 
 impl Gap {
+    /// How sure it is that the gap is dead air: a silence after a sentence is, a pause mid
+    /// sentence grows surer the longer it runs past `min`, and a murmur may be a missed word.
+    pub(crate) fn confidence(&self, min: Micros) -> u8 {
+        match (self.mid_sentence, self.murmur) {
+            (false, false) => 95,
+            (false, true) => 60,
+            (true, false) => {
+                let over = self.range.duration().0 as f64 / min.0 as f64 - 1.0;
+                (60.0 + 30.0 * over).clamp(60.0, 90.0) as u8
+            }
+            (true, true) => 50,
+        }
+    }
+
     fn cut(&self, breath: Micros) -> Option<TimeRange> {
         let from = self.range.from().0 + if self.voiced_before { breath.0 } else { 0 };
         let to = self
@@ -293,6 +299,11 @@ impl Gaps {
             voiced: merged,
             gaps,
         }
+    }
+
+    /// Every unvoiced stretch of the take, in order.
+    pub(crate) fn all(&self) -> &[Gap] {
+        &self.gaps
     }
 
     fn voiced_in(&self, range: TimeRange) -> bool {

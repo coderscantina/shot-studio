@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 shot-core = { path = "../shot-core" }
+shot-capture = { path = "../shot-capture" }
 whisper-rs.workspace = true
 ureq.workspace = true
 sha2.workspace = true

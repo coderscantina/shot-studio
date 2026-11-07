@@ -25,3 +25,6 @@ shot-render = { path = "../shot-render" }
 [[bin]]
 name = "shot"
 path = "src/main.rs"
+
+[dev-dependencies]
+tempfile.workspace = true

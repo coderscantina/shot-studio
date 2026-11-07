@@ -1,4 +1,5 @@
-//! Reading the record hotkey markers that feed the rules from a take's `events.jsonl`.
+//! Reading what the rules and elements need from a take's `events.jsonl`: the `again` markers,
+//! clicks and key presses.
 
 use std::fs;
 use std::io;
@@ -31,6 +32,47 @@ pub fn again_markers(events: &Path) -> io::Result<Vec<Micros>> {
         .filter(|line| line.kind == "marker" && line.mark == Some("again"))
         .map(|line| Micros(line.t))
         .collect())
+}
+
+/// The clicks and key presses of an event log.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Input {
+    /// Each press of a mouse button, with the cursor position in screen pixels.
+    pub clicks: Vec<(Micros, i32, i32)>,
+    pub keys: Vec<Micros>,
+}
+
+#[derive(Deserialize)]
+struct InputLine<'a> {
+    t: u64,
+    kind: &'a str,
+    #[serde(default)]
+    x: i32,
+    #[serde(default)]
+    y: i32,
+}
+
+/// Reads [`Input`] like [`again_markers`] reads markers: a missing log has none, a torn line is
+/// skipped.
+pub(crate) fn input(events: &Path) -> io::Result<Input> {
+    let text = match fs::read_to_string(events) {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Input::default()),
+        Err(e) => return Err(e),
+    };
+    let mut input = Input::default();
+    for line in text
+        .lines()
+        .filter(|line| line.contains("\"down\"") || line.contains("\"key\""))
+        .filter_map(|line| serde_json::from_str::<InputLine>(line).ok())
+    {
+        match line.kind {
+            "down" => input.clicks.push((Micros(line.t), line.x, line.y)),
+            "key" => input.keys.push(Micros(line.t)),
+            _ => {}
+        }
+    }
+    Ok(input)
 }
 
 #[cfg(test)]

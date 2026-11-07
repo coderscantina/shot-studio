@@ -180,7 +180,7 @@ fn describe_tool(name: &str) -> String {
 }
 
 /// The `shot` executable that serves MCP, next to the app.
-fn shot_executable() -> Result<PathBuf, String> {
+pub fn shot_executable() -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let shot = exe.with_file_name("shot");
     if shot.exists() {

@@ -4,7 +4,8 @@
 //! A recorder thread owns the capture session from start to stop, so the session never moves
 //! between threads. Starting loads the speech model first (downloading it on first use), then
 //! starts capture with a mic tap feeding the transcriber. Stopping finishes the take, flushes the
-//! transcript to the cache and appends the take to `cut.kdl`.
+//! transcript to the cache, writes the take's elements and appends the take to `cut.kdl`. The
+//! Vision and Claude passes of the elements run after the rough cut, in `shot analyze`.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -19,6 +20,7 @@ use gpui::{
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::progress::Progress;
 use objc2_core_video::{CVPixelBufferGetHeight, CVPixelBufferGetWidth};
+use shot_analyze::elements::{self, Depth};
 use shot_analyze::{SpeechDetector, Transcriber, cache, models};
 use shot_capture::events::Hotkey;
 use shot_capture::{Devices, Preview, PreviewFrame, Session, SessionConfig, Source};
@@ -216,6 +218,7 @@ impl RecordScreen {
                             });
                             match result {
                                 Ok(()) => {
+                                    analyze_later(&this.folder.read(cx).dir, &take);
                                     this.shared.set(Phase::Idle);
                                     cx.emit(Recorded);
                                 }
@@ -301,9 +304,14 @@ fn record(
             let follow = fetch(shot_prompter::follow_model())?;
             shared.set(Phase::Loading);
             let sink = WordSink::default();
+            let log = elements::Log::create(dir, &expected).map_err(|e| e.to_string())?;
             let on_word = {
                 let sink = sink.clone();
-                move |word: &shot_core::Word| sink.push(word.text.clone())
+                move |word: &shot_core::Word| {
+                    sink.push(word.text.clone());
+                    // Only a crash keeps the log; a failed line is written again at stop.
+                    let _ = log.word(word);
+                }
             };
             let transcriber = Transcriber::new(&whisper, &vad, expected.clone(), on_word)
                 .map_err(|e| e.to_string())?;
@@ -373,6 +381,7 @@ fn record(
     live.set_marks(None);
     shared.preview.lock().expect("preview").take();
     let take = session.stop().map_err(|e| e.to_string())?;
+    let mut heard = Transcript::new(take.id.clone());
     if let Some((transcriber, sink)) = transcriber {
         let transcriber = Arc::try_unwrap(transcriber)
             .map_err(|_| "the mic tap still holds the transcriber".to_owned())?;
@@ -388,15 +397,44 @@ fn record(
             moved
         };
         cache::write_cached(dir, &transcript).map_err(|e| e.to_string())?;
+        heard = transcript;
     }
-    if let Some(speech) = speech {
-        let speech = Arc::try_unwrap(speech)
-            .map_err(|_| "the mic tap still holds the speech detector".to_owned())?
-            .finish()
-            .map_err(|e| e.to_string())?;
-        cache::write_speech(dir, &take.id, &speech).map_err(|e| e.to_string())?;
+    let speech = match speech {
+        Some(speech) => {
+            let speech = Arc::try_unwrap(speech)
+                .map_err(|_| "the mic tap still holds the speech detector".to_owned())?
+                .finish()
+                .map_err(|e| e.to_string())?;
+            cache::write_speech(dir, &take.id, &speech).map_err(|e| e.to_string())?;
+            speech
+        }
+        None => shot_analyze::Speech::default(),
+    };
+    let found = elements::analyze(dir, &heard, &speech, Depth::Quick).map_err(|e| e.to_string())?;
+    elements::write(dir, &found).map_err(|e| e.to_string())?;
+    if take.id != expected {
+        let _ = std::fs::remove_file(elements::path(dir, &expected));
     }
     Ok((take.id, take.duration))
+}
+
+/// Adds what Vision and Claude find to the take's elements in a `shot analyze` of its own, so it
+/// never holds up the rough cut. Without the `shot` command or Claude Code that part is skipped.
+fn analyze_later(dir: &std::path::Path, take: &Id) {
+    let Ok(shot) = crate::agent::shot_executable() else {
+        return;
+    };
+    let mut command = std::process::Command::new(shot);
+    command
+        .args(["analyze", "--video"])
+        .arg(dir)
+        .args(["--take", take.as_str()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    if shot_mcp::bridge::Claude::find().is_some() {
+        command.arg("--claude");
+    }
+    std::thread::spawn(move || command.status());
 }
 
 /// Stable words handed from the transcriber's thread to the recorder.

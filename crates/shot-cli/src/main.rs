@@ -4,6 +4,7 @@
 //! CLI and the MCP tools print the same thing.
 
 mod agent;
+mod analyze;
 mod autocut;
 mod caption_fix;
 mod models;
@@ -113,6 +114,8 @@ enum Command {
     Transcribe(transcribe::TranscribeArgs),
     /// Run the auto-cut rules on a take and write the rough cut into cut.kdl.
     Autocut(autocut::AutocutArgs),
+    /// Run a take's analysis again and rewrite its elements file.
+    Analyze(analyze::AnalyzeArgs),
     /// Add, change or remove a caption fix: words the transcript mishears and what captions show.
     CaptionFix(caption_fix::CaptionFixArgs),
 }
@@ -160,6 +163,7 @@ fn run(cli: Cli) -> Result<(), String> {
         Command::Models { action } => return models::run(action),
         Command::Transcribe(args) => return transcribe::run(args),
         Command::Autocut(args) => return autocut::run(args),
+        Command::Analyze(args) => return analyze::run(args),
         Command::CaptionFix(args) => return caption_fix::run(args),
         Command::Style(args) => return style::run(cli.repo, args),
         _ => {}
@@ -264,6 +268,7 @@ fn run(cli: Cli) -> Result<(), String> {
         | Command::Transcribe(_)
         | Command::Autocut(_)
         | Command::Style(_)
+        | Command::Analyze(_)
         | Command::CaptionFix(_) => {
             unreachable!("handled before opening the board")
         }
