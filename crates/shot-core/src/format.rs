@@ -1,7 +1,8 @@
 use kdl::KdlValue;
 
+use crate::brand::BrandScope;
 use crate::kdl_io::{FromKdl, Node, Source, ToKdl, Writer, keyword_enum, quote, required};
-use crate::{Micros, ParseError};
+use crate::{Brand, Micros, ParseError, StyleSheet};
 
 keyword_enum! {
     /// The four shipped formats. Each has a preset `format.kdl`.
@@ -260,26 +261,51 @@ pub struct TimedRule {
     pub min: Micros,
 }
 
-impl Format {
+/// A format file as one layer of the style cascade: a channel's `formats/<format>.kdl` or a
+/// video's `format.kdl`, which holds only what differs from the channel's. Every setting is
+/// optional, and the file may hold a `brand { ... }` override and style rules.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FormatLayer {
+    pub prompter: Option<PrompterMode>,
+    pub pacing: Option<Pacing>,
+    /// The default layout first, then the hotkey layouts. Never empty when set.
+    pub layouts: Option<Vec<Layout>>,
+    pub captions: Option<CaptionStyle>,
+    pub auto_cut: Option<AutoCut>,
+    pub auto_zoom: Option<AutoZoom>,
+    pub zoom_motion: Option<ZoomMotion>,
+    pub cursor: Option<CursorStyle>,
+    pub keystrokes: Option<Keystrokes>,
+    pub window: Option<WindowStyle>,
+    /// Fields of the brand this layer changes.
+    pub brand: Option<Brand>,
+    pub rules: StyleSheet,
+}
+
+impl FormatLayer {
     pub fn parse(text: &str) -> Result<Self, ParseError> {
         let src = Source {
             file: "format.kdl",
             text,
         };
         let doc = src.parse()?;
-        let (mut prompter, mut pacing, mut layouts, mut captions, mut auto_cut) =
-            (None, None, None, None, None);
-        let (mut auto_zoom, mut zoom_motion, mut cursor, mut keystrokes, mut window) =
-            (None, None, None, None, None);
-        for node in src.nodes(&doc) {
+        Self::read(src, &doc, true)
+    }
+
+    /// Reads the file. Without `style`, the `brand` block and rules are unknown nodes, which
+    /// keeps a settings-only [`Format`] strict.
+    fn read(src: Source<'_>, doc: &kdl::KdlDocument, style: bool) -> Result<Self, ParseError> {
+        let mut layer = Self::default();
+        let (mut layouts, mut brand) = (None, None);
+        for node in src.nodes(doc) {
             match node.name() {
                 "prompter" => {
                     node.expect(1, &[])?;
-                    node.set_once(&mut prompter, node.arg(0)?)?;
+                    node.set_once(&mut layer.prompter, node.arg(0)?)?;
                 }
                 "pacing" => {
                     node.expect(1, &[])?;
-                    node.set_once(&mut pacing, node.arg(0)?)?;
+                    node.set_once(&mut layer.pacing, node.arg(0)?)?;
                 }
                 "layouts" => {
                     node.expect_list()?;
@@ -287,76 +313,123 @@ impl Format {
                 }
                 "captions" => {
                     node.expect(1, &[])?;
-                    node.set_once(&mut captions, node.arg(0)?)?;
+                    node.set_once(&mut layer.captions, node.arg(0)?)?;
                 }
-                "auto-cut" => node.set_once(&mut auto_cut, AutoCut::read(node)?)?,
-                "auto-zoom" => node.set_once(&mut auto_zoom, AutoZoom::read(node)?)?,
+                "auto-cut" => node.set_once(&mut layer.auto_cut, AutoCut::read(node)?)?,
+                "auto-zoom" => node.set_once(&mut layer.auto_zoom, AutoZoom::read(node)?)?,
                 "zoom-motion" => {
                     node.expect(1, &[])?;
-                    node.set_once(&mut zoom_motion, node.arg(0)?)?;
+                    node.set_once(&mut layer.zoom_motion, node.arg(0)?)?;
                 }
-                "cursor" => node.set_once(&mut cursor, CursorStyle::read(node)?)?,
+                "cursor" => node.set_once(&mut layer.cursor, CursorStyle::read(node)?)?,
                 "keystrokes" => {
                     node.expect(1, &[])?;
-                    node.set_once(&mut keystrokes, node.arg(0)?)?;
+                    node.set_once(&mut layer.keystrokes, node.arg(0)?)?;
                 }
-                "window" => node.set_once(&mut window, WindowStyle::read(node)?)?,
+                "window" => node.set_once(&mut layer.window, WindowStyle::read(node)?)?,
+                "brand" if style => {
+                    node.expect_block(0, &[])?;
+                    let patch = Brand::read(node.children(), BrandScope::Patch)?;
+                    if patch.is_empty() {
+                        return Err(node.error("`brand` overrides at least one field"));
+                    }
+                    node.set_once(&mut brand, patch)?;
+                }
+                "on" if style => layer.rules.add(node)?,
                 _ => return Err(node.unknown()),
             }
         }
-        let missing = |message| src.error(0, message);
-        let mut layouts = required(layouts, "layouts", missing)?.into_iter();
-        Ok(Self {
-            prompter: required(prompter, "prompter", missing)?,
-            pacing: required(pacing, "pacing", missing)?,
-            default_layout: layouts.next().expect("layouts has at least one argument"),
-            other_layouts: layouts.collect(),
-            captions: required(captions, "captions", missing)?,
-            auto_cut: required(auto_cut, "auto-cut", missing)?,
-            auto_zoom,
-            zoom_motion,
-            cursor,
-            keystrokes,
-            window,
-        })
+        layer.layouts = layouts;
+        layer.brand = brand;
+        Ok(layer)
     }
 
-    /// The render settings with the defaults filled in.
-    pub fn effects(&self) -> Effects {
-        let defaults = Effects::default();
-        Effects {
-            zoom_motion: self.zoom_motion.unwrap_or(defaults.zoom_motion),
-            cursor: self.cursor.unwrap_or(defaults.cursor),
-            keystrokes: self.keystrokes.unwrap_or(defaults.keystrokes),
-            window: self.window.unwrap_or(defaults.window),
+    /// The settings of `base` with this layer's replacing them. Brand fields and rules are
+    /// the cascade's business, not the resolved format's.
+    pub fn apply(&self, base: &Format) -> Format {
+        let mut format = base.clone();
+        if let Some(prompter) = self.prompter {
+            format.prompter = prompter;
         }
+        if let Some(pacing) = self.pacing {
+            format.pacing = pacing;
+        }
+        if let Some(layouts) = &self.layouts {
+            format.default_layout = layouts[0];
+            format.other_layouts = layouts[1..].to_vec();
+        }
+        if let Some(captions) = self.captions {
+            format.captions = captions;
+        }
+        if let Some(auto_cut) = &self.auto_cut {
+            format.auto_cut = auto_cut.clone();
+        }
+        fn opt<T: Clone>(base: &mut Option<T>, layer: &Option<T>) {
+            if layer.is_some() {
+                base.clone_from(layer);
+            }
+        }
+        opt(&mut format.auto_zoom, &self.auto_zoom);
+        opt(&mut format.zoom_motion, &self.zoom_motion);
+        opt(&mut format.cursor, &self.cursor);
+        opt(&mut format.keystrokes, &self.keystrokes);
+        opt(&mut format.window, &self.window);
+        format
+    }
+
+    /// A full format from a layer that sets every required node, or the first missing one.
+    fn complete(self, src: Source<'_>) -> Result<Format, ParseError> {
+        let missing = |message| src.error(0, message);
+        let mut layouts = required(self.layouts, "layouts", missing)?.into_iter();
+        Ok(Format {
+            prompter: required(self.prompter, "prompter", missing)?,
+            pacing: required(self.pacing, "pacing", missing)?,
+            default_layout: layouts.next().expect("layouts has at least one argument"),
+            other_layouts: layouts.collect(),
+            captions: required(self.captions, "captions", missing)?,
+            auto_cut: required(self.auto_cut, "auto-cut", missing)?,
+            auto_zoom: self.auto_zoom,
+            zoom_motion: self.zoom_motion,
+            cursor: self.cursor,
+            keystrokes: self.keystrokes,
+            window: self.window,
+        })
     }
 
     pub fn to_kdl(&self) -> String {
         let mut w = Writer::default();
-        w.node("prompter").arg(&self.prompter).end();
-        w.node("pacing").arg(&self.pacing).end();
-        w.node("layouts").arg(&self.default_layout);
-        for layout in &self.other_layouts {
-            w.arg(layout);
+        if let Some(prompter) = &self.prompter {
+            w.node("prompter").arg(prompter).end();
         }
-        w.end();
-        w.node("captions").arg(&self.captions).end();
-        let a = &self.auto_cut;
-        w.node("auto-cut").prop("confidence", &a.confidence).open();
-        a.silence.write(&mut w, RuleKind::Silence);
-        w.node(RuleKind::Retake.as_str())
-            .prop("on", &a.retake)
-            .end();
-        w.node(RuleKind::Misspoken.as_str())
-            .prop("on", &a.misspoken)
-            .end();
-        a.pause.write(&mut w, RuleKind::Pause);
-        w.node(RuleKind::Filler.as_str())
-            .prop("on", &a.filler)
-            .end();
-        a.idle_screen.write(&mut w, RuleKind::IdleScreen);
-        w.close();
+        if let Some(pacing) = &self.pacing {
+            w.node("pacing").arg(pacing).end();
+        }
+        if let Some(layouts) = &self.layouts {
+            w.node("layouts");
+            for layout in layouts {
+                w.arg(layout);
+            }
+            w.end();
+        }
+        if let Some(captions) = &self.captions {
+            w.node("captions").arg(captions).end();
+        }
+        if let Some(a) = &self.auto_cut {
+            w.node("auto-cut").prop("confidence", &a.confidence).open();
+            a.silence.write(&mut w, RuleKind::Silence);
+            w.node(RuleKind::Retake.as_str())
+                .prop("on", &a.retake)
+                .end();
+            w.node(RuleKind::Misspoken.as_str())
+                .prop("on", &a.misspoken)
+                .end();
+            a.pause.write(&mut w, RuleKind::Pause);
+            w.node(RuleKind::Filler.as_str())
+                .prop("on", &a.filler)
+                .end();
+            a.idle_screen.write(&mut w, RuleKind::IdleScreen);
+            w.close();
+        }
         if let Some(z) = &self.auto_zoom {
             w.node("auto-zoom");
             for trigger in &z.triggers {
@@ -386,7 +459,71 @@ impl Format {
                 .prop("frame", &win.frame)
                 .end();
         }
+        if let Some(brand) = &self.brand {
+            w.node("brand").open();
+            brand.write(&mut w);
+            w.close();
+        }
+        self.rules.write(&mut w);
         w.finish()
+    }
+}
+
+impl From<&Format> for FormatLayer {
+    fn from(format: &Format) -> Self {
+        Self {
+            prompter: Some(format.prompter),
+            pacing: Some(format.pacing),
+            layouts: Some(
+                std::iter::once(format.default_layout)
+                    .chain(format.other_layouts.iter().copied())
+                    .collect(),
+            ),
+            captions: Some(format.captions),
+            auto_cut: Some(format.auto_cut.clone()),
+            auto_zoom: format.auto_zoom.clone(),
+            zoom_motion: format.zoom_motion,
+            cursor: format.cursor,
+            keystrokes: format.keystrokes,
+            window: format.window,
+            brand: None,
+            rules: StyleSheet::default(),
+        }
+    }
+}
+
+impl Format {
+    /// A settings-only file with every required node, as the shipped presets are written.
+    /// A `brand` block or style rules are unknown nodes here; parse those as a [`FormatLayer`].
+    pub fn parse(text: &str) -> Result<Self, ParseError> {
+        let src = Source {
+            file: "format.kdl",
+            text,
+        };
+        let doc = src.parse()?;
+        FormatLayer::read(src, &doc, false)?.complete(src)
+    }
+
+    /// The settings after laying `layers` over this format, lowest layer first.
+    pub fn resolve<'a>(&self, layers: impl IntoIterator<Item = &'a FormatLayer>) -> Self {
+        layers
+            .into_iter()
+            .fold(self.clone(), |format, layer| layer.apply(&format))
+    }
+
+    /// The render settings with the defaults filled in.
+    pub fn effects(&self) -> Effects {
+        let defaults = Effects::default();
+        Effects {
+            zoom_motion: self.zoom_motion.unwrap_or(defaults.zoom_motion),
+            cursor: self.cursor.unwrap_or(defaults.cursor),
+            keystrokes: self.keystrokes.unwrap_or(defaults.keystrokes),
+            window: self.window.unwrap_or(defaults.window),
+        }
+    }
+
+    pub fn to_kdl(&self) -> String {
+        FormatLayer::from(self).to_kdl()
     }
 }
 

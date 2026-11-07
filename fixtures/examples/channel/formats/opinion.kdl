@@ -1,0 +1,27 @@
+prompter beats
+pacing tight
+layouts face split
+captions word-pop
+auto-cut confidence=85 {
+    silence on=#true min=600_000
+    retake on=#true
+    misspoken on=#true
+    pause on=#true min=1_000_000
+    filler on=#true
+    idle-screen on=#false min=8_000_000
+}
+on silence min=600_000 {
+    cut breath=50_000 confidence=85
+}
+on filler {
+    cut confidence=85
+}
+on pause min=1_000_000 {
+    cut breath=50_000 confidence=85
+}
+on emphasis {
+    zoom 112
+}
+on click {
+    zoom 160 hold=1_500_000
+}

@@ -10,3 +10,5 @@ repository.workspace = true
 [dependencies]
 kdl.workspace = true
 blake3.workspace = true
+# The element files are JSON Lines. Parsed through `Value`, so no derive is needed.
+serde_json.workspace = true

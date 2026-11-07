@@ -1,0 +1,42 @@
+captions word-pop
+
+chapter "Hook" {
+    take t01 {
+        keep from=0 to=12_000_000
+    }
+}
+
+chapter "The rule everyone repeats" {
+    take t01 {
+        keep from=12_000_000 to=58_000_000
+        layout split from=20_000_000 to=40_000_000
+    }
+    take t02 {
+        keep from=0 to=15_000_000
+        remove from=15_000_000 to=16_200_000 by=manual
+        keep from=16_200_000 to=44_000_000
+    }
+}
+
+override t01 click at=6_200_000 {
+    zoom off
+}
+override t01 filler at=9_800_000 {
+    keep
+}
+override t01 url at=22_000_000 {
+    overlay link-card for=6_000_000 {
+        url
+        accent #true
+    }
+}
+override t01 pause at=45_000_000 {
+    cut
+}
+override t02 filler at=30_000_000 {
+    keep
+}
+
+short friday-deploys {
+    clip t01 from=5_100_000 to=12_000_000
+}

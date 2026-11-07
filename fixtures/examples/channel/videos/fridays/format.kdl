@@ -1,0 +1,17 @@
+pacing natural
+brand {
+    colors accent="#ff7a59"
+}
+on silence min=500_000 {
+    cut breath=250_000 confidence=80
+}
+on filler {
+    cut confidence=80
+}
+on pause min=1_000_000 {
+    cut breath=250_000 confidence=80
+}
+on silence min=4_000_000 confidence=50 {
+    cut breath=250_000
+}
+on punchline off

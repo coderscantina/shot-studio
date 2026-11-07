@@ -6386,6 +6386,7 @@ version = "26.11.7"
 dependencies = [
  "blake3",
  "kdl",
+ "serde_json",
 ]
 
 [[package]]

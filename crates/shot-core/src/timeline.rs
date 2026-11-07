@@ -93,6 +93,23 @@ impl ContentHash {
         &self.0
     }
 
+    /// The hash of `bytes`, for files the lock records by content.
+    pub fn of(bytes: &[u8]) -> Self {
+        Self(*blake3::hash(bytes).as_bytes())
+    }
+
+    /// Reads the 64 hex digits `Display` writes.
+    pub fn from_hex(hex: &str) -> Option<Self> {
+        if hex.len() != 64 {
+            return None;
+        }
+        let mut bytes = [0; 32];
+        for (i, byte) in bytes.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(hex.get(i * 2..i * 2 + 2)?, 16).ok()?;
+        }
+        Some(Self(bytes))
+    }
+
     /// The key of a chunk that a later pass draws from what this key names plus `input`, for
     /// example a derived cut's chunk drawn from a main chunk. The pass encodes `input` so that
     /// distinct inputs never share bytes.
