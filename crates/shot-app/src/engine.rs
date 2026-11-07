@@ -13,8 +13,11 @@ use std::time::Duration;
 
 use objc2_core_foundation::CFRetained;
 use objc2_core_video::CVPixelBuffer;
+use shot_core::Effects;
 use shot_media::videotoolbox::Decoder;
+use shot_render::assets::Assets;
 use shot_render::cursor::FrameCursor;
+use shot_render::frame::{Shot, compose};
 use shot_render::graph::Renderer;
 use shot_render::layout::{Canvas, LayoutSpec, Source, Sources};
 use shot_render::plan::frame_time;
@@ -40,10 +43,12 @@ pub struct PreviewFrame {
 // a buffer once it is queued, so handing it to the UI thread is sound.
 unsafe impl Send for PreviewFrame {}
 
-/// What one preview plays: where each output frame comes from, and where the takes live.
+/// What one preview plays: where each output frame comes from, where the takes live, and the
+/// format's effects.
 pub struct Plan {
     pub map: EditMap,
     pub media: PathBuf,
+    pub effects: Effects,
 }
 
 #[derive(Default)]
@@ -165,6 +170,8 @@ fn render_loop(shared: &Shared) {
     let mut renderer = None;
     let mut pool = None;
     let mut tracks: HashMap<PathBuf, FrameCursor> = HashMap::new();
+    // Event logs and snapshots, read again for each new plan.
+    let mut assets: Option<(Arc<Plan>, Assets)> = None;
     loop {
         let (plan, frame, generation) = {
             let mut state = shared.lock();
@@ -198,7 +205,14 @@ fn render_loop(shared: &Shared) {
                         .map_err(|e| e.to_string())?,
                 ),
             };
-            render(&plan, frame, renderer, pool, &mut tracks)
+            let assets = match &mut assets {
+                Some((current, assets)) if Arc::ptr_eq(current, &plan) => assets,
+                _ => {
+                    let dir = plan.media.parent().unwrap_or(&plan.media);
+                    &mut assets.insert((plan.clone(), Assets::new(dir))).1
+                }
+            };
+            render(&plan, frame, renderer, pool, &mut tracks, assets)
         })();
 
         let mut state = shared.lock();
@@ -222,12 +236,13 @@ fn render(
     renderer: &Renderer,
     pool: &BufferPool,
     tracks: &mut HashMap<PathBuf, FrameCursor>,
+    assets: &mut Assets,
 ) -> Result<CFRetained<CVPixelBuffer>, String> {
     let span = plan
         .map
         .span_at(frame)
         .ok_or_else(|| format!("no segment at frame {frame}"))?;
-    let spec = LayoutSpec::of(span.layout).map_err(|e| e.to_string())?;
+    let spec = LayoutSpec::styled(span.layout, &plan.effects.window).map_err(|e| e.to_string())?;
     let source_frame = span.source_frame(frame);
     let time = Duration::from_micros(frame_time(source_frame, FPS).0);
     let take = plan.media.join(span.take.as_str());
@@ -268,14 +283,24 @@ fn render(
         screen: frames.screen.map_or((16, 9), |f| size(&f.buffer)),
         camera: frames.camera.map_or((16, 9), |f| size(&f.buffer)),
     };
-    let mut scene = spec.scene(CANVAS, sizes, span.zoom_at(source_frame));
-    scene
+    let look = assets
+        .look(&span.take, &span.overlays, plan.effects)
+        .map_err(|e| e.to_string())?;
+    let shot = Shot {
+        layout: span.layout,
+        zooms: &span.zooms,
+        overlays: &span.overlays,
+        time: frame_time(source_frame, FPS),
+    };
+    let mut drawn = compose(&shot, &look, CANVAS, sizes).map_err(|e| e.to_string())?;
+    drawn
+        .scene
         .layers
         .retain(|layer| frames.get(layer.source).is_some());
     let target = pool.buffer().map_err(|e| e.to_string())?;
     renderer
-        .render(
-            &scene,
+        .draw(
+            &drawn,
             Sources {
                 screen: frames.screen.map(|f| &*f.buffer),
                 camera: frames.camera.map(|f| &*f.buffer),

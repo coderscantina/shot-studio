@@ -71,7 +71,7 @@ pub fn run(args: ExportArgs) -> Result<(), String> {
     Ok(())
 }
 
-fn load(dir: &Path) -> Result<Project, String> {
+pub(crate) fn load(dir: &Path) -> Result<Project, String> {
     let read = |name: &str| {
         std::fs::read_to_string(dir.join(name))
             .map_err(|e| format!("{}: {e}", dir.join(name).display()))

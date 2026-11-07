@@ -10,9 +10,11 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_core_foundation::{CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType};
 use objc2_core_video::{
-    CVAttachmentMode, CVPixelBuffer, CVPixelBufferGetHeight, CVPixelBufferGetHeightOfPlane,
+    CVAttachmentMode, CVPixelBuffer, CVPixelBufferGetBaseAddressOfPlane,
+    CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferGetHeight, CVPixelBufferGetHeightOfPlane,
     CVPixelBufferGetIOSurface, CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidth,
-    CVPixelBufferGetWidthOfPlane, CVPixelBufferPool, kCVImageBufferYCbCrMatrix_ITU_R_601_4,
+    CVPixelBufferGetWidthOfPlane, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags,
+    CVPixelBufferPool, CVPixelBufferUnlockBaseAddress, kCVImageBufferYCbCrMatrix_ITU_R_601_4,
     kCVImageBufferYCbCrMatrix_ITU_R_709_2, kCVImageBufferYCbCrMatrixKey, kCVPixelBufferHeightKey,
     kCVPixelBufferIOSurfacePropertiesKey, kCVPixelBufferMetalCompatibilityKey,
     kCVPixelBufferPixelFormatTypeKey, kCVPixelBufferWidthKey,
@@ -269,4 +271,53 @@ impl BufferPool {
             _ => Err(RenderError::Pool(status)),
         }
     }
+}
+
+/// The pixels of a biplanar 4:2:0 buffer as 8-bit sRGB, row by row, decoded with the buffer's
+/// own range and matrix. Reads through the CPU, for golden-frame tests and evidence.
+pub fn read_rgb(buffer: &CVPixelBuffer) -> Result<Vec<[u8; 3]>, RenderError> {
+    let range = Range::of(buffer)?;
+    let [kr, kb] = Matrix::of(buffer).weights();
+    let (width, height) = size(buffer);
+    // SAFETY: The buffer is live; the lock keeps its planes mapped until the unlock below.
+    let status = unsafe { CVPixelBufferLockBaseAddress(buffer, CVPixelBufferLockFlags::ReadOnly) };
+    if status != 0 {
+        return Err(RenderError::Pool(status));
+    }
+    let plane = |index| {
+        let base = CVPixelBufferGetBaseAddressOfPlane(buffer, index) as *const u8;
+        let stride = CVPixelBufferGetBytesPerRowOfPlane(buffer, index);
+        let rows = CVPixelBufferGetHeightOfPlane(buffer, index);
+        // SAFETY: A locked plane spans `stride * rows` bytes from its base address.
+        unsafe { std::slice::from_raw_parts(base, stride * rows) }
+    };
+    let (luma, chroma) = (plane(0), plane(1));
+    let luma_stride = CVPixelBufferGetBytesPerRowOfPlane(buffer, 0);
+    let chroma_stride = CVPixelBufferGetBytesPerRowOfPlane(buffer, 1);
+    let mut out = Vec::with_capacity((width * height) as usize);
+    for y in 0..height as usize {
+        for x in 0..width as usize {
+            let l = f32::from(luma[y * luma_stride + x]) / 255.0;
+            let c = (y / 2) * chroma_stride + (x / 2) * 2;
+            let (cb, cr) = (
+                f32::from(chroma[c]) / 255.0 - 128.0 / 255.0,
+                f32::from(chroma[c + 1]) / 255.0 - 128.0 / 255.0,
+            );
+            let (l, cb, cr) = match range {
+                Range::Video => (
+                    (l - 16.0 / 255.0) * (255.0 / 219.0),
+                    cb * (255.0 / 224.0),
+                    cr * (255.0 / 224.0),
+                ),
+                Range::Full => (l, cb, cr),
+            };
+            let r = l + 2.0 * (1.0 - kr) * cr;
+            let b = l + 2.0 * (1.0 - kb) * cb;
+            let g = (l - kr * r - kb * b) / (1.0 - kr - kb);
+            out.push([r, g, b].map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8));
+        }
+    }
+    // SAFETY: Balances the lock above.
+    unsafe { CVPixelBufferUnlockBaseAddress(buffer, CVPixelBufferLockFlags::ReadOnly) };
+    Ok(out)
 }

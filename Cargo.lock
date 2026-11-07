@@ -6325,6 +6325,7 @@ version = "26.11.7"
 name = "shot-render"
 version = "26.11.7"
 dependencies = [
+ "git2",
  "objc2 0.6.5",
  "objc2-core-foundation",
  "objc2-core-video",
@@ -6332,6 +6333,8 @@ dependencies = [
  "objc2-metal 0.3.2",
  "parley",
  "pollster",
+ "serde",
+ "serde_json",
  "shot-core",
  "shot-media",
  "tempfile",
