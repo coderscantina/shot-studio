@@ -186,32 +186,29 @@ fn activity_is_newest_first_across_videos_and_bounded() {
 }
 
 #[test]
-fn tags_a_shipped_video_with_the_release_week() {
-    let channel = Channel::new(&[("alpha", VIDEO)]);
+fn tags_a_shipped_video_with_its_release_date() {
+    let channel = Channel::new(&[("alpha", VIDEO), ("beta", VIDEO)]);
     let board = channel.board();
-    let week = shot_board::ReleaseWeek {
-        year: 2026,
-        week: 46,
-    };
+    let day = shot_core::Date::new(2026, 11, 7).unwrap();
 
     board.move_card("alpha", Status::Editing).unwrap();
     assert!(matches!(
-        board.tag_release("alpha", week),
+        board.tag_release("alpha", day),
         Err(Error::NotShipped(_))
     ));
 
     let shipped = board.move_card("alpha", Status::Shipped).unwrap().unwrap();
-    let tag = board.tag_release("alpha", week).unwrap();
-    assert_eq!(tag.name, "v2026.46");
-    assert_eq!(tag.commit, shipped);
-    assert!(matches!(
-        board.tag_release("alpha", week),
-        Err(Error::TagExists(_))
-    ));
+    let first = board.tag_release("alpha", day).unwrap();
+    assert_eq!(first.name, "v26.11.7");
+    assert_eq!(first.commit, shipped);
+
+    board.move_card("beta", Status::Shipped).unwrap();
+    let second = board.tag_release("beta", day).unwrap();
+    assert_eq!(second.name, "v26.11.7.2");
 
     let releases = channel.board().releases().unwrap();
-    assert_eq!(releases, vec![tag]);
-    assert_eq!(releases[0].slug.as_deref(), Some("alpha"));
+    assert_eq!(releases, vec![second, first]);
+    assert_eq!(releases[1].slug.as_deref(), Some("alpha"));
 }
 
 #[test]

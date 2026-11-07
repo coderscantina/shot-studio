@@ -417,7 +417,7 @@ gen_demo() {
       [[ $status == "$final" ]] && break
     done
     if [[ $final == shipped ]]; then
-      demo_git tag -a "$(TZ=UTC demo_git log -1 --format=%cd --date=format:'v%G.%V')" -m "🚀 ship $slug"
+      demo_git tag -a "$(TZ=UTC demo_git log -1 --format=%cd --date=format:'v%y.%-m.%-d')" -m "🚀 ship $slug"
     fi
     demo_git checkout -q main
   done

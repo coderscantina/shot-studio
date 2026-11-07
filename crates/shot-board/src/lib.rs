@@ -10,8 +10,8 @@
 //!   on the default branch (`main`, then `master`, then the checked out branch); the first move or
 //!   accepted proposal creates its branch off the default branch tip.
 //! - `proposal/<slug>/<name>`: an agent proposal off the video's branch ([0004]).
-//! - `v<YYYY>.<WW>`: annotated release tag on a shipped video's commit, for example `v2026.46`.
-//!   The week is the ISO week, written with two digits so tags sort by name.
+//! - `vYY.M.D`: annotated CalVer release tag on a shipped video's commit, for example `v26.11.7`.
+//!   A second release on the same day is `v26.11.7.2`.
 //!
 //! `<slug>` and `<name>` use lowercase ASCII letters, digits and dashes, not starting with a dash.
 //!
@@ -37,7 +37,7 @@ use shot_core::{Status, Video};
 
 pub use error::{CardError, Error, Result};
 pub use proposals::{Accepted, FileDiff, Proposal};
-pub use releases::{ReleaseTag, ReleaseWeek};
+pub use releases::ReleaseTag;
 
 const VIDEO_PREFIX: &str = "video/";
 const FALLBACK_NAME: &str = "Shot Studio";

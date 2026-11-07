@@ -33,8 +33,6 @@ pub enum Error {
     Conflict { paths: Vec<String> },
     #[error("`{0}` is not shipped yet")]
     NotShipped(String),
-    #[error("release tag `{0}` already exists")]
-    TagExists(String),
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
