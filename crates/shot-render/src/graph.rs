@@ -2,7 +2,8 @@
 //!
 //! Each layer is one draw into the luma plane and one into the chroma plane, sampling the decoded
 //! frame's planes in place. The target is whatever the consumer takes directly: the encoder's
-//! `420v` buffers for export, `420f` buffers for gpui's preview surface.
+//! `420v` BT.709 buffers for export, `420f` BT.601 buffers for gpui's preview surface. Range and
+//! matrix are read from each buffer, so both sides show the same RGB.
 
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -12,13 +13,15 @@ use wgpu::hal::api::Metal;
 
 use crate::RenderError;
 use crate::layout::{Canvas, Scene, Sources};
-use crate::surface::{Plane, Range, plane_texture, size};
+use crate::surface::{Matrix, Plane, Range, plane_texture, size};
 
 /// Layers one frame can draw. 04 to 07 add overlays on top of the two sources.
 const MAX_LAYERS: usize = 8;
 
 /// Bytes per layer in the uniform buffer, the minimum dynamic offset alignment.
 const LAYER_STRIDE: u64 = 256;
+/// Size of the shader's `Layer` struct.
+const LAYER_SIZE: u64 = 80;
 
 pub struct Renderer {
     device: wgpu::Device,
@@ -77,7 +80,7 @@ impl Renderer {
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: true,
-                        min_binding_size: wgpu::BufferSize::new(64),
+                        min_binding_size: wgpu::BufferSize::new(LAYER_SIZE),
                     },
                     count: None,
                 },
@@ -159,6 +162,7 @@ impl Renderer {
             return Err(RenderError::TooManyLayers(scene.layers.len()));
         }
         let target_range = Range::of(target)?;
+        let target_matrix = Matrix::of(target);
         let (width, height) = size(target);
         let canvas = Canvas { width, height };
 
@@ -172,6 +176,8 @@ impl Renderer {
                 .get(layer.source)
                 .ok_or(RenderError::MissingSource(layer.source))?;
             let source_range = Range::of(source)?;
+            let [source_kr, source_kb] = Matrix::of(source).weights();
+            let [target_kr, target_kb] = target_matrix.weights();
             let views = Plane::BOTH.map(|plane| {
                 plane_texture(
                     &self.device,
@@ -202,6 +208,10 @@ impl Renderer {
                 0.0,
                 0.0,
                 0.0,
+                source_kr,
+                source_kb,
+                target_kr,
+                target_kb,
             ];
             let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_ne_bytes()).collect();
             self.queue.write_buffer(&self.uniforms, offset, &bytes);
@@ -226,7 +236,7 @@ impl Renderer {
                         resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                             buffer: &self.uniforms,
                             offset: 0,
-                            size: wgpu::BufferSize::new(64),
+                            size: wgpu::BufferSize::new(LAYER_SIZE),
                         }),
                     },
                 ],
@@ -237,7 +247,7 @@ impl Renderer {
             });
         }
 
-        let background = ycbcr(scene.background, target_range);
+        let background = ycbcr(scene.background, target_range, target_matrix);
         let mut encoder = self.device.create_command_encoder(&Default::default());
         for plane in Plane::BOTH {
             let texture = plane_texture(
@@ -291,10 +301,11 @@ fn video_flag(range: Range) -> f32 {
     }
 }
 
-/// BT.709 YCbCr of a gamma-encoded RGB color in `range`, matching the shader.
-fn ycbcr([r, g, b]: [f32; 3], range: Range) -> [f32; 3] {
-    let y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-    let (cb, cr) = ((b - y) / 1.8556, (r - y) / 1.5748);
+/// YCbCr of a gamma-encoded RGB color in `range` and `matrix`, matching the shader.
+fn ycbcr([r, g, b]: [f32; 3], range: Range, matrix: Matrix) -> [f32; 3] {
+    let [kr, kb] = matrix.weights();
+    let y = kr * r + (1.0 - kr - kb) * g + kb * b;
+    let (cb, cr) = ((b - y) / (2.0 * (1.0 - kb)), (r - y) / (2.0 * (1.0 - kr)));
     match range {
         Range::Video => [
             (16.0 + 219.0 * y) / 255.0,
@@ -312,13 +323,39 @@ mod tests {
     #[test]
     fn white_and_black_land_on_the_bt709_code_values() {
         let to_codes = |c: [f32; 3]| c.map(|v| (v * 255.0).round() as u8);
-        assert_eq!(to_codes(ycbcr([1.0; 3], Range::Video)), [235, 128, 128]);
-        assert_eq!(to_codes(ycbcr([0.0; 3], Range::Video)), [16, 128, 128]);
-        assert_eq!(to_codes(ycbcr([1.0; 3], Range::Full)), [255, 128, 128]);
+        let bt709 = Matrix::Bt709;
+        assert_eq!(
+            to_codes(ycbcr([1.0; 3], Range::Video, bt709)),
+            [235, 128, 128]
+        );
+        assert_eq!(
+            to_codes(ycbcr([0.0; 3], Range::Video, bt709)),
+            [16, 128, 128]
+        );
+        assert_eq!(
+            to_codes(ycbcr([1.0; 3], Range::Full, bt709)),
+            [255, 128, 128]
+        );
         // Pure red: Cr at its maximum.
         assert_eq!(
-            to_codes(ycbcr([1.0, 0.0, 0.0], Range::Video)),
+            to_codes(ycbcr([1.0, 0.0, 0.0], Range::Video, bt709)),
             [63, 102, 240]
         );
+    }
+
+    #[test]
+    fn bt601_full_range_decodes_back_with_gpuis_matrix() {
+        // gpui's surface shader: R = Y + 1.402 Cr, G = Y - 0.3441 Cb - 0.7141 Cr, B = Y + 1.772 Cb.
+        let rgb = [0.75, 0.25, 0.5];
+        let [y, cb, cr] = ycbcr(rgb, Range::Full, Matrix::Bt601);
+        let (cb, cr) = (cb - 128.0 / 255.0, cr - 128.0 / 255.0);
+        let back = [
+            y + 1.402 * cr,
+            y - 0.3441 * cb - 0.7141 * cr,
+            y + 1.772 * cb,
+        ];
+        for (a, b) in rgb.iter().zip(back) {
+            assert!((a - b).abs() < 0.5 / 255.0, "{rgb:?} came back as {back:?}");
+        }
     }
 }

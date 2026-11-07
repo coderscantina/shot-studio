@@ -1,10 +1,9 @@
 //! The Edit screen's preview: a render thread that draws output frames of an [`EditMap`] through
-//! `shot-render`'s render graph, the same layouts, crops and zooms export draws, into `420f`
-//! buffers gpui's surface element shows.
+//! `shot-render`'s render graph, the same decoded frames, layouts, crops and zooms export draws,
+//! into `420f` BT.601 buffers, the encoding gpui's surface element decodes.
 //!
 //! The thread keeps a few frames ahead while playing and renders one frame while paused. A seek
-//! drops what is queued. Decoders stay open per track and decode forward; a jump backwards or
-//! more than a second ahead seeks to the keyframe before it.
+//! drops what is queued. Each track has a [`FrameCursor`], export's own.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -14,11 +13,12 @@ use std::time::Duration;
 
 use objc2_core_foundation::CFRetained;
 use objc2_core_video::CVPixelBuffer;
-use shot_media::videotoolbox::{Decoder, Frame};
+use shot_media::videotoolbox::Decoder;
+use shot_render::cursor::FrameCursor;
 use shot_render::graph::Renderer;
 use shot_render::layout::{Canvas, LayoutSpec, Source, Sources};
 use shot_render::plan::frame_time;
-use shot_render::surface::{BufferPool, Range, size};
+use shot_render::surface::{BufferPool, Matrix, Range, size};
 
 use crate::model::{EditMap, FPS};
 
@@ -29,10 +29,6 @@ const CANVAS: Canvas = Canvas {
     width: 1920,
     height: 1080,
 };
-/// Forward jumps up to this long decode on instead of seeking.
-const DECODE_ON: Duration = Duration::from_secs(1);
-/// Frame times come from integer division on both sides; this absorbs the rounding.
-const PTS_TOLERANCE: Duration = Duration::from_millis(1);
 
 /// A rendered output frame.
 pub struct PreviewFrame {
@@ -168,7 +164,7 @@ impl Drop for Engine {
 fn render_loop(shared: &Shared) {
     let mut renderer = None;
     let mut pool = None;
-    let mut tracks: HashMap<PathBuf, Track> = HashMap::new();
+    let mut tracks: HashMap<PathBuf, FrameCursor> = HashMap::new();
     loop {
         let (plan, frame, generation) = {
             let mut state = shared.lock();
@@ -198,7 +194,7 @@ fn render_loop(shared: &Shared) {
             let pool = match &mut pool {
                 Some(pool) => pool,
                 None => pool.insert(
-                    BufferPool::new(CANVAS.width, CANVAS.height, Range::Full)
+                    BufferPool::new(CANVAS.width, CANVAS.height, Range::Full, Matrix::Bt601)
                         .map_err(|e| e.to_string())?,
                 ),
             };
@@ -225,7 +221,7 @@ fn render(
     frame: u64,
     renderer: &Renderer,
     pool: &BufferPool,
-    tracks: &mut HashMap<PathBuf, Track>,
+    tracks: &mut HashMap<PathBuf, FrameCursor>,
 ) -> Result<CFRetained<CVPixelBuffer>, String> {
     let span = plan
         .map
@@ -248,8 +244,8 @@ fn render(
             let path = path(source);
             if !tracks.contains_key(&path) {
                 let decoder =
-                    Decoder::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-                tracks.insert(path.clone(), Track::new(decoder));
+                    Decoder::open_native(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+                tracks.insert(path.clone(), FrameCursor::new(decoder));
             }
             tracks
                 .get_mut(&path)
@@ -258,11 +254,11 @@ fn render(
                 .map_err(|e| format!("{}: {e}", path.display()))?;
         }
     }
-    let frame_of = |source| -> Option<&Frame> {
+    let frame_of = |source| {
         available(source)
             .then(|| tracks.get(&path(source)))
             .flatten()
-            .and_then(|t| t.current.as_ref())
+            .and_then(FrameCursor::current)
     };
     let frames = Sources {
         screen: frame_of(Source::Screen),
@@ -288,46 +284,4 @@ fn render(
         )
         .map_err(|e| e.to_string())?;
     Ok(target)
-}
-
-/// One track's decoder, holding the frame on screen at the last requested time.
-struct Track {
-    decoder: Decoder,
-    current: Option<Frame>,
-    next: Option<Frame>,
-    ended: bool,
-}
-
-impl Track {
-    fn new(decoder: Decoder) -> Self {
-        Self {
-            decoder,
-            current: None,
-            next: None,
-            ended: false,
-        }
-    }
-
-    /// Moves to the frame on screen at `time`. Past the last frame, the last one stays.
-    fn goto(&mut self, time: Duration) -> Result<(), shot_media::videotoolbox::DecodeError> {
-        let shown = self.current.as_ref().map(|f| f.pts);
-        let decodes_on =
-            shown.is_some_and(|pts| pts <= time + PTS_TOLERANCE && time < pts + DECODE_ON);
-        if !decodes_on {
-            self.next = None;
-            self.ended = false;
-            self.current = self.decoder.seek(time + PTS_TOLERANCE, || false)?;
-            return Ok(());
-        }
-        loop {
-            if self.next.is_none() && !self.ended {
-                self.next = self.decoder.next_frame()?;
-                self.ended = self.next.is_none();
-            }
-            match &self.next {
-                Some(next) if next.pts <= time + PTS_TOLERANCE => self.current = self.next.take(),
-                _ => return Ok(()),
-            }
-        }
-    }
 }

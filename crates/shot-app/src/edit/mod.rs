@@ -20,6 +20,7 @@ use gpui::{
     actions, div, prelude::*,
 };
 use shot_core::{Cut, EditError, Id, Micros, TakeAt, TimeRange, WordState};
+use shot_media::timing::ClockFollower;
 use shot_render::export::{self, ExportOptions};
 
 use crate::engine::{Engine, Plan, PreviewFrame};
@@ -28,6 +29,7 @@ use crate::model::{
     self, BlockDoc, EditMap, FPS, LAYOUT_KEYS, Selection, View, apply_layout, document,
 };
 use crate::peaks::Peaks;
+use crate::sound::Sound;
 use crate::theme::*;
 
 const CONTEXT: &str = "EditScreen";
@@ -88,7 +90,12 @@ pub enum Workspace {
     Timeline,
 }
 
-/// The playback clock, started once the first frame after play is queued.
+/// A frame picked at a render is on screen about one refresh later, so it is picked for the
+/// sound heard then. One refresh at 60 Hz.
+const VIDEO_AHEAD: Duration = Duration::from_micros(16_667);
+
+/// The wall clock that paces playback when there is no sound, started once the first frame
+/// after play is queued.
 #[derive(Clone, Copy)]
 struct Clock {
     started: Instant,
@@ -114,10 +121,14 @@ pub struct EditScreen {
     /// Cut runs opened to show their removed words, by block and media start.
     expanded: HashSet<RunKey>,
     engine: Engine,
+    /// The edit's audio, and the playback clock while it plays.
+    sound: Sound,
     shown: Option<PreviewFrame>,
     playhead: u64,
     playing: bool,
     clock: Option<Clock>,
+    /// Picks frames from the sound's clock, see [`ClockFollower`].
+    follower: ClockFollower,
     /// A seek's frame is still on its way.
     seeking: bool,
     peaks: HashMap<Id, Option<Arc<Peaks>>>,
@@ -151,10 +162,12 @@ impl EditScreen {
             dragging: false,
             expanded: HashSet::new(),
             engine: Engine::spawn(),
+            sound: Sound::spawn(),
             shown: None,
             playhead: 0,
             playing: false,
             clock: None,
+            follower: ClockFollower::default(),
             seeking: false,
             peaks: HashMap::new(),
             export: None,
@@ -188,10 +201,12 @@ impl EditScreen {
             .unwrap_or(self.playhead)
             .min(self.map.frames.saturating_sub(1));
         self.playhead = frame;
+        let media = folder.dir.join("media");
+        self.sound.set_plan(&self.map, media.clone(), frame);
         self.engine.set_plan(
             Plan {
                 map: self.map.clone(),
-                media: folder.dir.join("media"),
+                media,
             },
             frame,
         );
@@ -265,6 +280,7 @@ impl EditScreen {
         let frame = frame.min(self.map.frames.saturating_sub(1));
         self.playhead = frame;
         self.engine.seek(frame);
+        self.sound.seek(frame);
         self.seeking = true;
         self.clock = None;
     }
@@ -277,6 +293,7 @@ impl EditScreen {
         self.clock = None;
         self.engine.set_playing(playing);
         if !playing {
+            self.sound.set_playing(false);
             self.seek(self.playhead);
         }
     }
@@ -299,6 +316,9 @@ impl EditScreen {
                 let Some(front) = self.engine.front() else {
                     return;
                 };
+                // Sound starts with the first frame, so neither runs ahead of the other.
+                self.sound.set_playing(true);
+                self.follower = ClockFollower::default();
                 let clock = Clock {
                     started: Instant::now(),
                     from: front,
@@ -308,7 +328,15 @@ impl EditScreen {
                 clock
             }
         };
-        let due = clock.from + (clock.started.elapsed().as_secs_f64() * f64::from(FPS)) as u64;
+        let due = if self.sound.is_clock() {
+            match self.sound.heard(VIDEO_AHEAD) {
+                Some(frame) => self.follower.frame(frame),
+                // The device has not played yet: hold the frame on screen.
+                None => return,
+            }
+        } else {
+            clock.from + (clock.started.elapsed().as_secs_f64() * f64::from(FPS)) as u64
+        };
         if let Some(frame) = self.engine.take_due(due) {
             self.playhead = frame.frame;
             self.shown = Some(frame);
@@ -316,6 +344,7 @@ impl EditScreen {
         if due + 1 >= self.map.frames {
             self.playing = false;
             self.engine.set_playing(false);
+            self.sound.set_playing(false);
             self.clock = None;
         }
         if let Some(chapter) = self.map.chapter_at(self.playhead) {
@@ -523,6 +552,9 @@ impl Render for EditScreen {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(error) = self.engine.error() {
             self.error.get_or_insert(error);
+        }
+        if let Some(error) = self.sound.error() {
+            self.error.get_or_insert(format!("no sound: {error}"));
         }
         self.advance();
         if self.playing || self.seeking {

@@ -3,11 +3,17 @@
 //! - [`layout`]: where each source sits in a layout, as plain geometry.
 //! - [`graph`]: draws a frame's scene from decoded IOSurface planes into an IOSurface target.
 //! - [`plan`]: an evaluated output snapped to the frame grid.
+//! - [`cursor`]: the frame of a video track on screen at a time, decoding forward.
+//! - [`audio`]: the mic audio of an output, cut and faded like its video.
 //! - [`export`]: renders changed segments in parallel and joins them into one MP4.
 
 pub mod layout;
 pub mod plan;
 
+#[cfg(target_os = "macos")]
+pub mod audio;
+#[cfg(target_os = "macos")]
+pub mod cursor;
 #[cfg(target_os = "macos")]
 pub mod export;
 #[cfg(target_os = "macos")]

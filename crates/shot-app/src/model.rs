@@ -9,7 +9,7 @@ use shot_core::{
     Cut, EditError, Id, Layout, MediaId, Micros, Overlay, Project, RangeEdit, RemovedBy, TakeAt,
     TimeRange, Timeline, Transcript, WordState, Zoom,
 };
-use shot_render::plan::{ExportPlan, frame_time};
+use shot_render::plan::{self, ExportPlan, frame_time};
 
 /// Output frame rate of preview and export.
 pub const FPS: u32 = 60;
@@ -82,11 +82,7 @@ impl Span {
 
     /// The punch-in at a source frame, 1 for none.
     pub fn zoom_at(&self, source_frame: u64) -> f32 {
-        let time = frame_time(source_frame, FPS);
-        self.zooms
-            .iter()
-            .find(|zoom| zoom.range.from() <= time && time < zoom.range.to())
-            .map_or(1.0, |zoom| f32::from(zoom.scale) / 100.0)
+        plan::zoom_at(&self.zooms, source_frame, FPS)
     }
 }
 
