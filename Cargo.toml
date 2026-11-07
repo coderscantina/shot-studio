@@ -37,6 +37,10 @@ objc2-av-foundation = "0.3.2"
 objc2-metal = "0.3.2"
 objc2-io-surface = "0.3.2"
 block2 = "0.6.2"
+# AAC encode for export (AudioConverter) and the PCM output settings keys of AVAssetReader.
+objc2-audio-toolbox = { version = "0.3.2", default-features = false, features = ["std", "AudioConverter", "objc2-core-audio-types"] }
+objc2-core-audio-types = { version = "0.3.2", default-features = false, features = ["std", "CoreAudioBaseTypes"] }
+objc2-avf-audio = { version = "0.3.2", default-features = false, features = ["std", "AVAudioSettings"] }
 # Same wgpu as vello 0.11, so only one wgpu is compiled.
 wgpu = "30.0.1"
 pollster = "0.4.0"
