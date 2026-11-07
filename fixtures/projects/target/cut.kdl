@@ -1,0 +1,101 @@
+captions word-pop
+
+chapter "Intro" {
+    take t01 {
+        remove from=0 to=800_000 by=silence
+        keep from=800_000 to=31_400_000
+        remove from=31_400_000 to=33_000_000 by=pause
+        keep from=33_000_000 to=90_000_000
+        remove from=90_000_000 to=96_000_000 by=silence
+        overlay lower-third from=3_000_000 to=8_000_000 {
+            text "Coder's Cantina"
+        }
+    }
+}
+
+chapter "Install and setup" {
+    take t01 {
+        remove from=96_000_000 to=96_800_000 by=silence
+        keep from=96_800_000 to=136_200_000
+        remove from=136_200_000 to=137_100_000 by=filler
+        keep from=137_100_000 to=173_000_000
+        remove from=173_000_000 to=174_400_000 by=manual
+        keep from=174_400_000 to=228_000_000
+        remove from=228_000_000 to=234_000_000 by=silence
+        zoom 115 from=116_000_000 to=119_000_000
+    }
+}
+
+chapter "Project structure" {
+    take t01 {
+        remove from=234_000_000 to=234_800_000 by=silence
+        keep from=234_800_000 to=286_000_000
+        remove from=286_000_000 to=287_200_000 by=pause
+        keep from=287_200_000 to=348_000_000
+        remove from=348_000_000 to=354_000_000 by=silence
+        layout split from=294_000_000 to=324_000_000
+    }
+}
+
+chapter "Recording a take" {
+    take t01 {
+        remove from=354_000_000 to=354_800_000 by=silence
+        keep from=354_800_000 to=398_000_000
+        remove from=398_000_000 to=400_200_000 by=retake
+        keep from=400_200_000 to=435_500_000
+        remove from=435_500_000 to=436_500_000 by=filler
+        keep from=436_500_000 to=498_000_000
+        remove from=498_000_000 to=504_000_000 by=silence
+    }
+}
+
+chapter "Auto cut" {
+    take t01 {
+        remove from=504_000_000 to=504_800_000 by=silence
+        keep from=504_800_000 to=534_000_000
+        remove from=534_000_000 to=535_300_000 by=misspoken
+        keep from=535_300_000 to=574_500_000
+        remove from=574_500_000 to=575_200_000 by=filler
+        keep from=575_200_000 to=602_000_000
+        remove from=602_000_000 to=614_000_000 by=silence
+        keep from=614_000_000 to=642_000_000
+        remove from=642_000_000 to=648_000_000 by=silence
+        layout split from=564_000_000 to=594_000_000
+    }
+}
+
+chapter "Review and notes" {
+    take t01 {
+        remove from=648_000_000 to=648_800_000 by=silence
+        keep from=648_800_000 to=684_400_000
+        remove from=684_400_000 to=685_500_000 by=pause
+        keep from=685_500_000 to=768_000_000
+        remove from=768_000_000 to=774_000_000 by=silence
+    }
+}
+
+chapter "Export" {
+    take t01 {
+        remove from=774_000_000 to=774_800_000 by=silence
+        keep from=774_800_000 to=799_000_000
+        remove from=799_000_000 to=800_800_000 by=manual
+        keep from=800_800_000 to=862_000_000
+        remove from=862_000_000 to=863_000_000 by=filler
+        keep from=863_000_000 to=918_000_000
+        remove from=918_000_000 to=924_000_000 by=silence
+    }
+}
+
+chapter "Wrap up" {
+    take t01 {
+        remove from=924_000_000 to=924_800_000 by=silence
+        keep from=924_800_000 to=965_000_000
+        remove from=965_000_000 to=966_500_000 by=retake
+        keep from=966_500_000 to=1_014_000_000
+        remove from=1_014_000_000 to=1_020_000_000 by=silence
+    }
+}
+
+short intro-hook {
+    clip t01 from=800_000 to=30_000_000
+}

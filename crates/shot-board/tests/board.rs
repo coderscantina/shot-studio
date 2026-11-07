@@ -346,3 +346,28 @@ fn rejects_bad_names_and_paths_and_empty_proposals() {
         Err(Error::EmptyProposal)
     ));
 }
+
+/// Runs against the generated demo channel: `SHOT_FIXTURES=<dir> scripts/fixtures.sh demo`, then
+/// `SHOT_FIXTURES=<dir> cargo test -p shot-board -- --ignored`.
+#[test]
+#[ignore = "needs a generated demo channel in SHOT_FIXTURES"]
+fn generated_demo_channel_has_a_card_in_every_column() {
+    let dir = std::env::var_os("SHOT_FIXTURES").expect("SHOT_FIXTURES is not set");
+    let board = Board::open(Path::new(&dir).join("demo-channel")).unwrap();
+
+    let mut columns = BTreeMap::<Status, usize>::new();
+    for card in board.cards().unwrap() {
+        *columns.entry(card.video.unwrap().status).or_default() += 1;
+    }
+    for &status in Status::ALL {
+        assert!(columns.contains_key(&status), "no card in {status}");
+    }
+
+    assert_eq!(board.proposals(None).unwrap().len(), 1);
+    let releases = board.releases().unwrap();
+    assert_eq!(releases.len(), 1);
+    assert_eq!(
+        releases[0].slug.as_deref(),
+        Some("tailwind-without-the-config")
+    );
+}

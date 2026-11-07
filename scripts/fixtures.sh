@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
-# Generates the deterministic test media under fixtures/generated/ (git-ignored).
+# Generates the deterministic test media and demo data.
 #
-#   scripts/fixtures.sh [small|target|all] [--force]
+#   scripts/fixtures.sh [small|target|demo|all] [--force]
+#
+# Output goes to $SHOT_FIXTURES, default fixtures/generated/ (git-ignored). Agents in worktrees
+# set SHOT_FIXTURES=$HOME/.cache/shot-studio-fixtures so media survives worktree removal.
 #
 # small   speech clips, a 30 s 4K60 screen capture with cursor events, a 30 s 1080p60 camera clip
-# target  the 17 min 4K60 workload: screen, camera and mic tracks, events.jsonl and chapters.json
-# all     both (default)
+# target  the 17 min 4K60 workload: screen, camera and mic tracks, events.jsonl and chapters.json,
+#         plus target-project/, the committed project text with the media linked into media/t01/
+# demo    demo-channel/, a git repo with videos in every board column, built from fixtures/projects
+# all     everything (default)
 #
 # Outputs are skipped when every file exists and matches its sha256 in checksums.txt.
 # --force regenerates and reports whether each checksum changed.
@@ -17,7 +22,7 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 SPEC=$ROOT/fixtures/spec
-OUT=$ROOT/fixtures/generated
+OUT=${SHOT_FIXTURES:-$ROOT/fixtures/generated}
 WORK=$OUT/.work
 SUMS=$OUT/checksums.txt
 
@@ -38,9 +43,9 @@ MODE=all
 FORCE=0
 for arg in "$@"; do
   case $arg in
-    small | target | all) MODE=$arg ;;
+    small | target | demo | all) MODE=$arg ;;
     --force) FORCE=1 ;;
-    *) echo "usage: scripts/fixtures.sh [small|target|all] [--force]" >&2; exit 2 ;;
+    *) echo "usage: scripts/fixtures.sh [small|target|demo|all] [--force]" >&2; exit 2 ;;
   esac
 done
 
@@ -141,7 +146,7 @@ plan_scenario() {
         }
         px = round(px); py = round(py)
         if (px != lx || py != ly) {
-          emit(round(n * 1000000 / fps), sprintf("{\"t_us\":%d,\"kind\":\"move\",\"x\":%d,\"y\":%d}", round(n * 1000000 / fps), px, py))
+          emit(round(n * 1000000 / fps), sprintf("{\"t\":%d,\"kind\":\"move\",\"x\":%d,\"y\":%d}", round(n * 1000000 / fps), px, py))
           lx = px; ly = py
         }
         pos_x[n] = px; pos_y[n] = py
@@ -149,8 +154,8 @@ plan_scenario() {
       for (c = 1; c <= nc; c++) {
         n = round(ct[c] * fps); if (n >= nframes) n = nframes - 1
         d = round(ct[c] * 1000000); u = d + 100000
-        emit(d, sprintf("{\"t_us\":%d,\"kind\":\"down\",\"x\":%d,\"y\":%d}", d, pos_x[n], pos_y[n]))
-        emit(u, sprintf("{\"t_us\":%d,\"kind\":\"up\",\"x\":%d,\"y\":%d}", u, pos_x[n], pos_y[n]))
+        emit(d, sprintf("{\"t\":%d,\"kind\":\"down\",\"x\":%d,\"y\":%d,\"button\":\"left\"}", d, pos_x[n], pos_y[n]))
+        emit(u, sprintf("{\"t\":%d,\"kind\":\"up\",\"x\":%d,\"y\":%d,\"button\":\"left\"}", u, pos_x[n], pos_y[n]))
         ring = ring (c > 1 ? "+" : "") sprintf("between(t,%.3f,%.3f)", ct[c], ct[c] + 0.25)
       }
       print ring > (outdir "/scn.ring")
@@ -166,7 +171,7 @@ plan_scenario() {
       print "round(" ye ")" > (outdir "/scn.y")
       for (k = 1; k <= nk; k++) {
         d = round(kt[k] * 1000000)
-        emit(d, sprintf("{\"t_us\":%d,\"kind\":\"key\",\"key\":\"%s\"}", d, kc[k]))
+        emit(d, sprintf("{\"t\":%d,\"kind\":\"key\",\"key\":\"%s\",\"mods\":[]}", d, (kc[k] == " " ? "space" : kc[k])))
         if (kc[k] != " ") printf ",drawbox=x=%d:y=1672:w=30:h=56:c=white:t=fill:enable=gte(t\\,%.3f)", 360 + (k - 1) * 44, kt[k] > (outdir "/scn.keys")
       }
     }
@@ -182,9 +187,9 @@ tile_events() {
     END {
       for (k = 0; k < reps; k++)
         for (i = 1; i <= NR; i++) {
-          match(lines[i], /"t_us":[0-9]+/)
-          t = substr(lines[i], RSTART + 7, RLENGTH - 7)
-          printf "{\"t_us\":%d%s\n", t + k * seg_us, substr(lines[i], RSTART + RLENGTH)
+          match(lines[i], /"t":[0-9]+/)
+          t = substr(lines[i], RSTART + 4, RLENGTH - 4)
+          printf "{\"t\":%d%s\n", t + k * seg_us, substr(lines[i], RSTART + RLENGTH)
         }
     }
   ' "$WORK/seg.events.jsonl" >"$2"
@@ -330,6 +335,108 @@ gen_target() {
   record "${files[@]}"
 }
 
+# A copy of the committed target project with the generated take linked in as media/t01/.
+gen_target_project() {
+  local src=$ROOT/fixtures/projects/target dst=$OUT/target-project f
+  rm -rf "$dst"
+  mkdir -p "$dst/media/t01"
+  cp "$src"/video.kdl "$src"/format.kdl "$src"/script.md "$src"/cut.kdl "$dst/"
+  for f in screen.mp4 camera.mp4 mic.mp4 events.jsonl; do
+    ln -f "$OUT/target/$f" "$dst/media/t01/$f" 2>/dev/null || ln -sf "$OUT/target/$f" "$dst/media/t01/$f"
+  done
+  log "target project linked at ${dst#"$ROOT"/}"
+}
+
+# ---------------------------------------------------------------- demo channel
+
+DEMO_STATUSES=(ideas scripting ready recorded editing shipped)
+DEMO_EPOCH=1791194400 # 2026-10-05 10:00 UTC
+DEMO_STEP=43200       # every commit is 12 h after the previous one
+DEMO_TICKS=0
+
+# demo_git ARGS...: git in the demo repo with no user config, hooks or signing, so shas never vary.
+demo_git() {
+  GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+    git -C "$DEMO" -c commit.gpgsign=false -c tag.gpgsign=false -c core.hooksPath=/dev/null "$@"
+}
+
+# demo_commit MESSAGE: commit everything with the next fixed date.
+demo_commit() {
+  DEMO_TICKS=$((DEMO_TICKS + 1))
+  local when="$((DEMO_EPOCH + DEMO_TICKS * DEMO_STEP)) +0000"
+  export GIT_AUTHOR_DATE=$when GIT_COMMITTER_DATE=$when
+  demo_git add -A
+  demo_git commit -q -m "$1"
+}
+
+# demo_stage SLUG STATUS: video.kdl with that status, plus the files that exist by then.
+demo_stage() {
+  local slug=$1 status=$2 src=$DEMO_SRC/videos/$1 dir=$DEMO/videos/$1 at=0 i
+  for i in "${!DEMO_STATUSES[@]}"; do [[ ${DEMO_STATUSES[i]} == "$status" ]] && at=$i; done
+  mkdir -p "$dir"
+  sed -E "s/^status .*/status $status/" "$src/video.kdl" >"$dir/video.kdl"
+  if ((at >= 1)); then cp "$src/script.md" "$dir/script.md"; fi
+  if ((at >= 2)); then
+    format=$(awk '$1 == "format" { print $2 }' "$src/video.kdl")
+    cp "$ROOT/crates/shot-core/formats/$format.kdl" "$dir/format.kdl"
+  fi
+  if ((at >= 4)); then cp "$src/cut.kdl" "$dir/cut.kdl"; fi
+}
+
+gen_demo() {
+  DEMO=$OUT/demo-channel
+  DEMO_SRC=$ROOT/fixtures/projects/demo-channel
+  log "demo channel repo"
+  rm -rf "$DEMO"
+  mkdir -p "$DEMO/formats"
+  export GIT_AUTHOR_NAME="Mike Wallner" GIT_AUTHOR_EMAIL="mike@example.com"
+  export GIT_COMMITTER_NAME="Mike Wallner" GIT_COMMITTER_EMAIL="mike@example.com"
+  DEMO_TICKS=0
+  demo_git init -q -b main
+  demo_git config user.name "Mike Wallner"
+  demo_git config user.email "mike@example.com"
+  cp "$DEMO_SRC/.gitignore" "$DEMO/"
+  cp "$ROOT"/crates/shot-core/formats/*.kdl "$DEMO/formats/"
+  demo_commit "🎉 start the channel"
+
+  local slug final dir status i
+  local slugs=()
+  for dir in "$DEMO_SRC"/videos/*/; do slugs+=("$(basename "$dir")"); done
+  for slug in "${slugs[@]}"; do
+    demo_stage "$slug" ideas
+    demo_commit "💡 add the idea $slug"
+  done
+  for slug in "${slugs[@]}"; do
+    final=$(awk '$1 == "status" { print $2 }' "$DEMO_SRC/videos/$slug/video.kdl")
+    [[ $final == ideas ]] && continue
+    demo_git checkout -q -b "video/$slug" main
+    for ((i = 1; i < ${#DEMO_STATUSES[@]}; i++)); do
+      status=${DEMO_STATUSES[i]}
+      demo_stage "$slug" "$status"
+      demo_commit "🚚 move $slug to $status"
+      [[ $status == "$final" ]] && break
+    done
+    if [[ $final == shipped ]]; then
+      demo_git tag -a "$(TZ=UTC demo_git log -1 --format=%cd --date=format:'v%G.%V')" -m "🚀 ship $slug"
+    fi
+    demo_git checkout -q main
+  done
+
+  local pdir name
+  for pdir in "$DEMO_SRC"/proposals/*/*/; do
+    slug=$(basename "$(dirname "$pdir")")
+    name=$(basename "$pdir")
+    demo_git checkout -q -b "proposal/$slug/$name" "video/$slug"
+    cp "$pdir"/* "$DEMO/videos/$slug/"
+    demo_commit "✂️ propose $name for $slug"
+    demo_git checkout -q main
+  done
+
+  # The ref list is the demo repo's checksum: same shas, same repo.
+  demo_git for-each-ref --format='%(objectname) %(refname)' >"$OUT/demo-channel.refs"
+  record "$OUT/demo-channel.refs"
+}
+
 # ---------------------------------------------------------------- main
 
 rm -rf "$WORK"
@@ -339,7 +446,8 @@ trap 'rm -rf "$WORK"' EXIT
 start=$SECONDS
 case $MODE in
   small) gen_small ;;
-  target) gen_target ;;
-  all) gen_small; gen_target ;;
+  target) gen_target; gen_target_project ;;
+  demo) gen_demo ;;
+  all) gen_small; gen_target; gen_target_project; gen_demo ;;
 esac
 log "done in $((SECONDS - start)) s, checksums in ${SUMS#"$ROOT"/}"
