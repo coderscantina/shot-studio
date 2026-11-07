@@ -4646,6 +4646,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-vision"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bfc194758a2d5d7540b1ad283bfb9ca318ec608991892326e95b428230b2689b"
+dependencies = [
+ "objc2 0.6.5",
+ "objc2-core-foundation",
+ "objc2-core-video",
+ "objc2-foundation 0.3.2",
+]
+
+[[package]]
 name = "objc_exception"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6244,10 +6256,16 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 name = "shot-analyze"
 version = "26.11.7"
 dependencies = [
+ "objc2 0.6.5",
+ "objc2-core-foundation",
+ "objc2-core-video",
+ "objc2-foundation 0.3.2",
+ "objc2-vision",
  "serde",
  "serde_json",
  "sha2 0.11.1",
  "shot-core",
+ "shot-media",
  "symphonia",
  "tempfile",
  "thiserror 2.0.21",
@@ -6399,6 +6417,7 @@ name = "shot-render"
 version = "26.11.7"
 dependencies = [
  "git2",
+ "image",
  "objc2 0.6.5",
  "objc2-core-foundation",
  "objc2-core-video",
@@ -6410,6 +6429,7 @@ dependencies = [
  "serde_json",
  "shot-analyze",
  "shot-audio",
+ "shot-capture",
  "shot-core",
  "shot-media",
  "tempfile",

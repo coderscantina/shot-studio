@@ -337,7 +337,7 @@ impl EditScreen {
                     .icon(gpui_component::Icon::empty().path(crate::theme::icon_path("export")))
                     .label("Export")
                     .disabled(running)
-                    .on_click(cx.listener(|this, _, _, cx| this.start_export(cx))),
+                    .on_click(cx.listener(|this, _, _, cx| this.start_export("main", cx))),
             )
     }
 }

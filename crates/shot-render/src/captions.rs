@@ -178,7 +178,7 @@ pub fn write_sidecar(
 /// The take's words with every fix applied: a run of words reading `heard`, ignoring case and
 /// punctuation, becomes one word `said` with the run's timing and the last word's trailing
 /// punctuation.
-fn apply_fixes(transcript: &Transcript, fixes: &[CaptionFix]) -> Vec<CaptionWord> {
+pub(crate) fn apply_fixes(transcript: &Transcript, fixes: &[CaptionFix]) -> Vec<CaptionWord> {
     let key = |text: &str| -> String {
         text.trim_matches(|c: char| !c.is_alphanumeric())
             .to_lowercase()

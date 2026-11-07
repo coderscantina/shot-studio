@@ -15,6 +15,8 @@ struct Layer {
     source_video_range: f32,
     // Same for the target.
     target_video_range: f32,
+    // Block size in canvas pixels of a blurred layer, 0 for a sharp one.
+    blur: f32,
     // Luma weights Kr and Kb of the source matrix, then of the target matrix.
     weights: vec4<f32>,
 }
@@ -59,6 +61,38 @@ fn source_rgb(uv: vec2<f32>) -> vec3<f32> {
     return clamp(to_rgb(yn, cn, layer.weights.xy), vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
+// The mean of a block of the source, from 4x4 samples spread over it.
+fn block_rgb(block: vec2<f32>, size: vec2<f32>) -> vec3<f32> {
+    var sum = vec3<f32>(0.0);
+    for (var i = 0; i < 4; i++) {
+        for (var j = 0; j < 4; j++) {
+            sum += source_rgb(block + (vec2<f32>(f32(i), f32(j)) + 0.5) / 4.0 * size);
+        }
+    }
+    return sum / 16.0;
+}
+
+// The source averaged over blocks of `layer.blur` canvas pixels and eased between them, so no
+// detail smaller than a block survives.
+fn blurred_rgb(uv: vec2<f32>) -> vec3<f32> {
+    let size = (layer.crop.zw - layer.crop.xy) / (layer.frame.zw - layer.frame.xy) * layer.blur;
+    let cell = uv / size - 0.5;
+    let base = floor(cell);
+    let t = smoothstep(vec2<f32>(0.0), vec2<f32>(1.0), cell - base);
+    let a = block_rgb(base * size, size);
+    let b = block_rgb((base + vec2<f32>(1.0, 0.0)) * size, size);
+    let c = block_rgb((base + vec2<f32>(0.0, 1.0)) * size, size);
+    let d = block_rgb((base + vec2<f32>(1.0, 1.0)) * size, size);
+    return mix(mix(a, b, t.x), mix(c, d, t.x), t.y);
+}
+
+fn layer_rgb(uv: vec2<f32>) -> vec3<f32> {
+    if layer.blur > 0.0 {
+        return blurred_rgb(uv);
+    }
+    return source_rgb(uv);
+}
+
 // Luma, Cb, Cr in the target's range.
 fn target_ycbcr(rgb: vec3<f32>) -> vec3<f32> {
     let k = layer.weights.zw;
@@ -81,13 +115,13 @@ fn coverage(canvas: vec2<f32>) -> f32 {
 
 @fragment
 fn luma_plane(input: Varyings) -> @location(0) vec4<f32> {
-    let ycbcr = target_ycbcr(source_rgb(input.uv));
+    let ycbcr = target_ycbcr(layer_rgb(input.uv));
     return vec4<f32>(ycbcr.x, 0.0, 0.0, coverage(input.canvas));
 }
 
 // Runs once per 2x2 block of canvas pixels, at the block's center.
 @fragment
 fn chroma_plane(input: Varyings) -> @location(0) vec4<f32> {
-    let ycbcr = target_ycbcr(source_rgb(input.uv));
+    let ycbcr = target_ycbcr(layer_rgb(input.uv));
     return vec4<f32>(ycbcr.y, ycbcr.z, 0.0, coverage(input.canvas));
 }

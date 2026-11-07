@@ -169,7 +169,7 @@ A `chapter` holds `take <id> { ... }` blocks in output order. A take may appear 
 | `zoom <percent> from=<time> to=<time> x=<px> y=<px> by=<what>` | a punch-in zoom, at least `100` percent. `x` and `y`, together or not at all, center it on a point of the screen track in its pixels; without them the layout picks the center. `by` names what wrote it: `jump-cut`, `emphasis`, `click`, `typing`, `cursor` or `marker`. A zoom without `by` is a person's |
 | `overlay <template> from=<time> to=<time> { <param> <value> ... }` | a template overlay. Each child is one parameter: a name and one text, integer or boolean value. Integers are written grouped by three like times, so a parameter in microseconds reads as one. Later overlays draw on top |
 
-`keep` and `remove` ranges together are in order and do not overlap; gaps between them are allowed. `review` and `ignore` ranges are in order, do not overlap each other, and lie inside kept material. `layout` ranges are in order and do not overlap, and so are `zoom` ranges. Overlays may overlap. Template names and their parameters are defined by the overlay templates, not by this contract.
+`keep` and `remove` ranges together are in order and do not overlap; gaps between them are allowed. `review` and `ignore` ranges are in order, do not overlap each other, and lie inside kept material. `layout` ranges are in order and do not overlap, and so are `zoom` ranges. Overlays may overlap. Template names and their parameters are defined by the [overlay templates](#overlay-templates), not by the grammar: `shot-core` parses any template, and the renderer refuses to export an overlay that does not fit its template.
 
 Auto cut and auto edit write into the take block and leave a trail, so nothing is asked twice:
 
@@ -180,6 +180,8 @@ Auto cut and auto edit write into the take block and leave a trail, so nothing i
 - Hotkey markers from the [event log](#cursor-and-key-event-log) enter the cut once, when the take is appended: layout markers become `layout` nodes, Z markers `zoom ... by=marker`, B markers b-roll overlays, A markers feed the retake rule and N markers the chapter boundaries.
 
 A derived cut (`short` or `x-clip`) has a unique name and holds an optional `captions <style>` and one or more `clip <take> from=<time> to=<time>` nodes in output order. It uses only material the main cut keeps inside those ranges, with the main cut's layouts, zooms and overlays, and burns its captions in. Its caption style defaults to the main cut's. Every clip's take must appear in the main cut.
+
+A derived cut shows the main cut's own pixels ([0017](../decisions/0017-derived-cuts-from-main-chunks.md)): each frame is a window of the main frame at the same moment, as tall as the main frame, scaled to 1080x1920 for a `short` and 1080x1080 for an `x-clip`, with the captions drawn on top. A Short's window follows the largest face Vision finds in the camera track where the layout shows the camera, and keeps that face inside; elsewhere, and in an X clip, it stays centered. Overlays drawn for 16:9 may be cut off at the window's edges.
 
 ```kdl
 captions word-pop
@@ -262,11 +264,47 @@ chapter "Search filters" {
 `shot-core` evaluates a project into one output for the main cut and one for each derived cut.
 
 - A main output has one group of segments per chapter. A segment is a kept range of one take with one layout, so a kept range splits wherever a layout change starts or ends. It carries the zooms and overlays that overlap it, with their full ranges.
-- A derived output has one group, named after the cut. Its segments are the main segments cut down to each clip's range.
+- A derived output has one group, named after the cut. Its segments are the main segments cut down to each clip's range, so every chunk of a derived cut lies inside one chunk of the main cut.
 - Export caches rendered video in chunks. A segment is snapped to the output frame grid and cut at every half second of its take's media time, which is the recordings' keyframe grid. So a chunk is at most 0.5 s and starts on the grid or at a segment edge.
 - Each chunk has a content hash (BLAKE3) over the renderer version, the output aspect, the burned-in caption style with the caption fixes (or the fact that captions are a sidecar), the take id and the take's media identity, the frame rate and the chunk's frames of the take, the layout, the cursor and keystroke settings when the layout shows the screen (every layout but `face`), the window style in the `window` layout, the zooms with their scale and center, and every overlay overlapping the chunk with its full range and parameters. Instant zooms are cut to the chunk; with `zoom-motion smooth` every zoom of the segment counts whole, because the easing at one frame depends on where the zoom starts and ends and where the next one centers. Output position, chapter titles, zoom provenance, review items and the music bed are not part of it. Deleting a word therefore re-renders only the two chunks at the new edges, and every other chunk is reused at its new position. A new caption fix re-renders the derived cuts and nothing of the main cut.
+- An overlay that names a file (a `code-diff` snapshot, a `b-roll` file) adds the file's size and modification time to the hash of every chunk it overlaps, so a file replaced under the same name renders again.
+- A derived chunk renders in two passes. Its base is the main chunk that holds its frames, keyed as above and shared with the main export, so whichever export runs first renders it for both. The derived chunk's own key extends the hash above (with the derived aspect and burned-in captions) with the base chunk's key, which of its frames it shows, the window's position on every frame and the caption on screen on every frame with its highlighted word. A new transcript or a moved face re-renders only the derived chunks whose captions or window changed.
 - A take's media identity hashes the size and modification time of its video tracks and of its event log, since the cursor is drawn from events. A take recorded again under a reused id gets a new identity, so it never matches the old recording's chunks.
 - Audio is not cached. Export encodes the whole cut's audio as one AAC stream with the music bed mixed under the voice, so the joins have no encoder delay or padding.
+
+## Overlay templates
+
+An `overlay` node names a template, and the template owns its parameters ([0018](../decisions/0018-overlay-templates-as-typed-specs.md)). Each template is a typed spec in `shot-render`: parameter names, their kind (text, integer, boolean, time in microseconds) and which are required. A parameter of the wrong kind, an unknown one or a missing required one stops the export with the overlay's template and parameter. A spec only grows by optional parameters, and a renderer change bumps the renderer version without touching a spec, so a `cut.kdl` always reads the same.
+
+Every template that draws also takes `enter` and `exit`: microseconds it takes to come in after `from` and go out before `to`, eased. `blur` and `bleep` take neither: a fade would reveal what they hide.
+
+| Template | Parameters | What it does |
+| --- | --- | --- |
+| `link-card` | `url`, `accent` (bool) | A card for a link at the bottom left: GitHub pull request, issue or repository, a post on X, a Hacker News item, an npm package, or any link by its host. The rule places one from the word where a URL is said, written or spoken, for 6 s |
+| `lower-third` | `text`, `subtitle` | A name or line at the bottom left |
+| `highlight` | `x`, `y`, `width`, `height` (screen pixels), `text` | A lime box around text on the screen recording, following the layout and zoom. The rule places one where at least three words you say are on screen as you say them, read with Vision |
+| `b-roll` | `file`, `start` (time) | A cutaway over the frame: a still (`.png`, `.jpg`) fading in with a slow push, a clip (`.mp4`, `.mov`) cut in hard from `start`, or a diff (`.diff`) typed out. The file is relative to the video folder. Without `file` it is an empty slot that draws nothing; the rule places slots over idle screen of at least 8 s and at every B marker |
+| `code-diff` | `diff`, `highlight-line`, `highlight-at` (time) | A diff snapshot typed out, see the product tour example |
+| `blur` | `x`, `y`, `width`, `height` (screen pixels), `strength` | The screen recording averaged over blocks of `strength` screen pixels (32 by default) inside the rectangle, following the layout and zoom |
+| `bleep` | none | The voice over the range replaced by a 1 kHz tone |
+
+```kdl
+overlay link-card from=22_000_000 to=28_000_000 {
+    url "https://github.com/coderscantina/shot-studio/pull/1"
+}
+overlay highlight from=31_200_000 to=34_900_000 {
+    x 820
+    y 412
+    width 1_340
+    height 64
+    text "never deploy on Fridays"
+    enter 150_000
+}
+overlay b-roll from=40_000_000 to=48_500_000 {
+    file "sources/dashboard.png"
+}
+overlay bleep from=52_100_000 to=52_600_000
+```
 
 ## `script.md`
 

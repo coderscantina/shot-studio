@@ -92,6 +92,17 @@ impl ContentHash {
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
+
+    /// The key of a chunk that a later pass draws from what this key names plus `input`, for
+    /// example a derived cut's chunk drawn from a main chunk. The pass encodes `input` so that
+    /// distinct inputs never share bytes.
+    pub fn extend(&self, input: &[u8]) -> Self {
+        let mut h = HashInput(blake3::Hasher::new());
+        h.0.update(&self.0);
+        h.u64(input.len() as u64);
+        h.0.update(input);
+        Self(*h.0.finalize().as_bytes())
+    }
 }
 
 impl fmt::Display for ContentHash {

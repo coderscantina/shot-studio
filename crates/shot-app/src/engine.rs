@@ -269,19 +269,16 @@ fn render(
                 .map_err(|e| format!("{}: {e}", path.display()))?;
         }
     }
-    let frame_of = |source| {
+    let size_of = |source| {
         available(source)
             .then(|| tracks.get(&path(source)))
             .flatten()
             .and_then(FrameCursor::current)
-    };
-    let frames = Sources {
-        screen: frame_of(Source::Screen),
-        camera: frame_of(Source::Camera),
+            .map(|f| size(&f.buffer))
     };
     let sizes = Sources {
-        screen: frames.screen.map_or((16, 9), |f| size(&f.buffer)),
-        camera: frames.camera.map_or((16, 9), |f| size(&f.buffer)),
+        screen: size_of(Source::Screen).unwrap_or((16, 9)),
+        camera: size_of(Source::Camera).unwrap_or((16, 9)),
     };
     let look = assets
         .look(&span.take, &span.overlays, plan.effects)
@@ -293,6 +290,42 @@ fn render(
         time: frame_time(source_frame, FPS),
     };
     let mut drawn = compose(&shot, &look, CANVAS, sizes).map_err(|e| e.to_string())?;
+    // A b-roll clip shows in the screen layer instead of the take's screen.
+    let cutaway = match &drawn.cutaway {
+        Some(cutaway) => {
+            let clip = plan
+                .media
+                .parent()
+                .unwrap_or(&plan.media)
+                .join(&cutaway.file);
+            if !tracks.contains_key(&clip) {
+                let decoder =
+                    Decoder::open_native(&clip).map_err(|e| format!("{}: {e}", clip.display()))?;
+                tracks.insert(clip.clone(), FrameCursor::new(decoder));
+            }
+            let cursor = tracks.get_mut(&clip).expect("inserted above");
+            cursor
+                .goto(Duration::from_micros(cutaway.time.0))
+                .map_err(|e| format!("{}: {e}", clip.display()))?;
+            if let Some(frame) = cursor.current() {
+                shot_render::overlay::broll::fit_cutaway(&mut drawn, size(&frame.buffer));
+            }
+            Some(clip)
+        }
+        None => None,
+    };
+    let frame_of = |source| {
+        let path = match (&cutaway, source) {
+            (Some(clip), Source::Screen) => clip.clone(),
+            _ if available(source) => path(source),
+            _ => return None,
+        };
+        tracks.get(&path).and_then(FrameCursor::current)
+    };
+    let frames = Sources {
+        screen: frame_of(Source::Screen),
+        camera: frame_of(Source::Camera),
+    };
     drawn
         .scene
         .layers

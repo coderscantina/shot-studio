@@ -68,6 +68,14 @@ pub fn run(args: ExportArgs) -> Result<(), String> {
         report.join_time.as_secs_f64(),
         started.elapsed().as_secs_f64()
     );
+    if report.base_chunks > 0 {
+        println!(
+            "drawn from {} main chunks: {} reused from the cache, {} rendered",
+            report.base_chunks,
+            report.base_chunks - report.base_rendered,
+            report.base_rendered
+        );
+    }
     Ok(())
 }
 

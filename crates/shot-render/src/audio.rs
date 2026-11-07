@@ -1,6 +1,7 @@
 //! The mic audio of an output, cut like its video: each segment's samples of its take, faded
 //! over 5 ms where the source jumps. Export encodes it, the preview plays it, so both cut the
-//! same samples and fade them the same way.
+//! same samples and fade them the same way. Bleeps silence the voice over their range; the
+//! export puts the tone in after the voice chain.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -42,6 +43,8 @@ pub struct TimelineAudio {
     track: Box<dyn Fn(&Id) -> PathBuf>,
     readers: HashMap<Id, PcmReader>,
     scratch: Vec<f32>,
+    /// Output samples the voice is silenced over, in order.
+    bleeps: Vec<Range<u64>>,
 }
 
 impl TimelineAudio {
@@ -80,7 +83,35 @@ impl TimelineAudio {
             track: Box::new(track),
             readers: HashMap::new(),
             scratch: Vec::new(),
+            bleeps: Vec::new(),
         }
+    }
+
+    /// Silences the voice over `bleeps`, ranges of the take's media time per take. Each range is
+    /// placed wherever its take's segments show it.
+    pub fn with_bleeps(mut self, bleeps: &[(Id, shot_core::TimeRange)]) -> Self {
+        let per_second = u64::from(SAMPLE_RATE);
+        let sample = |t: shot_core::Micros| t.0 * per_second / 1_000_000;
+        let mut out: Vec<Range<u64>> = Vec::new();
+        for segment in &self.segments {
+            let source_end = segment.source_start + (segment.output.end - segment.output.start);
+            for (_, range) in bleeps.iter().filter(|(take, _)| *take == segment.take) {
+                let from = sample(range.from()).max(segment.source_start);
+                let to = sample(range.to()).min(source_end);
+                if from < to {
+                    let shift = |s: u64| segment.output.start + s - segment.source_start;
+                    out.push(shift(from)..shift(to));
+                }
+            }
+        }
+        out.sort_by_key(|r| r.start);
+        self.bleeps = out;
+        self
+    }
+
+    /// Output samples the voice is silenced over, in order.
+    pub fn bleeps(&self) -> &[Range<u64>] {
+        &self.bleeps
     }
 
     /// Output length in samples.
@@ -137,6 +168,15 @@ impl TimelineAudio {
             at = end;
         }
         out.resize(out.len() + (range.end - at) as usize, 0.0);
+        let first = out.len() - (range.end - range.start) as usize;
+        for bleep in &self.bleeps {
+            let from = bleep.start.max(range.start);
+            let to = bleep.end.min(range.end);
+            if from < to {
+                let at = first + (from - range.start) as usize;
+                out[at..at + (to - from) as usize].fill(0.0);
+            }
+        }
         Ok(())
     }
 }

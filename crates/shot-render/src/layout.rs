@@ -245,6 +245,7 @@ impl LayoutSpec {
                     frame,
                     crop,
                     radius: slot.radius * scale,
+                    blur: 0.0,
                 }
             })
             .collect();
@@ -329,6 +330,8 @@ pub struct Layer {
     pub crop: Rect,
     /// Corner radius in canvas pixels.
     pub radius: f32,
+    /// The size in canvas pixels of the blocks the layer is averaged over, 0 for a sharp one.
+    pub blur: f32,
 }
 
 #[cfg(test)]

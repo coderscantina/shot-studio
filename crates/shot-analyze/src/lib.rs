@@ -8,6 +8,7 @@
 //! - [`idle`]: stretches where the screen track does not change.
 //! - [`again_markers`]: the `again` hotkey presses of a take's event log.
 //! - [`autocut`]: the rough cut, rules and pacing written into `cut.kdl`.
+//! - [`vision`]: faces and on-screen text with Apple Vision, for reframing and highlights.
 
 mod audio;
 pub mod autocut;
@@ -18,6 +19,7 @@ pub mod models;
 mod resample;
 mod speech;
 mod transcribe;
+pub mod vision;
 
 pub use audio::decode_mono;
 pub use events::again_markers;

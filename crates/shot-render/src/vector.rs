@@ -8,7 +8,7 @@
 
 use parley::{FontContext, GenericFamily, LayoutContext, PositionedLayoutItem, StyleProperty};
 use vello::kurbo::{Affine, BezPath, Circle, Rect as KRect, RoundedRect, Stroke};
-use vello::peniko::{Color, Fill};
+use vello::peniko::{Color, Fill, ImageBrush};
 use vello::{AaConfig, AaSupport, RenderParams, Renderer, RendererOptions, Scene};
 
 use crate::RenderError;
@@ -392,6 +392,67 @@ fn draw(
                 transform * Affine::translate((f64::from(left + pad_x), f64::from(top + pad_y)));
             glyphs(scene, fonts, layouts, at, text, *size, Font::Sans, *c);
         }
+        Shape::Outline {
+            rect: r,
+            radius,
+            width,
+            color: c,
+        } => scene.stroke(
+            &Stroke::new(f64::from(*width)),
+            transform,
+            color(*c),
+            None,
+            &RoundedRect::from_rect(rect(*r), f64::from(*radius)),
+        ),
+        Shape::Image {
+            rect: r,
+            radius,
+            image,
+            crop,
+            opacity,
+        } => {
+            let sx = f64::from(r.width()) / (f64::from(crop.width()) * f64::from(image.width));
+            let sy = f64::from(r.height()) / (f64::from(crop.height()) * f64::from(image.height));
+            let at = transform
+                * Affine::translate((f64::from(r.left), f64::from(r.top)))
+                * Affine::scale_non_uniform(sx, sy)
+                * Affine::translate((
+                    -f64::from(crop.left) * f64::from(image.width),
+                    -f64::from(crop.top) * f64::from(image.height),
+                ));
+            scene.push_clip_layer(
+                Fill::NonZero,
+                transform,
+                &RoundedRect::from_rect(rect(*r), f64::from(*radius)),
+            );
+            scene.draw_image(&ImageBrush::new(image.clone()).with_alpha(*opacity), at);
+            scene.pop_layer();
+        }
+        Shape::Caption {
+            center,
+            width,
+            words,
+            highlight,
+            size,
+            color: c,
+            accent,
+            background,
+        } => caption(
+            scene,
+            fonts,
+            layouts,
+            transform,
+            CaptionStyle {
+                center: *center,
+                width: *width,
+                size: *size,
+                color: *c,
+                accent: *accent,
+                background: *background,
+            },
+            words,
+            *highlight,
+        ),
         Shape::Clip {
             rect: r,
             radius,
@@ -406,6 +467,109 @@ fn draw(
                 draw(scene, fonts, layouts, transform, inner);
             }
             scene.pop_layer();
+        }
+    }
+}
+
+struct CaptionStyle {
+    center: [f32; 2],
+    width: f32,
+    size: f32,
+    color: Rgba,
+    accent: Rgba,
+    background: Rgba,
+}
+
+/// Lays caption words out in centered lines no wider than the style's width and draws them on
+/// one rounded box, the highlighted word on an accent pill.
+#[allow(clippy::too_many_arguments)]
+fn caption(
+    scene: &mut Scene,
+    fonts: &mut FontContext,
+    layouts: &mut LayoutContext<()>,
+    transform: Affine,
+    style: CaptionStyle,
+    words: &[String],
+    highlight: Option<usize>,
+) {
+    let size = style.size;
+    // A word space, widened so a highlight pill keeps clear of its neighbours.
+    let space = measure(fonts, layouts, "a b", size, Font::Sans).0
+        - measure(fonts, layouts, "ab", size, Font::Sans).0
+        + size * 0.16;
+    let widths: Vec<f32> = words
+        .iter()
+        .map(|w| measure(fonts, layouts, w, size, Font::Sans).0)
+        .collect();
+    let mut lines: Vec<(std::ops::Range<usize>, f32)> = Vec::new();
+    let mut start = 0;
+    let mut line_width = 0.0;
+    for (i, w) in widths.iter().enumerate() {
+        let wider = line_width + space + w;
+        if i > start && wider > style.width {
+            lines.push((start..i, line_width));
+            start = i;
+            line_width = *w;
+        } else {
+            line_width = if i == start { *w } else { wider };
+        }
+    }
+    if start < words.len() {
+        lines.push((start..words.len(), line_width));
+    }
+    let line_height = size * 1.3;
+    let (pad_x, pad_y) = (size * 0.6, size * 0.35);
+    let widest = lines.iter().map(|(_, w)| *w).fold(0.0, f32::max);
+    let height = line_height * lines.len() as f32;
+    let top = style.center[1] - height / 2.0;
+    let boxed = Rect::new(
+        style.center[0] - widest / 2.0 - pad_x,
+        top - pad_y,
+        style.center[0] + widest / 2.0 + pad_x,
+        top + height + pad_y,
+    );
+    if style.background.0[3] > 0.0 {
+        scene.fill(
+            Fill::NonZero,
+            transform,
+            color(style.background),
+            None,
+            &RoundedRect::from_rect(rect(boxed), f64::from(size * 0.35)),
+        );
+    }
+    for (row, (range, line_width)) in lines.into_iter().enumerate() {
+        let mut x = style.center[0] - line_width / 2.0;
+        let y = top + row as f32 * line_height + (line_height - size * 1.2) / 2.0;
+        for i in range {
+            let lit = highlight == Some(i);
+            if lit {
+                let pill = Rect::new(
+                    x - size * 0.14,
+                    y - size * 0.02,
+                    x + widths[i] + size * 0.14,
+                    y + size * 1.22,
+                );
+                scene.fill(
+                    Fill::NonZero,
+                    transform,
+                    color(style.accent),
+                    None,
+                    &RoundedRect::from_rect(rect(pill), f64::from(size * 0.22)),
+                );
+            }
+            let ink = if lit {
+                Rgba([
+                    style.background.0[0],
+                    style.background.0[1],
+                    style.background.0[2],
+                    1.0,
+                ])
+            } else {
+                style.color
+            };
+            let at = transform * Affine::translate((f64::from(x), f64::from(y)));
+            glyphs(scene, fonts, layouts, at, &words[i], size, Font::Sans, ink);
+            x += widths[i] + space;
         }
     }
 }
