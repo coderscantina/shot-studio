@@ -1,34 +1,38 @@
 {
-  "note": "Pinned references. Milestone 01 fills in every revision and license. Checkouts go to the ignored .sources/ directory.",
+  "note": "Pinned references. Checkouts go to the ignored .sources/ directory. Cargo.toml pins the same versions.",
   "sources": [
     {
       "name": "gpui",
       "repository": "https://github.com/zed-industries/zed",
       "path": "crates/gpui",
-      "revision": null,
+      "revision": "f816e1f9263e3a8ef63c4baaa02e1441ce1c6038",
       "license": "Apache-2.0",
-      "contributes": "UI framework, Metal rendering, custom elements"
+      "contributes": "UI framework, Metal rendering, custom elements",
+      "crate": "gpui-pre =0.3.11 (crates.io snapshot of this Zed commit)"
     },
     {
       "name": "gpui-component",
-      "repository": "https://github.com/longbridge/gpui-component",
-      "revision": null,
-      "license": null,
-      "contributes": "Standard widgets, restyled with Shot Studio tokens"
+      "repository": "https://github.com/longbridge/gpui-kit",
+      "revision": "7591a35eced761e3613c01e71ff04c10129dae1a",
+      "license": "Apache-2.0",
+      "contributes": "Standard widgets, restyled with Shot Studio tokens",
+      "crate": "gpui-component =0.9.0 (tag v0.9.0)"
     },
     {
       "name": "vello",
       "repository": "https://github.com/linebender/vello",
-      "revision": null,
-      "license": null,
-      "contributes": "GPU vector rendering for overlay templates"
+      "revision": "f3000c8d9e7a9c7e6abb09b9587238bf8b4860ff",
+      "license": "Apache-2.0 OR MIT",
+      "contributes": "GPU vector rendering for overlay templates",
+      "crate": "vello =0.11.0 (tag v0.11.0)"
     },
     {
       "name": "parley",
       "repository": "https://github.com/linebender/parley",
-      "revision": null,
-      "license": null,
-      "contributes": "Text layout for overlays and captions"
+      "revision": "6e1143dda817360dd3a2a64f9133c6e5dfabd881",
+      "license": "Apache-2.0 OR MIT",
+      "contributes": "Text layout for overlays and captions",
+      "crate": "parley =0.12.0 (tag v0.12.0)"
     }
   ]
 }

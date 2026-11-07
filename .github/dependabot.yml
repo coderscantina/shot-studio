@@ -1,0 +1,19 @@
+version: 2
+# Monthly, one grouped pull request per ecosystem. gpui, vello and parley are pinned exactly
+# together, so expect to review those bumps by hand.
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      cargo:
+        patterns: ['*']
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ['*']

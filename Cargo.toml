@@ -1,0 +1,23 @@
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
+version = "26.11.7"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT"
+publish = false
+repository = "https://github.com/coderscantina/shot-studio"
+
+[workspace.dependencies]
+# gpui-component 0.9.0 depends on the gpui-pre snapshots on crates.io (Zed f816e1f), not on Zed git.
+# A git gpui would build a second, incompatible gpui, so both pin to the same exact snapshot.
+gpui = { package = "gpui-pre", version = "=0.3.11" }
+gpui-component = "=0.9.0"
+# Newest linebender release train: vello 0.11.0 and parley 0.12.0 share peniko and kurbo.
+vello = "=0.11.0"
+parley = "=0.12.0"
+
+[profile.release]
+debug = "line-tables-only"
