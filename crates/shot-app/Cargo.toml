@@ -9,4 +9,19 @@ repository.workspace = true
 
 [dependencies]
 gpui = { workspace = true }
+# font-kit: without it gpui renders no text on macOS.
+# runtime_shaders: this machine lacks the Xcode Metal Toolchain component that precompiles the
+# shaders. Same shader source, compiled once at startup. Drop it once the toolchain is installed.
+gpui-platform = { workspace = true, features = ["font-kit", "runtime_shaders"] }
 gpui-component = { workspace = true }
+shot-media = { path = "../shot-media" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { workspace = true }
+objc2-core-foundation = { workspace = true }
+objc2-core-video = { workspace = true, features = ["objc2-io-surface"] }
+objc2-io-surface = { workspace = true }
+objc2-metal = { workspace = true, features = ["objc2-io-surface"] }
+wgpu = { workspace = true }
+pollster = { workspace = true }
+libc = { workspace = true }
