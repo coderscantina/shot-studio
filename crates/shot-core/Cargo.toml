@@ -8,3 +8,5 @@ publish.workspace = true
 repository.workspace = true
 
 [dependencies]
+kdl.workspace = true
+blake3.workspace = true

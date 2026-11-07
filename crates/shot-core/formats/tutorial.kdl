@@ -1,0 +1,12 @@
+prompter full-script
+pacing natural
+layouts screen face-corner
+captions clean
+auto-cut confidence=85 {
+    silence on=#true min=600_000
+    retake on=#true
+    misspoken on=#true
+    pause on=#true min=1_000_000
+    filler on=#true
+    idle-screen on=#true min=5_000_000
+}
