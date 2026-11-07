@@ -15,6 +15,9 @@
 //! - [`export`]: renders changed segments in parallel and joins them into one MP4.
 //! - [`derived`]: Shorts and X clips drawn from the main cut's chunks, reframed and captioned.
 //! - [`overlay_rules`]: link cards, highlights and b-roll slots written into `cut.kdl`.
+//! - [`motion`]: springs, presets and choreography over media time; [`kinetic`] moves text on
+//!   them, [`materials`] holds the light, parallax and motion blur rules that sheets, shadows and
+//!   glass follow, and [`lottie`] checks, fills and draws Lottie templates.
 
 pub mod assets;
 pub mod autozoom;
@@ -23,7 +26,11 @@ pub mod code_diff;
 pub mod drawing;
 pub mod events;
 pub mod frame;
+pub mod kinetic;
 pub mod layout;
+pub mod lottie;
+pub mod materials;
+pub mod motion;
 pub mod overlay;
 pub mod plan;
 pub mod zoom;
@@ -39,7 +46,11 @@ pub mod export;
 #[cfg(target_os = "macos")]
 pub mod graph;
 #[cfg(target_os = "macos")]
+mod material_pass;
+#[cfg(target_os = "macos")]
 pub mod overlay_rules;
+#[cfg(all(test, target_os = "macos"))]
+mod reel;
 #[cfg(target_os = "macos")]
 pub mod rules;
 #[cfg(target_os = "macos")]

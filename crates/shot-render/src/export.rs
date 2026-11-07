@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
-use shot_core::{ContentHash, Effects, Id, MediaId, OutputKind, Project, Timeline};
+use shot_core::{ContentHash, Effects, Id, MediaId, Micros, OutputKind, Project, Timeline};
 use shot_media::audio::{AAC_PACKET_SAMPLES, AacEncoder, AacStream, AudioError, SAMPLE_RATE};
 use shot_media::encode::{EncodeError, EncodedFrame, EncoderSettings, HevcEncoder};
 use shot_media::mux::{self, AudioTrack, Chapter, FragmentedFile, Joiner, Movie, MuxError, Track};
@@ -36,7 +36,7 @@ use crate::assets::{AssetError, Assets, EVENTS_FILE};
 use crate::audio::{AudioSegment, TimelineAudio, TimelineAudioError};
 use crate::cursor::FrameCursor;
 use crate::derived::{DerivedInputs, DerivedPlan, FaceTrack};
-use crate::frame::{Shot, compose};
+use crate::frame::{Frame, Shot, compose};
 use crate::graph::Renderer;
 use crate::layout::{Canvas, LayoutSpec, Source, Sources, UnsupportedLayout};
 use crate::plan::{ExportPlan, PlannedChunk, PlannedSegment, frame_time};
@@ -158,6 +158,29 @@ pub fn export(
     options: ExportOptions,
     progress: &(dyn Fn(Progress) + Sync),
 ) -> Result<ExportReport, ExportError> {
+    export_decorated(video_dir, project, cut, out, options, None, progress)
+}
+
+/// Draws on top of every frame of a main cut after the cut's own drawing, for reels and
+/// measurements of renderer features before a template uses them. Its name enters every chunk's
+/// key, so decorated chunks never stand in for plain ones.
+#[derive(Debug, Clone, Copy)]
+pub struct Decoration {
+    pub name: &'static str,
+    /// Called with the frame's media time and canvas.
+    pub draw: fn(Micros, Canvas, &mut Frame),
+}
+
+/// [`export`] with a [`Decoration`] on every frame of a main cut.
+pub fn export_decorated(
+    video_dir: &Path,
+    project: &Project,
+    cut: &str,
+    out: &Path,
+    options: ExportOptions,
+    decoration: Option<Decoration>,
+    progress: &(dyn Fn(Progress) + Sync),
+) -> Result<ExportReport, ExportError> {
     let timeline = Timeline::evaluate(project);
     let output = timeline
         .outputs
@@ -205,6 +228,11 @@ pub fn export(
         None => {
             let mut plan = ExportPlan::new(output, FPS, |take| ids[take]);
             crate::overlay::key_assets(&mut plan, &assets);
+            if let Some(decoration) = decoration {
+                for chunk in plan.segments.iter_mut().flat_map(|s| &mut s.chunks) {
+                    chunk.hash = chunk.hash.extend(decoration.name.as_bytes());
+                }
+            }
             plan
         }
     };
@@ -251,6 +279,7 @@ pub fn export(
         &cache,
         out,
         options,
+        decoration,
         progress,
     )?;
     if derived.is_none() {
@@ -542,6 +571,7 @@ fn run(
     cache: &Cache,
     out: &Path,
     options: ExportOptions,
+    decoration: Option<Decoration>,
     progress: &(dyn Fn(Progress) + Sync),
 ) -> Result<(Duration, Duration), ExportError> {
     let started = Instant::now();
@@ -559,7 +589,7 @@ fn run(
             .map(|_| {
                 scope.spawn(|| {
                     pending.guard(|| {
-                        let mut worker = Worker::new(media, effects)?;
+                        let mut worker = Worker::new(media, effects, decoration)?;
                         loop {
                             if pending.failed() {
                                 return Err(ExportError::Cancelled);
@@ -614,16 +644,22 @@ struct Worker {
     cursors: HashMap<PathBuf, FrameCursor>,
     assets: Assets,
     effects: Effects,
+    decoration: Option<Decoration>,
 }
 
 impl Worker {
-    fn new(media: &Media, effects: Effects) -> Result<Self, ExportError> {
+    fn new(
+        media: &Media,
+        effects: Effects,
+        decoration: Option<Decoration>,
+    ) -> Result<Self, ExportError> {
         let video_dir = media.root.parent().unwrap_or(&media.root);
         Ok(Self {
             renderer: Renderer::new()?,
             cursors: HashMap::new(),
             assets: Assets::new(video_dir),
             effects,
+            decoration,
         })
     }
 
@@ -720,6 +756,9 @@ impl Worker {
                     time: frame_time(frame, FPS),
                 };
                 let mut drawn = compose(&shot, &look, canvas, sizes)?;
+                if let Some(decoration) = self.decoration {
+                    (decoration.draw)(shot.time, canvas, &mut drawn);
+                }
                 let mut screen = paths.screen.clone();
                 if let Some(cutaway) = &drawn.cutaway {
                     let path = media

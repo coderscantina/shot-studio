@@ -13,7 +13,10 @@ use vello::{AaConfig, AaSupport, RenderParams, Renderer, RendererOptions, Scene}
 
 use crate::RenderError;
 use crate::drawing::{Drawing, Font, Rgba, Shape, union};
+use crate::kinetic::Kinetic;
 use crate::layout::{Canvas, Rect};
+use crate::lottie::{Justify, PlacedText};
+use crate::motion::{Part, Unit};
 use crate::surface::{Matrix, Plane, Range};
 
 /// Bytes per quad in the uniform buffer, the minimum dynamic offset alignment.
@@ -36,8 +39,7 @@ struct Target {
 
 pub(crate) struct VectorPass {
     vello: Renderer,
-    fonts: FontContext,
-    layouts: LayoutContext<()>,
+    ink: Ink,
     scene: Scene,
     /// Under, then over.
     targets: [Option<Target>; 2],
@@ -133,8 +135,11 @@ impl VectorPass {
         });
         Ok(Self {
             vello,
-            fonts: FontContext::new(),
-            layouts: LayoutContext::new(),
+            ink: Ink {
+                fonts: FontContext::new(),
+                layouts: LayoutContext::new(),
+                lottie: velato::Renderer::new(),
+            },
             scene: Scene::new(),
             targets: [None, None],
             layout,
@@ -172,13 +177,7 @@ impl VectorPass {
                 self.scene.reset();
                 let origin = Affine::translate((-f64::from(area.left), -f64::from(area.top)));
                 for shape in shapes {
-                    draw(
-                        &mut self.scene,
-                        &mut self.fonts,
-                        &mut self.layouts,
-                        origin,
-                        shape,
-                    );
+                    draw(&mut self.scene, &mut self.ink, origin, shape);
                 }
                 self.vello
                     .render_to_texture(
@@ -246,6 +245,37 @@ impl VectorPass {
         Ok(bound)
     }
 
+    /// Renders `shapes` under `transform` into the `size` texels at the top left of `view`, an
+    /// RGBA texture vello can write.
+    pub(crate) fn render(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        shapes: &[Shape],
+        transform: Affine,
+        (width, height): (u32, u32),
+        view: &wgpu::TextureView,
+    ) -> Result<(), RenderError> {
+        self.scene.reset();
+        for shape in shapes {
+            draw(&mut self.scene, &mut self.ink, transform, shape);
+        }
+        self.vello
+            .render_to_texture(
+                device,
+                queue,
+                &self.scene,
+                view,
+                &RenderParams {
+                    base_color: Color::TRANSPARENT,
+                    width,
+                    height,
+                    antialiasing_method: AaConfig::Area,
+                },
+            )
+            .map_err(|e| RenderError::Gpu(e.to_string()))
+    }
+
     /// Composites one rendered half into the plane `pass` draws.
     pub(crate) fn draw(&self, pass: &mut wgpu::RenderPass, plane: Plane, bound: &Bound) {
         pass.set_pipeline(&self.pipelines[plane as usize]);
@@ -302,13 +332,15 @@ fn rect(r: Rect) -> KRect {
     )
 }
 
-fn draw(
-    scene: &mut Scene,
-    fonts: &mut FontContext,
-    layouts: &mut LayoutContext<()>,
-    transform: Affine,
-    shape: &Shape,
-) {
+/// The text and Lottie state drawing needs between frames.
+struct Ink {
+    fonts: FontContext,
+    layouts: LayoutContext<()>,
+    lottie: velato::Renderer,
+}
+
+fn draw(scene: &mut Scene, ink: &mut Ink, transform: Affine, shape: &Shape) {
+    let Ink { fonts, layouts, .. } = ink;
     match shape {
         Shape::Rect {
             rect: r,
@@ -437,6 +469,7 @@ fn draw(
             color: c,
             accent,
             background,
+            pop,
         } => caption(
             scene,
             fonts,
@@ -449,10 +482,28 @@ fn draw(
                 color: *c,
                 accent: *accent,
                 background: *background,
+                pop: *pop,
             },
             words,
             *highlight,
         ),
+        Shape::Kinetic(text) => kinetic(scene, fonts, layouts, transform, text),
+        Shape::Lottie {
+            lottie,
+            origin,
+            scale,
+            elapsed,
+            opacity,
+        } => {
+            let at = transform
+                * Affine::translate((f64::from(origin[0]), f64::from(origin[1])))
+                * Affine::scale(f64::from(*scale));
+            let frame = lottie.frame_at(*elapsed);
+            lottie.draw(&mut ink.lottie, scene, frame, at, f64::from(*opacity));
+            for text in lottie.texts(frame) {
+                slot_text(scene, &mut ink.fonts, &mut ink.layouts, at, &text, *opacity);
+            }
+        }
         Shape::Clip {
             rect: r,
             radius,
@@ -464,7 +515,7 @@ fn draw(
                 &RoundedRect::from_rect(rect(*r), f64::from(*radius)),
             );
             for inner in shapes {
-                draw(scene, fonts, layouts, transform, inner);
+                draw(scene, ink, transform, inner);
             }
             scene.pop_layer();
         }
@@ -478,6 +529,7 @@ struct CaptionStyle {
     color: Rgba,
     accent: Rgba,
     background: Rgba,
+    pop: f32,
 }
 
 /// Lays caption words out in centered lines no wider than the style's width and draws them on
@@ -542,6 +594,12 @@ fn caption(
         let y = top + row as f32 * line_height + (line_height - size * 1.2) / 2.0;
         for i in range {
             let lit = highlight == Some(i);
+            let at = if lit {
+                let middle = (f64::from(x + widths[i] / 2.0), f64::from(y + size * 0.6));
+                transform * Affine::scale_about(f64::from(style.pop), middle)
+            } else {
+                transform
+            };
             if lit {
                 let pill = Rect::new(
                     x - size * 0.14,
@@ -551,7 +609,7 @@ fn caption(
                 );
                 scene.fill(
                     Fill::NonZero,
-                    transform,
+                    at,
                     color(style.accent),
                     None,
                     &RoundedRect::from_rect(rect(pill), f64::from(size * 0.22)),
@@ -567,11 +625,151 @@ fn caption(
             } else {
                 style.color
             };
-            let at = transform * Affine::translate((f64::from(x), f64::from(y)));
+            let at = at * Affine::translate((f64::from(x), f64::from(y)));
             glyphs(scene, fonts, layouts, at, &words[i], size, Font::Sans, ink);
             x += widths[i] + space;
         }
     }
+}
+
+/// One word or glyph of kinetic type, as laid out.
+struct Piece {
+    glyphs: Vec<vello::Glyph>,
+    run: usize,
+    /// Horizontal extent, and the line's top and bottom.
+    left: f32,
+    right: f32,
+    top: f32,
+    bottom: f32,
+}
+
+/// Lays kinetic text out with parley and draws each word or glyph at its pose, staggered in
+/// reading order.
+fn kinetic(
+    scene: &mut Scene,
+    fonts: &mut FontContext,
+    layouts: &mut LayoutContext<()>,
+    transform: Affine,
+    text: &Kinetic,
+) {
+    let mut layout = text_layout(fonts, layouts, &text.text, text.size, text.font);
+    layout.break_all_lines(text.width);
+    let mut runs = Vec::new();
+    let mut pieces: Vec<Piece> = Vec::new();
+    for line in layout.lines() {
+        let metrics = line.metrics();
+        let (top, bottom) = (metrics.block_min_coord, metrics.block_max_coord);
+        for item in line.items() {
+            let PositionedLayoutItem::GlyphRun(run) = item else {
+                continue;
+            };
+            runs.push(*run.run());
+            let mut x = run.offset();
+            let y = run.baseline();
+            let mut open = false;
+            for cluster in run.run().visual_clusters() {
+                if cluster.is_space_or_nbsp() {
+                    x += cluster.advance();
+                    open = false;
+                    continue;
+                }
+                if !open || text.unit == Unit::Glyph {
+                    pieces.push(Piece {
+                        glyphs: Vec::new(),
+                        run: runs.len() - 1,
+                        left: x,
+                        right: x,
+                        top,
+                        bottom,
+                    });
+                    open = true;
+                }
+                let piece = pieces.last_mut().expect("pushed above");
+                for glyph in cluster.glyphs() {
+                    piece.glyphs.push(vello::Glyph {
+                        id: glyph.id,
+                        x: x + glyph.x,
+                        y: y + glyph.y,
+                    });
+                    x += glyph.advance;
+                }
+                piece.right = x;
+            }
+        }
+    }
+    let origin =
+        transform * Affine::translate((f64::from(text.origin[0]), f64::from(text.origin[1])));
+    let count = pieces.len();
+    for (index, piece) in pieces.iter().enumerate() {
+        let pose = text.pose(Part::new(index, count), piece.bottom - piece.top);
+        if pose.opacity <= 0.0 || pose.scale <= 0.0 {
+            continue;
+        }
+        let middle = (
+            f64::from(piece.left + piece.right) / 2.0,
+            f64::from(piece.top + piece.bottom) / 2.0,
+        );
+        let at = origin
+            * Affine::translate((f64::from(pose.offset[0]), f64::from(pose.offset[1])))
+            * Affine::scale_about(f64::from(pose.scale), middle);
+        if pose.masked {
+            let slot = KRect::new(
+                f64::from(piece.left - text.size),
+                f64::from(piece.top),
+                f64::from(piece.right + text.size),
+                f64::from(piece.bottom),
+            );
+            scene.push_clip_layer(Fill::NonZero, origin, &slot);
+        }
+        let run = &runs[piece.run];
+        let coords: Vec<i16> = run
+            .normalized_coords()
+            .iter()
+            .map(|c| c.to_bits())
+            .collect();
+        scene
+            .draw_glyphs(run.font())
+            .font_size(run.font_size())
+            .normalized_coords(&coords)
+            .transform(at)
+            .brush(color(text.color.faded(pose.opacity)))
+            .draw(Fill::NonZero, piece.glyphs.iter().copied());
+        if pose.masked {
+            scene.pop_layer();
+        }
+    }
+}
+
+/// A Lottie text slot: its text from the layer's origin on the baseline, aligned by its
+/// justification, in the layer's transform.
+fn slot_text(
+    scene: &mut Scene,
+    fonts: &mut FontContext,
+    layouts: &mut LayoutContext<()>,
+    transform: Affine,
+    text: &PlacedText,
+    opacity: f32,
+) {
+    let layout = text_layout(fonts, layouts, &text.text, text.size, Font::Sans);
+    let baseline = layout.lines().next().map_or(0.0, |l| l.metrics().baseline);
+    let shift = match text.justify {
+        Justify::Left => 0.0,
+        Justify::Center => layout.width() / 2.0,
+        Justify::Right => layout.width(),
+    };
+    let at =
+        transform * text.transform * Affine::translate((-f64::from(shift), -f64::from(baseline)));
+    let ink = text.color.faded(text.opacity * opacity);
+    glyphs(
+        scene,
+        fonts,
+        layouts,
+        at,
+        &text.text,
+        text.size,
+        Font::Sans,
+        ink,
+    );
 }
 
 /// The macOS arrow, one unit tall, tip at the origin.

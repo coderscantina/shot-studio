@@ -69,6 +69,7 @@ pub struct Rect {
 
 impl Rect {
     pub const UNIT: Self = Self::new(0.0, 0.0, 1.0, 1.0);
+    pub const ZERO: Self = Self::new(0.0, 0.0, 0.0, 0.0);
 
     pub const fn new(left: f32, top: f32, right: f32, bottom: f32) -> Self {
         Self {
@@ -246,6 +247,7 @@ impl LayoutSpec {
                     crop,
                     radius: slot.radius * scale,
                     blur: 0.0,
+                    shutter: Rect::ZERO,
                 }
             })
             .collect();
@@ -332,6 +334,19 @@ pub struct Layer {
     pub radius: f32,
     /// The size in canvas pixels of the blocks the layer is averaged over, 0 for a sharp one.
     pub blur: f32,
+    /// How `crop` changes from the shutter's opening to its closing, for motion blur. Zero when
+    /// the layer holds still.
+    pub shutter: Rect,
+}
+
+impl Layer {
+    /// How far the shown content moves on the canvas during the shutter, in canvas pixels.
+    pub fn travel(&self) -> f32 {
+        let s = self.shutter;
+        let across = self.frame.width() / self.crop.width();
+        let down = self.frame.height() / self.crop.height();
+        (s.left.abs().max(s.right.abs()) * across).max(s.top.abs().max(s.bottom.abs()) * down)
+    }
 }
 
 #[cfg(test)]

@@ -28,6 +28,7 @@ use shot_core::{
 use crate::captions::{self, Cue};
 use crate::drawing::{Drawing, Rgba, Shape};
 use crate::frame::Frame;
+use crate::kinetic;
 use crate::layout::{BACKGROUND, Canvas, Layer, LayoutSpec, Rect, Scene, Source, Sources};
 use crate::plan::{ExportPlan, PlannedSegment, frame_time};
 use crate::zoom::punch_at;
@@ -112,11 +113,13 @@ pub struct DerivedChunk {
     pub captions: Vec<Option<Shown>>,
 }
 
-/// A caption on screen: the cue's index and the word to highlight.
+/// A caption on screen: the cue's index, the word to highlight, and how long since that word
+/// started, up to [`kinetic::word_pop_settle`], for its pop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Shown {
     pub cue: usize,
     pub word: Option<usize>,
+    pub pop: Micros,
 }
 
 /// A derived output planned over the main output: its chunks with their bases and keys.
@@ -246,10 +249,10 @@ impl DerivedPlan {
             self.canvas.height as f32,
         );
         let mut drawing = Drawing::default();
-        if let Some(Shown { cue, word }) = derived.captions[index] {
+        if let Some(Shown { cue, word, pop }) = derived.captions[index] {
             drawing
                 .over
-                .push(caption_shape(&self.cues[cue], word, self.canvas));
+                .push(caption_shape(&self.cues[cue], word, pop, self.canvas));
         }
         Frame {
             scene: Scene {
@@ -260,6 +263,7 @@ impl DerivedPlan {
                     crop,
                     radius: 0.0,
                     blur: 0.0,
+                    shutter: Rect::ZERO,
                 }],
             },
             drawing,
@@ -348,9 +352,16 @@ fn caption_at(cues: &[Cue], t: Micros, style: CaptionStyle) -> Option<Shown> {
     }
     let (_, word) = captions::shown_at(cues, t)?;
     let cue = cues.partition_point(|c| c.from() <= t) - 1;
+    let pops = style == CaptionStyle::WordPop;
+    let since = Micros(t.0.saturating_sub(cues[cue].words[word].from.0));
     Some(Shown {
         cue,
-        word: (style == CaptionStyle::WordPop).then_some(word),
+        word: pops.then_some(word),
+        pop: if pops {
+            since.min(kinetic::word_pop_settle())
+        } else {
+            kinetic::word_pop_settle()
+        },
     })
 }
 
@@ -375,12 +386,13 @@ fn key_input(chunk: &DerivedChunk, frames: &Range<u64>, cues: &[Cue]) -> Vec<u8>
         out.extend_from_slice(&count.to_le_bytes());
         match caption {
             None => out.push(0),
-            Some(Shown { cue, word }) => {
+            Some(Shown { cue, word, pop }) => {
                 out.push(1);
                 let text = cues[cue].text();
                 out.extend_from_slice(&(text.len() as u64).to_le_bytes());
                 out.extend_from_slice(text.as_bytes());
                 out.extend_from_slice(&word.map_or(u32::MAX, |w| w as u32).to_le_bytes());
+                out.extend_from_slice(&pop.0.to_le_bytes());
             }
         }
     }
@@ -388,7 +400,7 @@ fn key_input(chunk: &DerivedChunk, frames: &Range<u64>, cues: &[Cue]) -> Vec<u8>
 }
 
 /// The burned-in caption of `cue` on a derived canvas.
-fn caption_shape(cue: &Cue, word: Option<usize>, canvas: Canvas) -> Shape {
+fn caption_shape(cue: &Cue, word: Option<usize>, pop: Micros, canvas: Canvas) -> Shape {
     let tall = canvas.height > canvas.width;
     let size = canvas.width as f32 * if tall { 0.062 } else { 0.05 };
     Shape::Caption {
@@ -403,6 +415,7 @@ fn caption_shape(cue: &Cue, word: Option<usize>, canvas: Canvas) -> Shape {
         color: Rgba::hex(0xFFFFFF, 1.0),
         accent: Rgba::hex(0xC8F25A, 1.0),
         background: Rgba::hex(0x0A0B0D, 0.78),
+        pop: kinetic::word_pop(pop),
     }
 }
 

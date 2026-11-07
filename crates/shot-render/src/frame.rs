@@ -11,7 +11,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use shot_core::{DeviceFrame, Effects, Keystrokes, Layout, Micros, Overlay, Shadow, Zoom};
+use shot_core::{
+    DeviceFrame, Effects, Keystrokes, Layout, Micros, Overlay, Shadow, Zoom, ZoomMotion,
+};
 
 use vello::peniko::ImageData;
 
@@ -21,6 +23,7 @@ use crate::events::{EventLog, KeyPress, Modifier};
 use crate::layout::{
     Canvas, Layer, LayoutSpec, Rect, Scene, Source, Sources, UnsupportedLayout, bezel,
 };
+use crate::materials;
 use crate::overlay::{self, Cutaway, Stage};
 use crate::zoom::punch_at;
 
@@ -74,8 +77,26 @@ pub fn compose(
 ) -> Result<Frame, UnsupportedLayout> {
     let effects = &look.effects;
     let spec = LayoutSpec::styled(shot.layout, &effects.window)?;
-    let punch = punch_at(shot.zooms, shot.time, effects.zoom_motion, sizes.screen);
-    let scene = spec.scene(canvas, sizes, punch);
+    let scene_at = |t| {
+        let punch = punch_at(shot.zooms, t, effects.zoom_motion, sizes.screen);
+        spec.scene(canvas, sizes, punch)
+    };
+    let mut scene = scene_at(shot.time);
+    if effects.zoom_motion == ZoomMotion::Smooth && !shot.zooms.is_empty() {
+        let [open, close] = materials::shutter(shot.time).map(scene_at);
+        for (layer, (a, b)) in scene
+            .layers
+            .iter_mut()
+            .zip(open.layers.iter().zip(&close.layers))
+        {
+            layer.shutter = Rect::new(
+                b.crop.left - a.crop.left,
+                b.crop.top - a.crop.top,
+                b.crop.right - a.crop.right,
+                b.crop.bottom - a.crop.bottom,
+            );
+        }
+    }
     let s = canvas.width as f32 / 3840.0;
     let mut drawing = Drawing::default();
     let screen = scene.layers.iter().find(|l| l.source == Source::Screen);
@@ -99,7 +120,6 @@ pub fn compose(
         }
     }
     let mut screen = screen.map(|layer| (*layer, ScreenView::new(layer, sizes.screen)));
-    let mut scene = scene;
     let mut cutaway = None;
     for overlay in shot.overlays {
         overlay::apply(

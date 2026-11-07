@@ -1,9 +1,15 @@
-//! Vector shapes and text a frame draws under and over its source layers, in canvas pixels. Pure
-//! data: [`crate::frame`] decides what to draw, the vector pass draws it with vello and parley.
+//! Vector shapes and text a frame draws under and over its source layers, in canvas pixels, and
+//! the materials between them: soft shadows and sheets that tilt and sit on frosted glass. Pure
+//! data: [`crate::frame`] decides what to draw, the vector and material passes draw it.
 
+use std::sync::Arc;
+
+use shot_core::Micros;
 use vello::peniko::ImageData;
 
+use crate::kinetic::Kinetic;
 use crate::layout::Rect;
+use crate::lottie::Filled;
 
 /// Straight-alpha sRGB.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -97,6 +103,19 @@ pub enum Shape {
         color: Rgba,
         accent: Rgba,
         background: Rgba,
+        /// The highlighted word's scale, 1 once it has settled.
+        pop: f32,
+    },
+    /// Text whose words or glyphs move on their own springs.
+    Kinetic(Box<Kinetic>),
+    /// A filled Lottie template `elapsed` after it started, its top left at `origin`, `scale`
+    /// canvas pixels per Lottie pixel. Its text slots draw with parley.
+    Lottie {
+        lottie: Arc<Filled>,
+        origin: [f32; 2],
+        scale: f32,
+        elapsed: Micros,
+        opacity: f32,
     },
 }
 
@@ -151,17 +170,99 @@ impl Shape {
                 .reduce(union)
                 .and_then(|inner| intersect(inner, *rect))
                 .unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0)),
+            Self::Kinetic(text) => text.bounds(),
+            Self::Lottie {
+                lottie,
+                origin,
+                scale,
+                ..
+            } => {
+                let (width, height) = lottie.size();
+                Rect::new(
+                    origin[0],
+                    origin[1],
+                    origin[0] + width as f32 * scale,
+                    origin[1] + height as f32 * scale,
+                )
+            }
         }
     }
 }
 
-/// What a frame draws beyond its sources.
+/// The blurred silhouette of shapes, in one color: a soft shadow of any shape.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SoftShadow {
+    /// Only their coverage counts.
+    pub shapes: Vec<Shape>,
+    /// Standard deviation of the blur, in canvas pixels.
+    pub blur: f32,
+    pub color: Rgba,
+    /// From the shapes to their shadow, see [`crate::materials::Light::shadow_offset`].
+    pub offset: [f32; 2],
+}
+
+impl SoftShadow {
+    /// A rectangle that holds the whole shadow.
+    pub fn bounds(&self) -> Option<Rect> {
+        let inner = self.shapes.iter().map(Shape::bounds).reduce(union)?;
+        let r = grow(inner, self.blur * 3.0);
+        Some(Rect::new(
+            r.left + self.offset[0],
+            r.top + self.offset[1],
+            r.right + self.offset[0],
+            r.bottom + self.offset[1],
+        ))
+    }
+}
+
+/// Frosted glass: what lies behind, blurred and tinted.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Glass {
+    /// Standard deviation of the blur, in canvas pixels.
+    pub blur: f32,
+    /// Mixed over the blurred backdrop by its alpha.
+    pub tint: Rgba,
+}
+
+/// Where a sheet sits at one moment.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Placement {
+    /// Of the sheet, in canvas pixels.
+    pub center: [f32; 2],
+    pub scale: f32,
+    /// Rotation in degrees about the horizontal axis (top away from the viewer when positive)
+    /// and the vertical axis (right side away), seen in perspective.
+    pub tilt: [f32; 2],
+    pub opacity: f32,
+}
+
+/// Shapes drawn flat in their own coordinates, then placed on the canvas as one plane that can
+/// scale, tilt in perspective, catch the light and sit on frosted glass. Anything that moves as
+/// one piece is a sheet: it is drawn once and motion blurred along its path by the material
+/// pass.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Sheet {
+    /// In canvas pixels at scale 1. Shapes draw with the origin at its top left.
+    pub size: [f32; 2],
+    /// Corner radius of the glass and the light's sheen.
+    pub radius: f32,
+    pub glass: Option<Glass>,
+    pub shapes: Vec<Shape>,
+    /// At the start and the end of the frame's shutter, equal when it holds still.
+    pub placement: [Placement; 2],
+}
+
+/// What a frame draws beyond its sources, from the bottom up: `under`, the layers, `shadows`,
+/// `sheets` in order, then `over`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Drawing {
     /// Between the background and the first layer.
     pub under: Vec<Shape>,
     /// On top of every layer.
     pub over: Vec<Shape>,
+    pub shadows: Vec<SoftShadow>,
+    /// Glass blurs the layers and shadows behind it, not other sheets.
+    pub sheets: Vec<Sheet>,
 }
 
 /// A generous half width and half height for a label's box, so bounds never cut it.

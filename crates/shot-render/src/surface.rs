@@ -145,11 +145,13 @@ pub fn plane_texture(
     let width = CVPixelBufferGetWidthOfPlane(buffer, plane.index());
     let height = CVPixelBufferGetHeightOfPlane(buffer, plane.index());
     let surface = CVPixelBufferGetIOSurface(Some(buffer)).ok_or(RenderError::NotIoSurface)?;
-    let metal_usage = if usage.contains(wgpu::TextureUsages::RENDER_ATTACHMENT) {
-        MTLTextureUsage::RenderTarget
-    } else {
-        MTLTextureUsage::ShaderRead
-    };
+    let mut metal_usage = MTLTextureUsage::empty();
+    if usage.contains(wgpu::TextureUsages::RENDER_ATTACHMENT) {
+        metal_usage |= MTLTextureUsage::RenderTarget;
+    }
+    if usage.contains(wgpu::TextureUsages::TEXTURE_BINDING) {
+        metal_usage |= MTLTextureUsage::ShaderRead;
+    }
     let texture: Retained<ProtocolObject<dyn MTLTexture>> = unsafe {
         let descriptor =
             MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
