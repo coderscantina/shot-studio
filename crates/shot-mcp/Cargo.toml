@@ -8,7 +8,16 @@ publish.workspace = true
 repository.workspace = true
 
 [dependencies]
+shot-core = { path = "../shot-core" }
+shot-board = { path = "../shot-board" }
+git2.workspace = true
+rmcp.workspace = true
+serde.workspace = true
+tokio.workspace = true
 
-[[bin]]
-name = "shot-mcp"
-path = "src/main.rs"
+[dev-dependencies]
+rmcp = { workspace = true, features = ["client"] }
+serde_json.workspace = true
+shot-board = { path = "../shot-board" }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
