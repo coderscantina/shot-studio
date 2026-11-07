@@ -3,6 +3,9 @@
 //! Every subcommand is one call into `shot-board`. The words come from `shot_mcp::text`, so the
 //! CLI and the MCP tools print the same thing.
 
+mod models;
+mod transcribe;
+
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -52,6 +55,13 @@ enum Command {
     },
     /// Run the MCP server on stdio.
     Mcp,
+    /// Download or list the analysis models.
+    Models {
+        #[command(subcommand)]
+        action: models::ModelsAction,
+    },
+    /// Transcribe a take's mic track into the transcript cache.
+    Transcribe(transcribe::TranscribeArgs),
 }
 
 #[derive(Args)]
@@ -93,6 +103,11 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<(), String> {
+    match cli.command {
+        Command::Models { action } => return models::run(action),
+        Command::Transcribe(args) => return transcribe::run(args),
+        _ => {}
+    }
     if let Command::Mcp = cli.command {
         return tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -156,7 +171,9 @@ fn run(cli: Cli) -> Result<(), String> {
             board.reject_proposal(&slug, &name).map_err(fail)?;
             println!("rejected {slug}/{name}");
         }
-        Command::Mcp => unreachable!("handled before opening the board"),
+        Command::Mcp | Command::Models { .. } | Command::Transcribe(_) => {
+            unreachable!("handled before opening the board")
+        }
     }
     Ok(())
 }
