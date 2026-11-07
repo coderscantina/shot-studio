@@ -1,0 +1,12 @@
+prompter beats
+pacing natural
+layouts face-content face
+captions word-pop
+auto-cut confidence=85 {
+    silence on=#true min=600_000
+    retake on=#true
+    misspoken on=#true
+    pause on=#true min=1_000_000
+    filler on=#true
+    idle-screen on=#false min=8_000_000
+}

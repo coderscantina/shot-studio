@@ -1,0 +1,46 @@
+captions word-pop
+
+chapter "Hook" {
+    take t01 {
+        keep from=0 to=4_200_000
+        remove from=4_200_000 to=5_100_000 by=silence
+        keep from=5_100_000 to=12_000_000
+        zoom 112 from=8_000_000 to=9_500_000
+    }
+}
+
+chapter "The rule everyone repeats" {
+    take t01 {
+        keep from=12_000_000 to=31_400_000
+        remove from=31_400_000 to=33_000_000 by=retake
+        keep from=33_000_000 to=58_000_000
+        layout split from=20_000_000 to=40_000_000
+        overlay link-card from=22_000_000 to=27_000_000 {
+            url "https://github.com/coderscantina/shot-studio/pull/1"
+            accent #true
+        }
+    }
+    take t02 {
+        keep from=0 to=15_000_000
+        remove from=15_000_000 to=16_200_000 by=manual
+    }
+}
+
+chapter "What we do instead" {
+    take t02 {
+        keep from=16_200_000 to=44_000_000
+        remove from=44_000_000 to=45_000_000 by=filler
+        keep from=45_000_000 to=70_000_000
+        zoom 112 from=50_000_000 to=52_000_000
+    }
+}
+
+short friday-deploys {
+    clip t01 from=5_100_000 to=12_000_000
+    clip t02 from=16_200_000 to=44_000_000
+}
+
+x-clip the-rule {
+    captions clean
+    clip t01 from=12_000_000 to=31_400_000
+}
