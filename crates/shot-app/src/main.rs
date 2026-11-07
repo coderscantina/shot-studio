@@ -1,6 +1,8 @@
 //! gpui UI, bundled as shot.app.
 //!
-//! For now the preview spike window: `shot-app [flags] <video>`.
+//! `shot-app <video-folder>` opens a video folder on its Edit screen, with Record one click away.
+//!
+//! `shot-app [flags] <video.mp4>` opens the preview spike window on one file:
 //!
 //! - `--bench`: play, then seek at random, for several runs, print the measurements and a PASS or
 //!   FAIL line, exit 0 on pass and 1 on fail. A run passes when no frame is dropped, late or
@@ -12,8 +14,17 @@
 //! - `--wall-clock`: pace by wall clock alone instead of locking to the display, for comparison.
 
 mod bench;
+mod edit;
+mod engine;
+mod folder;
 mod metrics;
+mod model;
+mod peaks;
 mod preview;
+mod record;
+mod studio;
+mod theme;
+mod ui;
 mod zoom;
 
 use std::path::PathBuf;
@@ -27,11 +38,23 @@ fn main() -> ExitCode {
         Ok(options) => options,
         Err(message) => {
             eprintln!(
-                "{message}\nusage: shot-app [--bench] [--runs N] [--seconds N] [--seeks N] [--zoom] [--wall-clock] <video>"
+                "{message}\nusage: shot-app <video-folder>\n       shot-app [--bench] [--runs N] [--seconds N] [--seeks N] [--zoom] [--wall-clock] <video.mp4>"
             );
             return ExitCode::FAILURE;
         }
     };
+    if options.video.is_dir() && options.bench.is_none() {
+        let dir = options.video;
+        gpui_platform::application()
+            .with_assets(theme::Assets)
+            .run(move |cx| {
+                if let Err(error) = studio::open(&dir, cx) {
+                    eprintln!("{}: {error}", dir.display());
+                    cx.quit();
+                }
+            });
+        return ExitCode::SUCCESS;
+    }
     gpui_platform::application().run(move |cx| preview::open(options, cx));
     ExitCode::SUCCESS
 }
