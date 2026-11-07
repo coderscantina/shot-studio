@@ -10,4 +10,6 @@ pub mod encode;
 #[cfg(target_os = "macos")]
 pub mod player;
 #[cfg(target_os = "macos")]
+pub mod speaker;
+#[cfg(target_os = "macos")]
 pub mod videotoolbox;

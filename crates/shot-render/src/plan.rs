@@ -10,7 +10,7 @@
 
 use std::ops::Range;
 
-use shot_core::{ContentHash, Id, MediaId, Micros, Output, Segment, TimeRange};
+use shot_core::{ContentHash, Id, MediaId, Micros, Output, Segment, TimeRange, Zoom};
 
 /// Chunks per second of a take: one per keyframe interval of the recordings.
 const CHUNKS_PER_SECOND: u32 = 2;
@@ -64,12 +64,7 @@ impl PlannedSegment {
 
     /// The punch-in at a source frame: the zoom covering that frame's start, or 1.
     pub fn zoom_at(&self, source_frame: u64, fps: u32) -> f32 {
-        let time = frame_time(source_frame, fps);
-        self.segment
-            .zooms
-            .iter()
-            .find(|zoom| zoom.range.from() <= time && time < zoom.range.to())
-            .map_or(1.0, |zoom| f32::from(zoom.scale) / 100.0)
+        zoom_at(&self.segment.zooms, source_frame, fps)
     }
 }
 
@@ -149,6 +144,15 @@ fn chunk_grid(frames: Range<u64>, fps: u32) -> impl Iterator<Item = Range<u64>> 
 pub fn snap(range: TimeRange, fps: u32) -> Range<u64> {
     let frame = |time: Micros| (time.0 * u64::from(fps) + 500_000) / 1_000_000;
     frame(range.from())..frame(range.to())
+}
+
+/// The punch-in of `zooms` at a source frame: the zoom covering that frame's start, or 1.
+pub fn zoom_at(zooms: &[Zoom], source_frame: u64, fps: u32) -> f32 {
+    let time = frame_time(source_frame, fps);
+    zooms
+        .iter()
+        .find(|zoom| zoom.range.from() <= time && time < zoom.range.to())
+        .map_or(1.0, |zoom| f32::from(zoom.scale) / 100.0)
 }
 
 /// The media time where frame `frame` starts.

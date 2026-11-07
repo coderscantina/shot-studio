@@ -1,8 +1,8 @@
 // Draws one source layer into the luma or the chroma plane of a biplanar 4:2:0 target.
 //
-// The source's YCbCr planes are sampled and turned into BT.709 RGB, the layer's rounded corners
-// give coverage, and the color goes back to BT.709 YCbCr in the target's range. Blending in
-// YCbCr equals blending in RGB, because the conversion is affine.
+// The source's YCbCr planes are sampled and turned into RGB with the source's matrix, the layer's
+// rounded corners give coverage, and the color goes back to YCbCr in the target's range and
+// matrix. Blending in YCbCr equals blending in RGB, because the conversion is affine.
 
 struct Layer {
     // Destination in canvas pixels: left, top, right, bottom.
@@ -15,6 +15,16 @@ struct Layer {
     source_video_range: f32,
     // Same for the target.
     target_video_range: f32,
+    // Luma weights Kr and Kb of the source matrix, then of the target matrix.
+    weights: vec4<f32>,
+}
+
+// RGB from normalized luma and centered chroma with luma weights Kr and Kb.
+fn to_rgb(y: f32, c: vec2<f32>, k: vec2<f32>) -> vec3<f32> {
+    let kg = 1.0 - k.x - k.y;
+    let r = y + 2.0 * (1.0 - k.x) * c.y;
+    let b = y + 2.0 * (1.0 - k.y) * c.x;
+    return vec3<f32>(r, (y - k.x * r - k.y * b) / kg, b);
 }
 
 @group(0) @binding(0) var luma: texture_2d<f32>;
@@ -46,18 +56,14 @@ fn source_rgb(uv: vec2<f32>) -> vec3<f32> {
         yn = (y - 16.0 / 255.0) * (255.0 / 219.0);
         cn = c * (255.0 / 224.0);
     }
-    let rgb = vec3<f32>(
-        yn + 1.5748 * cn.y,
-        yn - 0.187324 * cn.x - 0.468124 * cn.y,
-        yn + 1.8556 * cn.x,
-    );
-    return clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+    return clamp(to_rgb(yn, cn, layer.weights.xy), vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
 // Luma, Cb, Cr in the target's range.
 fn target_ycbcr(rgb: vec3<f32>) -> vec3<f32> {
-    let y = dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
-    let c = vec2<f32>((rgb.b - y) / 1.8556, (rgb.r - y) / 1.5748);
+    let k = layer.weights.zw;
+    let y = dot(rgb, vec3<f32>(k.x, 1.0 - k.x - k.y, k.y));
+    let c = vec2<f32>((rgb.b - y) / (2.0 * (1.0 - k.y)), (rgb.r - y) / (2.0 * (1.0 - k.x)));
     if layer.target_video_range > 0.5 {
         return vec3<f32>(16.0 / 255.0 + y * (219.0 / 255.0), 128.0 / 255.0 + c * (224.0 / 255.0));
     }

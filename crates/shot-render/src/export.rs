@@ -22,14 +22,14 @@ use std::sync::{Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use shot_core::{ContentHash, Id, MediaId, OutputKind, Project, Timeline};
-use shot_media::audio::{
-    AAC_PACKET_SAMPLES, AacEncoder, AacStream, AudioError, PcmReader, SAMPLE_RATE,
-};
+use shot_media::audio::{AAC_PACKET_SAMPLES, AacEncoder, AacStream, AudioError, SAMPLE_RATE};
 use shot_media::encode::{EncodeError, EncodedFrame, EncoderSettings, HevcEncoder};
 use shot_media::mux::{self, AudioTrack, Chapter, FragmentedFile, Joiner, Movie, MuxError, Track};
-use shot_media::videotoolbox::{DecodeError, Decoder, Frame};
+use shot_media::videotoolbox::{DecodeError, Decoder};
 
 use crate::RenderError;
+use crate::audio::{AudioSegment, TimelineAudio, TimelineAudioError};
+use crate::cursor::FrameCursor;
 use crate::graph::Renderer;
 use crate::layout::{Canvas, LayoutSpec, Source, Sources, UnsupportedLayout};
 use crate::plan::{ExportPlan, PlannedChunk, PlannedSegment, frame_time};
@@ -45,8 +45,6 @@ const KEYFRAME_INTERVAL: u32 = FPS / 2;
 /// VideoToolbox quality for the master. See docs/evidence/m03/export.md for the measurement.
 const QUALITY: f32 = 0.75;
 const AUDIO_BITRATE: u32 = 128_000;
-/// Fade length where the audio jumps, 5 ms.
-const FADE_SAMPLES: usize = SAMPLE_RATE as usize / 200;
 const SAMPLES_PER_FRAME: u64 = (SAMPLE_RATE / FPS) as u64;
 
 /// The tracks of a take, by file name inside `media/<take>/`.
@@ -109,8 +107,8 @@ pub enum ExportError {
     Decode { path: PathBuf, source: DecodeError },
     #[error("{path} ends before {time:?}")]
     MediaEnds { path: PathBuf, time: Duration },
-    #[error("{path}: {source}")]
-    Audio { path: PathBuf, source: AudioError },
+    #[error(transparent)]
+    Audio(#[from] TimelineAudioError),
     #[error("encoding audio: {0}")]
     AudioEncode(AudioError),
     #[error(transparent)]
@@ -456,17 +454,17 @@ impl Worker {
         };
         for path in [&paths.screen, &paths.camera].into_iter().flatten() {
             if !self.cursors.contains_key(path) {
-                let decoder = Decoder::open_native(path).map_err(|source| ExportError::Decode {
-                    path: path.clone(),
-                    source,
-                })?;
-                self.cursors
-                    .insert(path.clone(), FrameCursor::new(decoder, path.clone()));
+                let decoder = Decoder::open_native(path).map_err(decode_error(path))?;
+                self.cursors.insert(path.clone(), FrameCursor::new(decoder));
             }
-            self.cursors
-                .get_mut(path)
-                .expect("opened above")
-                .seek(to_duration(first))?;
+            let cursor = self.cursors.get_mut(path).expect("opened above");
+            let time = to_duration(first);
+            if cursor.goto(time).map_err(decode_error(path))?.is_none() {
+                return Err(ExportError::MediaEnds {
+                    path: path.clone(),
+                    time,
+                });
+            }
         }
 
         let canvas = Canvas::UHD;
@@ -486,7 +484,8 @@ impl Worker {
                     self.cursors
                         .get_mut(path)
                         .expect("opened above")
-                        .advance(time)?;
+                        .goto(time)
+                        .map_err(decode_error(path))?;
                 }
                 let frame_of = |path: &Option<PathBuf>| {
                     path.as_ref()
@@ -590,71 +589,10 @@ fn to_duration(frame: u64) -> Duration {
     Duration::from_micros(frame_time(frame, FPS).0)
 }
 
-/// Frames of one track in time order, holding the frame on screen at the last requested time.
-struct FrameCursor {
-    decoder: Decoder,
-    path: PathBuf,
-    current: Option<Frame>,
-    next: Option<Frame>,
-    ended: bool,
-}
-
-/// Frame times come from integer division on both sides; this absorbs the rounding.
-const PTS_TOLERANCE: Duration = Duration::from_millis(1);
-
-impl FrameCursor {
-    fn new(decoder: Decoder, path: PathBuf) -> Self {
-        Self {
-            decoder,
-            path,
-            current: None,
-            next: None,
-            ended: false,
-        }
-    }
-
-    fn seek(&mut self, time: Duration) -> Result<(), ExportError> {
-        self.next = None;
-        self.ended = false;
-        self.current = self
-            .decoder
-            .seek(time + PTS_TOLERANCE, || false)
-            .map_err(|source| self.decode_error(source))?;
-        if self.current.is_none() {
-            return Err(ExportError::MediaEnds {
-                path: self.path.clone(),
-                time,
-            });
-        }
-        Ok(())
-    }
-
-    /// Moves to the frame on screen at `time`. Past the last frame, the last one stays.
-    fn advance(&mut self, time: Duration) -> Result<(), ExportError> {
-        loop {
-            if self.next.is_none() && !self.ended {
-                self.next = self
-                    .decoder
-                    .next_frame()
-                    .map_err(|source| self.decode_error(source))?;
-                self.ended = self.next.is_none();
-            }
-            match &self.next {
-                Some(next) if next.pts <= time + PTS_TOLERANCE => self.current = self.next.take(),
-                _ => return Ok(()),
-            }
-        }
-    }
-
-    fn current(&self) -> Option<&Frame> {
-        self.current.as_ref()
-    }
-
-    fn decode_error(&self, source: DecodeError) -> ExportError {
-        ExportError::Decode {
-            path: self.path.clone(),
-            source,
-        }
+fn decode_error(path: &Path) -> impl FnOnce(DecodeError) -> ExportError + '_ {
+    |source| ExportError::Decode {
+        path: path.to_owned(),
+        source,
     }
 }
 
@@ -758,56 +696,30 @@ fn encode_audio(
     out: &mpsc::Sender<AacStream>,
 ) -> Result<(), ExportError> {
     let send = |stream| out.send(stream).map_err(|_| ExportError::Cancelled);
-    let mut readers: HashMap<&Id, PcmReader> = HashMap::new();
     let mut encoder =
         AacEncoder::new(SAMPLE_RATE, AUDIO_BITRATE).map_err(ExportError::AudioEncode)?;
     send(encoder.take())?;
+    let root = media.root.clone();
+    let mut audio = TimelineAudio::new(
+        plan.segments.iter().map(|planned| AudioSegment {
+            take: planned.segment.take.clone(),
+            source_frames: planned.source_frames.clone(),
+        }),
+        FPS,
+        move |take| root.join(take.as_str()).join(MIC_FILE),
+    );
     let mut samples = Vec::new();
-    for (index, planned) in plan.segments.iter().enumerate() {
-        let take = &planned.segment.take;
-        let path = media.track(take, MIC_FILE);
-        let audio_error = |source| ExportError::Audio {
-            path: path.clone(),
-            source,
-        };
-        if !readers.contains_key(take) {
-            readers.insert(take, PcmReader::open(&path).map_err(audio_error)?);
-        }
-        let reader = readers.get_mut(take).expect("opened above");
+    for planned in &plan.segments {
+        let start = planned.output_frame * SAMPLES_PER_FRAME;
         samples.clear();
-        reader
-            .read(
-                planned.source_frames.start * SAMPLES_PER_FRAME,
-                planned.source_frames.end * SAMPLES_PER_FRAME,
-                &mut samples,
-            )
-            .map_err(audio_error)?;
-        let continues_next = plan
-            .segments
-            .get(index + 1)
-            .is_some_and(|next| next.continues_previous);
-        fade(&mut samples, !planned.continues_previous, !continues_next);
+        audio.read(
+            start..start + planned.frames() * SAMPLES_PER_FRAME,
+            &mut samples,
+        )?;
         encoder.push(&samples).map_err(ExportError::AudioEncode)?;
         send(encoder.take())?;
     }
     send(encoder.finish().map_err(ExportError::AudioEncode)?)
-}
-
-/// Fades the start and the end of a cut over [`FADE_SAMPLES`], or half the cut if it is shorter.
-fn fade(samples: &mut [f32], fade_in: bool, fade_out: bool) {
-    let length = FADE_SAMPLES.min(samples.len() / 2);
-    let gain = |i: usize| (i as f32 + 0.5) / length as f32;
-    if fade_in {
-        for (i, sample) in samples[..length].iter_mut().enumerate() {
-            *sample *= gain(i);
-        }
-    }
-    if fade_out {
-        let total = samples.len();
-        for (i, sample) in samples[total - length..].iter_mut().rev().enumerate() {
-            *sample *= gain(i);
-        }
-    }
 }
 
 /// Writes the output: one init segment, then every chunk's video fragments by stream copy,
@@ -975,25 +887,5 @@ impl<'a> AudioPackets<'a> {
             .map_err(io_error(path))?;
         self.offset += length;
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fades_ramp_only_the_cut_edges_they_are_asked_for() {
-        let mut samples = vec![1.0; 1000];
-        fade(&mut samples, true, false);
-        assert!(samples[0] < 0.01);
-        assert!(samples[FADE_SAMPLES / 2] > 0.4 && samples[FADE_SAMPLES / 2] < 0.6);
-        assert_eq!(samples[FADE_SAMPLES], 1.0);
-        assert_eq!(samples[999], 1.0);
-
-        let mut short = vec![1.0; 10];
-        fade(&mut short, true, true);
-        assert!(short[0] < 0.2 && short[9] < 0.2);
-        assert!(short.iter().all(|&s| s <= 1.0));
     }
 }

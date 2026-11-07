@@ -165,6 +165,38 @@ impl FramePacer {
     }
 }
 
+/// Picks frames from a clock it cannot steer, such as the audio device, so that frame boundaries
+/// stay about half a frame away from the renders.
+///
+/// Without it, a clock whose phase sits near a frame boundary at render time makes render jitter
+/// show some frames twice and skip others. The follower shifts the frame grid against the clock
+/// by up to 0.6 frames, a little per render. When display and clock rates differ, the shift
+/// wraps once per frame of drift, which shows or skips exactly the one frame the rates owe.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ClockFollower {
+    /// Frames added to the clock before picking, within 0.6 frames either way.
+    shift: f64,
+}
+
+impl ClockFollower {
+    /// Share of the phase error corrected per render.
+    const GAIN: f64 = 1.0 / 16.0;
+    const WRAP: f64 = 0.6;
+
+    /// The frame to show for a render where the clock reads `frames`.
+    pub fn frame(&mut self, frames: f64) -> u64 {
+        let shifted = frames + self.shift;
+        self.shift += (0.5 - shifted.fract()) * Self::GAIN;
+        // Past the wrap point by a margin, so render jitter cannot wrap it back at once.
+        if self.shift > Self::WRAP {
+            self.shift -= 1.0;
+        } else if self.shift < -Self::WRAP {
+            self.shift += 1.0;
+        }
+        (frames + self.shift).max(0.0) as u64
+    }
+}
+
 /// Pops every frame that is due by `media_time` and returns the newest one,
 /// with the count of due frames that were passed over and never shown.
 pub fn take_due<T>(
@@ -277,6 +309,46 @@ mod tests {
         assert!(missed > 0);
         assert_eq!(dropped, 0);
         assert!(shown >= 3590, "shown {shown}");
+    }
+
+    /// Renders on a 59.95 Hz display with up to 2 ms of jitter against a clock running at exactly
+    /// 60 frames per second for 10 minutes. Returns frames skipped and frames shown twice.
+    fn follow(pick: impl Fn(f64) -> u64) -> (u64, u64) {
+        let refresh = 1.0 / 59.95;
+        let (mut skipped, mut repeated) = (0, 0);
+        let mut last = None;
+        for render in 0..(600.0 / refresh) as u64 {
+            let jitter = ((render * 7919) % 2000) as f64 / 1e6;
+            let frame = pick((render as f64 * refresh + jitter) * 60.0);
+            if let Some(last) = last {
+                match frame.cmp(&(last + 1)) {
+                    std::cmp::Ordering::Greater => skipped += frame - last - 1,
+                    std::cmp::Ordering::Less => repeated += 1,
+                    std::cmp::Ordering::Equal => {}
+                }
+            }
+            last = Some(frame);
+        }
+        (skipped, repeated)
+    }
+
+    #[test]
+    fn a_clock_follower_skips_only_the_frames_the_display_rate_owes() {
+        // 0.05 Hz slower than the clock: about 30 frames in 10 minutes cannot be shown.
+        let follower = std::cell::Cell::new(ClockFollower::default());
+        let (skipped, repeated) = follow(|frames| {
+            let mut f = follower.get();
+            let frame = f.frame(frames);
+            follower.set(f);
+            frame
+        });
+        assert!((29..=31).contains(&skipped), "skipped {skipped}");
+        assert_eq!(repeated, 0);
+        let (naive, _) = follow(|frames| frames as u64);
+        assert!(
+            naive > 100,
+            "picking straight from the clock skipped {naive}"
+        );
     }
 
     #[test]

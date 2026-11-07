@@ -38,6 +38,8 @@ objc2-screen-capture-kit = "0.3.2"
 objc2-core-graphics = "0.3.2"
 objc2-avf-audio = "0.3.2"
 objc2-core-audio-types = "0.3.2"
+# Only the HAL properties and host time the speaker needs.
+objc2-core-audio = { version = "0.3.2", default-features = false, features = ["std", "AudioHardware", "HostTime", "objc2-core-audio-types"] }
 dispatch2 = "0.3.1"
 objc2-uniform-type-identifiers = "0.3.2"
 objc2-metal = "0.3.2"

@@ -22,6 +22,7 @@ mod model;
 mod peaks;
 mod preview;
 mod record;
+mod sound;
 mod studio;
 mod theme;
 mod ui;

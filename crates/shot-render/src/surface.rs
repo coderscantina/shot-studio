@@ -10,9 +10,10 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_core_foundation::{CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType};
 use objc2_core_video::{
-    CVPixelBuffer, CVPixelBufferGetHeight, CVPixelBufferGetHeightOfPlane,
+    CVAttachmentMode, CVPixelBuffer, CVPixelBufferGetHeight, CVPixelBufferGetHeightOfPlane,
     CVPixelBufferGetIOSurface, CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidth,
-    CVPixelBufferGetWidthOfPlane, CVPixelBufferPool, kCVPixelBufferHeightKey,
+    CVPixelBufferGetWidthOfPlane, CVPixelBufferPool, kCVImageBufferYCbCrMatrix_ITU_R_601_4,
+    kCVImageBufferYCbCrMatrix_ITU_R_709_2, kCVImageBufferYCbCrMatrixKey, kCVPixelBufferHeightKey,
     kCVPixelBufferIOSurfacePropertiesKey, kCVPixelBufferMetalCompatibilityKey,
     kCVPixelBufferPixelFormatTypeKey, kCVPixelBufferWidthKey,
     kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
@@ -46,6 +47,46 @@ impl Range {
         match self {
             Self::Video => kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
             Self::Full => kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+        }
+    }
+}
+
+/// The YCbCr matrix of a buffer, from its `kCVImageBufferYCbCrMatrixKey` attachment.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Matrix {
+    /// What the recordings and the export use. Untagged buffers count as BT.709.
+    #[default]
+    Bt709,
+    /// What gpui's surface shader decodes with, so preview buffers use it.
+    Bt601,
+}
+
+impl Matrix {
+    pub fn of(buffer: &CVPixelBuffer) -> Self {
+        // SAFETY: A null mode pointer is allowed, and the key names a CFString attachment.
+        let tag = unsafe { buffer.attachment(kCVImageBufferYCbCrMatrixKey, ptr::null_mut()) };
+        let bt601 = unsafe { kCVImageBufferYCbCrMatrix_ITU_R_601_4 };
+        match tag.and_then(|tag| tag.downcast::<CFString>().ok()) {
+            Some(name) if *name == *bt601 => Self::Bt601,
+            _ => Self::Bt709,
+        }
+    }
+
+    /// The luma weights of red and blue, `Kr` and `Kb`.
+    pub fn weights(self) -> [f32; 2] {
+        match self {
+            Self::Bt709 => [0.2126, 0.0722],
+            Self::Bt601 => [0.299, 0.114],
+        }
+    }
+
+    fn tag(self) -> &'static CFString {
+        // SAFETY: Constant CF strings defined by CoreVideo.
+        unsafe {
+            match self {
+                Self::Bt709 => kCVImageBufferYCbCrMatrix_ITU_R_709_2,
+                Self::Bt601 => kCVImageBufferYCbCrMatrix_ITU_R_601_4,
+            }
         }
     }
 }
@@ -158,13 +199,15 @@ pub fn plane_texture(
 }
 
 /// A pool of IOSurface-backed biplanar 4:2:0 buffers to render into, for example a preview's
-/// `420f` frames. Export renders into the encoder's own pool instead.
+/// `420f` BT.601 frames. Export renders into the encoder's own pool instead. Each buffer is
+/// tagged with the pool's matrix, which the render graph encodes into.
 pub struct BufferPool {
     pool: CFRetained<CVPixelBufferPool>,
+    matrix: Matrix,
 }
 
 impl BufferPool {
-    pub fn new(width: u32, height: u32, range: Range) -> Result<Self, RenderError> {
+    pub fn new(width: u32, height: u32, range: Range, matrix: Matrix) -> Result<Self, RenderError> {
         let format = CFNumber::new_i32(range.pixel_format() as i32);
         let width = CFNumber::new_i32(width as i32);
         let height = CFNumber::new_i32(height as i32);
@@ -197,6 +240,7 @@ impl BufferPool {
             // SAFETY: Create returns an owned pool on success.
             Some(pool) if status == 0 => Ok(Self {
                 pool: unsafe { CFRetained::from_raw(pool) },
+                matrix,
             }),
             _ => Err(RenderError::Pool(status)),
         }
@@ -209,8 +253,19 @@ impl BufferPool {
             CVPixelBufferPool::create_pixel_buffer(None, &self.pool, NonNull::from(&mut buffer))
         };
         match NonNull::new(buffer) {
-            // SAFETY: Create returns an owned buffer on success.
-            Some(buffer) if status == 0 => Ok(unsafe { CFRetained::from_raw(buffer) }),
+            Some(buffer) if status == 0 => {
+                // SAFETY: Create returns an owned buffer on success.
+                let buffer: CFRetained<CVPixelBuffer> = unsafe { CFRetained::from_raw(buffer) };
+                // SAFETY: The matrix attachment takes one of CoreVideo's matrix names.
+                unsafe {
+                    buffer.set_attachment(
+                        kCVImageBufferYCbCrMatrixKey,
+                        self.matrix.tag(),
+                        CVAttachmentMode::ShouldPropagate,
+                    )
+                };
+                Ok(buffer)
+            }
             _ => Err(RenderError::Pool(status)),
         }
     }

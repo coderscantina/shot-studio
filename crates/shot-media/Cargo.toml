@@ -24,6 +24,7 @@ objc2-av-foundation = { workspace = true, features = ["objc2-core-media"] }
 # Its default features make IOSurfaceRef a CF type, which CVPixelBufferGetIOSurface needs.
 objc2-io-surface = { workspace = true }
 block2 = { workspace = true }
-objc2-audio-toolbox = { workspace = true }
+objc2-audio-toolbox = { workspace = true, features = ["AUComponent", "AudioComponent", "AudioOutputUnit", "AudioUnitProperties"] }
+objc2-core-audio = { workspace = true }
 objc2-core-audio-types = { workspace = true }
 objc2-avf-audio = { workspace = true }
