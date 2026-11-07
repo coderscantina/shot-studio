@@ -65,6 +65,9 @@ ureq = "3.5.1"
 sha2 = "0.11.1"
 # Pure Rust AAC in MP4 decode for the mic track. Only the formats we read.
 symphonia = { version = "0.6.1", default-features = false, features = ["isomp4", "aac", "wav", "pcm"] }
+# Real FFT for the spectral denoiser, and EBU R128 loudness and true peak for the audio finish.
+realfft = "3.5.1"
+ebur128 = "0.1.11"
 
 [profile.release]
 debug = "line-tables-only"

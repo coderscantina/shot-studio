@@ -8,3 +8,5 @@ publish.workspace = true
 repository.workspace = true
 
 [dependencies]
+realfft.workspace = true
+ebur128.workspace = true
