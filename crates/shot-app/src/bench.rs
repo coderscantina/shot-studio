@@ -20,6 +20,8 @@ const WARM_UP: Duration = Duration::from_secs(1);
 
 /// The acceptance limit for seek p95.
 const SEEK_P95_LIMIT: Duration = Duration::from_millis(100);
+/// Playback may drop one frame per this much played time (decision 0012).
+const SECONDS_PER_ALLOWED_DROP: f64 = 300.0;
 
 /// A render interval over this means a 60 Hz refresh went by without a render.
 const LONG_INTERVAL: Duration = Duration::from_micros(25_000);
@@ -140,10 +142,10 @@ impl Run {
         percentile(self.seeks.iter().map(|(latency, _)| *latency).collect(), p)
     }
 
+    /// Dropped frames are judged over all runs together, see [`allowed_drops`].
     fn passed(&self) -> bool {
         let stats = self.stats;
-        stats.dropped == 0
-            && stats.late == 0
+        stats.late == 0
             && stats.underruns == 0
             && self.wrong_frames == 0
             && self.seek_percentile(0.95) < SEEK_P95_LIMIT
@@ -325,7 +327,7 @@ impl Bench {
         None
     }
 
-    /// Prints the summary over all runs and returns whether every run passed.
+    /// Prints the summary over all runs and returns whether they pass together.
     fn report(&self, preview: &Preview) -> bool {
         let info = preview.player.info();
         println!(
@@ -398,15 +400,17 @@ impl Bench {
             .map(|run| run.seek_percentile(0.95))
             .max()
             .unwrap_or_default();
-        let verdict = if failed == 0 { "PASS" } else { "FAIL" };
+        let allowed = allowed_drops(self.runs.iter().map(|run| run.seconds).sum());
+        let passed = failed == 0 && dropped <= allowed;
+        let verdict = if passed { "PASS" } else { "FAIL" };
         println!(
-            "{verdict}: {} of {} runs passed, {dropped} dropped frames, worst seek p95 {} (limit {})",
+            "{verdict}: {} of {} runs passed, {dropped} dropped frames (limit {allowed}), worst seek p95 {} (limit {})",
             self.runs.len() - failed,
             self.runs.len(),
             ms(worst_p95),
             ms(SEEK_P95_LIMIT)
         );
-        failed == 0
+        passed
     }
 }
 
@@ -482,4 +486,21 @@ fn fourcc(code: u32) -> String {
         .iter()
         .map(|&byte| byte as char)
         .collect()
+}
+
+/// Dropped frames allowed over `played` seconds of playback: one per five minutes, rounded.
+fn allowed_drops(played: f64) -> u64 {
+    (played / SECONDS_PER_ALLOWED_DROP).round() as u64
+}
+
+#[cfg(test)]
+mod drop_tests {
+    use super::allowed_drops;
+
+    #[test]
+    fn five_minute_runs_allow_one_drop() {
+        assert_eq!(allowed_drops(60.0), 0);
+        assert_eq!(allowed_drops(299.6), 1);
+        assert_eq!(allowed_drops(600.0), 2);
+    }
 }
