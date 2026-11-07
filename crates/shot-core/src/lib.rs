@@ -15,13 +15,15 @@ mod values;
 mod video;
 
 pub use cut::{
-    Chapter, Clip, Cut, DerivedCut, DerivedKind, LayoutChange, Overlay, ParamValue, RangeEdit,
-    RemovedBy, TakeEdit, Zoom,
+    CaptionFix, Chapter, Clip, Cut, DerivedCut, DerivedKind, LayoutChange, Music, Overlay,
+    ParamValue, Point, RangeEdit, RemovedBy, Review, TakeEdit, Zoom, ZoomBy,
 };
-pub use edit::{EditError, TakeAt, WordState, WordView};
+pub use edit::{Decision, EditError, TakeAt, WordState, WordView};
 pub use error::ParseError;
 pub use format::{
-    AutoCut, CaptionStyle, Format, FormatKind, Layout, Pacing, PrompterMode, RuleKind, TimedRule,
+    AutoCut, AutoZoom, CaptionStyle, Color, CursorStyle, DeviceFrame, Effects, Format, FormatKind,
+    Keystrokes, Layout, Pacing, PrompterMode, RuleKind, Shadow, TimedRule, WindowStyle, ZoomMotion,
+    ZoomTrigger,
 };
 pub use script::{Beat, Script, ScriptChapter};
 pub use timeline::{

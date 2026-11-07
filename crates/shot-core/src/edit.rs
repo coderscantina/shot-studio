@@ -4,8 +4,8 @@
 use std::fmt;
 
 use crate::{
-    Chapter, Cut, Id, Layout, LayoutChange, Micros, RangeEdit, RemovedBy, TakeEdit, TimeRange,
-    Transcript, Word,
+    Chapter, Cut, Id, Layout, LayoutChange, Micros, RangeEdit, RemovedBy, Review, TakeEdit,
+    TimeRange, Transcript, Word,
 };
 
 /// One take block of the main cut: the chapter and the take's position in that chapter. A take
@@ -24,6 +24,8 @@ pub enum EditError {
     WrongTranscript { expected: Id, got: Id },
     /// The selection covers no word.
     NoWords,
+    /// No open review item with exactly this range in the addressed take block.
+    NotInReview(TimeRange),
 }
 
 impl fmt::Display for EditError {
@@ -39,11 +41,24 @@ impl fmt::Display for EditError {
                 )
             }
             Self::NoWords => f.write_str("the selection covers no word"),
+            Self::NotInReview(range) => write!(
+                f,
+                "no open review item from {} to {} microseconds",
+                range.from().0,
+                range.to().0
+            ),
         }
     }
 }
 
 impl std::error::Error for EditError {}
+
+/// A person's answer to a review item: K or C in the queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Decision {
+    Keep,
+    Cut,
+}
 
 /// Whether the edit keeps a word.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +85,7 @@ impl Cut {
                 take,
                 ranges: vec![RangeEdit::Keep(range)],
                 layouts: Vec::new(),
+                reviews: Vec::new(),
                 zooms: Vec::new(),
                 overlays: Vec::new(),
             }],
@@ -77,9 +93,48 @@ impl Cut {
         cut
     }
 
+    /// Answers the open review item at `range`. Keep writes it as `ignore`, so the rule leaves
+    /// the material alone when it runs again. Cut removes the material with the rule as `by`.
+    pub fn decide(
+        &self,
+        at: TakeAt,
+        range: TimeRange,
+        decision: Decision,
+    ) -> Result<Cut, EditError> {
+        let index = self
+            .take(at)?
+            .reviews
+            .iter()
+            .position(|r| !r.kept && r.range == range)
+            .ok_or(EditError::NotInReview(range))?;
+        Ok(self.with_take(at, |edit| match decision {
+            Decision::Keep => edit.reviews[index].kept = true,
+            Decision::Cut => {
+                let review = edit.reviews.remove(index);
+                replace_in_ranges(edit, review.range, |piece| RangeEdit::Remove {
+                    range: piece.range(),
+                    by: RemovedBy::Rule(review.by),
+                });
+            }
+        }))
+    }
+
+    /// The open review items of the main cut, in cut order.
+    pub fn review_queue(&self) -> impl Iterator<Item = (TakeAt, Review)> + '_ {
+        self.chapters.iter().enumerate().flat_map(|(chapter, c)| {
+            c.takes.iter().enumerate().flat_map(move |(take, edit)| {
+                edit.reviews
+                    .iter()
+                    .filter(|r| !r.kept)
+                    .map(move |r| (TakeAt { chapter, take }, *r))
+            })
+        })
+    }
+
     /// Removes the media of the words that overlap `selection` as `remove ... by=manual`. The
     /// cut runs from the start of the first word to the end of the last, so no word is half
-    /// cut. Material that is already removed keeps its original `by`.
+    /// cut. Material that is already removed keeps its original `by`. Review items the cut
+    /// touches are dropped, the person has decided about that material.
     pub fn delete_words(
         &self,
         at: TakeAt,
@@ -109,14 +164,38 @@ impl Cut {
                 },
                 removed => removed,
             });
+            edit.reviews.retain(|r| !r.range.overlaps(span));
         }))
     }
 
-    /// Turns every removed part of `range` back into kept media, whoever removed it.
+    /// Turns every removed part of `range` back into kept media, whoever removed it. A part a
+    /// rule removed comes back under an `ignore` of that rule, so the rule does not remove it
+    /// again when it runs.
     pub fn restore(&self, at: TakeAt, range: TimeRange) -> Result<Cut, EditError> {
         self.take(at)?;
         Ok(self.with_take(at, |edit| {
+            let ignores: Vec<Review> = edit
+                .ranges
+                .iter()
+                .filter_map(|piece| match *piece {
+                    RangeEdit::Remove {
+                        range: removed,
+                        by: RemovedBy::Rule(rule),
+                    } => Some(Review {
+                        range: removed.intersect(range)?,
+                        by: rule,
+                        kept: true,
+                    }),
+                    _ => None,
+                })
+                .collect();
             replace_in_ranges(edit, range, |piece| RangeEdit::Keep(piece.range()));
+            for ignore in ignores {
+                let index = edit
+                    .reviews
+                    .partition_point(|r| r.range.from() < ignore.range.from());
+                edit.reviews.insert(index, ignore);
+            }
         }))
     }
 
@@ -330,12 +409,73 @@ mod tests {
                     take: id(),
                     ranges,
                     layouts: Vec::new(),
+                    reviews: Vec::new(),
                     zooms: Vec::new(),
                     overlays: Vec::new(),
                 }],
             }],
             ..Cut::default()
         }
+    }
+
+    #[test]
+    fn queue_decisions_write_remove_or_ignore() {
+        let mut cut = cut(vec![keep(0, 10_000_000)]);
+        let item = Review {
+            range: range(2_000_000, 3_000_000),
+            by: RuleKind::Pause,
+            kept: false,
+        };
+        cut.chapters[0].takes[0].reviews.push(item);
+        assert_eq!(cut.review_queue().collect::<Vec<_>>(), [(AT, item)]);
+
+        let kept = cut.decide(AT, item.range, Decision::Keep).unwrap();
+        let take = &kept.chapters[0].takes[0];
+        assert_eq!(take.reviews, [Review { kept: true, ..item }]);
+        assert_eq!(take.ranges, [keep(0, 10_000_000)]);
+        assert_eq!(kept.review_queue().count(), 0);
+        assert_eq!(
+            kept.decide(AT, item.range, Decision::Cut),
+            Err(EditError::NotInReview(item.range))
+        );
+
+        let cut_it = cut.decide(AT, item.range, Decision::Cut).unwrap();
+        let take = &cut_it.chapters[0].takes[0];
+        assert!(take.reviews.is_empty());
+        assert_eq!(
+            take.ranges,
+            [
+                keep(0, 2_000_000),
+                removed(2_000_000, 3_000_000, RemovedBy::Rule(RuleKind::Pause)),
+                keep(3_000_000, 10_000_000),
+            ]
+        );
+    }
+
+    #[test]
+    fn restoring_a_rule_cut_ignores_the_rule_there() {
+        let cut = cut(vec![
+            keep(0, 1_000_000),
+            removed(1_000_000, 2_000_000, RemovedBy::Rule(RuleKind::Silence)),
+            keep(2_000_000, 3_000_000),
+        ]);
+        let restored = cut.restore(AT, range(500_000, 2_500_000)).unwrap();
+        let take = &restored.chapters[0].takes[0];
+        assert_eq!(take.ranges, [keep(0, 3_000_000)]);
+        assert_eq!(
+            take.reviews,
+            [Review {
+                range: range(1_000_000, 2_000_000),
+                by: RuleKind::Silence,
+                kept: true,
+            }]
+        );
+
+        // Cutting the restored material by hand ends the person's say over it.
+        let deleted = restored
+            .delete_words(AT, &transcript(), range(1_000_000, 1_200_000))
+            .unwrap();
+        assert!(deleted.chapters[0].takes[0].reviews.is_empty());
     }
 
     fn ranges(cut: &Cut) -> &[RangeEdit] {
