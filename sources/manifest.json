@@ -1,0 +1,34 @@
+{
+  "note": "Pinned references. Milestone 01 fills in every revision and license. Checkouts go to the ignored .sources/ directory.",
+  "sources": [
+    {
+      "name": "gpui",
+      "repository": "https://github.com/zed-industries/zed",
+      "path": "crates/gpui",
+      "revision": null,
+      "license": "Apache-2.0",
+      "contributes": "UI framework, Metal rendering, custom elements"
+    },
+    {
+      "name": "gpui-component",
+      "repository": "https://github.com/longbridge/gpui-component",
+      "revision": null,
+      "license": null,
+      "contributes": "Standard widgets, restyled with Shot Studio tokens"
+    },
+    {
+      "name": "vello",
+      "repository": "https://github.com/linebender/vello",
+      "revision": null,
+      "license": null,
+      "contributes": "GPU vector rendering for overlay templates"
+    },
+    {
+      "name": "parley",
+      "repository": "https://github.com/linebender/parley",
+      "revision": null,
+      "license": null,
+      "contributes": "Text layout for overlays and captions"
+    }
+  ]
+}
