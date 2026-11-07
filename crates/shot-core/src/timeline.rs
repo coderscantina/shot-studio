@@ -9,7 +9,7 @@ use crate::{
 };
 
 /// Bumped whenever the renderer's output changes for the same input, so cached chunks expire.
-pub const RENDERER_VERSION: u32 = 2;
+pub const RENDERER_VERSION: u32 = 3;
 
 /// The evaluated project: the main cut followed by each derived cut, in file order.
 #[derive(Debug, Clone, PartialEq, Eq)]
