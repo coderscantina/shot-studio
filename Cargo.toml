@@ -14,6 +14,8 @@ repository = "https://github.com/coderscantina/shot-studio"
 # gpui-component 0.9.0 depends on the gpui-pre snapshots on crates.io (Zed f816e1f), not on Zed git.
 # A git gpui would build a second, incompatible gpui, so both pin to the same exact snapshot.
 gpui = { package = "gpui-pre", version = "=0.3.11" }
+# The macOS platform behind gpui::Application, same snapshot.
+gpui-platform = { package = "gpui-pre-platform", version = "=0.3.11" }
 gpui-component = "=0.9.0"
 # Newest linebender release train: vello 0.11.0 and parley 0.12.0 share peniko and kurbo.
 vello = "=0.11.0"
@@ -24,6 +26,21 @@ blake3 = "1.8.7"
 # Vendored libgit2 so the app needs no system git. No https or ssh: the board only works on local repos.
 git2 = { version = "0.21.0", default-features = false, features = ["vendored-libgit2"] }
 thiserror = "2.0.21"
+# Apple frameworks through objc2, on the same 0.3.2 train gpui-pre and wgpu-hal use.
+objc2 = "0.6.5"
+objc2-foundation = "0.3.2"
+objc2-core-foundation = "0.3.2"
+objc2-core-media = "0.3.2"
+objc2-core-video = "0.3.2"
+objc2-video-toolbox = "0.3.2"
+objc2-av-foundation = "0.3.2"
+objc2-metal = "0.3.2"
+objc2-io-surface = "0.3.2"
+block2 = "0.6.2"
+# Same wgpu as vello 0.11, so only one wgpu is compiled.
+wgpu = "30.0.1"
+pollster = "0.4.0"
+libc = "0.2.191"
 tempfile = "3.27.0"
 
 [profile.release]
