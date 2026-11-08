@@ -39,6 +39,7 @@ fn punch_in(range: TimeRange, by: ZoomBy) -> Zoom {
         range,
         center: None,
         by: Some(by),
+        shape: Default::default(),
     }
 }
 
@@ -146,6 +147,7 @@ mod tests {
             range: range(20, 22),
             center: None,
             by: None,
+            shape: Default::default(),
         };
         let mut edit = TakeEdit {
             take: Id::new("t01").unwrap(),

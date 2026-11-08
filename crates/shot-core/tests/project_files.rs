@@ -1,7 +1,8 @@
 use shot_core::{
     CaptionFix, CaptionStyle, Color, ContentHash, CursorStyle, Cut, DerivedKind, DeviceFrame,
-    Format, FormatKind, Id, Layout, MediaId, Micros, Output, OutputKind, Point, Project, RangeEdit,
-    Script, Segment, Shadow, TakeAt, TimeRange, Timeline, Transcript, Video, WindowStyle, Word,
+    Format, FormatKind, Framing, Id, Layout, MediaId, Micros, Output, OutputKind, Point, Project,
+    RangeEdit, Script, Segment, Shadow, TakeAt, TimeRange, Timeline, Transcript, Video,
+    WindowStyle, Word,
 };
 
 const VIDEO: &str = include_str!("../../../fixtures/examples/video.kdl");
@@ -241,7 +242,17 @@ fn zoom_center_and_motion_are_hashed_but_provenance_is_not() {
 
     let mut instant = tour;
     instant.format.zoom_motion = None;
-    assert_ne!(before, main_keys(&Timeline::evaluate(&instant)));
+    let instant_keys = main_keys(&Timeline::evaluate(&instant));
+    assert_ne!(before, instant_keys);
+
+    // Framing and ramps are hashed where set; a default shape leaves every key as it was.
+    let mut framed = instant.clone();
+    framed.cut.chapters[0].takes[0].zooms[0].shape.framing = Framing::TopLeft;
+    assert_ne!(instant_keys, main_keys(&Timeline::evaluate(&framed)));
+    let mut ramped = instant;
+    ramped.cut.chapters[0].takes[0].zooms[2].shape.ramp_in = Some(Micros(300_000));
+    let ramped_keys = main_keys(&Timeline::evaluate(&ramped));
+    assert_ne!(instant_keys, ramped_keys);
 }
 
 #[test]

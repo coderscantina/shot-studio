@@ -26,9 +26,9 @@ pub use brand::{
     Motion, Phase, Preset, PresetName, Slot, SlotType, SoundEffect, SoundKey, Stinger,
 };
 pub use cut::{
-    CaptionFix, Chapter, Clip, Cut, DerivedCut, DerivedKind, LayoutChange, Music, Overlay,
+    CaptionFix, Chapter, Clip, Cut, DerivedCut, DerivedKind, Framing, LayoutChange, Music, Overlay,
     Override, OverrideEffect, ParamValue, Point, RangeEdit, Rating, RemovedBy, Review, TakeEdit,
-    Zoom, ZoomBy,
+    Zoom, ZoomBy, ZoomShape,
 };
 pub use edit::{Decision, EditError, Placed, TakeAt, WordState, WordView};
 pub use element::{Attr, AttrValue, DuplicateElement, Element, ElementKind, Elements};

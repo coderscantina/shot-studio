@@ -9,7 +9,7 @@ use crate::brand::BrandScope;
 use crate::kdl_io::{Node, Source, Writer, required};
 use crate::{
     Brand, CaptionStyle, ContentHash, ElementKind, Id, Import, Layer, Layout, Micros, ParamValue,
-    ParseError, Point, Selector, Target, TimeRange, TransitionKind,
+    ParseError, Point, Selector, Target, TimeRange, TransitionKind, ZoomShape,
 };
 
 /// Bumped when the lock's grammar or the engine's results change for the same inputs.
@@ -89,6 +89,7 @@ pub enum Applied {
         scale: u16,
         range: TimeRange,
         center: Option<Point>,
+        shape: ZoomShape,
     },
     Overlay {
         template: Id,
@@ -344,7 +345,10 @@ impl Instance {
                 }
             }
             "zoom" => {
-                node.expect(1, &props(&["from", "to", "x", "y"]))?;
+                node.expect(
+                    1,
+                    &props(&[&["from", "to", "x", "y"][..], &ZoomShape::PROPS].concat()),
+                )?;
                 let scale: u16 = node.arg(0)?;
                 if scale < 100 {
                     return Err(node.error("zoom scale is a percentage of at least 100"));
@@ -358,6 +362,7 @@ impl Instance {
                     scale,
                     range: TimeRange::read(node)?,
                     center,
+                    shape: ZoomShape::read(node)?,
                 }
             }
             "overlay" => {
@@ -456,12 +461,14 @@ impl Instance {
                 scale,
                 range,
                 center,
+                shape,
             } => {
                 w.arg(scale);
                 write_range(w, *range);
                 if let Some(Point { x, y }) = center {
                     w.prop("x", x).prop("y", y);
                 }
+                shape.write(w);
             }
             Applied::Overlay {
                 template, range, ..

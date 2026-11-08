@@ -83,6 +83,7 @@ pub fn apply_markers(edit: &mut TakeEdit, markers: &[Marker], format: &Format) {
                     y: press.y,
                 }),
                 by: Some(ZoomBy::Marker),
+                shape: Default::default(),
             });
         }
     }
@@ -153,6 +154,7 @@ mod tests {
             range: TimeRange::new(Micros(10_500_000), Micros(12_000_000)).unwrap(),
             center: None,
             by: None,
+            shape: Default::default(),
         };
         edit.zooms.push(person);
         let markers = [

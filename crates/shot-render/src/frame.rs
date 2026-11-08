@@ -7,15 +7,14 @@
 //! - **Keystrokes**: the latest key press as a label at the bottom, or the typed run of text.
 //! - **Window**: the window layout's shadow and device frame under the window.
 //! - **Camera**: the brand's frame around the camera beside the screen, see
-//!   [`LayoutSpec::with_camera`].
+//!   [`LayoutSpec::with_camera`], and its hand-held drift wherever it shows, see
+//!   [`crate::handheld`].
 //! - **Overlays**: the templates of [`crate::overlay`], in file order, later ones on top.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use shot_core::{
-    DeviceFrame, Effects, Id, Keystrokes, Layout, Micros, Overlay, Shadow, Zoom, ZoomMotion,
-};
+use shot_core::{DeviceFrame, Effects, Id, Keystrokes, Layout, Micros, Overlay, Shadow, Zoom};
 
 use vello::peniko::ImageData;
 
@@ -91,7 +90,7 @@ pub fn compose(
         spec.scene(canvas, sizes, punch)
     };
     let mut scene = scene_at(shot.time);
-    if effects.zoom_motion == ZoomMotion::Smooth && !shot.zooms.is_empty() {
+    if crate::zoom::eases(shot.zooms, effects.zoom_motion) {
         let [open, close] = materials::shutter(shot.time).map(scene_at);
         for (layer, (a, b)) in scene
             .layers
@@ -106,6 +105,8 @@ pub fn compose(
             );
         }
     }
+    let seed = crate::handheld::seed(look.take.as_ref());
+    crate::handheld::apply(&mut scene, look.theme.handheld, seed, shot.time, sizes);
     let s = canvas.width as f32 / 3840.0;
     let mut drawing = Drawing::default();
     let screen = scene.layers.iter().find(|l| l.source == Source::Screen);
@@ -418,6 +419,7 @@ mod tests {
             range: TimeRange::new(Micros(0), Micros(1_000_000)).unwrap(),
             center: Some(Point { x: 1000, y: 500 }),
             by: None,
+            shape: Default::default(),
         }];
         let shot = Shot {
             layout: Layout::Content,

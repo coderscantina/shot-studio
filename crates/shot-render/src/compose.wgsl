@@ -31,6 +31,9 @@ struct Layer {
     shadow: vec4<f32>,
     // What the draw covers in canvas pixels: the frame, grown to hold the shadow.
     quad: vec4<f32>,
+    // In x, how far the source turns around the crop's center, in radians; in yz the source's
+    // size in pixels.
+    turn: vec4<f32>,
 }
 
 // RGB from normalized luma and centered chroma with luma weights Kr and Kb.
@@ -64,7 +67,16 @@ fn vertex(@builtin(vertex_index) index: u32) -> Varyings {
     let ndc = vec2<f32>(canvas.x / layer.canvas.x * 2.0 - 1.0, 1.0 - canvas.y / layer.canvas.y * 2.0);
     let size = layer.frame.zw - layer.frame.xy;
     let at = mix((layer.quad.xy - layer.frame.xy) / size, (layer.quad.zw - layer.frame.xy) / size, corner);
-    let uv = mix(layer.crop.xy, layer.crop.zw, at);
+    var uv = mix(layer.crop.xy, layer.crop.zw, at);
+    if layer.turn.x != 0.0 {
+        // Turned in source pixels, so the turn keeps its angle on a source that is not square.
+        let pixels = layer.turn.yz;
+        let middle = (layer.crop.xy + layer.crop.zw) * 0.5;
+        let p = (uv - middle) * pixels;
+        let c = cos(layer.turn.x);
+        let s = sin(layer.turn.x);
+        uv = middle + vec2<f32>(c * p.x - s * p.y, s * p.x + c * p.y) / pixels;
+    }
     return Varyings(vec4<f32>(ndc, 0.0, 1.0), canvas, uv, mix(layer.shutter.xy, layer.shutter.zw, at));
 }
 

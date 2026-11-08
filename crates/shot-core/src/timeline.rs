@@ -2,7 +2,7 @@ use std::fmt;
 use std::ops::Range;
 
 use crate::cut::{
-    CaptionFix, DerivedCut, LayoutChange, Overlay, ParamValue, RangeEdit, TakeEdit, Zoom,
+    CaptionFix, DerivedCut, LayoutChange, Overlay, ParamValue, RangeEdit, TakeEdit, Zoom, ZoomShape,
 };
 use crate::lock::{Applied, LockTake};
 use crate::{
@@ -246,7 +246,9 @@ impl Output {
             h.0.update(&win.background.0);
             h.str(win.frame.as_str());
         }
-        let smooth = effects.zoom_motion == ZoomMotion::Smooth;
+        // A zoom that ramps depends on where it and its neighbours start and end.
+        let smooth = effects.zoom_motion == ZoomMotion::Smooth
+            || segment.zooms.iter().any(|z| z.shape.ramps_gradually());
         let zooms: Vec<(&Zoom, TimeRange)> = segment
             .zooms
             .iter()
@@ -272,6 +274,12 @@ impl Output {
                     h.tagged(1, &center.y.to_le_bytes());
                 }
                 None => h.tagged(0, &[]),
+            }
+            if zoom.shape != ZoomShape::default() {
+                let ramp = |r: Option<Micros>| r.map_or(u64::MAX, |r| r.0).to_le_bytes();
+                h.tagged(2, zoom.shape.framing.as_str().as_bytes());
+                h.tagged(3, &ramp(zoom.shape.ramp_in));
+                h.tagged(3, &ramp(zoom.shape.ramp_out));
             }
         }
         let overlays: Vec<&Overlay> = segment
@@ -336,11 +344,13 @@ fn take_segments(take: &TakeEdit, default_layout: Layout, lock: Option<&LockTake
                 scale,
                 range,
                 center,
+                shape,
             } => zooms.push(Zoom {
                 scale: *scale,
                 range: *range,
                 center: *center,
                 by: None,
+                shape: *shape,
             }),
             Applied::Overlay {
                 template,

@@ -165,6 +165,7 @@ pub(crate) fn zooms(start: u64) -> Vec<Zoom> {
         range: range(start + 4_600_000, start + 9_400_000),
         center: Some(shot_core::Point { x: 1800, y: 700 }),
         by: None,
+        shape: Default::default(),
     }]
 }
 

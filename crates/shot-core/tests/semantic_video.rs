@@ -7,7 +7,8 @@ use std::time::Instant;
 
 use shot_core::{
     Applied, Attr, Brand, ContentHash, Cut, Element, ElementKind, Elements, Format, FormatKind,
-    FormatLayer, Id, Layer, Lock, Micros, Pacing, StyleInput, Target, TimeRange, build,
+    FormatLayer, Framing, Id, Layer, Lock, Micros, Pacing, StyleInput, Target, TimeRange,
+    ZoomShape, build,
 };
 
 const BRAND: &str = include_str!("../../../fixtures/examples/channel/brand/brand.kdl");
@@ -216,7 +217,8 @@ fn a_more_specific_selector_wins_then_the_later_layer() {
             Applied::Zoom {
                 scale: 120,
                 range: range(8_000_000, 9_500_000),
-                center: None
+                center: None,
+                shape: Default::default(),
             },
             Layer::Video
         )]
@@ -535,4 +537,74 @@ fn the_talking_presets_punch_in_on_every_other_silence() {
         assert_eq!(starts(&channel, zoom_from), expected, "{kind}");
         assert_eq!(channel.lock().to_kdl(), channel.lock().to_kdl());
     }
+}
+
+#[test]
+fn a_zoom_node_keeps_its_framing_and_ramps_and_writes_them_back() {
+    let line = "zoom 200 from=2_000_000 to=6_000_000 framing=top-right ramp-in=300_000 ramp-out=0";
+    assert_in_contract(line);
+    let text = format!(
+        "chapter \"Intro\" {{\n    take t01 {{\n        keep from=0 to=20_000_000\n        {line}\n        zoom 150 from=6_000_000 to=9_000_000 x=10 y=20 framing=center\n    }}\n}}\n"
+    );
+    let cut = Cut::parse(&text).unwrap();
+    let zooms = &cut.chapters[0].takes[0].zooms;
+    assert_eq!(
+        zooms[0].shape,
+        ZoomShape {
+            framing: Framing::TopRight,
+            ramp_in: Some(Micros(300_000)),
+            ramp_out: Some(Micros(0)),
+        }
+    );
+    assert_eq!(zooms[1].shape.framing, Framing::Center);
+    assert_eq!(zooms[1].shape.ramp_in, None);
+    assert_eq!(cut.to_kdl(), text);
+
+    let unknown = text.replace("framing=center", "framing=middle");
+    let err = Cut::parse(&unknown).unwrap_err();
+    assert_eq!(err.line, 5, "{err}");
+}
+
+#[test]
+fn a_zoom_effect_carries_framing_and_ramps_into_the_lock() {
+    let mut channel = Channel::example();
+    let rule = "on emphasis {\n    zoom 120 framing=bottom-left ramp-in=200_000\n}\n";
+    channel.video = FormatLayer::parse(&format!("{FORMAT}{rule}")).unwrap();
+    assert!(channel.video.to_kdl().ends_with(rule));
+    let shape = ZoomShape {
+        framing: Framing::BottomLeft,
+        ramp_in: Some(Micros(200_000)),
+        ramp_out: None,
+    };
+    let emphasis = channel.instances_on("t01", Target::Kind(ElementKind::Emphasis), 8_000_000);
+    assert!(matches!(emphasis[0].0, Applied::Zoom { shape: s, .. } if s == shape));
+    let lock = channel.lock().to_kdl();
+    assert!(
+        lock.contains("framing=bottom-left ramp-in=200_000 on=emphasis"),
+        "{lock}"
+    );
+    assert_eq!(Lock::parse(&lock).unwrap().to_kdl(), lock);
+}
+
+#[test]
+fn the_camera_node_sets_its_frame_and_hand_held_strength_apart() {
+    let both = "camera shape=rounded corners=24 border=0 shadow=soft handheld=40\n";
+    let brand = Brand::parse(both).unwrap();
+    assert_eq!(brand.handheld, Some(40));
+    assert!(brand.camera.is_some());
+    assert_eq!(brand.to_kdl(), both);
+
+    let alone = "camera handheld=30\n";
+    let video = Brand::parse(alone).unwrap();
+    assert_eq!((video.camera, video.handheld), (None, Some(30)));
+    assert_eq!(video.to_kdl(), alone);
+    // The video's strength replaces the channel's, and the channel's frame stays.
+    let merged = brand.merge(&video);
+    assert_eq!((merged.camera, merged.handheld), (brand.camera, Some(30)));
+
+    assert!(Brand::parse("camera shape=rounded corners=24\n").is_err());
+    assert!(Brand::parse("camera handheld=101\n").is_err());
+    assert!(Brand::parse("camera\n").is_err());
+    let layer = FormatLayer::parse("brand {\n    camera handheld=0\n}\n").unwrap();
+    assert_eq!(layer.brand.unwrap().handheld, Some(0));
 }

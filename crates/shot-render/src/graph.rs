@@ -28,7 +28,7 @@ const MAX_LAYERS: usize = 8;
 /// Bytes per layer in the uniform buffer, the minimum dynamic offset alignment.
 const LAYER_STRIDE: u64 = 256;
 /// Size of the shader's `Layer` struct.
-const LAYER_SIZE: u64 = 144;
+const LAYER_SIZE: u64 = 160;
 
 pub struct Renderer {
     device: wgpu::Device,
@@ -226,6 +226,7 @@ impl Renderer {
                 .get(layer.source)
                 .ok_or(RenderError::MissingSource(layer.source))?;
             let source_range = Range::of(source)?;
+            let source_size = size(source);
             let [source_kr, source_kb] = Matrix::of(source).weights();
             let [target_kr, target_kb] = target_matrix.weights();
             let views = Plane::BOTH.map(|plane| {
@@ -286,6 +287,10 @@ impl Renderer {
                 quad.top,
                 quad.right,
                 quad.bottom,
+                layer.turn,
+                source_size.0 as f32,
+                source_size.1 as f32,
+                0.0,
             ];
             let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_ne_bytes()).collect();
             self.queue.write_buffer(&self.uniforms, offset, &bytes);

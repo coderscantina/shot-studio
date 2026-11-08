@@ -74,11 +74,13 @@ pub fn shown(cut: &Cut, lock: &Lock) -> Cut {
                     scale,
                     range,
                     center,
+                    shape,
                 } if plays(range) => block.zooms.push(Zoom {
                     scale: *scale,
                     range: *range,
                     center: *center,
                     by: None,
+                    shape: *shape,
                 }),
                 Applied::Overlay {
                     template,

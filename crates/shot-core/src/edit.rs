@@ -6,7 +6,7 @@ use std::fmt;
 use crate::takes::{holds, middle};
 use crate::{
     Attempt, Chapter, Cut, Id, Layout, LayoutChange, Lineup, Micros, Music, RangeEdit, Rating,
-    RemovedBy, Review, Row, RowAt, TakeEdit, TimeRange, Transcript, Word, Zoom,
+    RemovedBy, Review, Row, RowAt, TakeEdit, TimeRange, Transcript, Word, Zoom, ZoomShape,
 };
 
 /// One take block of the main cut: the chapter and the take's position in that chapter. A take
@@ -273,6 +273,7 @@ impl Cut {
                     range,
                     center: None,
                     by: None,
+                    shape: ZoomShape::default(),
                 },
             );
         }))
@@ -309,6 +310,23 @@ impl Cut {
         Ok(self.with_take(at, |edit| {
             let zoom = &mut edit.zooms[index];
             zoom.scale = scale.max(100);
+            zoom.by = None;
+        }))
+    }
+
+    /// Sets how the zoom `index` of the block at `at` frames and ramps. A quarter framing
+    /// raises the scale to the 200 percent it needs. The zoom becomes a person's.
+    pub fn set_zoom_shape(
+        &self,
+        at: TakeAt,
+        index: usize,
+        shape: ZoomShape,
+    ) -> Result<Cut, EditError> {
+        self.placed(at, Placed::Zoom(index))?;
+        Ok(self.with_take(at, |edit| {
+            let zoom = &mut edit.zooms[index];
+            zoom.scale = zoom.scale.max(shape.framing.min_scale());
+            zoom.shape = shape;
             zoom.by = None;
         }))
     }
