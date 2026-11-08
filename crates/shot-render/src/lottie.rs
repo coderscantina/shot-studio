@@ -54,6 +54,42 @@ pub fn check(bytes: &[u8]) -> Vec<Finding> {
     analyze(bytes).err().unwrap_or_default()
 }
 
+/// What an accepted file loses without being refused, in plain words: velato draws it, but not
+/// as After Effects would. Empty for a file [`check`] refuses.
+pub fn warnings(bytes: &[u8]) -> Vec<String> {
+    let Ok((prepared, _)) = analyze(bytes) else {
+        return Vec::new();
+    };
+    let mut warnings: Vec<String> = prepared
+        .others
+        .iter()
+        .map(|slot| {
+            format!("slot `{slot}` sits on a property that is neither a color nor a number, so it cannot be filled")
+        })
+        .collect();
+    let doc: Value = serde_json::from_slice(bytes).unwrap_or_default();
+    for layer in array(&doc, "layers") {
+        if layer.get("ty").and_then(Value::as_u64) != Some(5) {
+            continue;
+        }
+        let name = label(layer);
+        if layer
+            .pointer("/t/d/k")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len)
+            > 1
+        {
+            warnings.push(format!(
+                "text layer `{name}`: only the first text keyframe is used"
+            ));
+        }
+        if !array(layer.get("t").unwrap_or(&Value::Null), "a").is_empty() {
+            warnings.push(format!("text layer `{name}`: text animators are ignored"));
+        }
+    }
+    warnings
+}
+
 /// The slots a file offers, by its Lottie slot ids, sorted by id: what a brand declares it with.
 /// A file velato cannot render is refused with its findings, as [`LottieTemplate::load`] would.
 /// An id on a property that is neither a color nor an integer is no slot and is left out.
@@ -1053,6 +1089,23 @@ mod tests {
             LottieTemplate::load(&bytes(&file), &[]),
             Err(LottieError::Unsupported(_))
         ));
+    }
+
+    #[test]
+    fn an_accepted_file_warns_about_what_it_loses() {
+        assert!(warnings(&bytes(&square())).is_empty());
+        let mut file = with_layers(square(), vec![text_layer("headline")]);
+        file["layers"][1]["t"]["d"]["k"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({ "t": 30, "s": { "s": 48, "t": "Bye" } }));
+        file["layers"][1]["t"]["a"] = json!([{ "nm": "Animator 1" }]);
+        file["layers"][0]["shapes"][0]["it"][0]["p"]["sid"] = json!("origin");
+        let warnings = warnings(&bytes(&file));
+        assert_eq!(warnings.len(), 3, "{warnings:?}");
+        assert!(warnings[0].contains("`origin`"));
+        assert!(warnings[1].contains("first text keyframe"));
+        assert!(warnings[2].contains("animators"));
     }
 
     #[test]

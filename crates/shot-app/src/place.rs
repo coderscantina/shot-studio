@@ -220,8 +220,13 @@ pub fn provenance(p: &Provenance) -> String {
 /// What adding a Lottie file to the brand did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LottieImport {
-    /// Copied to `file` in the channel repo and declared as template `name`.
-    Added { name: Id, file: String },
+    /// Copied to `file` in the channel repo and declared as template `name`. `warnings` say what
+    /// the file loses without being refused.
+    Added {
+        name: Id,
+        file: String,
+        warnings: Vec<String>,
+    },
     /// The import check found features velato cannot draw; nothing was written.
     Refused(Vec<Finding>),
 }
@@ -229,8 +234,8 @@ pub enum LottieImport {
 /// Checks the Lottie at `source` with [`lottie::check`] and, when it renders, copies it to
 /// `brand/<name>.json` of the channel repo at `repo` and declares `template <name>` in
 /// `brand/brand.kdl`, named after the file, with the slots the file offers ([`lottie::slots`]),
-/// none of them required. A slot id that is no valid name in `brand.kdl` is left out: no
-/// overlay could fill it.
+/// none of them required. A slot id that is no valid name in `brand.kdl` is left out, with a
+/// warning: no overlay could fill it.
 pub fn add_lottie(repo: &Path, source: &Path) -> Result<LottieImport, String> {
     let bytes = fs::read(source).map_err(|e| format!("{}: {e}", source.display()))?;
     let findings = lottie::check(&bytes);
@@ -269,12 +274,19 @@ pub fn add_lottie(repo: &Path, source: &Path) -> Result<LottieImport, String> {
     }
     fs::create_dir_all(repo.join("brand")).map_err(|e| e.to_string())?;
     fs::write(&target, &bytes).map_err(|e| format!("{}: {e}", target.display()))?;
+    let mut warnings = lottie::warnings(&bytes);
     let slots = lottie::slots(&bytes)
         .map_err(|e| format!("{}: {e}", source.display()))?
         .into_iter()
         .filter_map(|(id, kind)| {
+            let Some(name) = Id::new(&id) else {
+                warnings.push(format!(
+                    "slot `{id}` is no valid slot name, so it is left out"
+                ));
+                return None;
+            };
             Some(Slot {
-                name: Id::new(id)?,
+                name,
                 kind: match kind {
                     SlotKind::Text => SlotType::Text,
                     SlotKind::Color => SlotType::Color,
@@ -295,7 +307,11 @@ pub fn add_lottie(repo: &Path, source: &Path) -> Result<LottieImport, String> {
     fs::write(&tmp, brand.to_kdl())
         .and_then(|()| fs::rename(&tmp, &brand_path))
         .map_err(|e| format!("{}: {e}", brand_path.display()))?;
-    Ok(LottieImport::Added { name, file })
+    Ok(LottieImport::Added {
+        name,
+        file,
+        warnings,
+    })
 }
 
 #[cfg(test)]
@@ -421,7 +437,8 @@ mod tests {
             added,
             LottieImport::Added {
                 name: id("party-hat"),
-                file: "brand/party-hat.json".into()
+                file: "brand/party-hat.json".into(),
+                warnings: Vec::new()
             }
         );
         let brand = Brand::parse(&fs::read_to_string(repo.path().join("brand/brand.kdl")).unwrap())

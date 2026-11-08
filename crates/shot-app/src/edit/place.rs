@@ -39,7 +39,7 @@ pub struct PlaceState {
     /// The next click on the Picture preview places a callout.
     pub callout: bool,
     note: Option<String>,
-    /// The import check's findings for the last Lottie refused.
+    /// The findings of the last Lottie refused, or the warnings of the last one added.
     findings: Vec<String>,
 }
 
@@ -243,8 +243,13 @@ impl EditScreen {
                 let place = &mut this.place;
                 place.findings.clear();
                 match result {
-                    Ok(LottieImport::Added { name, file }) => {
+                    Ok(LottieImport::Added {
+                        name,
+                        file,
+                        warnings,
+                    }) => {
                         place.note = Some(format!("Added sticker {name} as {file}"));
+                        place.findings = warnings;
                     }
                     Ok(LottieImport::Refused(findings)) => {
                         place.note = Some(
