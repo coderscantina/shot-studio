@@ -62,7 +62,7 @@ pub fn bed_name(file: &str) -> &str {
 }
 
 /// Where a new bed comes from.
-enum Source {
+pub(super) enum Source {
     Bundled(&'static str),
     File(PathBuf),
 }
@@ -99,7 +99,7 @@ impl EditScreen {
     }
 
     /// Brings the bed into the video folder off the UI thread, then writes it to `cut.kdl`.
-    fn load_music(&mut self, source: Source, cx: &mut Context<Self>) {
+    pub(super) fn load_music(&mut self, source: Source, cx: &mut Context<Self>) {
         let dir = self.folder.read(cx).dir.clone();
         cx.spawn(async move |this, cx| {
             let file = cx

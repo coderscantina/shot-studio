@@ -6314,6 +6314,7 @@ dependencies = [
  "shot-board",
  "shot-capture",
  "shot-core",
+ "shot-library",
  "shot-mcp",
  "shot-media",
  "shot-prompter",
@@ -6395,6 +6396,20 @@ dependencies = [
  "blake3",
  "kdl",
  "serde_json",
+]
+
+[[package]]
+name = "shot-library"
+version = "26.11.7"
+dependencies = [
+ "kdl",
+ "serde",
+ "serde_json",
+ "shot-audio",
+ "shot-core",
+ "tempfile",
+ "thiserror 2.0.21",
+ "ureq",
 ]
 
 [[package]]

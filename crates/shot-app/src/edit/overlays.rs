@@ -237,7 +237,7 @@ impl EditScreen {
         self.edit_overlay(at, index, cx);
     }
 
-    fn place_preset(&mut self, preset: OverlayPreset, cx: &mut Context<Self>) {
+    pub(super) fn place_preset(&mut self, preset: OverlayPreset, cx: &mut Context<Self>) {
         self.overlay_note = Some(format!("Placed {}", preset.name));
         self.place_draft(
             crate::brand::overlay::Draft {

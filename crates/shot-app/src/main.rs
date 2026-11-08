@@ -30,6 +30,7 @@ mod engine;
 mod folder;
 mod layout_store;
 mod layouts;
+mod library;
 mod live;
 mod metrics;
 mod model;
@@ -120,6 +121,7 @@ fn init(cx: &mut gpui::App) {
     studio::bind_keys(cx);
     layouts::builder::bind_keys(cx);
     brand::bind_keys(cx);
+    library::bind_keys(cx);
 }
 
 fn parse_args(args: impl Iterator<Item = String>) -> Result<Options, String> {

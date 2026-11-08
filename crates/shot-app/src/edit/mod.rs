@@ -7,6 +7,7 @@
 mod camera;
 mod captions;
 mod lane_menu;
+pub(crate) mod library;
 mod marks;
 mod music;
 mod overlays;

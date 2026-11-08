@@ -324,7 +324,10 @@ mod tests {
         let brand = read(dir.path(), "brand/brand.kdl").unwrap();
         assert!(brand.contains("theme light\n") && brand.contains("accent=\"#3d7a00\""));
         assert!(brand.contains("import ") && brand.contains("overlay-preset speaker"));
-        assert!(brand.contains("layout big-face"), "channel layouts stay with the channel");
+        assert!(
+            brand.contains("layout big-face"),
+            "channel layouts stay with the channel"
+        );
         assert!(brand.contains("on punchline off"));
         assert_eq!(read(dir.path(), "brand/themes/light.kdl"), None);
         assert_eq!(

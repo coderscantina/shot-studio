@@ -32,6 +32,7 @@ Waiting for Mike. One line each with a recommendation and a link to its record. 
 
 - Score the four reels (`docs/evidence/m11/reel-*.mp4`, 81 s each, timecoded list in the report); milestone 11 needs 8 or higher per preset.
 - Website and domain: `shot-studio.app` or `shot.coderscantina.com`, postponed by Mike on 2026-11-08. No website is linked until then.
+- Library search on Openverse ([0026](../decisions/0026-library-search-on-openverse.md)): anonymous, CC0, PDM and CC BY only, sounds into `brand/sounds/`, images into the channel's `library/`, each with a `.credit.kdl`. Recommended: adopt.
 - Milestone 10 item 7: a design-variants round for provenance, the scope choice and the rule editor, plus the transition mark style and Picture's placement buttons.
 
 Settled on 2026-11-08: every Proposed record (0011, 0013 to 0025) adopted, the live URL card target relaxed to 1.5 s, golden frames allow 1 code value on up to 16 pixels, codec headroom stays 1.5 dB, presets get jump-cut punch-ins back through an `every=<n>` selector filter, the release workflow reuses Kessel's coderscantina signing secrets, the repo goes public now, SECURITY.md promises best effort, Discussions stay off, the Homebrew tap waits for the first release.

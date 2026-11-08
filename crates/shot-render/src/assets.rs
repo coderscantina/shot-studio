@@ -104,6 +104,9 @@ impl Assets {
                 Media::Clip => {}
             }
         }
+        for file in overlays.iter().filter_map(crate::overlay::pop::image) {
+            images.insert(file.to_owned(), self.image(file)?);
+        }
         Ok(Look {
             effects,
             events: self.events(take)?,

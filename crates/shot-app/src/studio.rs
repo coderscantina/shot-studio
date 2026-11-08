@@ -134,7 +134,7 @@ pub fn key(dir: &Path) -> PathBuf {
         .unwrap_or_else(|_| dir.to_owned())
 }
 
-actions!(studio, [Undo, Redo]);
+actions!(studio, [Undo, Redo, OpenLibrary]);
 
 /// Binds the keys of every screen. Call once at startup.
 /// Whether a take of the cut has no transcript yet.
@@ -153,6 +153,7 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("cmd-z", Undo, None),
         KeyBinding::new("cmd-shift-z", Redo, None),
+        KeyBinding::new("cmd-l", OpenLibrary, None),
     ]);
     edit::bind_keys(cx);
     record::bind_keys(cx);
@@ -781,6 +782,12 @@ impl Render for Studio {
             }))
             .on_action(cx.listener(|this, _: &crate::brand::OpenOverlays, _, cx| {
                 this.open_brand(crate::brand::Section::Overlays, cx)
+            }))
+            .on_action(cx.listener(|this, _: &OpenLibrary, _, cx| {
+                let dir = this.folder.read(cx).dir.clone();
+                if let Err(error) = crate::library::open(&dir, this.edit.downgrade(), cx) {
+                    this.report(error, cx);
+                }
             }))
             .bg(FRAME)
             .text_color(TEXT)

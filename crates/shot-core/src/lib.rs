@@ -5,6 +5,7 @@
 
 mod brand;
 mod captions;
+mod credit;
 mod cut;
 mod edit;
 mod element;
@@ -31,6 +32,7 @@ pub use brand::{
 pub use captions::{
     CaptionBack, CaptionCase, CaptionDesign, CaptionFont, CaptionLook, CaptionPosition, Emphasis,
 };
+pub use credit::{Creator, Credit, License};
 pub use cut::{
     CaptionBreak, CaptionFix, Chapter, Clip, Cut, DerivedCut, DerivedKind, Framing, LayoutChange,
     Music, Overlay, Override, OverrideEffect, ParamValue, Point, RangeEdit, Rating, RemovedBy,
