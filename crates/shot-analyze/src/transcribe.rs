@@ -28,6 +28,7 @@ use whisper_rs::{
 
 use crate::Error;
 use crate::resample::{Timeline16k, WHISPER_RATE};
+use crate::word_bounds;
 
 const SECOND: usize = WHISPER_RATE as usize;
 const MIN_STEP: usize = SECOND;
@@ -352,7 +353,10 @@ impl Worker {
             .join(" ")
     }
 
-    fn commit(&mut self, words: Vec<Word>) {
+    /// Re-measures the words against the window audio, then pushes them to the transcript. A
+    /// word is stable only while its audio is still in the window, so the window covers it.
+    fn commit(&mut self, mut words: Vec<Word>) {
+        word_bounds::refine(&self.window, self.time(self.window_start), &mut words);
         for word in words {
             (self.on_word)(&word);
             self.transcript

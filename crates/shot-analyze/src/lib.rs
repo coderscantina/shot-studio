@@ -22,6 +22,7 @@ mod resample;
 mod speech;
 mod transcribe;
 pub mod vision;
+mod word_bounds;
 
 pub use audio::decode_mono;
 pub use events::again_markers;
