@@ -410,3 +410,56 @@ fn deleting_words_changes_only_the_hashes_of_its_chapter() {
     assert_ne!(chapter_keys(&before, 1), chapter_keys(&after, 1));
     assert_eq!(chapter_keys(&before, 2), chapter_keys(&after, 2));
 }
+
+/// The caption style examples of the contract: a brand's look, a video's look over it, and a
+/// person's line breaks.
+const BRAND_CAPTIONS: &str = "captions font=body size=110 weight=800 color=\"#ffffff\" highlight=\"#ffd84d\" back=outline position=middle nudge=-5 words=4 case=upper\n";
+const FORMAT_CAPTIONS: &str = "captions karaoke size=120 position=top\n";
+const CAPTION_BREAKS: &str = "caption-fixes {\n    fix \"lara vel\" \"Laravel\"\n    split t01 at=12_400_000\n    join t01 at=15_100_000\n}\n";
+
+#[test]
+fn caption_looks_and_line_breaks_round_trip() {
+    for example in [BRAND_CAPTIONS, FORMAT_CAPTIONS, CAPTION_BREAKS] {
+        assert_in_contract(example);
+    }
+    let brand = shot_core::Brand::parse(BRAND_CAPTIONS).unwrap();
+    assert_eq!(brand.to_kdl(), BRAND_CAPTIONS);
+    assert_eq!(brand.captions.words, Some(4));
+    let format = FORMAT.replace("captions word-pop\n", FORMAT_CAPTIONS);
+    let parsed = Format::parse(&format).unwrap();
+    assert_eq!(parsed.captions, CaptionStyle::Karaoke);
+    assert_eq!(parsed.to_kdl(), format);
+    let design = brand
+        .captions
+        .merge(&parsed.caption_look)
+        .design(parsed.captions);
+    assert_eq!(
+        (design.size, design.weight),
+        (120, 800),
+        "the video's size over the brand's"
+    );
+    let cut = Cut::parse(CAPTION_BREAKS).unwrap();
+    assert_eq!(cut.caption_breaks.len(), 2);
+    assert!(cut.caption_breaks[0].split && !cut.caption_breaks[1].split);
+    assert_eq!(cut.to_kdl(), CAPTION_BREAKS);
+    let twice = CAPTION_BREAKS.replace("join t01 at=15_100_000", "join t01 at=12_400_000");
+    assert!(Cut::parse(&twice).is_err(), "one break per word");
+}
+
+#[test]
+fn a_caption_look_or_line_break_changes_only_burned_in_chunks() {
+    let mut project = project();
+    let before = Timeline::evaluate(&project);
+    project.format.caption_look.size = Some(130);
+    let after = Timeline::evaluate(&project);
+    assert_eq!(main_keys(&before), main_keys(&after));
+    assert_ne!(derived_keys(&before, 1), derived_keys(&after, 1));
+    project.cut.caption_breaks.push(shot_core::CaptionBreak {
+        take: Id::new("t01").unwrap(),
+        at: Micros(1_000_000),
+        split: true,
+    });
+    let split = Timeline::evaluate(&project);
+    assert_eq!(main_keys(&after), main_keys(&split));
+    assert_ne!(derived_keys(&after, 1), derived_keys(&split, 1));
+}

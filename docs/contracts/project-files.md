@@ -102,7 +102,7 @@ target-date "2026-11-20"
 | `prompter` | `beats` or `full-script` |
 | `pacing` | `loose`, `natural` (0.25 s of breath around cuts) or `tight` (jump-cut style) |
 | `layouts` | one or more layouts. The first is the default wherever `cut.kdl` sets none, the rest are offered on the 1 to 4 hotkeys |
-| `captions` | `word-pop`, `clean` or `off` |
+| `captions <style>` | the caption preset: `word-pop`, `clean`, `karaoke`, `bold` or `off`, with optional [look properties](#caption-look) that change the brand's look of burned-in captions for this video |
 | `auto-cut confidence=<0..100>` | block with one node per rule. Results at or above `confidence` percent apply right away, the rest go to the review queue |
 
 Layouts are `face`, `face-content`, `split`, `content`, `screen`, `face-corner` and `window` (a captured window on a background).
@@ -237,7 +237,7 @@ The edit of the main cut as a list of chapters, followed by the derived cuts. To
 | Node | Meaning |
 | --- | --- |
 | `captions <style>` | optional, overrides the format's caption style. The main cut ships captions as a sidecar file |
-| `caption-fixes { fix "<heard>" "<said>" ... }` | optional. Each `fix` replaces a run of transcript words that reads `heard`, ignoring case, with `said` wherever captions are shown, and the replacement takes the matched words' timing. `heard` is unique ignoring case, neither text is empty. Claude proposes fixes as text and a person edits them in Caption fixes, never through a proposal |
+| `caption-fixes { fix "<heard>" "<said>" ... }` | optional. Each `fix` replaces a run of transcript words that reads `heard`, ignoring case, with `said` wherever captions are shown, and the replacement takes the matched words' timing. `heard` is unique ignoring case, neither text is empty. Claude proposes fixes as text and a person edits them in Caption fixes, never through a proposal. The block also holds caption line breaks a person set: `split <take> at=<time>` starts a new line at the word of that take starting at `at`, `join <take> at=<time>` keeps that word on the line before. Breaks come after the fixes, sorted by take and time, one per word. When several fixes match at the same word, the longest wins, and a fix whose `said` has several words spreads the matched timing over them by length |
 | `music "<file>" gain=<dB> duck=<dB>` | optional. A music bed under the main cut and its derived cuts: a file relative to the video folder, its gain, and the gain it drops to under speech. Both are at most 0 |
 | `takes { attempt ... }` | optional, see [takes](#takes). Ratings and picks of the takes' attempts at each beat |
 | `chapter "<title>" { ... }` | zero or more, in output order |
@@ -282,6 +282,16 @@ Auto cut and auto edit write into the take block and leave a trail, so nothing i
 - Jump cuts are not nodes. The pacing places the edges of each `remove`, and the jump is what is left.
 - The punch-in zooms the pacing writes carry `by=jump-cut` or `by=emphasis`, auto zoom's carry their trigger, a Z marker's `by=marker`. A zoom rule that runs again replaces the zooms with its own `by` and leaves every other zoom alone.
 - Hotkey markers from the [event log](#cursor-and-key-event-log) enter the cut once, when the take is appended: layout markers become `layout` nodes, Z markers `zoom ... by=marker`, B markers b-roll overlays, A markers feed the retake rule and N markers the chapter boundaries.
+
+Editing a caption line in the Captions panel writes a `fix` for the words that changed, with a word of context on each side, and splitting or joining a line writes a break:
+
+```kdl
+caption-fixes {
+    fix "lara vel" "Laravel"
+    split t01 at=12_400_000
+    join t01 at=15_100_000
+}
+```
 
 A derived cut (`short` or `x-clip`) has a unique name and holds an optional `captions <style>` and one or more `clip <take> from=<time> to=<time>` nodes in output order. It uses only material the main cut keeps inside those ranges, with the main cut's layouts, zooms and overlays except chapter bands and end cards (see [transitions and bookends](#transitions-and-bookends)), and burns its captions in. Its caption style defaults to the main cut's. Every clip's take must appear in the main cut.
 
@@ -464,9 +474,9 @@ chapter "Hook" {
 - A main output has one group of segments per chapter. A segment is a kept range of one take with one layout, so a kept range splits wherever a layout change starts or ends. It carries the zooms and overlays that overlap it, with their full ranges.
 - A derived output has one group, named after the cut. Its segments are the main segments cut down to each clip's range, so every chunk of a derived cut lies inside one chunk of the main cut.
 - Export caches rendered video in chunks. A segment is snapped to the output frame grid and cut at every half second of its take's media time, which is the recordings' keyframe grid. So a chunk is at most 0.5 s and starts on the grid or at a segment edge.
-- Each chunk has a content hash (BLAKE3) over the renderer version, the output aspect, the burned-in caption style with the caption fixes (or the fact that captions are a sidecar), the take id and the take's media identity, the frame rate and the chunk's frames of the take, the layout, the cursor and keystroke settings when the layout shows the screen (every layout but `face`), the window style in the `window` layout, the zooms with their scale and center and, where they are set, their framing and ramps, and every overlay overlapping the chunk with its full range and parameters. Instant zooms are cut to the chunk; with `zoom-motion smooth`, or when a zoom of the segment has a ramp of its own longer than 0, every zoom of the segment counts whole, because the easing at one frame depends on where the zoom starts and ends and where the next one centers. Output position, chapter titles, zoom provenance, review items and the music bed are not part of it. Deleting a word therefore re-renders only the two chunks at the new edges, and every other chunk is reused at its new position. A new caption fix re-renders the derived cuts and nothing of the main cut.
+- Each chunk has a content hash (BLAKE3) over the renderer version, the output aspect, the burned-in caption style with the video's caption look, the caption fixes and line breaks (or the fact that captions are a sidecar), the take id and the take's media identity, the frame rate and the chunk's frames of the take, the layout, the cursor and keystroke settings when the layout shows the screen (every layout but `face`), the window style in the `window` layout, the zooms with their scale and center and, where they are set, their framing and ramps, and every overlay overlapping the chunk with its full range and parameters. Instant zooms are cut to the chunk; with `zoom-motion smooth`, or when a zoom of the segment has a ramp of its own longer than 0, every zoom of the segment counts whole, because the easing at one frame depends on where the zoom starts and ends and where the next one centers. Output position, chapter titles, zoom provenance, review items and the music bed are not part of it. Deleting a word therefore re-renders only the two chunks at the new edges, and every other chunk is reused at its new position. A new caption fix, look or line break re-renders the derived cuts and nothing of the main cut.
 - An overlay that names a file (a `code-diff` snapshot, a `b-roll` file) adds the file's size and modification time to the hash of every chunk it overlaps, so a file replaced under the same name renders again.
-- A derived chunk renders in two passes. Its base is the main chunk that holds its frames, keyed as above and shared with the main export, so whichever export runs first renders it for both; a base drawn without a transition or card the main chunk has is keyed apart. The derived chunk's own key extends the hash above (with the derived aspect and burned-in captions) with the base chunk's key, which of its frames it shows, the window's position on every frame and the caption on screen on every frame with its highlighted word. A new transcript or a moved face re-renders only the derived chunks whose captions or window changed.
+- A derived chunk renders in two passes. Its base is the main chunk that holds its frames, keyed as above and shared with the main export, so whichever export runs first renders it for both; a base drawn without a transition or card the main chunk has is keyed apart. The derived chunk's own key extends the hash above (with the derived aspect and burned-in captions) with the base chunk's key, which of its frames it shows, the window's position on every frame, the caption design after the brand's look, and the caption on screen on every frame with its highlighted word. A new transcript or a moved face re-renders only the derived chunks whose captions or window changed.
 - A take's media identity hashes the size and modification time of its video tracks and of its event log, since the cursor is drawn from events. A take recorded again under a reused id gets a new identity, so it never matches the old recording's chunks.
 - Audio is not cached. Export encodes the whole cut's audio as one AAC stream with the music bed mixed under the voice, so the joins have no encoder delay or padding.
 - Once a video is migrated, the pacing's cuts, zooms and overlays come from the [lock](#cutlock) instead of the take blocks: the timeline removes the union of the lock's `cut` instances from the kept ranges, and segments carry the lock's zooms and overlays next to a person's. The chunk hash then reads the same values from the lock. It adds the brand fields where something branded draws, font and Lottie files by content hash, the camera style where the camera shows beside the screen, the hand-held strength where the camera shows at all and, at a chapter edge, both sides of the transition. Rule layer and element provenance are not part of it, like zoom provenance today. A video without a `cut.lock` is read from the take blocks as above. A chunk where a template other than `blur`, `bleep`, a b-roll clip or an empty slot draws adds the motion preset with its feel controls, the four brand colors and the content hash and weight of each font; one where a brand Lottie draws (a declared template, a re-skin or a `pop` sticker) adds that file's content hash, and one where a `chapter-band` without `text` draws adds the chapter's number and title. Every other chunk keeps its key when the brand changes. The lock's `music` and `sfx` instances play in the export's audio at their moments' output time, mixed with the music bed before the loudness pass.
@@ -620,6 +630,7 @@ Layers apply lowest first: the brand's imports, `brand.kdl`, the channel's `form
 | `intro bumper="<path>" title=<bool>`, `outro ...` | a bumper in `brand/media/` (ignored by git, missing is an export error), a generated title, or both |
 | `end-card length=<time>` | the end card over the outro, or over the last seconds without one |
 | `camera shape=<rounded,circle,square> corners=<px> border=<px> shadow=<none,soft,hard> handheld=<0..100>` | how the camera is framed, and how strongly it drifts as if hand-held wherever it shows. The four frame properties come together or not at all, so a layer can set `camera handheld=40` alone; frame and strength each replace a lower layer's. `handheld` is 0, off, by default: a slow drift with a little rotation and now and then a small settle, from noise seeded by the take and its media time, so a frame draws the same every time. The camera is overscaled just enough that no edge shows, at most about 6 percent at 100 |
+| `captions <look>` | how burned-in captions change their preset for every video of the channel, at least one of the [look properties](#caption-look) |
 | `motion reaction=<preset> opinion=<preset> product-tour=<preset> tutorial=<preset>` | the motion preset of each format: `reactive`, `editorial`, `launch` or `calm` |
 | `preset <name> tempo= bounce= density= stagger= beat-sync=<bool>` | one per preset, feel controls 0 to 100, each optional and defaulting to the preset's own, see [feel controls](#feel-controls) |
 | `transition stinger="<path>" peak=<time>` | the Lottie stinger and the time its frame fully covers the picture, where the cut happens |
@@ -663,6 +674,35 @@ on punchline {
         text "🔥"
     }
 }
+```
+
+### Caption look
+
+Burned-in captions (Shorts and X clips, and the caption preview in Edit) start from the caption preset the `captions <style>` node names, the brand's `captions` node changes single fields of it, and the video's `captions <style>` node in its format layer changes fields again. Each property is optional:
+
+| Property | Value |
+| --- | --- |
+| `font` | which brand font: `heading`, `body` or `mono` |
+| `size` | percent of the preset's size, 50 to 200 |
+| `weight` | 100 to 900 |
+| `color` | the words, `"#rrggbb"` |
+| `highlight` | the word being said, `"#rrggbb"`. Unset in the preset, the brand's accent |
+| `back` | `box` behind the words, an `outline` around each letter, or `none` |
+| `position` | `bottom`, `middle` or `top` |
+| `nudge` | moves the caption down by this percent of the frame's height, up when negative, -30 to 30 |
+| `words` | at most this many words show at once, 1 to 12 |
+| `case` | `as-said` or `upper` |
+
+The presets: `word-pop` puts the word being said on a pill in the highlight color, heading font at 700, up to 7 words on a box. `clean` draws plain lines in the body font at 600 on a box. `karaoke` fills the words with the highlight color (yellow) as they are said, at 800, up to 5 words on a box. `bold` draws up to 3 uppercase words at 125% and 900 with an outline, the word being said in yellow. A brand that sets every caption in its body font a little larger, outlined in the middle of the frame:
+
+```kdl
+captions font=body size=110 weight=800 color="#ffffff" highlight="#ffd84d" back=outline position=middle nudge=-5 words=4 case=upper
+```
+
+A video that uses karaoke captions, larger, at the top:
+
+```kdl
+captions karaoke size=120 position=top
 ```
 
 ### Feel controls

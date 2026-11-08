@@ -7,13 +7,13 @@ This document owns the visual rules of the app. The [mockup](mockup/README.md) s
 - **Theme**: dark only in the first release. Tokens are named by role (surface, raised, text, muted, accent, danger) so a light theme can be added later without touching screens.
 - **Surfaces**: panels are separated by shade, not borders.
 - **Accent**: lime `#C8F25A` for actions and data. Red only for recording and cuts.
-- **Lane colors**: each kind of edit keeps one hue in lanes, tags and their icons: zoom blue `#5AA9FF`, b-roll violet `#B69CFF`, highlight lime, cuts red. No other hues.
+- **Lane colors**: each kind of edit keeps one hue in lanes, tags and their icons: zoom blue `#5AA9FF`, b-roll violet `#B69CFF`, highlight lime, cuts red. No other hues. The transcript marks effects in the same hues (2026-11-08, from Mike's milestone 13 request): a zoom or an overlay underlines its words, a highlight washes them lime, a sound sits as a neutral chip at its word, and a chip with the effect's icon starts each one, filled for a person's effect and outlined for one from the style rules.
 - **Type**: Geist, 15 px base. Geist Mono only for timecodes, durations, code and file names. Labels and values such as "Word pop" or "24%" stay in Geist.
 - **Corners**: 8 to 14 px.
 - **Components**: `gpui-component`, restyled with these tokens. Custom elements (timeline, waveform, transcript, preview surface) are built on raw gpui and use the same tokens.
 - **Window**: minimum 1280x800.
 - **Screenshots**: evidence is captured at 1600x1000 in dark.
-- **Keyboard first**: every review action has a single-key shortcut, shown next to the button. In the Cut review queue K keeps and C cuts. In Edit, Backspace cuts the selected words. Tab accepts and Esc rejects a proposal only while it has focus (the caret is inside it or the card is selected), like ghost text in a code editor; otherwise Tab moves focus. Esc closes the topmost thing first: popover, then selection, then proposal. A timeline, list or transcript is one tab stop with arrow keys inside.
+- **Keyboard first**: every review action has a single-key shortcut, shown next to the button. In the Cut review queue K keeps and C cuts. In Edit, Backspace cuts the selected words; wherever Backspace removes, cuts or deletes something, forward Delete does the same, and hints show both keys (2026-11-08). Tab accepts and Esc rejects a proposal only while it has focus (the caret is inside it or the card is selected), like ghost text in a code editor; otherwise Tab moves focus. Esc closes the topmost thing first: popover, then selection, then proposal. A timeline, list or transcript is one tab stop with arrow keys inside.
 - **Time**: every timecode is in edited time, unless Untrimmed is on. All views of the same moment come from one cut list, so a word, block or proposal shows the same time everywhere.
 
 ## Settled rules

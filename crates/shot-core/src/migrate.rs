@@ -364,11 +364,15 @@ fn settings_diff(old: &Format, channel: &Format) -> FormatLayer {
             .collect::<Vec<_>>()
     };
     let effects = old.effects();
+    let caption_look = old.caption_look.diff(&channel.caption_look);
     FormatLayer {
         prompter: differs(old.prompter, channel.prompter),
         pacing: differs(old.pacing, channel.pacing),
         layouts: differs(layouts(old), layouts(channel)),
-        captions: differs(old.captions, channel.captions),
+        // A look needs its node, which names the style.
+        captions: (old.captions != channel.captions || !caption_look.is_empty())
+            .then_some(old.captions),
+        caption_look,
         auto_cut: differs(old.auto_cut.clone(), channel.auto_cut.clone()),
         auto_zoom: (old.auto_zoom != channel.auto_zoom).then(|| {
             old.auto_zoom.clone().unwrap_or_else(|| AutoZoom {

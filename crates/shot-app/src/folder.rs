@@ -472,6 +472,33 @@ impl VideoFolder {
         Ok(imported)
     }
 
+    /// Lays `look` over the channel brand's caption look in `brand/brand.kdl` and drops the
+    /// video's own, so every video of the channel uses it. Brand files are not part of undo.
+    pub fn set_brand_captions(&mut self, look: shot_core::CaptionLook) -> Result<(), String> {
+        let repo = Disk::locate(&self.dir)
+            .ok()
+            .and(shot_render::theme::channel_root(&self.dir))
+            .ok_or(
+                "The caption look of a channel lives in its brand, and this video is not in one",
+            )?
+            .to_owned();
+        let path = repo.join("brand/brand.kdl");
+        let mut brand = match fs::read_to_string(&path) {
+            Ok(text) => {
+                shot_core::Brand::parse(&text).map_err(|e| format!("brand/brand.kdl:{e}"))?
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => shot_core::Brand::default(),
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        };
+        brand.captions = brand.captions.merge(&look);
+        fs::create_dir_all(repo.join("brand")).map_err(|e| e.to_string())?;
+        write(&path, &brand.to_kdl())?;
+        let mut format = self.project.format.clone();
+        format.caption_look = shot_core::CaptionLook::default();
+        self.write_format(format)?;
+        self.rebuild_lock()
+    }
+
     pub fn media(&self, take: &Id, file: &str) -> PathBuf {
         self.dir.join("media").join(take.as_str()).join(file)
     }

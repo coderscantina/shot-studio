@@ -32,10 +32,10 @@ use shot_core::{
     Transcript,
 };
 
-use crate::captions::{self, Cue};
-use crate::drawing::{Drawing, Rgba, Shape};
+pub use crate::captions::Shown;
+use crate::captions::{Cue, Design};
+use crate::drawing::Drawing;
 use crate::frame::Frame;
-use crate::kinetic;
 use crate::layout::{BACKGROUND, Canvas, Layer, LayoutSpec, Rect, Scene, Source, Sources};
 use crate::plan::{ExportPlan, PlannedSegment, frame_time};
 use crate::zoom::punch_at;
@@ -120,15 +120,6 @@ pub struct DerivedChunk {
     pub captions: Vec<Option<Shown>>,
 }
 
-/// A caption on screen: the cue's index, the word to highlight, and how long since that word
-/// started, up to [`kinetic::word_pop_settle`], for its pop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Shown {
-    pub cue: usize,
-    pub word: Option<usize>,
-    pub pop: Micros,
-}
-
 /// A derived output planned over the main output: its chunks with their bases and keys.
 #[derive(Debug, Clone)]
 pub struct DerivedPlan {
@@ -140,7 +131,7 @@ pub struct DerivedPlan {
     /// Per segment of `plan`, per chunk.
     pub chunks: Vec<Vec<DerivedChunk>>,
     cues: Vec<Cue>,
-    style: CaptionStyle,
+    design: Design,
 }
 
 /// What a derived plan is made from besides the timeline.
@@ -168,7 +159,8 @@ impl DerivedPlan {
         let mut main_plan = ExportPlan::new(main, fps, inputs.media);
         crate::overlay::key_chunks(&mut main_plan, inputs.assets, inputs.theme);
         let mut plan = ExportPlan::new(derived, fps, inputs.media);
-        let cues = captions::cues(&plan, inputs.transcripts, &derived.caption_fixes);
+        let design = Design::of(derived, inputs.theme);
+        let cues = design.cues(&plan, inputs.transcripts, derived);
         let width = window_width(kind);
         let mut chunks = Vec::with_capacity(plan.segments.len());
         for planned in &mut plan.segments {
@@ -211,13 +203,11 @@ impl DerivedPlan {
                         .map(|f| windows[(f - parent.source_frames.start) as usize])
                         .collect(),
                     captions: (0..chunk.frame_count())
-                        .map(|i| {
-                            caption_at(&cues, frame_time(output_start + i, fps), derived.captions)
-                        })
+                        .map(|i| design.shown(&cues, frame_time(output_start + i, fps)))
                         .collect(),
                 };
                 let own = derived.chunk_hash(&planned.segment, media, fps, chunk.frames.clone());
-                chunk.hash = own.extend(&key_input(&derived_chunk, &chunk.frames, &cues));
+                chunk.hash = own.extend(&key_input(&derived_chunk, &chunk.frames, &cues, &design));
                 segment_chunks.push(derived_chunk);
             }
             chunks.push(segment_chunks);
@@ -229,7 +219,7 @@ impl DerivedPlan {
             plan,
             chunks,
             cues,
-            style: derived.captions,
+            design,
         }
     }
 
@@ -259,10 +249,10 @@ impl DerivedPlan {
             self.canvas.height as f32,
         );
         let mut drawing = Drawing::default();
-        if let Some(Shown { cue, word, pop }) = derived.captions[index] {
+        if let Some(shown) = derived.captions[index] {
             drawing
                 .over
-                .push(caption_shape(&self.cues[cue], word, pop, self.canvas));
+                .push(self.design.shape(&self.cues[shown.cue], shown, self.canvas));
         }
         Frame {
             scene: Scene {
@@ -275,7 +265,7 @@ impl DerivedPlan {
     }
 
     pub fn style(&self) -> CaptionStyle {
-        self.style
+        self.design.style()
     }
 }
 
@@ -362,30 +352,10 @@ pub(crate) fn render(
     files.finish(&encoder)
 }
 
-/// The cue and highlighted word on screen at output time `t`.
-fn caption_at(cues: &[Cue], t: Micros, style: CaptionStyle) -> Option<Shown> {
-    if style == CaptionStyle::Off {
-        return None;
-    }
-    let (_, word) = captions::shown_at(cues, t)?;
-    let cue = cues.partition_point(|c| c.from() <= t) - 1;
-    let pops = style == CaptionStyle::WordPop;
-    let since = Micros(t.0.saturating_sub(cues[cue].words[word].from.0));
-    Some(Shown {
-        cue,
-        word: pops.then_some(word),
-        pop: if pops {
-            since.min(kinetic::word_pop_settle())
-        } else {
-            kinetic::word_pop_settle()
-        },
-    })
-}
-
 /// What a derived chunk adds to its own key: the base chunk, which of its frames, the window per
-/// frame and the caption per frame, in runs.
-fn key_input(chunk: &DerivedChunk, frames: &Range<u64>, cues: &[Cue]) -> Vec<u8> {
-    let mut out = Vec::new();
+/// frame, the caption design and the caption per frame, in runs.
+fn key_input(chunk: &DerivedChunk, frames: &Range<u64>, cues: &[Cue], design: &Design) -> Vec<u8> {
+    let mut out = design.key();
     out.extend_from_slice(chunk.base.hash.as_bytes());
     out.extend_from_slice(&(frames.start - chunk.base.frames.start).to_le_bytes());
     out.extend_from_slice(&(frames.end - frames.start).to_le_bytes());
@@ -414,26 +384,6 @@ fn key_input(chunk: &DerivedChunk, frames: &Range<u64>, cues: &[Cue]) -> Vec<u8>
         }
     }
     out
-}
-
-/// The burned-in caption of `cue` on a derived canvas.
-pub(crate) fn caption_shape(cue: &Cue, word: Option<usize>, pop: Micros, canvas: Canvas) -> Shape {
-    let tall = canvas.height > canvas.width;
-    let size = canvas.width as f32 * if tall { 0.062 } else { 0.05 };
-    Shape::Caption {
-        center: [
-            canvas.width as f32 / 2.0,
-            canvas.height as f32 * if tall { 0.72 } else { 0.83 },
-        ],
-        width: canvas.width as f32 * 0.84,
-        words: cue.words.iter().map(|w| w.text.clone()).collect(),
-        highlight: word,
-        size,
-        color: Rgba::hex(0xFFFFFF, 1.0),
-        accent: Rgba::hex(0xC8F25A, 1.0),
-        background: Rgba::hex(0x0A0B0D, 0.78),
-        pop: kinetic::word_pop(pop),
-    }
 }
 
 /// The window's left edge on the main canvas for every frame of `parent`, a main segment.

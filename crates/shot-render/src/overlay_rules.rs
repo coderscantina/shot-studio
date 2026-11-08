@@ -279,6 +279,38 @@ pub fn redact(
     Ok(cut)
 }
 
+/// A `highlight` around where `phrase`, said over `said` in `take`, shows on the screen when it
+/// is said, held until [`highlight::AFTER`] past it. Vision reads the screen once, on the
+/// keyframe at the start.
+pub fn highlight_said(
+    video_dir: &Path,
+    take: &Id,
+    said: TimeRange,
+    phrase: &str,
+) -> Result<Overlay, OverlayRuleError> {
+    let step = crate::derived::FACE_STEP.0;
+    let at = Micros(said.from().0 / step * step);
+    let lines = screen_lines(video_dir, take, &[at])?;
+    let rect = lines
+        .first()
+        .and_then(|(_, lines)| highlight::find_on_screen(lines, phrase))
+        .ok_or_else(|| OverlayRuleError::NotOnScreen(phrase.to_owned()))?;
+    let range = TimeRange::new(said.from(), Micros(said.to().0 + highlight::AFTER.0))
+        .expect("a phrase has a length");
+    let px = |v: f32| ParamValue::Integer(v.round() as i64);
+    Ok(overlay(
+        highlight::TEMPLATE,
+        range,
+        vec![
+            ("x", px(rect.left)),
+            ("y", px(rect.top)),
+            ("width", px(rect.width())),
+            ("height", px(rect.height())),
+            ("text", ParamValue::Text(phrase.to_owned())),
+        ],
+    ))
+}
+
 /// `cut` with `file` picked for the b-roll of `take` that covers `at`.
 pub fn fill_b_roll(cut: &Cut, take: &Id, at: Micros, file: &str) -> Result<Cut, OverlayRuleError> {
     let mut cut = cut.clone();

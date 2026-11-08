@@ -956,6 +956,7 @@ impl EditScreen {
                 dir,
                 effects,
                 theme: Ok(Arc::new(theme)),
+                captions: None,
             },
             from,
         );

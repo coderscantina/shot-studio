@@ -7,8 +7,9 @@
 
 use kdl::KdlValue;
 
+use crate::captions::LOOK_PROPS;
 use crate::kdl_io::{FromKdl, Node, Source, ToKdl, Writer, keyword_enum, quote};
-use crate::{Color, FormatKind, Id, Micros, ParseError, Shadow, StyleSheet};
+use crate::{CaptionLook, Color, FormatKind, Id, Micros, ParseError, Shadow, StyleSheet};
 
 /// A style imported from a git repo at a commit, the lowest layer of the brand.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -253,6 +254,8 @@ pub struct Brand {
     /// How strongly the camera drifts as if hand-held, 0 (off) to 100. Written on the `camera`
     /// node; `None` keeps what a lower layer set.
     pub handheld: Option<u8>,
+    /// How burned-in captions change their preset, for every video of the channel.
+    pub captions: CaptionLook,
     pub motion: Motion,
     /// Sorted by name, each name once.
     pub presets: Vec<Preset>,
@@ -289,6 +292,7 @@ impl Brand {
         let (mut fonts, mut colors, mut logo, mut sounds, mut intro, mut outro) =
             (None, None, None, None, None, None);
         let (mut end_card, mut camera, mut motion, mut stinger) = (None, None, None, None);
+        let mut captions = None;
         for node in nodes {
             match node.name() {
                 "import" if scope == BrandScope::File => {
@@ -362,6 +366,14 @@ impl Brand {
                     node.set_once(&mut camera, frame)?;
                     brand.handheld = handheld;
                 }
+                "captions" => {
+                    node.expect(0, &LOOK_PROPS)?;
+                    let look = CaptionLook::read(node)?;
+                    if look.is_empty() {
+                        return Err(node.error("`captions` changes at least one property"));
+                    }
+                    node.set_once(&mut captions, look)?;
+                }
                 "motion" => {
                     let props: Vec<&str> = FormatKind::ALL.iter().map(|k| k.as_str()).collect();
                     node.expect(0, &props)?;
@@ -407,6 +419,7 @@ impl Brand {
         brand.outro = outro;
         brand.end_card = end_card;
         brand.camera = camera.flatten();
+        brand.captions = captions.unwrap_or_default();
         brand.motion = motion.unwrap_or_default();
         brand.presets.sort_by_key(|p| p.name);
         brand.stinger = stinger;
@@ -473,6 +486,11 @@ impl Brand {
                     .prop("shadow", &camera.shadow);
             }
             write_opt(w, "handheld", &self.handheld);
+            w.end();
+        }
+        if !self.captions.is_empty() {
+            w.node("captions");
+            self.captions.write(w);
             w.end();
         }
         if self.motion != Motion::default() {
@@ -548,6 +566,7 @@ impl Brand {
         merge_opt(&mut merged.end_card, &over.end_card);
         merge_opt(&mut merged.camera, &over.camera);
         merge_opt(&mut merged.handheld, &over.handheld);
+        merged.captions = merged.captions.merge(&over.captions);
         for &kind in FormatKind::ALL {
             merge_opt(merged.motion.get_mut(kind), &over.motion.get(kind));
         }

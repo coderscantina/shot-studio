@@ -279,21 +279,25 @@ fn lines(this: &EditScreen) -> Div {
 
 /// What is on screen at the playhead, what changes next, and the tools that place effects.
 fn layers(this: &EditScreen, cx: &mut Context<EditScreen>) -> Stateful<Div> {
+    if this.captions.open {
+        return ui::pane()
+            .id("layers")
+            .flex_1()
+            .flex()
+            .flex_col()
+            .child(super::captions::panel(this, cx));
+    }
     let now = this.map.span_at(this.playhead);
     let zoom = now
         .map(|s| s.zoom_at(s.source_frame(this.playhead)))
         .filter(|z| *z > 1.0);
     let folder = this.folder.read(cx);
-    let captions = match folder
+    let captions = folder
         .project
         .cut
         .captions
-        .unwrap_or(folder.project.format.captions)
-    {
-        shot_core::CaptionStyle::WordPop => "Word pop",
-        shot_core::CaptionStyle::Clean => "Clean",
-        shot_core::CaptionStyle::Off => "Off",
-    };
+        .unwrap_or(folder.project.format.captions);
+    let captions = super::captions::style_name(captions);
     let overlays = overlays(this, cx);
     let showing: Vec<&Overlay> = overlays
         .iter()
@@ -322,12 +326,17 @@ fn layers(this: &EditScreen, cx: &mut Context<EditScreen>) -> Stateful<Div> {
                 div().child(layout_name(s.layout)),
             )
         }))
-        .child(layer(
-            "text",
-            MUTED.into(),
-            "Captions",
-            div().child(captions),
-        ))
+        .child(
+            layer("text", MUTED.into(), "Captions", div().child(captions))
+                .id("layer-captions")
+                .cursor_pointer()
+                .hover(|s| s.bg(RAISED).text_color(TEXT))
+                .tooltip(|window, cx| {
+                    gpui_component::tooltip::Tooltip::new("Edit the captions and their style")
+                        .build(window, cx)
+                })
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_captions(cx))),
+        )
         .children(zoom.map(|z| {
             layer(
                 "zoom",

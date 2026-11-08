@@ -1,6 +1,7 @@
 use kdl::KdlValue;
 
 use crate::brand::BrandScope;
+use crate::captions::{CaptionLook, LOOK_PROPS};
 use crate::kdl_io::{FromKdl, Node, Source, ToKdl, Writer, keyword_enum, quote, required};
 use crate::{Brand, Micros, ParseError, StyleSheet};
 
@@ -164,9 +165,17 @@ impl ToKdl for Color {
 }
 
 keyword_enum! {
+    /// The caption preset: how burned-in captions look before the brand and the video change
+    /// single fields, see [`crate::CaptionLook`].
     pub enum CaptionStyle {
+        /// The word being said on a pill in the highlight color.
         WordPop = "word-pop",
+        /// Plain lines on a box.
         Clean = "clean",
+        /// Words fill with the highlight color as they are said, on a box.
+        Karaoke = "karaoke",
+        /// Few large uppercase words with an outline, the word being said in color.
+        Bold = "bold",
         Off = "off",
     }
 }
@@ -193,6 +202,8 @@ pub struct Format {
     /// Further layouts offered on the 1 to 4 hotkeys after the default.
     pub other_layouts: Vec<Layout>,
     pub captions: CaptionStyle,
+    /// Changes to the caption preset's look for this video, over the brand's.
+    pub caption_look: CaptionLook,
     pub auto_cut: AutoCut,
     /// The product video settings. Each is optional; `None` means the contract's default.
     pub auto_zoom: Option<AutoZoom>,
@@ -296,6 +307,8 @@ pub struct FormatLayer {
     /// The default layout first, then the hotkey layouts. Never empty when set.
     pub layouts: Option<Vec<Layout>>,
     pub captions: Option<CaptionStyle>,
+    /// Look properties on the `captions` node, laid over the layers below field by field.
+    pub caption_look: CaptionLook,
     pub auto_cut: Option<AutoCut>,
     pub auto_zoom: Option<AutoZoom>,
     pub zoom_motion: Option<ZoomMotion>,
@@ -337,8 +350,9 @@ impl FormatLayer {
                     node.set_once(&mut layouts, node.args::<Layout>()?)?;
                 }
                 "captions" => {
-                    node.expect(1, &[])?;
+                    node.expect(1, &LOOK_PROPS)?;
                     node.set_once(&mut layer.captions, node.arg(0)?)?;
+                    layer.caption_look = CaptionLook::read(node)?;
                 }
                 "auto-cut" => node.set_once(&mut layer.auto_cut, AutoCut::read(node)?)?,
                 "auto-zoom" => node.set_once(&mut layer.auto_zoom, AutoZoom::read(node)?)?,
@@ -386,6 +400,7 @@ impl FormatLayer {
         if let Some(captions) = self.captions {
             format.captions = captions;
         }
+        format.caption_look = format.caption_look.merge(&self.caption_look);
         if let Some(auto_cut) = &self.auto_cut {
             format.auto_cut = auto_cut.clone();
         }
@@ -412,6 +427,7 @@ impl FormatLayer {
             default_layout: layouts.next().expect("layouts has at least one argument"),
             other_layouts: layouts.collect(),
             captions: required(self.captions, "captions", missing)?,
+            caption_look: self.caption_look,
             auto_cut: required(self.auto_cut, "auto-cut", missing)?,
             auto_zoom: self.auto_zoom,
             zoom_motion: self.zoom_motion,
@@ -437,7 +453,9 @@ impl FormatLayer {
             w.end();
         }
         if let Some(captions) = &self.captions {
-            w.node("captions").arg(captions).end();
+            w.node("captions").arg(captions);
+            self.caption_look.write(&mut w);
+            w.end();
         }
         if let Some(a) = &self.auto_cut {
             w.node("auto-cut").prop("confidence", &a.confidence).open();
@@ -505,6 +523,7 @@ impl From<&Format> for FormatLayer {
                     .collect(),
             ),
             captions: Some(format.captions),
+            caption_look: format.caption_look.clone(),
             auto_cut: Some(format.auto_cut.clone()),
             auto_zoom: format.auto_zoom.clone(),
             zoom_motion: format.zoom_motion,

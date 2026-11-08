@@ -2,11 +2,13 @@ use std::fmt;
 use std::ops::Range;
 
 use crate::cut::{
-    CaptionFix, DerivedCut, LayoutChange, Overlay, ParamValue, RangeEdit, TakeEdit, Zoom, ZoomShape,
+    CaptionBreak, CaptionFix, DerivedCut, LayoutChange, Overlay, ParamValue, RangeEdit, TakeEdit,
+    Zoom, ZoomShape,
 };
 use crate::lock::{Applied, LockTake};
 use crate::{
-    CaptionStyle, DerivedKind, Effects, Id, Layout, Lock, Micros, Project, TimeRange, ZoomMotion,
+    CaptionLook, CaptionStyle, DerivedKind, Effects, Id, Layout, Lock, Micros, Project, TimeRange,
+    ZoomMotion,
 };
 
 /// Bumped whenever the renderer's output changes for the same input, so cached chunks expire.
@@ -24,8 +26,12 @@ pub struct Output {
     /// `main` for the main cut, otherwise the derived cut's name.
     pub name: String,
     pub captions: CaptionStyle,
+    /// The video's changes to the caption preset, over the brand's.
+    pub caption_look: CaptionLook,
     /// Applied wherever this output shows captions.
     pub caption_fixes: Vec<CaptionFix>,
+    /// Caption line breaks a person set.
+    pub caption_breaks: Vec<CaptionBreak>,
     /// The format's render settings with defaults filled in.
     pub effects: Effects,
     /// The main cut's chapters. A derived cut has one group named after it.
@@ -155,7 +161,9 @@ impl Timeline {
             kind: OutputKind::Main,
             name: "main".to_owned(),
             captions,
+            caption_look: project.format.caption_look.clone(),
             caption_fixes: project.cut.caption_fixes.clone(),
+            caption_breaks: project.cut.caption_breaks.clone(),
             effects: project.format.effects(),
             chapters: project
                 .cut
@@ -223,6 +231,13 @@ impl Output {
             for fix in &self.caption_fixes {
                 h.str(&fix.heard);
                 h.str(&fix.said);
+            }
+            h.str(&self.caption_look.key());
+            h.u64(self.caption_breaks.len() as u64);
+            for b in &self.caption_breaks {
+                h.str(b.take.as_str());
+                h.u64(b.at.0);
+                h.u64(u64::from(b.split));
             }
         }
         h.str(segment.take.as_str());
@@ -459,7 +474,9 @@ fn derive(main: &Output, cut: &DerivedCut, main_captions: CaptionStyle) -> Outpu
         kind,
         name: cut.name.to_string(),
         captions,
+        caption_look: main.caption_look.clone(),
         caption_fixes: main.caption_fixes.clone(),
+        caption_breaks: main.caption_breaks.clone(),
         effects: main.effects,
         chapters: vec![ChapterSegments {
             title: cut.name.to_string(),

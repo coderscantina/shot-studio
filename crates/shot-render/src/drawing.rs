@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use shot_core::Micros;
+use shot_core::{CaptionBack, Emphasis, Micros};
 use vello::peniko::ImageData;
 
 use crate::kinetic::Kinetic;
@@ -34,6 +34,26 @@ pub enum Font {
     Sans,
     Mono,
     Face(Face),
+}
+
+/// Caption words wrapped into lines at most `width` wide, centered on `center`, on a rounded
+/// box in `background`, outlined in it, or bare. The word being said at `highlight` stands out
+/// as `emphasis` says, in `accent`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Caption {
+    pub center: [f32; 2],
+    pub width: f32,
+    pub words: Vec<String>,
+    pub highlight: Option<usize>,
+    pub size: f32,
+    pub font: Font,
+    pub color: Rgba,
+    pub accent: Rgba,
+    pub background: Rgba,
+    pub back: CaptionBack,
+    pub emphasis: Emphasis,
+    /// The highlighted word's scale, 1 once it has settled.
+    pub pop: f32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -103,20 +123,8 @@ pub enum Shape {
         crop: Rect,
         opacity: f32,
     },
-    /// Caption words wrapped into lines at most `width` wide, centered on `center`, on a
-    /// rounded box. The word at `highlight` draws on an accent pill in the background color.
-    Caption {
-        center: [f32; 2],
-        width: f32,
-        words: Vec<String>,
-        highlight: Option<usize>,
-        size: f32,
-        color: Rgba,
-        accent: Rgba,
-        background: Rgba,
-        /// The highlighted word's scale, 1 once it has settled.
-        pop: f32,
-    },
+    /// Burned-in caption words, see [`Caption`].
+    Caption(Box<Caption>),
     /// Text whose words or glyphs move on their own springs.
     Kinetic(Box<Kinetic>),
     /// A filled Lottie template `elapsed` after it started, its top left at `origin`, `scale`
@@ -169,17 +177,23 @@ impl Shape {
             }
             Self::Outline { rect, width, .. } => grow(*rect, *width),
             Self::Image { rect, .. } => *rect,
-            Self::Caption {
-                center,
-                width,
-                size,
-                ..
-            } => Rect::new(
-                center[0] - width / 2.0 - size,
-                center[1] - size * 3.0,
-                center[0] + width / 2.0 + size,
-                center[1] + size * 3.0,
-            ),
+            Self::Caption(caption) => {
+                let Caption {
+                    center,
+                    width,
+                    size,
+                    words,
+                    ..
+                } = &**caption;
+                // At worst one word per line, lines 1.3 sizes apart, with the box and a pop.
+                let half = size * (1.5 + 0.7 * words.len() as f32);
+                Rect::new(
+                    center[0] - width / 2.0 - size,
+                    center[1] - half,
+                    center[0] + width / 2.0 + size,
+                    center[1] + half,
+                )
+            }
             Self::Clip { rect, shapes, .. } => shapes
                 .iter()
                 .map(Shape::bounds)

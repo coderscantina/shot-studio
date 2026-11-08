@@ -5,7 +5,9 @@
 //! screen keeps only view state: the workspace, the chapter on show, the selection, the playhead.
 
 mod camera;
+mod captions;
 mod lane_menu;
+mod marks;
 mod music;
 mod overlays;
 mod parts;
@@ -52,6 +54,10 @@ fn word_selection() -> gpui::Hsla {
     gpui::Hsla::from(ACCENT).opacity(0.32)
 }
 
+/// The keys that cut words or remove the picked element, as hints show them: Backspace and
+/// forward Delete do the same.
+pub const DELETE_KEYS: &str = "⌫ ⌦";
+
 /// How long "Saved" shows after an edit is written.
 const SAVED_FOR: Duration = Duration::from_millis(1600);
 
@@ -85,6 +91,10 @@ actions!(
         GoToStart,
         GoToEnd,
         RecordTake,
+        EditCaption,
+        AddHighlight,
+        PickPop,
+        PickLayout,
     ]
 );
 
@@ -93,6 +103,7 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("space", TogglePlay, context),
         KeyBinding::new("backspace", DeleteSelection, context),
+        KeyBinding::new("delete", DeleteSelection, context),
         KeyBinding::new("r", RestoreSelection, context),
         KeyBinding::new("escape", ClearSelection, context),
         KeyBinding::new("1", Layout1, context),
@@ -118,6 +129,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("home", GoToStart, context),
         KeyBinding::new("end", GoToEnd, context),
         KeyBinding::new("cmd-enter", RecordTake, context),
+        KeyBinding::new("enter", EditCaption, context),
+        KeyBinding::new("h", AddHighlight, context),
+        KeyBinding::new("p", PickPop, context),
+        KeyBinding::new("l", PickLayout, context),
     ]);
     zoom::bind_keys(cx);
 }
@@ -226,6 +241,10 @@ pub struct EditScreen {
     claude: Option<Claude>,
     /// Claude writing another take.
     run: Option<AgentRun>,
+    /// The Captions panel.
+    captions: captions::CaptionsState,
+    /// The Text workspace's hovered and picked effect and its pickers.
+    text: text::TextState,
 }
 
 impl EditScreen {
@@ -291,6 +310,8 @@ impl EditScreen {
             scroll_to_card: false,
             claude: Claude::find(),
             run: None,
+            captions: captions::CaptionsState::default(),
+            text: text::TextState::default(),
         };
         this.rebuild(cx);
         this
@@ -328,15 +349,18 @@ impl EditScreen {
         self.playhead = frame;
         self.sound
             .set_plan(&self.map, folder.dir.clone(), project.clone(), frame);
-        self.engine.set_plan(
-            Plan {
-                map: self.map.clone(),
-                dir: folder.dir.clone(),
-                effects: project.format.effects(),
-                theme: folder.theme.clone(),
-            },
-            frame,
-        );
+        let plan = Plan {
+            map: self.map.clone(),
+            dir: folder.dir.clone(),
+            effects: project.format.effects(),
+            theme: folder.theme.clone(),
+            captions: None,
+        };
+        let plan = Plan {
+            captions: self.preview_captions(cx),
+            ..plan
+        };
+        self.engine.set_plan(plan, frame);
         self.seeking = true;
         self.clock = None;
         self.repick_layout();
@@ -613,7 +637,8 @@ impl EditScreen {
     }
 
     fn delete_selection(&mut self, _: &DeleteSelection, _: &mut Window, cx: &mut Context<Self>) {
-        if self.remove_picked(cx) {
+        if self.remove_picked(cx) || self.remove_picked_sound(cx) {
+            self.text.picked = None;
             return;
         }
         let Some((at, range, true, _)) = self.selected() else {
@@ -800,7 +825,10 @@ impl Render for EditScreen {
         };
         div()
             .id("edit")
-            .key_context(CONTEXT)
+            // A caption line being edited takes the letter keys.
+            .when(!self.captions.is_editing(), |edit| {
+                edit.key_context(CONTEXT)
+            })
             .track_focus(&self.focus)
             .size_full()
             .flex()
@@ -811,6 +839,8 @@ impl Render for EditScreen {
             .on_action(cx.listener(Self::restore_selection))
             .on_action(cx.listener(|this, _: &ClearSelection, _, cx| {
                 if !this.close_picker()
+                    && !std::mem::take(&mut this.text.layouts_open)
+                    && !this.drop_text_pick()
                     && !this.stop_proposal(cx)
                     && !this.reject_selected(cx)
                     && this.lanes.picked.take().is_none()
@@ -841,6 +871,14 @@ impl Render for EditScreen {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &RecordTake, _, cx| this.go_record(cx)))
+            .on_action(
+                cx.listener(|this, _: &EditCaption, window, cx| this.edit_caption_line(window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &AddHighlight, _, cx| this.add_highlight(cx)))
+            .on_action(
+                cx.listener(|this, _: &PickPop, _, cx| this.toggle_picker(place::Picker::Pop, cx)),
+            )
+            .on_action(cx.listener(|this, _: &PickLayout, _, cx| this.toggle_layouts(cx)))
             .on_action(cx.listener(|this, _: &GoToEnd, _, cx| {
                 this.seek(this.map.frames);
                 cx.notify();

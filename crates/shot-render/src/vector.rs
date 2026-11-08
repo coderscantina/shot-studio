@@ -10,12 +10,13 @@ use parley::fontique::{Blob, FontInfoOverride};
 use parley::{
     FontContext, FontFamilyName, GenericFamily, LayoutContext, PositionedLayoutItem, StyleProperty,
 };
+use shot_core::{CaptionBack, Emphasis};
 use vello::kurbo::{Affine, BezPath, Circle, Rect as KRect, RoundedRect, Stroke};
 use vello::peniko::{Color, Fill, Gradient, ImageBrush};
 use vello::{AaConfig, AaSupport, RenderParams, Renderer, RendererOptions, Scene};
 
 use crate::RenderError;
-use crate::drawing::{Drawing, Font, Rgba, Shape, union};
+use crate::drawing::{Caption, Drawing, Font, Rgba, Shape, union};
 use crate::kinetic::Kinetic;
 use crate::layout::{Canvas, Rect};
 use crate::lottie::{Justify, PlacedText};
@@ -496,33 +497,7 @@ fn draw(scene: &mut Scene, ink: &mut Ink, transform: Affine, shape: &Shape) {
             scene.draw_image(&ImageBrush::new(image.clone()).with_alpha(*opacity), at);
             scene.pop_layer();
         }
-        Shape::Caption {
-            center,
-            width,
-            words,
-            highlight,
-            size,
-            color: c,
-            accent,
-            background,
-            pop,
-        } => caption(
-            scene,
-            fonts,
-            layouts,
-            transform,
-            CaptionStyle {
-                center: *center,
-                width: *width,
-                size: *size,
-                color: *c,
-                accent: *accent,
-                background: *background,
-                pop: *pop,
-            },
-            words,
-            *highlight,
-        ),
+        Shape::Caption(c) => caption(scene, fonts, layouts, transform, c),
         Shape::Kinetic(text) => kinetic(scene, fonts, layouts, transform, text),
         Shape::Lottie {
             lottie,
@@ -567,43 +542,36 @@ fn draw(scene: &mut Scene, ink: &mut Ink, transform: Affine, shape: &Shape) {
     }
 }
 
-struct CaptionStyle {
-    center: [f32; 2],
-    width: f32,
-    size: f32,
-    color: Rgba,
-    accent: Rgba,
-    background: Rgba,
-    pop: f32,
-}
-
-/// Lays caption words out in centered lines no wider than the style's width and draws them on
-/// one rounded box, the highlighted word on an accent pill.
-#[allow(clippy::too_many_arguments)]
+/// Lays caption words out in centered lines no wider than the caption's width and draws them
+/// on its box, in its outline or bare, the word being said standing out as its emphasis says.
 fn caption(
     scene: &mut Scene,
     fonts: &mut FontContext,
     layouts: &mut LayoutContext<()>,
     transform: Affine,
-    style: CaptionStyle,
-    words: &[String],
-    highlight: Option<usize>,
+    c: &Caption,
 ) {
-    let size = style.size;
-    // A word space, widened so a highlight pill keeps clear of its neighbours.
-    let space = measure(fonts, layouts, "a b", size, Font::Sans).0
-        - measure(fonts, layouts, "ab", size, Font::Sans).0
-        + size * 0.16;
-    let widths: Vec<f32> = words
+    let (size, font) = (c.size, c.font);
+    // A word space, widened so a highlight pill, or an outline, keeps clear of its neighbours.
+    let outlined = if c.back == CaptionBack::Outline {
+        0.12
+    } else {
+        0.0
+    };
+    let space = measure(fonts, layouts, "a b", size, font).0
+        - measure(fonts, layouts, "ab", size, font).0
+        + size * (0.16 + outlined);
+    let widths: Vec<f32> = c
+        .words
         .iter()
-        .map(|w| measure(fonts, layouts, w, size, Font::Sans).0)
+        .map(|w| measure(fonts, layouts, w, size, font).0)
         .collect();
     let mut lines: Vec<(std::ops::Range<usize>, f32)> = Vec::new();
     let mut start = 0;
     let mut line_width = 0.0;
     for (i, w) in widths.iter().enumerate() {
         let wider = line_width + space + w;
-        if i > start && wider > style.width {
+        if i > start && wider > c.width {
             lines.push((start..i, line_width));
             start = i;
             line_width = *w;
@@ -611,41 +579,44 @@ fn caption(
             line_width = if i == start { *w } else { wider };
         }
     }
-    if start < words.len() {
-        lines.push((start..words.len(), line_width));
+    if start < c.words.len() {
+        lines.push((start..c.words.len(), line_width));
     }
     let line_height = size * 1.3;
     let (pad_x, pad_y) = (size * 0.6, size * 0.35);
     let widest = lines.iter().map(|(_, w)| *w).fold(0.0, f32::max);
     let height = line_height * lines.len() as f32;
-    let top = style.center[1] - height / 2.0;
-    let boxed = Rect::new(
-        style.center[0] - widest / 2.0 - pad_x,
-        top - pad_y,
-        style.center[0] + widest / 2.0 + pad_x,
-        top + height + pad_y,
-    );
-    if style.background.0[3] > 0.0 {
+    let top = c.center[1] - height / 2.0;
+    if c.back == CaptionBack::Box && c.background.0[3] > 0.0 {
+        let boxed = Rect::new(
+            c.center[0] - widest / 2.0 - pad_x,
+            top - pad_y,
+            c.center[0] + widest / 2.0 + pad_x,
+            top + height + pad_y,
+        );
         scene.fill(
             Fill::NonZero,
             transform,
-            color(style.background),
+            color(c.background),
             None,
             &RoundedRect::from_rect(rect(boxed), f64::from(size * 0.35)),
         );
     }
+    let opaque = |ink: Rgba| Rgba([ink.0[0], ink.0[1], ink.0[2], 1.0]);
+    let outline = Stroke::new(f64::from(size * 0.16)).with_join(vello::kurbo::Join::Round);
     for (row, (range, line_width)) in lines.into_iter().enumerate() {
-        let mut x = style.center[0] - line_width / 2.0;
+        let mut x = c.center[0] - line_width / 2.0;
         let y = top + row as f32 * line_height + (line_height - size * 1.2) / 2.0;
         for i in range {
-            let lit = highlight == Some(i);
-            let at = if lit {
+            let lit = c.highlight == Some(i);
+            let popping = lit && matches!(c.emphasis, Emphasis::Pill | Emphasis::Color);
+            let at = if popping {
                 let middle = (f64::from(x + widths[i] / 2.0), f64::from(y + size * 0.6));
-                transform * Affine::scale_about(f64::from(style.pop), middle)
+                transform * Affine::scale_about(f64::from(c.pop), middle)
             } else {
                 transform
             };
-            if lit {
+            if lit && c.emphasis == Emphasis::Pill {
                 let pill = Rect::new(
                     x - size * 0.14,
                     y - size * 0.02,
@@ -655,23 +626,47 @@ fn caption(
                 scene.fill(
                     Fill::NonZero,
                     at,
-                    color(style.accent),
+                    color(c.accent),
                     None,
                     &RoundedRect::from_rect(rect(pill), f64::from(size * 0.22)),
                 );
             }
-            let ink = if lit {
-                Rgba([
-                    style.background.0[0],
-                    style.background.0[1],
-                    style.background.0[2],
-                    1.0,
-                ])
-            } else {
-                style.color
+            let said = c.highlight.is_some_and(|h| i <= h);
+            let ink = match c.emphasis {
+                Emphasis::Pill if lit => opaque(c.background),
+                Emphasis::Color if lit => c.accent,
+                Emphasis::Fill if said => c.accent,
+                _ => c.color,
             };
             let at = at * Affine::translate((f64::from(x), f64::from(y)));
-            glyphs(scene, fonts, layouts, at, &words[i], size, Font::Sans, ink);
+            match c.back {
+                CaptionBack::Outline => glyphs_styled(
+                    scene,
+                    fonts,
+                    layouts,
+                    at,
+                    &c.words[i],
+                    (size, font),
+                    opaque(c.background),
+                    Some(&outline),
+                ),
+                CaptionBack::None => {
+                    let drop = Affine::translate((0.0, f64::from(size * 0.05)));
+                    let shadow = Rgba([0.0, 0.0, 0.0, 0.55]);
+                    glyphs(
+                        scene,
+                        fonts,
+                        layouts,
+                        drop * at,
+                        &c.words[i],
+                        size,
+                        font,
+                        shadow,
+                    );
+                }
+                CaptionBack::Box => {}
+            }
+            glyphs(scene, fonts, layouts, at, &c.words[i], size, font, ink);
             x += widths[i] + space;
         }
     }
@@ -904,6 +899,30 @@ fn glyphs(
     font: Font,
     c: Rgba,
 ) {
+    glyphs_styled(
+        scene,
+        fonts,
+        layouts,
+        transform,
+        text,
+        (size, font),
+        c,
+        None,
+    );
+}
+
+/// [`glyphs`] filled, or stroked along their outlines with `stroke`.
+#[allow(clippy::too_many_arguments)]
+fn glyphs_styled(
+    scene: &mut Scene,
+    fonts: &mut FontContext,
+    layouts: &mut LayoutContext<()>,
+    transform: Affine,
+    text: &str,
+    (size, font): (f32, Font),
+    c: Rgba,
+    stroke: Option<&Stroke>,
+) {
     let layout = text_layout(fonts, layouts, text, size, font);
     for line in layout.lines() {
         for item in line.items() {
@@ -916,20 +935,21 @@ fn glyphs(
                 .iter()
                 .map(|c| c.to_bits())
                 .collect();
-            scene
+            let draw = scene
                 .draw_glyphs(glyph_run.font())
                 .font_size(glyph_run.font_size())
                 .normalized_coords(&coords)
                 .transform(transform)
-                .brush(color(c))
-                .draw(
-                    Fill::NonZero,
-                    run.positioned_glyphs().map(|g| vello::Glyph {
-                        id: g.id,
-                        x: g.x,
-                        y: g.y,
-                    }),
-                );
+                .brush(color(c));
+            let placed = run.positioned_glyphs().map(|g| vello::Glyph {
+                id: g.id,
+                x: g.x,
+                y: g.y,
+            });
+            match stroke {
+                Some(stroke) => draw.draw(stroke, placed),
+                None => draw.draw(Fill::NonZero, placed),
+            }
         }
     }
 }

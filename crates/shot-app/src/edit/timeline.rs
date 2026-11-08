@@ -1484,11 +1484,13 @@ fn toolbar(
                 seconds(range.duration())
             )))
             .when(kept, |bar| {
-                bar.child(tool("tool-cut", "cut", "Cut", "⌫").on_click(cx.listener(
-                    |this, _, window, cx| {
-                        this.delete_selection(&super::DeleteSelection, window, cx)
-                    },
-                )))
+                bar.child(
+                    tool("tool-cut", "cut", "Cut", super::DELETE_KEYS).on_click(cx.listener(
+                        |this, _, window, cx| {
+                            this.delete_selection(&super::DeleteSelection, window, cx)
+                        },
+                    )),
+                )
             })
             .when(removed, |bar| {
                 bar.child(
@@ -1525,7 +1527,7 @@ fn toolbar(
                     .child(div().w(px(8.)));
             }
             bar.child(
-                tool("tool-remove", "close", "Remove", "⌫").on_click(cx.listener(
+                tool("tool-remove", "close", "Remove", super::DELETE_KEYS).on_click(cx.listener(
                     |this, _, _, cx| {
                         this.remove_picked(cx);
                     },
@@ -1572,7 +1574,7 @@ fn toolbar(
         None => bar
             .gap(px(18.))
             .child(label("Drag across the lanes to select words, right-click for more").truncate())
-            .child(hint("⌫", "Cut"))
+            .child(hint(super::DELETE_KEYS, "Cut"))
             .child(hint("Z", "Zoom"))
             .child(hint("S", "Sound"))
             .child(hint("1–4", "Layout"))
@@ -1675,7 +1677,7 @@ fn music_tools(this: &EditScreen, bar: Div, cx: &mut Context<EditScreen>) -> Div
     .children(beds)
     .child(choose)
     .child(
-        tool("tool-remove-music", "close", "Remove", "⌫").on_click(cx.listener(
+        tool("tool-remove-music", "close", "Remove", super::DELETE_KEYS).on_click(cx.listener(
             |this, _, _, cx| {
                 this.remove_picked(cx);
             },

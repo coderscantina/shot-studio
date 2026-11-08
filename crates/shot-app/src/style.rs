@@ -255,11 +255,15 @@ pub fn layer(format: &Format, base: &Format, current: &FormatLayer) -> FormatLay
             .collect::<Vec<_>>()
     };
     let effects = format.effects();
+    let caption_look = format.caption_look.diff(&base.caption_look);
     FormatLayer {
         prompter: differs(format.prompter, base.prompter),
         pacing: differs(format.pacing, base.pacing),
         layouts: differs(layouts(format), layouts(base)),
-        captions: differs(format.captions, base.captions),
+        // A look needs its node, which names the style.
+        captions: (format.captions != base.captions || !caption_look.is_empty())
+            .then_some(format.captions),
+        caption_look,
         auto_cut: differs(format.auto_cut.clone(), base.auto_cut.clone()),
         auto_zoom: (format.auto_zoom != base.auto_zoom).then(|| {
             format.auto_zoom.clone().unwrap_or_else(|| AutoZoom {

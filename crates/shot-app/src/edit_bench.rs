@@ -80,6 +80,7 @@ pub fn run(dir: &std::path::Path, options: &BenchOptions) -> Result<bool, String
             dir: dir.to_owned(),
             effects: project.format.effects(),
             theme: folder.theme.clone(),
+            captions: None,
         },
         0,
     );
@@ -472,16 +473,21 @@ fn launch_reel(t: Micros, canvas: Canvas, frame: &mut Frame) {
     if (start..start + 4 * 700_000).contains(&local.0) {
         let index = ((local.0 - start) / 700_000) as usize;
         let since = Micros(local.0 - start - index as u64 * 700_000);
-        drawing.over.push(Shape::Caption {
-            center: [canvas.width as f32 / 2.0, canvas.height as f32 * 0.88],
-            width: canvas.width as f32 * 0.8,
-            words: words.iter().map(|w| (*w).to_owned()).collect(),
-            highlight: Some(index),
-            size: 96.0 * s,
-            color: Rgba::hex(0xFFFFFF, 1.0),
-            accent: Rgba::hex(0xC8F25A, 1.0),
-            background: Rgba::hex(0x0A0B0D, 0.78),
-            pop: kinetic::word_pop(since),
-        });
+        drawing
+            .over
+            .push(Shape::Caption(Box::new(shot_render::drawing::Caption {
+                center: [canvas.width as f32 / 2.0, canvas.height as f32 * 0.88],
+                width: canvas.width as f32 * 0.8,
+                words: words.iter().map(|w| (*w).to_owned()).collect(),
+                highlight: Some(index),
+                size: 96.0 * s,
+                font: shot_render::drawing::Font::Sans,
+                color: Rgba::hex(0xFFFFFF, 1.0),
+                accent: Rgba::hex(0xC8F25A, 1.0),
+                background: Rgba::hex(0x0A0B0D, 0.78),
+                back: shot_core::CaptionBack::Box,
+                emphasis: shot_core::Emphasis::Pill,
+                pop: kinetic::word_pop(since),
+            })));
     }
 }
