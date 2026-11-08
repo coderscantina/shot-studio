@@ -19,7 +19,7 @@ use crate::preview::{PlaybackStats, Preview};
 const WARM_UP: Duration = Duration::from_secs(1);
 
 /// The acceptance limit for seek p95.
-const SEEK_P95_LIMIT: Duration = Duration::from_millis(100);
+pub(crate) const SEEK_P95_LIMIT: Duration = Duration::from_millis(100);
 /// Playback may drop one frame per this much played time (decision 0012).
 const SECONDS_PER_ALLOWED_DROP: f64 = 300.0;
 
@@ -30,6 +30,10 @@ pub struct BenchOptions {
     pub seconds: u64,
     pub seeks: usize,
     pub runs: usize,
+    /// For `--bench-edit`: draw the glass and motion blur reel over every frame.
+    pub glass: bool,
+    /// Bench the Edit screen's engine on a video folder, see `edit_bench`.
+    pub edit: bool,
 }
 
 enum Phase {
@@ -460,7 +464,7 @@ fn print_run(number: usize, runs: usize, run: &Run, preview: &Preview) {
 }
 
 /// The nearest-rank percentile, zero for no values.
-fn percentile(mut values: Vec<Duration>, p: f64) -> Duration {
+pub(crate) fn percentile(mut values: Vec<Duration>, p: f64) -> Duration {
     if values.is_empty() {
         return Duration::ZERO;
     }
@@ -469,12 +473,12 @@ fn percentile(mut values: Vec<Duration>, p: f64) -> Duration {
     values[rank - 1]
 }
 
-fn ms(duration: Duration) -> String {
+pub(crate) fn ms(duration: Duration) -> String {
     format!("{:.1} ms", duration.as_secs_f64() * 1000.0)
 }
 
 /// Uniform in [0, 1). The bench starts from a fixed seed, so every bench seeks to the same places.
-fn next_random(state: &mut u64) -> f64 {
+pub(crate) fn next_random(state: &mut u64) -> f64 {
     *state = state
         .wrapping_mul(6_364_136_223_846_793_005)
         .wrapping_add(1_442_695_040_888_963_407);
@@ -489,7 +493,7 @@ fn fourcc(code: u32) -> String {
 }
 
 /// Dropped frames allowed over `played` seconds of playback: one per five minutes, rounded.
-fn allowed_drops(played: f64) -> u64 {
+pub(crate) fn allowed_drops(played: f64) -> u64 {
     (played / SECONDS_PER_ALLOWED_DROP).round() as u64
 }
 

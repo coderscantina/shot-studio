@@ -13,11 +13,11 @@ use std::time::Duration;
 
 use objc2_core_foundation::CFRetained;
 use objc2_core_video::CVPixelBuffer;
-use shot_core::Effects;
+use shot_core::{Effects, Micros};
 use shot_media::videotoolbox::Decoder;
 use shot_render::assets::Assets;
 use shot_render::cursor::FrameCursor;
-use shot_render::frame::{Shot, compose};
+use shot_render::frame::{Frame, Shot, compose};
 use shot_render::graph::Renderer;
 use shot_render::layout::{Canvas, LayoutSpec, Source, Sources};
 use shot_render::plan::frame_time;
@@ -43,6 +43,9 @@ pub struct PreviewFrame {
 // a buffer once it is queued, so handing it to the UI thread is sound.
 unsafe impl Send for PreviewFrame {}
 
+/// Adds drawing to a composed frame, given its media time and the canvas.
+pub type Decoration = fn(Micros, Canvas, &mut Frame);
+
 /// What one preview plays: where each output frame comes from, where the takes live, and the
 /// format's effects.
 pub struct Plan {
@@ -62,6 +65,8 @@ struct State {
     /// A paused preview still owes the frame at `position`.
     owed: bool,
     queue: VecDeque<PreviewFrame>,
+    /// Draws on top of every composed frame. Only the bench sets it.
+    decoration: Option<Decoration>,
     error: Option<String>,
     quit: bool,
 }
@@ -104,6 +109,15 @@ impl Engine {
         let mut state = self.shared.lock();
         state.plan = Some(Arc::new(plan));
         state.error = None;
+        Self::restart(&mut state, frame);
+        self.shared.changed.notify_all();
+    }
+
+    /// Draws `decoration` on every frame from the next render on.
+    pub fn set_decoration(&self, decoration: Decoration) {
+        let mut state = self.shared.lock();
+        state.decoration = Some(decoration);
+        let frame = state.position;
         Self::restart(&mut state, frame);
         self.shared.changed.notify_all();
     }
@@ -173,7 +187,7 @@ fn render_loop(shared: &Shared) {
     // Event logs and snapshots, read again for each new plan.
     let mut assets: Option<(Arc<Plan>, Assets)> = None;
     loop {
-        let (plan, frame, generation) = {
+        let (plan, frame, generation, decoration) = {
             let mut state = shared.lock();
             loop {
                 if state.quit {
@@ -190,7 +204,7 @@ fn render_loop(shared: &Shared) {
             }
             state.owed = false;
             let plan = state.plan.clone().expect("checked above");
-            (plan, state.position, state.generation)
+            (plan, state.position, state.generation, state.decoration)
         };
 
         let rendered = (|| {
@@ -212,7 +226,15 @@ fn render_loop(shared: &Shared) {
                     &mut assets.insert((plan.clone(), Assets::new(dir))).1
                 }
             };
-            render(&plan, frame, renderer, pool, &mut tracks, assets)
+            render(
+                &plan,
+                frame,
+                decoration,
+                renderer,
+                pool,
+                &mut tracks,
+                assets,
+            )
         })();
 
         let mut state = shared.lock();
@@ -233,6 +255,7 @@ fn render_loop(shared: &Shared) {
 fn render(
     plan: &Plan,
     frame: u64,
+    decoration: Option<Decoration>,
     renderer: &Renderer,
     pool: &BufferPool,
     tracks: &mut HashMap<PathBuf, FrameCursor>,
@@ -290,6 +313,9 @@ fn render(
         time: frame_time(source_frame, FPS),
     };
     let mut drawn = compose(&shot, &look, CANVAS, sizes).map_err(|e| e.to_string())?;
+    if let Some(decorate) = decoration {
+        decorate(shot.time, CANVAS, &mut drawn);
+    }
     // A b-roll clip shows in the screen layer instead of the take's screen.
     let cutaway = match &drawn.cutaway {
         Some(cutaway) => {

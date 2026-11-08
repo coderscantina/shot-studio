@@ -7,6 +7,9 @@
 //! - `--bench`: play, then seek at random, for several runs, print the measurements and a PASS or
 //!   FAIL line, exit 0 on pass and 1 on fail. A run passes when no frame is dropped, late or
 //!   missing, every seek shows its exact frame and seek p95 stays under 100 ms.
+//! - `--bench-edit <video-folder>`: the same for the Edit screen's engine, headless, on the
+//!   folder's edited timeline through the render graph. `--glass` adds a glass and motion blur
+//!   reel on every frame.
 //! - `--runs N`: bench runs, default 5.
 //! - `--seconds N`: playback per run, default 60.
 //! - `--seeks N`: random seeks per run, default 60.
@@ -18,6 +21,7 @@ mod bench;
 mod board;
 mod cut;
 mod edit;
+mod edit_bench;
 mod engine;
 mod folder;
 mod metrics;
@@ -45,11 +49,21 @@ fn main() -> ExitCode {
         Ok(options) => options,
         Err(message) => {
             eprintln!(
-                "{message}\nusage: shot-app <video-folder>\n       shot-app [--bench] [--runs N] [--seconds N] [--seeks N] [--zoom] [--wall-clock] <video.mp4>"
+                "{message}\nusage: shot-app <video-folder>\n       shot-app [--bench] [--bench-edit] [--glass] [--runs N] [--seconds N] [--seeks N] [--zoom] [--wall-clock] <video.mp4>"
             );
             return ExitCode::FAILURE;
         }
     };
+    if let Some(bench) = options.bench.as_ref().filter(|bench| bench.edit) {
+        return match edit_bench::run(&options.video, bench) {
+            Ok(true) => ExitCode::SUCCESS,
+            Ok(false) => ExitCode::FAILURE,
+            Err(error) => {
+                eprintln!("{}: {error}", options.video.display());
+                ExitCode::FAILURE
+            }
+        };
+    }
     if options.video.is_dir() && options.bench.is_none() {
         let dir = options.video;
         gpui_platform::application()
@@ -71,6 +85,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Options, String> {
     let mut zoom = 1.0;
     let mut display_lock = true;
     let mut bench = false;
+    let mut edit = false;
+    let mut glass = false;
     let mut seconds = 60;
     let mut seeks = 60;
     let mut runs = 5;
@@ -83,6 +99,11 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Options, String> {
         };
         match arg.as_str() {
             "--bench" => bench = true,
+            "--bench-edit" => {
+                bench = true;
+                edit = true;
+            }
+            "--glass" => glass = true,
             "--zoom" => zoom = 2.0,
             "--wall-clock" => display_lock = false,
             "--seconds" => seconds = number("--seconds")?,
@@ -100,6 +121,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Options, String> {
             seconds,
             seeks,
             runs,
+            edit,
+            glass,
         }),
     })
 }
