@@ -1,15 +1,19 @@
 //! The app window for one video folder: the title bar with the Record, Cut and Edit screens, and
-//! the Board and Script screens when the folder is a video of a channel repo.
+//! the Board and Script screens when the folder is a video of a channel repo. A video outside a
+//! channel keeps a quiet Board entry that says why there is no board and offers to move the
+//! video into a channel or open one.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use gpui::{
-    App, Bounds, Context, Entity, Focusable, FontWeight, KeyBinding, Subscription, TitlebarOptions,
-    Window, WindowBounds, WindowOptions, actions, div, point, prelude::*, px, size,
+    AnyWindowHandle, App, Bounds, Context, Entity, Focusable, FontWeight, Global, KeyBinding,
+    PathPromptOptions, SharedString, Subscription, TitlebarOptions, WeakEntity, Window,
+    WindowBounds, WindowOptions, actions, div, point, prelude::*, px, size,
 };
 use gpui_component::Root;
+use shot_core::Status;
 
-use crate::board::BoardScreen;
+use crate::board::{self, BoardScreen, ShowCurrent, channel};
 use crate::cut::{self, ContinueToEdit, CutScreen};
 use crate::edit::{self, EditScreen};
 use crate::folder::VideoFolder;
@@ -17,16 +21,30 @@ use crate::record::{self, RecordScreen, Recorded};
 use crate::script::{self, ScriptScreen};
 use crate::ship::{self, ShipScreen};
 use crate::theme::*;
-use crate::ui::icon;
+use crate::ui::{ActionLook, alert, icon, mono, pane, proposal_action};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Screen {
+/// A screen of the studio window.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Screen {
     Board,
     Script,
     Record,
     Cut,
     Edit,
     Ship,
+}
+
+impl Screen {
+    /// The screen of the next step of a video in `status`.
+    pub fn for_status(status: Status) -> Self {
+        match status {
+            Status::Ideas | Status::Scripting => Self::Script,
+            Status::Ready => Self::Record,
+            Status::Recorded => Self::Cut,
+            Status::Editing => Self::Edit,
+            Status::Shipped => Self::Ship,
+        }
+    }
 }
 
 pub struct Studio {
@@ -37,9 +55,30 @@ pub struct Studio {
     edit: Entity<EditScreen>,
     ship: Entity<ShipScreen>,
     /// Present when the video folder sits in a channel repo, `<repo>/videos/<slug>`.
-    planning: Option<(Entity<BoardScreen>, Entity<ScriptScreen>)>,
-    _recorded: Subscription,
-    _continue: Subscription,
+    planning: Option<Planning>,
+    /// Why the last attempt to move the video into a channel or open one failed.
+    channel_error: Option<SharedString>,
+    _subscriptions: Vec<Subscription>,
+}
+
+/// The Board and Script screens of a video in a channel.
+struct Planning {
+    board: Entity<BoardScreen>,
+    script: Entity<ScriptScreen>,
+}
+
+/// The open studio windows by video folder.
+#[derive(Default)]
+struct Studios(Vec<(PathBuf, AnyWindowHandle, WeakEntity<Studio>)>);
+
+impl Global for Studios {}
+
+/// The path a window is known by: canonical where it exists, so `/tmp` and `/private/tmp` or a
+/// trailing slash open the same window.
+pub fn key(dir: &Path) -> PathBuf {
+    dir.canonicalize()
+        .or_else(|_| std::path::absolute(dir))
+        .unwrap_or_else(|_| dir.to_owned())
 }
 
 actions!(studio, [Undo, Redo]);
@@ -56,36 +95,80 @@ pub fn bind_keys(cx: &mut App) {
     cut::bind_keys(cx);
     script::bind_keys(cx);
     ship::bind_keys(cx);
+    board::bind_keys(cx);
 }
 
 /// Opens a window on the video folder at `dir` and adds it to the recent videos. Needs
 /// [`crate::theme::init`] and [`bind_keys`].
 pub fn open(dir: &Path, cx: &mut App) -> Result<(), String> {
-    let folder = VideoFolder::open(dir)?;
+    open_at(dir, None, cx)
+}
+
+/// Like [`open`], on `screen` instead of Edit. A folder that is open already comes to the front
+/// and shows `screen`. A video of a channel gets the files it lacks from its branch first (see
+/// [`channel::prepare`]).
+pub fn open_at(dir: &Path, screen: Option<Screen>, cx: &mut App) -> Result<(), String> {
+    let dir = key(dir);
+    let open = cx.try_global::<Studios>().and_then(|studios| {
+        studios
+            .0
+            .iter()
+            .find(|(d, ..)| *d == dir)
+            .and_then(|(_, window, studio)| Some((*window, studio.upgrade()?)))
+    });
+    if let Some((window, studio)) = open {
+        let shown = window.update(cx, |_, window, cx| {
+            window.activate_window();
+            if let Some(screen) = screen {
+                studio.update(cx, |studio, cx| studio.show(screen, window, cx));
+            }
+        });
+        if shown.is_ok() {
+            return Ok(());
+        }
+    }
+    // A card of a channel may have its files on its branch only: get them on disk first.
+    if let Some((repo, slug)) = channel::locate(&dir) {
+        channel::prepare(&repo, &slug)?;
+    }
+    let folder = VideoFolder::open(&dir)?;
     let bounds = Bounds::centered(None, size(px(1600.), px(1000.)), cx);
-    cx.open_window(
-        WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_min_size: Some(size(px(1280.), px(800.))),
-            titlebar: Some(TitlebarOptions {
-                title: Some(folder.project.video.title.clone().into()),
-                appears_transparent: true,
-                traffic_light_position: Some(point(px(16.), px(16.))),
-            }),
-            // The preview plays at 60 fps, also while another window has focus.
-            inactive_frame_interval: None,
-            low_power_frame_interval: None,
-            thermal_frame_interval: None,
-            ..Default::default()
-        },
-        |window, cx| {
-            let folder = cx.new(|_| folder);
-            let studio = cx.new(|cx| Studio::new(folder, window, cx));
-            cx.new(|cx| Root::new(studio, window, cx))
-        },
-    )
-    .map_err(|e| e.to_string())?;
-    crate::welcome::remember(dir);
+    let mut opened = None;
+    let window = cx
+        .open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_min_size: Some(size(px(1280.), px(800.))),
+                titlebar: Some(TitlebarOptions {
+                    title: Some(folder.project.video.title.clone().into()),
+                    appears_transparent: true,
+                    traffic_light_position: Some(point(px(16.), px(16.))),
+                }),
+                // The preview plays at 60 fps, also while another window has focus.
+                inactive_frame_interval: None,
+                low_power_frame_interval: None,
+                thermal_frame_interval: None,
+                ..Default::default()
+            },
+            |window, cx| {
+                let folder = cx.new(|_| folder);
+                let studio = cx.new(|cx| Studio::new(folder, window, cx));
+                if let Some(screen) = screen {
+                    studio.update(cx, |studio, cx| studio.show(screen, window, cx));
+                }
+                opened = Some(studio.downgrade());
+                cx.new(|cx| Root::new(studio, window, cx))
+            },
+        )
+        .map_err(|e| e.to_string())?;
+    if let Some(studio) = opened {
+        let studios = cx.default_global::<Studios>();
+        studios
+            .0
+            .retain(|(d, _, s)| *d != dir && s.upgrade().is_some());
+        studios.0.push((dir.clone(), window.into(), studio));
+    }
+    crate::welcome::remember(&dir);
     cx.activate(true);
     Ok(())
 }
@@ -105,13 +188,20 @@ impl Studio {
                 this.show(Screen::Edit, window, cx);
             });
         window.focus(&edit.focus_handle(cx), cx);
-        let planning = channel(&folder.read(cx).dir).map(|(repo, slug)| {
+        let mut subscriptions = vec![recorded, continue_to_edit];
+        let planning = channel::locate(&folder.read(cx).dir).map(|(repo, slug)| {
             let full_script =
                 folder.read(cx).project.format.prompter == shot_core::PrompterMode::FullScript;
-            (
-                cx.new(|cx| BoardScreen::new(repo.clone(), slug.clone(), cx)),
-                cx.new(|cx| ScriptScreen::new(repo, slug, full_script, window, cx)),
-            )
+            let board = cx.new(|cx| BoardScreen::new(repo.clone(), Some(slug.clone()), cx));
+            subscriptions.push(cx.subscribe_in(
+                &board,
+                window,
+                |this, _, ShowCurrent(screen), window, cx| this.show(*screen, window, cx),
+            ));
+            Planning {
+                board,
+                script: cx.new(|cx| ScriptScreen::new(repo, slug, full_script, window, cx)),
+            }
         });
         Self {
             folder,
@@ -121,16 +211,24 @@ impl Studio {
             edit,
             ship,
             planning,
-            _recorded: recorded,
-            _continue: continue_to_edit,
+            channel_error: None,
+            _subscriptions: subscriptions,
         }
     }
 
     fn show(&mut self, screen: Screen, window: &mut Window, cx: &mut Context<Self>) {
+        if self.record.read(cx).is_recording() {
+            return;
+        }
+        // A video outside a channel has no Script screen: its next step is in Edit.
+        let screen = match (screen, &self.planning) {
+            (Screen::Script, None) => Screen::Edit,
+            _ => screen,
+        };
         self.screen = screen;
         match screen {
             Screen::Board | Screen::Script => {
-                if let Some((board, script)) = &self.planning {
+                if let Some(Planning { board, script, .. }) = &self.planning {
                     board.update(cx, |board, _| board.reload());
                     script.update(cx, |script, _| script.reload());
                     let focus = match screen {
@@ -166,6 +264,182 @@ impl Studio {
         });
         self.edit
             .update(cx, |edit, cx| edit.stepped_history(result.err(), cx));
+    }
+
+    /// The Board screen of a video outside a channel: why there is no board, and the way into
+    /// one.
+    fn no_channel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let dir = self.folder.read(cx).dir.clone();
+        let parent = dir.parent().map(Path::to_owned).unwrap_or_default();
+        div().size_full().p(px(8.)).pt(px(0.)).child(
+            pane()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .w(px(560.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(14.))
+                        .child(
+                            div()
+                                .text_size(px(21.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(STRONG)
+                                .child("This video is not in a channel"),
+                        )
+                        .child(div().text_color(BODY).line_height(px(23.)).child(
+                            "The board plans the videos of a channel: a git repo that keeps each \
+                             video in videos/<name>, as a card from idea to shipped, with the \
+                             Script screen and Claude's planning next to it. A folder on its own \
+                             records, cuts, edits and ships just the same.",
+                        ))
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(6.))
+                                .text_size(TEXT_SM)
+                                .text_color(MUTED)
+                                .child("This folder:")
+                                .child(
+                                    mono(crate::welcome::shown_path(&dir))
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_color(KBD_TEXT),
+                                ),
+                        )
+                        .when_some(self.channel_error.clone(), |this, error| {
+                            this.child(alert(error))
+                        })
+                        .child(
+                            div()
+                                .pt(px(6.))
+                                .flex()
+                                .gap(px(8.))
+                                .child(
+                                    proposal_action(
+                                        "move-into-channel",
+                                        "Move into a channel…",
+                                        Some("board"),
+                                        None,
+                                        ActionLook::Plain,
+                                    )
+                                    .on_click(cx.listener(
+                                        |this, _, window, cx| this.move_into_channel(window, cx),
+                                    )),
+                                )
+                                .child(
+                                    proposal_action(
+                                        "open-channel",
+                                        "Open a channel…",
+                                        None,
+                                        None,
+                                        ActionLook::Quiet,
+                                    )
+                                    .on_click(cx.listener(
+                                        |this, _, _, cx| {
+                                            this.channel_error = None;
+                                            let done = this.reporter(cx);
+                                            crate::welcome::pick_channel(done, cx);
+                                        },
+                                    )),
+                                )
+                                .child(
+                                    proposal_action(
+                                        "new-channel",
+                                        "Start a channel…",
+                                        None,
+                                        None,
+                                        ActionLook::Quiet,
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| {
+                                            this.channel_error = None;
+                                            let done = this.reporter(cx);
+                                            crate::welcome::new_channel(&parent, done, cx);
+                                        },
+                                    )),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_size(TEXT_SM)
+                                .text_color(MUTED)
+                                .line_height(px(20.))
+                                .child(
+                                    "Moving puts this folder in the channel's videos/ folder and \
+                                     adds it to the board. Recordings move along and stay out of \
+                                     git.",
+                                ),
+                        ),
+                ),
+        )
+    }
+
+    /// Asks for a channel, moves this video into it and opens it again there, on the Board.
+    fn move_into_channel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.channel_error = None;
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Move into this channel".into()),
+        });
+        let window = window.window_handle();
+        cx.spawn(async move |this, cx| {
+            let Some(repo) = picked
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .flatten()
+                .and_then(|paths| paths.into_iter().next())
+            else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                if this.record.read(cx).is_recording() {
+                    return;
+                }
+                let dir = this.folder.read(cx).dir.clone();
+                match channel::move_into(&dir, &repo) {
+                    Ok(moved) => {
+                        // The old folder is gone: this window closes and the video opens again
+                        // from its new place.
+                        window
+                            .update(cx, |_, window, _| window.remove_window())
+                            .ok();
+                        if let Err(error) = open_at(&moved, Some(Screen::Board), cx) {
+                            crate::welcome::show_error(error, cx);
+                        }
+                    }
+                    Err(error) => this.report(error, cx),
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Where a channel picker started here reports why it failed.
+    fn reporter(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> impl FnOnce(Result<(), String>, &mut App) + use<> {
+        let studio = cx.weak_entity();
+        move |result, cx| {
+            if let Err(error) = result {
+                studio
+                    .update(cx, |studio, cx| studio.report(error, cx))
+                    .ok();
+            }
+        }
+    }
+
+    fn report(&mut self, error: String, cx: &mut Context<Self>) {
+        self.channel_error = Some(error.into());
+        cx.notify();
     }
 
     /// `compact` below 1500 px wide, where the workspace switcher shows icons only.
@@ -207,6 +481,13 @@ impl Studio {
         let nav =
             |id: &'static str, name: &'static str, icon_name: &'static str, screen: Screen| {
                 let on = self.screen == screen;
+                // Without a channel the Board entry stays quiet: it only explains.
+                let quiet = screen == Screen::Board && self.planning.is_none();
+                let color = match (on, quiet) {
+                    (true, _) => STRONG,
+                    (false, true) => FAINT,
+                    (false, false) => MUTED,
+                };
                 div()
                     .id(id)
                     .flex()
@@ -217,12 +498,12 @@ impl Studio {
                     .rounded(RADIUS_SM)
                     .text_size(px(14.))
                     .font_weight(FontWeight::MEDIUM)
-                    .text_color(if on { STRONG } else { MUTED })
+                    .text_color(color)
                     .when(on, |this| this.bg(RAISED))
                     .when(!on && !recording, |this| {
                         this.cursor_pointer().hover(|s| s.text_color(TEXT))
                     })
-                    .child(icon(icon_name, ICON, if on { STRONG } else { MUTED }))
+                    .child(icon(icon_name, ICON, color))
                     .child(name)
                     .when(!recording, |this| {
                         this.on_click(
@@ -259,9 +540,9 @@ impl Studio {
                 div()
                     .flex()
                     .gap(px(2.))
+                    .child(nav("nav-board", "Board", "board", Screen::Board))
                     .when(self.planning.is_some(), |this| {
-                        this.child(nav("nav-board", "Board", "board", Screen::Board))
-                            .child(nav("nav-script", "Script", "script", Screen::Script))
+                        this.child(nav("nav-script", "Script", "script", Screen::Script))
                     })
                     .child(nav("nav-record", "Record", "record", Screen::Record))
                     .child(nav("nav-cut", "Cut", "cut", Screen::Cut))
@@ -284,9 +565,9 @@ impl Render for Studio {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let compact = window.viewport_size().width < px(1500.);
         let screen = match (self.screen, &self.planning) {
-            (Screen::Board, Some((board, _))) => board.clone().into_any_element(),
-            (Screen::Script, Some((_, script))) => script.clone().into_any_element(),
-            (Screen::Board | Screen::Script, None) => div().into_any_element(),
+            (Screen::Board, Some(planning)) => planning.board.clone().into_any_element(),
+            (Screen::Script, Some(planning)) => planning.script.clone().into_any_element(),
+            (Screen::Board | Screen::Script, None) => self.no_channel(cx).into_any_element(),
             (Screen::Record, _) => self.record.clone().into_any_element(),
             (Screen::Cut, _) => self.cut.clone().into_any_element(),
             (Screen::Edit, _) => self.edit.clone().into_any_element(),
@@ -309,14 +590,6 @@ impl Render for Studio {
 
 /// The channel repo and slug of a video folder at `<repo>/videos/<slug>`, if the repo opens as
 /// a board.
-pub(crate) fn channel(dir: &Path) -> Option<(std::path::PathBuf, String)> {
-    let dir = std::path::absolute(dir).ok()?;
-    let slug = dir.file_name()?.to_str()?.to_owned();
-    let videos = dir.parent()?;
-    if videos.file_name()? != "videos" {
-        return None;
-    }
-    let repo = videos.parent()?.to_owned();
-    shot_board::Board::open(&repo).ok()?;
-    Some((repo, slug))
+pub(crate) fn channel(dir: &Path) -> Option<(PathBuf, String)> {
+    channel::locate(dir)
 }

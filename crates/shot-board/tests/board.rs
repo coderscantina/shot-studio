@@ -504,3 +504,50 @@ fn a_channel_proposal_branches_off_and_merges_into_the_default_branch() {
     );
     assert!(matches!(mixed, Err(Error::MixedProposal)));
 }
+
+#[test]
+fn starts_a_channel_with_the_format_presets_and_a_clean_tree() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("cantina");
+    let board = Board::init(&path).unwrap();
+    assert!(board.cards().unwrap().is_empty());
+
+    let repo = Repository::open(&path).unwrap();
+    let head = repo.head().unwrap();
+    assert_eq!(head.shorthand().unwrap(), "main");
+    let commit = head.peel_to_commit().unwrap();
+    assert_eq!(commit.summary().unwrap(), Some("🎉 start the channel"));
+    let tree = commit.tree().unwrap();
+    assert!(tree.get_path(Path::new("formats/opinion.kdl")).is_ok());
+    assert!(
+        repo.statuses(None).unwrap().is_empty(),
+        "nothing left to commit"
+    );
+
+    assert!(matches!(Board::init(&path), Err(Error::NotEmpty(_))));
+}
+
+#[test]
+fn adds_a_video_as_a_branch_and_refuses_a_taken_slug() {
+    let channel = Channel::new(&[("alpha", VIDEO)]);
+    let main = channel.sha("main");
+    let board = channel.board();
+    let video = files(&[("video.kdl", VIDEO), ("script.md", "# Beta\n")]);
+    board.add_video("beta", &video).unwrap();
+
+    assert_eq!(channel.sha("main"), main, "the default branch stays put");
+    assert_eq!(
+        channel.file_at("video/beta", "videos/beta/script.md"),
+        "# Beta\n"
+    );
+    let slugs: Vec<String> = board.cards().unwrap().into_iter().map(|c| c.slug).collect();
+    assert_eq!(slugs, ["alpha", "beta"]);
+
+    for taken in ["alpha", "beta"] {
+        assert!(matches!(
+            board.add_video(taken, &video),
+            Err(Error::VideoExists(_))
+        ));
+    }
+    assert!(board.add_video("gamma", &files(&[("../x", "")])).is_err());
+}

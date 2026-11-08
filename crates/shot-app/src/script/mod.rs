@@ -15,8 +15,8 @@ pub mod proposal;
 use std::path::PathBuf;
 
 use gpui::{
-    App, Context, Div, Entity, FocusHandle, Focusable, FontWeight, Hsla, KeyBinding, SharedString,
-    Window, actions, div, prelude::*, px,
+    AnyElement, App, Context, Div, Entity, FocusHandle, Focusable, FontWeight, Hsla, KeyBinding,
+    ScrollHandle, SharedString, Window, actions, div, prelude::*, px,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use shot_board::Board;
@@ -72,6 +72,8 @@ pub struct ScriptScreen {
     claude: Option<Claude>,
     run: Option<AgentRun>,
     input: Entity<InputState>,
+    /// The document, one child per chapter, so the outline can scroll to one.
+    scroll: ScrollHandle,
     focus: FocusHandle,
 }
 
@@ -119,6 +121,7 @@ impl ScriptScreen {
             claude: Claude::find(),
             run: None,
             input,
+            scroll: ScrollHandle::new(),
             focus: cx.focus_handle(),
         };
         screen.reload();
@@ -136,7 +139,7 @@ impl ScriptScreen {
         };
         self.script = match board.read_file(&self.slug, "script.md") {
             Ok(Some(text)) => Script::parse(&text).map_err(|e| format!("script.md:{e}")),
-            Ok(None) => Err("no script.md yet: give Claude a brief to draft one".to_owned()),
+            Ok(None) => Err("No script.md yet. Give Claude a brief to draft one.".to_owned()),
             Err(e) => Err(e.to_string()),
         };
         self.report = self.script.as_ref().ok().map(script_check::check_script);
@@ -289,7 +292,7 @@ impl ScriptScreen {
         }
     }
 
-    fn outline(&self) -> Div {
+    fn outline(&self, cx: &mut Context<Self>) -> Div {
         let mut column = pane()
             .w(px(268.))
             .flex_none()
@@ -320,16 +323,30 @@ impl ScriptScreen {
                     .chapters
                     .iter()
                     .zip(&report.chapters)
-                    .map(|(chapter, length)| {
+                    .enumerate()
+                    .map(|(index, (chapter, length))| {
                         div()
+                            .id(("outline", index))
                             .flex()
                             .justify_between()
+                            .gap(px(8.))
                             .px(px(10.))
                             .py(px(9.))
                             .rounded(RADIUS_SM)
                             .text_color(BODY)
-                            .child(chapter.title.clone())
-                            .child(mono(clock(*length)).text_size(TEXT_SM).text_color(MUTED))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(RAISED).text_color(STRONG))
+                            .child(div().min_w_0().truncate().child(chapter.title.clone()))
+                            .child(
+                                mono(clock(*length))
+                                    .flex_none()
+                                    .text_size(TEXT_SM)
+                                    .text_color(MUTED),
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.scroll.scroll_to_top_of_item(index);
+                                cx.notify();
+                            }))
                     }),
             )
             .child(label("Sources").px(px(4.)).pt(px(16.)).pb(px(6.)))
@@ -432,8 +449,14 @@ impl ScriptScreen {
                 })
             }),
         ];
-        let body = match &self.script {
-            Err(error) => div().p(px(18.)).text_color(MUTED).child(error.clone()),
+        let body: Vec<AnyElement> = match &self.script {
+            Err(error) => vec![
+                div()
+                    .p(px(18.))
+                    .text_color(MUTED)
+                    .child(error.clone())
+                    .into_any_element(),
+            ],
             Ok(script) => {
                 let report = self.report.as_ref().expect("a parsed script has a report");
                 let inline: Vec<(&ScriptProposal, &Change)> = self
@@ -498,15 +521,13 @@ impl ScriptScreen {
                         }
                         start = end;
                     }
-                    sections.push(section);
+                    sections.push(section.into_any_element());
                 }
-                let rest: Vec<_> = (0..inline.len()).filter(|&i| !shown[i]).collect();
-                let mut column = div().flex().flex_col().gap(px(8.)).children(sections);
-                for i in rest {
+                for i in (0..inline.len()).filter(|&i| !shown[i]) {
                     let (proposal, change) = inline[i];
-                    column = column.child(self.proposal_card(proposal, change, cx));
+                    sections.push(self.proposal_card(proposal, change, cx).into_any_element());
                 }
-                column
+                sections
             }
         };
         pane()
@@ -534,10 +555,14 @@ impl ScriptScreen {
             .child(
                 div()
                     .id("script-document")
+                    .track_scroll(&self.scroll)
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .child(body),
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .children(body),
             )
     }
 
@@ -668,6 +693,17 @@ impl ScriptScreen {
                 .flex()
                 .flex_col()
                 .gap(px(12.))
+                .when(self.run.is_none() && hooks.is_empty(), |this| {
+                    let drafted = self.script.as_ref().is_ok_and(|s| !s.chapters.is_empty());
+                    this.child(div().text_color(MUTED).line_height(px(22.)).child(if drafted {
+                        "Ask for a change below, or pick a command. Claude's changes show up \
+                         in the script as suggestions you accept or reject."
+                    } else {
+                        "Write a brief below: what the video is about, your take and how long \
+                         it should run. Claude drafts the script as a suggestion you accept or \
+                         reject."
+                    }))
+                })
                 .when_some(self.run.as_ref(), |this, run| {
                     this.child(agent::steps_view(run))
                 })
@@ -699,11 +735,13 @@ impl ScriptScreen {
         let chips = ScriptCommand::SLASH.map(|command| {
             div()
                 .id(SharedString::from(format!("slash-{command}")))
-                .px(px(12.))
-                .py(px(6.))
+                .h(px(28.))
+                .flex()
+                .items_center()
+                .px(px(8.))
                 .rounded(RADIUS_SM)
                 .bg(RAISED)
-                .text_size(px(14.))
+                .text_size(TEXT_SM)
                 .cursor_pointer()
                 .hover(|s| s.bg(FLOAT))
                 .when(running || self.claude.is_none(), |this| this.opacity(0.5))
@@ -745,7 +783,7 @@ impl ScriptScreen {
                     .overflow_y_scroll()
                     .child(body),
             )
-            .child(div().flex().flex_wrap().gap(px(8.)).children(chips))
+            .child(div().flex().flex_wrap().gap(px(6.)).children(chips))
             .child(
                 div()
                     .p(px(4.))
@@ -769,7 +807,7 @@ impl Render for ScriptScreen {
             .gap(px(8.))
             .p(px(8.))
             .pt(px(0.))
-            .child(self.outline())
+            .child(self.outline(cx))
             .child(self.document(cx))
             .child(self.agent_pane(cx))
     }
