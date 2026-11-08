@@ -54,10 +54,8 @@ impl Record {
     pub fn save(&self, video_dir: &Path) -> io::Result<()> {
         let path = Self::path(video_dir);
         fs::create_dir_all(path.parent().expect("has a parent"))?;
-        let part = path.with_extension("json.part");
         let text = serde_json::to_string_pretty(self).expect("the record serializes");
-        fs::write(&part, text + "\n")?;
-        fs::rename(part, path)
+        shot_fs::write(&path, text + "\n")
     }
 
     /// The video id of a finished upload of `cut`.

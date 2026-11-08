@@ -60,26 +60,28 @@ pub fn run(repo: PathBuf, args: StyleArgs) -> Result<(), String> {
 
 fn build(video: &std::path::Path) -> Result<(), String> {
     let (disk, slug) = Disk::locate(video)?;
-    write(&disk, &slug)
+    write(&disk, &slug, video)
 }
 
 /// Builds every video with a lock; a shipped or unmigrated one is listed and left alone.
 fn build_all(repo: PathBuf) -> Result<(), String> {
-    let disk = Disk::new(repo);
+    let disk = Disk::new(&repo);
     for slug in style::Repo::slugs(&disk)? {
         let path = style::video_path(&slug, "cut.lock");
         if style::Repo::read(&disk, &slug, &path)?.is_none() {
             println!("videos/{slug}: no cut.lock, not migrated");
             continue;
         }
-        if let Err(e) = write(&disk, &slug) {
+        if let Err(e) = write(&disk, &slug, &repo.join("videos").join(&slug)) {
             println!("videos/{slug}: {e}");
         }
     }
     Ok(())
 }
 
-fn write(disk: &Disk, slug: &str) -> Result<(), String> {
+/// Builds the lock of video `slug`, whose folder is `video`, and writes it when it changed.
+fn write(disk: &Disk, slug: &str, video: &std::path::Path) -> Result<(), String> {
+    let _lock = crate::lock(video)?;
     let built = style::build_video(disk, slug)?;
     if built.shipped() {
         return Err(format!(

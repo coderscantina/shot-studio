@@ -123,7 +123,7 @@ pub fn prepare(repo: &Path, slug: &str) -> Result<PathBuf, String> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
         }
-        fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))
+        shot_fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))
     };
     let from_branch = |file: &str| -> Result<(), String> {
         if dir.join(file).exists() {

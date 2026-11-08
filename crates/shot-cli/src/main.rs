@@ -14,7 +14,7 @@ mod restyle;
 mod style;
 mod transcribe;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
@@ -156,6 +156,12 @@ enum ProposalAction {
     Accept { slug: String, name: String },
     /// Delete the proposal branch.
     Reject { slug: String, name: String },
+}
+
+/// Holds the writer lock of the video folder `video` until dropped, so another `shot`, the
+/// app or the MCP server waits instead of losing this command's edit.
+pub(crate) fn lock(video: &Path) -> Result<shot_fs::WriteLock, String> {
+    shot_fs::WriteLock::acquire(video).map_err(|e| format!("{}: {e}", video.display()))
 }
 
 fn main() -> ExitCode {

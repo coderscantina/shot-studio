@@ -73,9 +73,7 @@ pub fn write_cached(video: &Path, transcript: &Transcript) -> Result<PathBuf, Er
     };
     let json = serde_json::to_vec_pretty(&file).map_err(|e| Error::Cache(e.to_string()))?;
     fs::create_dir_all(path.parent().expect("cache path has a parent"))?;
-    let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, json)?;
-    fs::rename(&tmp, &path)?;
+    shot_fs::write(&path, json)?;
     Ok(path)
 }
 
@@ -139,9 +137,7 @@ pub fn write_speech(video: &Path, take: &Id, speech: &Speech) -> Result<PathBuf,
     };
     let json = serde_json::to_vec(&file).map_err(|e| Error::Cache(e.to_string()))?;
     fs::create_dir_all(path.parent().expect("cache path has a parent"))?;
-    let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, json)?;
-    fs::rename(&tmp, &path)?;
+    shot_fs::write(&path, json)?;
     Ok(path)
 }
 

@@ -352,7 +352,7 @@ impl ScriptScreen {
         let opened = if on_disk.as_ref() == Some(&text) {
             Ok(())
         } else {
-            fs::write(&file, &text)
+            shot_fs::write(&file, &text)
         }
         .and_then(|()| {
             std::process::Command::new("open")
@@ -404,7 +404,7 @@ impl ScriptScreen {
         let file = self.file();
         if opened != branch
             && fs::read_to_string(&file).is_ok_and(|text| text == opened)
-            && fs::write(&file, branch).is_ok()
+            && shot_fs::write(&file, branch).is_ok()
         {
             self.opened = Some(branch.to_owned());
         }

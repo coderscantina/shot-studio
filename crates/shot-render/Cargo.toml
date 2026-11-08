@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 shot-core = { path = "../shot-core" }
 shot-analyze = { path = "../shot-analyze" }
+shot-fs = { path = "../shot-fs" }
 thiserror = { workspace = true }
 vello = { workspace = true }
 parley = { workspace = true }

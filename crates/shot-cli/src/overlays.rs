@@ -57,6 +57,7 @@ struct Phrase {
 }
 
 pub fn run(args: OverlaysArgs) -> Result<(), String> {
+    let _lock = crate::lock(&args.video)?;
     let project = crate::export::load(&args.video)?;
     let take = |id: &str| Id::new(id).ok_or_else(|| format!("{id} is not a take id"));
     let micros = |seconds: f64| Micros((seconds * 1e6).round() as u64);
@@ -134,8 +135,5 @@ fn check(cut: &Cut) -> Result<(), String> {
 
 fn write_cut(dir: &std::path::Path, cut: &Cut) -> Result<(), String> {
     let path = dir.join("cut.kdl");
-    let tmp = dir.join(".cut.kdl.tmp");
-    std::fs::write(&tmp, cut.to_kdl())
-        .and_then(|()| std::fs::rename(&tmp, &path))
-        .map_err(|e| format!("{}: {e}", path.display()))
+    shot_fs::write(&path, cut.to_kdl()).map_err(|e| format!("{}: {e}", path.display()))
 }

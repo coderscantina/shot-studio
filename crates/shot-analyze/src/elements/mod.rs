@@ -97,9 +97,7 @@ pub fn read(video: &Path, take: &Id) -> Result<Option<Elements>, Error> {
 pub fn write(video: &Path, elements: &Elements) -> Result<PathBuf, Error> {
     let path = path(video, elements.take());
     fs::create_dir_all(path.parent().expect("elements/ is a parent"))?;
-    let tmp = path.with_extension("jsonl.tmp");
-    fs::write(&tmp, elements.to_jsonl())?;
-    fs::rename(&tmp, &path)?;
+    shot_fs::write(&path, elements.to_jsonl())?;
     Ok(path)
 }
 

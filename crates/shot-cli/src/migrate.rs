@@ -21,6 +21,7 @@ pub struct MigrateArgs {
 
 pub fn run(args: MigrateArgs) -> Result<(), String> {
     let dir = &args.video;
+    let _lock = crate::lock(dir)?;
     if dir.join(LOCK).exists() {
         return Err(format!(
             "{} has a cut.lock, it is migrated already",

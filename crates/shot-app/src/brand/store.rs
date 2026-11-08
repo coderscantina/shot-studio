@@ -87,10 +87,7 @@ fn write_file(path: &Path, text: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     }
-    let tmp = path.with_extension("tmp");
-    fs::write(&tmp, text)
-        .and_then(|()| fs::rename(&tmp, path))
-        .map_err(|e| format!("{}: {e}", path.display()))
+    shot_fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 impl Themes {

@@ -251,7 +251,8 @@ pub fn create(dir: &Path, format: FormatKind) -> Result<(), String> {
         target_date: None,
     };
     let write = |file: &str, text: &str| {
-        fs::write(dir.join(file), text).map_err(|e| format!("{}: {e}", dir.join(file).display()))
+        shot_fs::write(&dir.join(file), text)
+            .map_err(|e| format!("{}: {e}", dir.join(file).display()))
     };
     fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     write("video.kdl", &video.to_kdl())?;

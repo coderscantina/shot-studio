@@ -1021,10 +1021,7 @@ fn cached(client: &Client, url: &str, path: &Path, limit: u64) -> Result<PathBuf
         .fetch(url, limit, |_, _| true)
         .map_err(|e| e.to_string())?;
     std::fs::create_dir_all(cache_dir()).map_err(|e| e.to_string())?;
-    let part = path.with_extension("part");
-    std::fs::write(&part, bytes)
-        .and_then(|()| std::fs::rename(&part, path))
-        .map_err(|e| e.to_string())?;
+    shot_fs::write(path, bytes).map_err(|e| e.to_string())?;
     Ok(path.to_owned())
 }
 

@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 shot-core = { path = "../shot-core" }
+shot-fs = { path = "../shot-fs" }
 git2.workspace = true
 thiserror.workspace = true
 

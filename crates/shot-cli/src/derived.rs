@@ -58,6 +58,7 @@ fn style(text: &str) -> Result<CaptionStyle, String> {
 }
 
 pub fn run(args: DerivedArgs) -> Result<(), String> {
+    let _lock = crate::lock(&args.video)?;
     let project = crate::export::load(&args.video)?;
     let mut cut = project.cut;
     let id = |text: &str| Id::new(text).ok_or_else(|| format!("{text} is not an id"));
@@ -123,8 +124,5 @@ pub fn run(args: DerivedArgs) -> Result<(), String> {
     let text = cut.to_kdl();
     shot_core::Cut::parse(&text).map_err(|e| format!("cut.kdl:{e}"))?;
     let path = args.video.join("cut.kdl");
-    let tmp = args.video.join(".cut.kdl.tmp");
-    std::fs::write(&tmp, text)
-        .and_then(|()| std::fs::rename(&tmp, &path))
-        .map_err(|e| format!("{}: {e}", path.display()))
+    shot_fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))
 }

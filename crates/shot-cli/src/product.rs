@@ -44,6 +44,7 @@ pub struct CodeDiffArgs {
 }
 
 pub fn auto_zoom(args: AutoZoomArgs) -> Result<(), String> {
+    let _lock = crate::lock(&args.video)?;
     crate::migrate::refuse_if_migrated(&args.video, "zooms")?;
     let project = crate::export::load(&args.video)?;
     let cut = shot_render::rules::auto_zoom(&args.video, &project.cut, &project.format)
@@ -61,6 +62,7 @@ pub fn auto_zoom(args: AutoZoomArgs) -> Result<(), String> {
 }
 
 pub fn code_diff(args: CodeDiffArgs) -> Result<(), String> {
+    let _lock = crate::lock(&args.video)?;
     let project = crate::export::load(&args.video)?;
     let take =
         Id::new(args.take.as_str()).ok_or_else(|| format!("{} is not a take id", args.take))?;
@@ -99,7 +101,7 @@ pub fn code_diff(args: CodeDiffArgs) -> Result<(), String> {
     block.overlays.push(overlay);
     let path = args.video.join(&file);
     std::fs::create_dir_all(args.video.join("sources")).map_err(|e| e.to_string())?;
-    std::fs::write(&path, snapshot).map_err(|e| format!("{}: {e}", path.display()))?;
+    shot_fs::write(&path, snapshot).map_err(|e| format!("{}: {e}", path.display()))?;
     write_cut(&args.video, &cut)?;
     println!("wrote {file} and a code-diff overlay on {take}");
     Ok(())
@@ -107,5 +109,5 @@ pub fn code_diff(args: CodeDiffArgs) -> Result<(), String> {
 
 fn write_cut(dir: &Path, cut: &Cut) -> Result<(), String> {
     let path = dir.join("cut.kdl");
-    std::fs::write(&path, cut.to_kdl()).map_err(|e| format!("{}: {e}", path.display()))
+    shot_fs::write(&path, cut.to_kdl()).map_err(|e| format!("{}: {e}", path.display()))
 }

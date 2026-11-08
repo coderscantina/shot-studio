@@ -843,9 +843,7 @@ mod tracks {
                 let beats = beats::detect(&samples);
                 std::fs::create_dir_all(beats_dir).map_err(io_error(beats_dir))?;
                 // Written aside and renamed, so a reader never sees half a file.
-                let part = file.with_extension("part");
-                std::fs::write(&part, beats.to_text()).map_err(io_error(&part))?;
-                std::fs::rename(&part, &file).map_err(io_error(&file))?;
+                shot_fs::write(&file, beats.to_text()).map_err(io_error(&file))?;
                 beats
             }
         };
