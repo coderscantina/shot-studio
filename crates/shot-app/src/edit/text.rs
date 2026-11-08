@@ -429,8 +429,37 @@ fn selection_toolbar(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl In
                         .pl(px(8.))
                         .child(format!("{count} {words}, {}", seconds(range.duration()))),
                 )
-                .when(kept, |bar| bar.child(tool("cut", "Cut", "⌫")))
-                .when(removed, |bar| bar.child(tool("restore", "Restore", "R")))
+                .when(kept, |bar| {
+                    bar.child(
+                        tool("cut", "Cut", "⌫")
+                            .id("text-tool-cut")
+                            .cursor_pointer()
+                            .hover(|s| s.bg(FLOAT_ON))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.delete_selection(&super::DeleteSelection, window, cx)
+                            })),
+                    )
+                })
+                .when(removed, |bar| {
+                    bar.child(
+                        tool("restore", "Restore", "R")
+                            .id("text-tool-restore")
+                            .cursor_pointer()
+                            .hover(|s| s.bg(FLOAT_ON))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.restore_selection(&super::RestoreSelection, window, cx)
+                            })),
+                    )
+                })
+                .when(kept, |bar| {
+                    bar.child(
+                        tool("zoom", "Zoom", "Z")
+                            .id("text-tool-zoom")
+                            .cursor_pointer()
+                            .hover(|s| s.bg(FLOAT_ON))
+                            .on_click(cx.listener(|this, _, _, cx| this.add_zoom(cx))),
+                    )
+                })
                 .child(
                     tool("system-audio", "Sound", "S")
                         .id("tool-sound")

@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use gpui::{Context, FontWeight, div, prelude::*, px, rgb};
+use gpui::{Context, FontWeight, Hsla, div, prelude::*, px, rgb};
 use shot_core::{Applied, Cut, DerivedKind, Overlay, ParamValue, TakeAt};
 use shot_render::overlay::{self, Params, broll, highlight, link_card};
 use shot_render::overlay_rules;
@@ -61,62 +61,49 @@ fn placed(this: &EditScreen) -> Vec<Placed<'_>> {
     out
 }
 
-/// The Overlays lane, every template but `highlight` in violet, or with `highlight` the
-/// Highlight lane in lime. Overlays that overlap share the lane in two rows.
-pub fn lane(
+/// Every overlay of the Overlays lane, or with `highlight` of the Highlight lane, a person's
+/// with its index in `cut.kdl`.
+pub fn lane_items(
     this: &EditScreen,
-    window: &std::ops::Range<u64>,
-    x: impl Fn(u64) -> f32,
     highlight: bool,
-) -> impl IntoElement {
-    let (fill, text) = if highlight {
-        (SELECTION, ACCENT)
-    } else {
-        (rgb(BROLL).alpha(0.3), rgb(BROLL))
-    };
-    let mut shown: Vec<(Placed, usize)> = Vec::new();
-    let mut ends = [0u64; 2];
-    for p in placed(this) {
-        let is_highlight = p.overlay.template.as_str() == highlight::TEMPLATE;
-        if is_highlight != highlight || p.frames.end <= window.start || p.frames.start >= window.end
-        {
-            continue;
+    cx: &Context<EditScreen>,
+) -> Vec<super::timeline::Item> {
+    let folder = this.folder.read(cx);
+    let mut items = Vec::new();
+    for (at, block) in crate::model::blocks(&folder.shown.cut) {
+        let own = folder
+            .project
+            .cut
+            .chapters
+            .get(at.chapter)
+            .and_then(|c| c.takes.get(at.take));
+        for overlay in &block.overlays {
+            if super::timeline::is_highlight(overlay.template.as_str()) != highlight {
+                continue;
+            }
+            let Some(frames) = this.map.output_range(at, overlay.range) else {
+                continue;
+            };
+            items.push(super::timeline::Item {
+                at,
+                placed: own
+                    .and_then(|b| b.overlays.iter().position(|o| o == overlay))
+                    .map(shot_core::Placed::Overlay),
+                frames,
+                text: summary(overlay),
+            });
         }
-        let row = ends
-            .iter()
-            .position(|end| *end <= p.frames.start)
-            .unwrap_or(1);
-        ends[row] = ends[row].max(p.frames.end);
-        shown.push((p, row));
     }
-    let rows = if shown.iter().any(|(_, row)| *row == 1) {
-        2.
+    items
+}
+
+/// The fill and text of the Overlays lane in violet, or of the Highlight lane in lime.
+pub fn lane_colors(highlight: bool) -> (Hsla, Hsla) {
+    if highlight {
+        (SELECTION.into(), ACCENT.into())
     } else {
-        1.
-    };
-    let height = (36. - 2. * (rows - 1.)) / rows;
-    div()
-        .size_full()
-        .children(shown.into_iter().map(move |(p, row)| {
-            let left = x(p.frames.start.max(window.start));
-            let right = x(p.frames.end.min(window.end));
-            div()
-                .absolute()
-                .top(px((height + 2.) * row as f32))
-                .h(px(height))
-                .left(gpui::relative(left))
-                .w(gpui::relative((right - left).max(0.002)))
-                .rounded(px(6.))
-                .px(px(8.))
-                .bg(fill)
-                .text_color(text)
-                .text_size(TEXT_XS)
-                .font_weight(FontWeight::MEDIUM)
-                .line_height(px(height))
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .child(summary(p.overlay))
-        }))
+        (rgb(BROLL).alpha(0.3).into(), rgb(BROLL).into())
+    }
 }
 
 /// One line about an overlay: what it shows.

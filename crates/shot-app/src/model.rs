@@ -283,6 +283,35 @@ impl EditMap {
         Some((span.at, range))
     }
 
+    /// The output frames that show media `range` of the block at `at`, from the first kept
+    /// frame to the last, as export places a zoom or an overlay.
+    pub fn output_range(&self, at: TakeAt, range: TimeRange) -> Option<Range<u64>> {
+        let snapped = shot_render::plan::snap(range, FPS);
+        self.spans
+            .iter()
+            .filter(|s| s.at == at)
+            .filter_map(|s| {
+                let from = snapped.start.max(s.source_frames.start);
+                let to = snapped.end.min(s.source_frames.end);
+                (from < to).then(|| {
+                    s.output_frame + (from - s.source_frames.start)
+                        ..s.output_frame + (to - s.source_frames.start)
+                })
+            })
+            .reduce(|a, b| a.start.min(b.start)..a.end.max(b.end))
+    }
+
+    /// The media range of the block at `at` that output `frames` show, clipped to the block.
+    /// The inverse of [`Self::output_range`].
+    pub fn source_range(&self, at: TakeAt, frames: Range<u64>) -> Option<TimeRange> {
+        let spans = || self.spans.iter().filter(|s| s.at == at);
+        let first = spans().find(|s| s.output_frames().end > frames.start)?;
+        let last = spans().rfind(|s| s.output_frame < frames.end)?;
+        let from = first.source_frame(frames.start.max(first.output_frame));
+        let to = last.source_frame(frames.end.min(last.output_frames().end) - 1) + 1;
+        TimeRange::new(frame_time(from, FPS), frame_time(to, FPS))
+    }
+
     /// The chapter shown at `frame`.
     pub fn chapter_at(&self, frame: u64) -> Option<usize> {
         self.chapters.iter().position(|c| c.frames.contains(&frame))
@@ -747,6 +776,25 @@ mod tests {
         );
         assert_eq!(map.source_at(90), Some((b, Micros(10_000_000))));
         assert_eq!(map.cut_frames(), [60, 90]);
+    }
+
+    #[test]
+    fn media_ranges_and_output_frames_map_both_ways_across_a_cut() {
+        let map = EditMap::of(&project(two_chapters()), View::Edited);
+        let a = TakeAt {
+            chapter: 0,
+            take: 0,
+        };
+        let range = TimeRange::new(Micros(500_000), Micros(1_750_000)).unwrap();
+        assert_eq!(map.output_range(a, range), Some(30..75));
+        let back = map.source_range(a, 30..75).unwrap();
+        assert_eq!(
+            (back.from(), back.to()),
+            (Micros(500_000), Micros(1_750_000))
+        );
+        // Frames past the block are clipped to it.
+        let clipped = map.source_range(a, 80..120).unwrap();
+        assert_eq!(clipped.to(), Micros(2_000_000));
     }
 
     #[test]

@@ -5,7 +5,7 @@ use std::fmt;
 
 use crate::{
     Chapter, Cut, Id, Layout, LayoutChange, Micros, RangeEdit, RemovedBy, Review, TakeEdit,
-    TimeRange, Transcript, Word,
+    TimeRange, Transcript, Word, Zoom,
 };
 
 /// One take block of the main cut: the chapter and the take's position in that chapter. A take
@@ -26,6 +26,15 @@ pub enum EditError {
     NoWords,
     /// No open review item with exactly this range in the addressed take block.
     NotInReview(TimeRange),
+    /// No zoom or overlay at this index in the addressed take block.
+    UnknownPlaced(TakeAt, Placed),
+}
+
+/// A zoom or an overlay of a take block, by its index in the block's list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Placed {
+    Zoom(usize),
+    Overlay(usize),
 }
 
 impl fmt::Display for EditError {
@@ -47,6 +56,19 @@ impl fmt::Display for EditError {
                 range.from().0,
                 range.to().0
             ),
+            Self::UnknownPlaced(at, placed) => {
+                let (what, index) = match placed {
+                    Placed::Zoom(index) => ("zoom", index),
+                    Placed::Overlay(index) => ("overlay", index),
+                };
+                write!(
+                    f,
+                    "no {what} {} in take {} of chapter {}",
+                    index + 1,
+                    at.take + 1,
+                    at.chapter + 1
+                )
+            }
         }
     }
 }
@@ -222,6 +244,74 @@ impl Cut {
     pub fn clear_layout(&self, at: TakeAt, range: TimeRange) -> Result<Cut, EditError> {
         self.take(at)?;
         Ok(self.with_take(at, |edit| clear_layouts(&mut edit.layouts, range)))
+    }
+
+    /// Adds a person's zoom at `scale` percent over `range`, replacing the zooms it overlaps.
+    pub fn add_zoom(&self, at: TakeAt, range: TimeRange, scale: u16) -> Result<Cut, EditError> {
+        self.take(at)?;
+        Ok(self.with_take(at, |edit| {
+            edit.zooms.retain(|z| !z.range.overlaps(range));
+            let index = edit
+                .zooms
+                .partition_point(|z| z.range.from() < range.from());
+            edit.zooms.insert(
+                index,
+                Zoom {
+                    scale: scale.max(100),
+                    range,
+                    center: None,
+                    by: None,
+                },
+            );
+        }))
+    }
+
+    /// Moves the zoom or overlay `placed` of the block at `at` to `range`. A zoom becomes a
+    /// person's, and zooms it now overlaps are dropped, so zooms never stack.
+    pub fn set_range(
+        &self,
+        at: TakeAt,
+        placed: Placed,
+        range: TimeRange,
+    ) -> Result<Cut, EditError> {
+        self.placed(at, placed)?;
+        Ok(self.with_take(at, |edit| match placed {
+            Placed::Zoom(index) => {
+                let mut zoom = edit.zooms.remove(index);
+                zoom.range = range;
+                zoom.by = None;
+                edit.zooms.retain(|z| !z.range.overlaps(range));
+                let index = edit
+                    .zooms
+                    .partition_point(|z| z.range.from() < range.from());
+                edit.zooms.insert(index, zoom);
+            }
+            Placed::Overlay(index) => edit.overlays[index].range = range,
+        }))
+    }
+
+    /// Removes the zoom or overlay `placed` of the block at `at`.
+    pub fn remove_placed(&self, at: TakeAt, placed: Placed) -> Result<Cut, EditError> {
+        self.placed(at, placed)?;
+        Ok(self.with_take(at, |edit| match placed {
+            Placed::Zoom(index) => {
+                edit.zooms.remove(index);
+            }
+            Placed::Overlay(index) => {
+                edit.overlays.remove(index);
+            }
+        }))
+    }
+
+    fn placed(&self, at: TakeAt, placed: Placed) -> Result<(), EditError> {
+        let edit = self.take(at)?;
+        let exists = match placed {
+            Placed::Zoom(index) => index < edit.zooms.len(),
+            Placed::Overlay(index) => index < edit.overlays.len(),
+        };
+        exists
+            .then_some(())
+            .ok_or(EditError::UnknownPlaced(at, placed))
     }
 
     /// The transcript's words that lie in the addressed take block, each with its state, for
@@ -648,6 +738,32 @@ mod tests {
             c.clear_layout(AT, range(0, 100)).unwrap().chapters[0].takes[0]
                 .layouts
                 .is_empty()
+        );
+    }
+
+    fn zooms(c: &Cut) -> Vec<(u16, u64, u64, bool)> {
+        c.chapters[0].takes[0]
+            .zooms
+            .iter()
+            .map(|z| (z.scale, z.range.from().0, z.range.to().0, z.by.is_none()))
+            .collect()
+    }
+
+    #[test]
+    fn zooms_replace_the_ones_they_overlap_and_stay_ordered() {
+        let c = cut(vec![keep(0, 100)])
+            .add_zoom(AT, range(40, 60), 120)
+            .unwrap()
+            .add_zoom(AT, range(10, 20), 130)
+            .unwrap();
+        assert_eq!(zooms(&c), [(130, 10, 20, true), (120, 40, 60, true)]);
+        let moved = c.set_range(AT, Placed::Zoom(0), range(15, 45)).unwrap();
+        assert_eq!(zooms(&moved), [(130, 15, 45, true)]);
+        let removed = c.remove_placed(AT, Placed::Zoom(1)).unwrap();
+        assert_eq!(zooms(&removed), [(130, 10, 20, true)]);
+        assert_eq!(
+            c.remove_placed(AT, Placed::Overlay(0)),
+            Err(EditError::UnknownPlaced(AT, Placed::Overlay(0)))
         );
     }
 

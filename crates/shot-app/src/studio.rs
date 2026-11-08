@@ -4,8 +4,8 @@
 use std::path::Path;
 
 use gpui::{
-    App, Bounds, Context, Entity, Focusable, FontWeight, Subscription, TitlebarOptions, Window,
-    WindowBounds, WindowOptions, div, point, prelude::*, px, size,
+    App, Bounds, Context, Entity, Focusable, FontWeight, KeyBinding, Subscription, TitlebarOptions,
+    Window, WindowBounds, WindowOptions, actions, div, point, prelude::*, px, size,
 };
 use gpui_component::Root;
 
@@ -42,8 +42,15 @@ pub struct Studio {
     _continue: Subscription,
 }
 
+actions!(studio, [Undo, Redo]);
+
 /// Binds the keys of every screen. Call once at startup.
 pub fn bind_keys(cx: &mut App) {
+    // Text fields bind their own undo in their context, which wins over these.
+    cx.bind_keys([
+        KeyBinding::new("cmd-z", Undo, None),
+        KeyBinding::new("cmd-shift-z", Redo, None),
+    ]);
     edit::bind_keys(cx);
     record::bind_keys(cx);
     cut::bind_keys(cx);
@@ -147,7 +154,22 @@ impl Studio {
         cx.notify();
     }
 
-    fn title_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Undoes or redoes the last change of `cut.kdl`, while nothing records.
+    fn step_history(&mut self, undo: bool, cx: &mut Context<Self>) {
+        if self.record.read(cx).is_recording() {
+            return;
+        }
+        let result = self.folder.update(cx, |folder, cx| {
+            let result = if undo { folder.undo() } else { folder.redo() };
+            cx.notify();
+            result
+        });
+        self.edit
+            .update(cx, |edit, cx| edit.stepped_history(result.err(), cx));
+    }
+
+    /// `compact` below 1500 px wide, where the workspace switcher shows icons only.
+    fn title_bar(&mut self, compact: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let folder = self.folder.read(cx);
         let title = folder.project.video.title.clone();
         let format = match folder.project.video.format {
@@ -158,9 +180,9 @@ impl Studio {
         };
         let recording = self.record.read(cx).is_recording();
         let trailing = match self.screen {
-            Screen::Edit => self
-                .edit
-                .update(cx, |edit, cx| edit.title_controls(cx).into_any_element()),
+            Screen::Edit => self.edit.update(cx, |edit, cx| {
+                edit.title_controls(compact, cx).into_any_element()
+            }),
             Screen::Record => div()
                 .when(recording, |this| {
                     this.flex()
@@ -259,7 +281,8 @@ impl Studio {
 }
 
 impl Render for Studio {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let compact = window.viewport_size().width < px(1500.);
         let screen = match (self.screen, &self.planning) {
             (Screen::Board, Some((board, _))) => board.clone().into_any_element(),
             (Screen::Script, Some((_, script))) => script.clone().into_any_element(),
@@ -273,11 +296,13 @@ impl Render for Studio {
             .size_full()
             .flex()
             .flex_col()
+            .on_action(cx.listener(|this, _: &Undo, _, cx| this.step_history(true, cx)))
+            .on_action(cx.listener(|this, _: &Redo, _, cx| this.step_history(false, cx)))
             .bg(FRAME)
             .text_color(TEXT)
             .font_family(SANS)
             .text_size(TEXT_BASE)
-            .child(self.title_bar(cx))
+            .child(self.title_bar(compact, cx))
             .child(div().flex_1().min_h_0().flex().flex_col().child(screen))
     }
 }

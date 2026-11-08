@@ -62,6 +62,12 @@ actions!(
         AcceptProposal,
         ShowProposal,
         PickSound,
+        AddZoom,
+        ZoomIn,
+        ZoomOut,
+        ZoomToFit,
+        GoToStart,
+        GoToEnd,
     ]
 );
 
@@ -86,6 +92,12 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("tab", AcceptProposal, context),
         KeyBinding::new("g", ShowProposal, context),
         KeyBinding::new("s", PickSound, context),
+        KeyBinding::new("z", AddZoom, context),
+        KeyBinding::new("=", ZoomIn, context),
+        KeyBinding::new("-", ZoomOut, context),
+        KeyBinding::new("shift-z", ZoomToFit, context),
+        KeyBinding::new("home", GoToStart, context),
+        KeyBinding::new("end", GoToEnd, context),
     ]);
 }
 
@@ -151,16 +163,17 @@ pub struct EditScreen {
     error: Option<String>,
     focus: FocusHandle,
     scroll: ScrollHandle,
-    /// Where the overview bar and the lanes were last painted, for mouse mapping.
+    /// Where the overview bar was last painted, for mouse mapping.
     overview_bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// The Timeline lanes' view, drag and picked block.
+    lanes: timeline::Lanes,
     product: product::ProductState,
     /// What the overlay rules last added, for the Overlays pane.
     overlay_note: Option<String>,
     /// The sound and pop pickers and the callout tool.
     place: place::PlaceState,
-    /// Where the Picture preview and the Sound lane were last painted, for mouse mapping.
+    /// Where the Picture preview was last painted, for mouse mapping.
     preview_bounds: Rc<Cell<Bounds<Pixels>>>,
-    sound_lane_bounds: Rc<Cell<Bounds<Pixels>>>,
     /// The channel repo and slug when the folder is a video of one, for agent proposals.
     channel: Option<(PathBuf, String)>,
     proposals: Vec<proposals::CutProposal>,
@@ -214,11 +227,11 @@ impl EditScreen {
             focus: cx.focus_handle(),
             scroll: ScrollHandle::new(),
             overview_bounds: Rc::default(),
+            lanes: timeline::Lanes::default(),
             product: product::ProductState::default(),
             overlay_note: None,
             place: place::PlaceState::default(),
             preview_bounds: Rc::default(),
-            sound_lane_bounds: Rc::default(),
             channel,
             proposals: Vec::new(),
             cards: Vec::new(),
@@ -275,6 +288,21 @@ impl EditScreen {
         );
         self.seeking = true;
         self.clock = None;
+        if let Some(timeline::Pick::Placed(at, placed)) = self.lanes.picked {
+            let block = folder
+                .project
+                .cut
+                .chapters
+                .get(at.chapter)
+                .and_then(|c| c.takes.get(at.take));
+            let valid = block.is_some_and(|b| match placed {
+                shot_core::Placed::Zoom(index) => index < b.zooms.len(),
+                shot_core::Placed::Overlay(index) => index < b.overlays.len(),
+            });
+            if !valid {
+                self.lanes.picked = None;
+            }
+        }
         if let Some(selection) = self.selection {
             let valid = self
                 .block(selection.at)
@@ -425,6 +453,7 @@ impl EditScreen {
 
     fn select_word(&mut self, at: TakeAt, index: usize, extend: bool, cx: &mut Context<Self>) {
         self.proposal = None;
+        self.lanes.picked = None;
         self.selection = match self.selection {
             Some(selection) if extend && selection.at == at => Some(Selection {
                 head: index,
@@ -442,8 +471,14 @@ impl EditScreen {
         cx.notify();
     }
 
+    /// Moves the selected word, or without a selection the playhead by a frame, or a second
+    /// with Shift.
     fn move_selection(&mut self, step: isize, extend: bool, cx: &mut Context<Self>) {
         let Some(selection) = self.selection else {
+            let frames = if extend { i64::from(FPS) } else { 1 } * step as i64;
+            self.set_playing(false);
+            self.seek(self.playhead.saturating_add_signed(frames));
+            cx.notify();
             return;
         };
         let Some(len) = self.block(selection.at).map(|b| b.words.len()) else {
@@ -490,6 +525,9 @@ impl EditScreen {
     }
 
     fn delete_selection(&mut self, _: &DeleteSelection, _: &mut Window, cx: &mut Context<Self>) {
+        if self.remove_picked(cx) {
+            return;
+        }
         let Some((at, range, true, _)) = self.selected() else {
             return;
         };
@@ -504,9 +542,17 @@ impl EditScreen {
     }
 
     fn restore_selection(&mut self, _: &RestoreSelection, _: &mut Window, cx: &mut Context<Self>) {
-        let Some((at, range, _, true)) = self.selected() else {
+        let picked = match self.lanes.picked {
+            Some(timeline::Pick::Cut(at, range)) => Some((at, range)),
+            _ => None,
+        };
+        let Some((at, range)) = picked.or_else(|| {
+            self.selected()
+                .and_then(|(at, range, _, removed)| removed.then_some((at, range)))
+        }) else {
             return;
         };
+        self.lanes.picked = None;
         self.selection = None;
         let result = self.folder.update(cx, |folder, cx| {
             let result = folder.restore(at, range);
@@ -528,6 +574,14 @@ impl EditScreen {
         };
         let default = self.folder.read(cx).project.format.default_layout;
         self.edit(cx, |cut| apply_layout(cut, at, range, layout, default));
+    }
+
+    /// After undo or redo: drops the picked block, which may now be another one, and shows
+    /// the error if the step failed.
+    pub fn stepped_history(&mut self, error: Option<String>, cx: &mut Context<Self>) {
+        self.lanes.picked = None;
+        self.error = error;
+        cx.notify();
     }
 
     fn set_view(&mut self, view: View, cx: &mut Context<Self>) {
@@ -652,7 +706,11 @@ impl Render for EditScreen {
             .on_action(cx.listener(Self::delete_selection))
             .on_action(cx.listener(Self::restore_selection))
             .on_action(cx.listener(|this, _: &ClearSelection, _, cx| {
-                if !this.close_picker() && !this.stop_proposal(cx) && !this.reject_selected(cx) {
+                if !this.close_picker()
+                    && !this.stop_proposal(cx)
+                    && !this.reject_selected(cx)
+                    && this.lanes.picked.take().is_none()
+                {
                     this.selection = None;
                 }
                 cx.notify();
@@ -662,6 +720,18 @@ impl Render for EditScreen {
             }))
             .on_action(cx.listener(|this, _: &AcceptProposal, _, cx| this.accept_selected(cx)))
             .on_action(cx.listener(|this, _: &ShowProposal, _, cx| this.show_next_proposal(cx)))
+            .on_action(cx.listener(|this, _: &AddZoom, _, cx| this.add_zoom(cx)))
+            .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom_lanes(0.5, None, cx)))
+            .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom_lanes(2.0, None, cx)))
+            .on_action(cx.listener(|this, _: &ZoomToFit, _, cx| this.fit_lanes(cx)))
+            .on_action(cx.listener(|this, _: &GoToStart, _, cx| {
+                this.seek(0);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &GoToEnd, _, cx| {
+                this.seek(this.map.frames);
+                cx.notify();
+            }))
             .on_action(cx.listener(|this, _: &Layout1, _, cx| this.set_layout(0, cx)))
             .on_action(cx.listener(|this, _: &Layout2, _, cx| this.set_layout(1, cx)))
             .on_action(cx.listener(|this, _: &Layout3, _, cx| this.set_layout(2, cx)))
@@ -683,9 +753,17 @@ impl Render for EditScreen {
                 cx.listener(|this, _: &ExtendPrevious, _, cx| this.move_selection(-1, true, cx)),
             )
             .on_action(cx.listener(|this, _: &ExtendNext, _, cx| this.move_selection(1, true, cx)))
+            .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
+                if event.pressed_button == Some(gpui::MouseButton::Left) {
+                    this.drag_lanes(event.position.x, cx);
+                }
+            }))
             .on_mouse_up(
                 gpui::MouseButton::Left,
-                cx.listener(|this, _, _, _| this.dragging = false),
+                cx.listener(|this, _, _, cx| {
+                    this.dragging = false;
+                    this.end_lane_drag(cx);
+                }),
             )
             .child(body)
             .text_color(TEXT)

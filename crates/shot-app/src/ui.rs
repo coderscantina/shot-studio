@@ -63,6 +63,8 @@ pub struct Segment {
     pub label: SharedString,
     pub icon: Option<&'static str>,
     pub on: bool,
+    /// Shows the icon alone, with the label as a tooltip.
+    pub compact: bool,
     pub on_click: ClickHandler,
 }
 
@@ -76,12 +78,18 @@ impl Segment {
             label: label.into(),
             icon: None,
             on,
+            compact: false,
             on_click: Box::new(on_click),
         }
     }
 
     pub fn icon(mut self, name: &'static str) -> Self {
         self.icon = Some(name);
+        self
+    }
+
+    pub fn compact(mut self, compact: bool) -> Self {
+        self.compact = compact && self.icon.is_some();
         self
     }
 }
@@ -118,7 +126,16 @@ pub fn segmented(id: &'static str, well: impl Into<Hsla>, segments: Vec<Segment>
                 .when_some(segment.icon, |this, name| {
                     this.child(icon(name, ICON, color))
                 })
-                .child(segment.label)
+                .map(|this| {
+                    if segment.compact {
+                        let label = segment.label.clone();
+                        this.tooltip(move |window, cx| {
+                            gpui_component::tooltip::Tooltip::new(label.clone()).build(window, cx)
+                        })
+                    } else {
+                        this.child(segment.label)
+                    }
+                })
                 .on_click(segment.on_click)
         }))
 }

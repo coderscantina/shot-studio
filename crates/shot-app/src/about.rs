@@ -68,14 +68,20 @@ pub fn init(cx: &mut App) {
     cx.on_action(|_: &About, cx| open(cx));
     cx.on_action(|_: &Quit, cx| cx.quit());
     cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
-    cx.set_menus([Menu::new("Shot Studio").items([
-        MenuItem::action("About Shot Studio", About),
-        MenuItem::separator(),
-        MenuItem::action("Welcome to Shot Studio", crate::welcome::ShowWelcome),
-        MenuItem::action("Open Video Folder…", crate::welcome::OpenVideo),
-        MenuItem::separator(),
-        MenuItem::action("Quit Shot Studio", Quit),
-    ])]);
+    cx.set_menus([
+        Menu::new("Shot Studio").items([
+            MenuItem::action("About Shot Studio", About),
+            MenuItem::separator(),
+            MenuItem::action("Welcome to Shot Studio", crate::welcome::ShowWelcome),
+            MenuItem::action("Open Video Folder…", crate::welcome::OpenVideo),
+            MenuItem::separator(),
+            MenuItem::action("Quit Shot Studio", Quit),
+        ]),
+        Menu::new("Edit").items([
+            MenuItem::action("Undo", crate::studio::Undo),
+            MenuItem::action("Redo", crate::studio::Redo),
+        ]),
+    ]);
 }
 
 /// Opens the About window, or brings the open one to the front. Needs [`crate::theme::init`].

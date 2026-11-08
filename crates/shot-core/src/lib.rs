@@ -29,7 +29,7 @@ pub use cut::{
     Override, OverrideEffect, ParamValue, Point, RangeEdit, RemovedBy, Review, TakeEdit, Zoom,
     ZoomBy,
 };
-pub use edit::{Decision, EditError, TakeAt, WordState, WordView};
+pub use edit::{Decision, EditError, Placed, TakeAt, WordState, WordView};
 pub use element::{Attr, AttrValue, DuplicateElement, Element, ElementKind, Elements};
 pub use engine::{StyleError, StyleInput, build};
 pub use error::ParseError;

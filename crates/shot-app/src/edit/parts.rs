@@ -250,7 +250,7 @@ impl EditScreen {
     }
 
     /// The title bar's workspace switcher and export.
-    pub fn title_controls(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub fn title_controls(&mut self, compact: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let workspace = self.workspace;
         let export = self
             .export
@@ -313,25 +313,29 @@ impl EditScreen {
                         workspace == Workspace::Text,
                         cx.listener(|this, _, _, cx| this.set_workspace(Workspace::Text, cx)),
                     )
-                    .icon("text"),
+                    .icon("text")
+                    .compact(compact),
                     Segment::new(
                         "Picture",
                         workspace == Workspace::Picture,
                         cx.listener(|this, _, _, cx| this.set_workspace(Workspace::Picture, cx)),
                     )
-                    .icon("picture"),
+                    .icon("picture")
+                    .compact(compact),
                     Segment::new(
                         "Timeline",
                         workspace == Workspace::Timeline,
                         cx.listener(|this, _, _, cx| this.set_workspace(Workspace::Timeline, cx)),
                     )
-                    .icon("timeline"),
+                    .icon("timeline")
+                    .compact(compact),
                     Segment::new(
                         "Product",
                         workspace == Workspace::Product,
                         cx.listener(|this, _, _, cx| this.set_workspace(Workspace::Product, cx)),
                     )
-                    .icon("cursor"),
+                    .icon("cursor")
+                    .compact(compact),
                 ],
             ))
             .child(
