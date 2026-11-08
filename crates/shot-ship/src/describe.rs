@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::fmt::Write;
 
-use shot_core::{Id, Output, ParamValue, Project, Timeline, Transcript};
+use shot_core::{Id, Output, ParamValue, Project, Transcript};
 
 use crate::spoken::{chapter_marks, clock, spoken_words};
 
@@ -18,10 +18,13 @@ pub struct Description {
     pub text: String,
 }
 
-/// Drafts the description of the main cut.
-pub fn describe(project: &Project, transcripts: &HashMap<Id, Transcript>) -> Description {
-    let timeline = Timeline::evaluate(project);
-    let main = &timeline.outputs[0];
+/// Drafts the description of `main`, the main output as export renders it (see
+/// [`crate::lock::timeline`]).
+pub fn describe(
+    project: &Project,
+    main: &Output,
+    transcripts: &HashMap<Id, Transcript>,
+) -> Description {
     let words = spoken_words(main, transcripts);
     let mut text = String::new();
     if let Some(hook) = project
@@ -86,7 +89,7 @@ fn links(project: &Project, main: &Output) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::spoken::tests::{project, transcript};
-    use shot_core::Script;
+    use shot_core::{Script, Timeline};
 
     #[test]
     fn drafts_hook_chapters_and_links() {
@@ -99,7 +102,7 @@ mod tests {
         .unwrap();
         let transcripts =
             transcript(&[("never", 300_000, 600_000), ("so", 65_200_000, 65_500_000)]);
-        let description = describe(&project, &transcripts);
+        let description = describe(&project, Timeline::evaluate(&project).main(), &transcripts);
         assert_eq!(
             description.text,
             "Never on a Friday? post\n\nChapters\n0:00 Hook\n1:05 Why\n\nLinks\nhttps://github.com/a/b/pull/1\nhttps://example.com/post\n"

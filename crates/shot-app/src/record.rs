@@ -218,7 +218,7 @@ impl RecordScreen {
                             });
                             match result {
                                 Ok(()) => {
-                                    analyze_later(&this.folder.read(cx).dir, &take);
+                                    this.analyze_later(&take, cx);
                                     this.shared.set(Phase::Idle);
                                     cx.emit(Recorded);
                                 }
@@ -418,23 +418,40 @@ fn record(
     Ok((take.id, take.duration))
 }
 
-/// Adds what Vision and Claude find to the take's elements in a `shot analyze` of its own, so it
-/// never holds up the rough cut. Without the `shot` command or Claude Code that part is skipped.
-fn analyze_later(dir: &std::path::Path, take: &Id) {
-    let Ok(shot) = crate::agent::shot_executable() else {
-        return;
-    };
-    let mut command = std::process::Command::new(shot);
-    command
-        .args(["analyze", "--video"])
-        .arg(dir)
-        .args(["--take", take.as_str()])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    if shot_mcp::bridge::Claude::find().is_some() {
-        command.arg("--claude");
+impl RecordScreen {
+    /// Adds what Vision and Claude find to the take's elements in a `shot analyze` of its own,
+    /// so it never holds up the rough cut, then rebuilds a migrated video's lock with them.
+    /// Without the `shot` command or Claude Code that part is skipped.
+    fn analyze_later(&self, take: &Id, cx: &mut Context<Self>) {
+        let Ok(shot) = crate::agent::shot_executable() else {
+            return;
+        };
+        let mut command = std::process::Command::new(shot);
+        command
+            .args(["analyze", "--video"])
+            .arg(&self.folder.read(cx).dir)
+            .args(["--take", take.as_str()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        if shot_mcp::bridge::Claude::find().is_some() {
+            command.arg("--claude");
+        }
+        let folder = self.folder.clone();
+        cx.spawn(async move |_, cx| {
+            let analyzed = cx
+                .background_spawn(async move { command.status() })
+                .await
+                .is_ok_and(|s| s.success());
+            if analyzed {
+                folder.update(cx, |folder, cx| {
+                    // A failed rebuild shows on the next edit; nothing waits on this one.
+                    let _ = folder.rebuild_lock();
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
-    std::thread::spawn(move || command.status());
 }
 
 /// Stable words handed from the transcriber's thread to the recorder.

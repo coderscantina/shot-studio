@@ -16,7 +16,7 @@ use objc2_vision::{
     VNDetectFaceCaptureQualityRequest, VNDetectFaceLandmarksRequest, VNFaceObservation,
     VNImageRequestHandler, VNRequest,
 };
-use shot_core::{Id, Layout, Micros, Project, Timeline};
+use shot_core::{Id, Layout, Micros, Project};
 use shot_media::videotoolbox::Decoder;
 
 use crate::media::Planes;
@@ -49,6 +49,8 @@ pub enum ThumbnailError {
         path: PathBuf,
         source: std::io::Error,
     },
+    #[error(transparent)]
+    Lock(#[from] crate::lock::LockError),
 }
 
 /// Scores the camera frames the main cut shows and writes the best `count` as PNG under
@@ -58,7 +60,8 @@ pub fn find(
     project: &Project,
     count: usize,
 ) -> Result<Vec<Candidate>, ThumbnailError> {
-    let main = &Timeline::evaluate(project).outputs[0];
+    let timeline = crate::lock::timeline(video_dir, project)?;
+    let main = timeline.main();
     let mut scored = Vec::new();
     let mut offset = 0;
     let mut decoders: Vec<(Id, Option<Decoder>)> = Vec::new();

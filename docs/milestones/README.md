@@ -58,10 +58,12 @@ Waiting for Mike. One line each with a recommendation and a link to its record. 
 Found by agents and waiting for a task. Remove a line when it's fixed.
 
 - Record does not warn when the camera delivers black frames.
-- The app cannot open a migrated video (it parses `format.kdl` as a full format) and its stop path still writes rule nodes. `shot describe`, thumbnails, the ship plan and the app model evaluate without the lock, so a migrated video's chapter times are wrong there.
-- The fixture generator copies the presets, now with rules, into each demo video's `format.kdl`.
-- Preview audio has no voice chain, music or sound effects, so it does not match export.
 - The first seek after playback in the editor engine takes about 0.5 s.
+- The MCP server loads a video's settings with `Format::parse`, so its tools fail on a migrated video's `format.kdl` layer, and its `describe` evaluates without the lock.
+- On a migrated video the Cut screen's rule switches and pacing only show; changing the rules waits for the rule editor (milestone 10 item 7). A lock cut on a kind outside the six pacing kinds shows as a person's cut in the app.
+- The preview's loudness gain comes from one measuring pass, without export's limiter trials, and a new gain plays from the next seek.
+- `shot-render` keeps export's score (bed, lock music and sfx at their output samples) private and `shot-core` its settings diff, so the app has its own copies of both (`score.rs`, `style::layer`).
+- A migrated video folder outside a channel repo keeps its lock as it is: edits there write `cut.kdl` but do not rebuild `cut.lock`, as `shot export` does not.
 - The bundled sounds and music beds are unheard: Mike should check by ear that each sound fits its name and that the bed loop seams (bed-lofi most of all) are clean.
 - Beats are detected per music file on every run; decision 0023 asks for a cache keyed by the file's hash.
 - `music "<file>"` only takes a path; bundled beds need a bare name looked up like `sfx`. Music ducks to the cue's duck level under bumpers rather than going silent (an assumption).
@@ -79,7 +81,7 @@ Found by agents and waiting for a task. Remove a line when it's fixed.
 - Overlays laid out for 16:9 get cut off inside a Short's 9:16 window.
 - The export job queue starts with the shortest jobs although its comment says longest first.
 - The b-roll lane color and the Overlays pane icons are local stand-ins, not theme tokens and Hugeicons.
-- The app cannot preview a derived cut, and the preview plays no bleep.
+- The app cannot preview a derived cut.
 - The inline retake toast exists in the prompter but nothing calls it: the live retake rule should call `PrompterPane::live().caught(...)`.
 - `PcmReader` in `shot-media` does not expose its length, so the music bed detects the end by looking for 10 s of digital silence.
 - Filler learning only uses Keeps from the current video, not the channel. N markers (next beat) are not used by any rule yet.

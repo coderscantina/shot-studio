@@ -156,7 +156,10 @@ impl ShipScreen {
         }
         let folder = self.folder.read(cx);
         let dir = folder.dir.clone();
-        self.cuts = ship::plan(&dir, &folder.project, &folder.transcripts, self.options());
+        match ship::plan(&dir, &folder.project, &folder.transcripts, self.options()) {
+            Ok(cuts) => self.cuts = cuts,
+            Err(e) => self.error = Some(e.to_string()),
+        }
         self.selected = self.selected.min(self.cuts.len().saturating_sub(1));
         self.record = Record::load(&dir).unwrap_or_default();
         let working = folder.project.cut.to_kdl();
@@ -1152,6 +1155,10 @@ fn check_stamp(dir: &Path, cut: &PlannedCut, cut_kdl: &str) -> Option<u64> {
         .and_then(|p| modified(&p))
         .hash(&mut hasher);
     cut_kdl.hash(&mut hasher);
+    // A migrated video's frames follow its lock too, which a rule change rebuilds.
+    std::fs::read(dir.join(shot_ship::lock::LOCK_FILE))
+        .ok()
+        .hash(&mut hasher);
     Some(hasher.finish())
 }
 

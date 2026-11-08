@@ -7,7 +7,7 @@ chapter "Hook" {
 chapter "What moved" {
     take t01 {
         keep from=9_000_000 to=40_000_000
-        remove from=40_000_000 to=41_500_000 by=pause
+        remove from=40_000_000 to=41_500_000 by=manual
         keep from=41_500_000 to=75_000_000
     }
 }

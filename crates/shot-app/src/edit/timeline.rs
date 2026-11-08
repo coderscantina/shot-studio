@@ -73,8 +73,8 @@ fn lane_window(this: &EditScreen) -> std::ops::Range<u64> {
 
 fn change_list(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement {
     let folder = this.folder.read(cx);
-    let changes = changes(&folder.project.cut);
-    let raw: u64 = model::blocks(&folder.project.cut)
+    let changes = changes(&folder.shown.cut);
+    let raw: u64 = model::blocks(&folder.shown.cut)
         .filter_map(|(_, edit)| {
             Some(edit.ranges.last()?.range().to().0 - edit.ranges.first()?.range().from().0)
         })
@@ -537,7 +537,7 @@ fn voice_lane(
     window: &std::ops::Range<u64>,
     cx: &mut Context<EditScreen>,
 ) -> impl IntoElement {
-    let cut = &this.folder.read(cx).project.cut;
+    let cut = &this.folder.read(cx).shown.cut;
     let removed_in = |at: shot_core::TakeAt| -> Vec<shot_core::TimeRange> {
         if this.view == model::View::Edited {
             return Vec::new();

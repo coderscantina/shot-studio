@@ -3,7 +3,7 @@ captions word-pop
 chapter "Hook" {
     take t01 {
         keep from=0 to=4_200_000
-        remove from=4_200_000 to=5_100_000 by=silence
+        remove from=4_200_000 to=5_100_000 by=manual
         keep from=5_100_000 to=12_000_000
     }
 }
@@ -11,7 +11,7 @@ chapter "Hook" {
 chapter "The rule everyone repeats" {
     take t01 {
         keep from=12_000_000 to=31_400_000
-        remove from=31_400_000 to=33_000_000 by=retake
+        remove from=31_400_000 to=33_000_000 by=manual
         keep from=33_000_000 to=58_000_000
     }
 }
@@ -19,7 +19,7 @@ chapter "The rule everyone repeats" {
 chapter "What we do instead" {
     take t01 {
         keep from=58_000_000 to=96_000_000
-        remove from=96_000_000 to=97_200_000 by=filler
+        remove from=96_000_000 to=97_200_000 by=manual
         keep from=97_200_000 to=130_000_000
     }
 }
