@@ -3,8 +3,9 @@
 //! functions over `shot-core` types, except [`add_lottie`], which writes the channel repo.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use shot_audio::sound::Library;
 use shot_core::{
     Brand, Cut, EditError, Effect, ElementKind, Elements, Id, Layer, LottieTemplate, Micros,
     Overlay, OverrideEffect, ParamValue, Point, Provenance, Slot, SlotType, TakeAt, TimeRange,
@@ -39,16 +40,23 @@ impl SoundOrigin {
     }
 }
 
+/// The channel's `brand/` folder of the video in `video_dir`, where export looks for it.
+fn brand_dir(video_dir: &Path) -> Option<PathBuf> {
+    let brand = video_dir.parent()?.parent()?.join("brand");
+    brand.is_dir().then_some(brand)
+}
+
+/// Where the video in `video_dir` finds a sound by name, as export finds it.
+pub fn library(video_dir: &Path) -> Library {
+    Library::new(video_dir, brand_dir(video_dir).as_deref())
+}
+
 /// The sounds a video can place, in lookup order: its `sounds/`, the channel's
 /// `brand/sounds/`, then the bundled effects, each folder sorted by name. A name found earlier
 /// hides the same name later, as the lookup does.
 pub fn sounds(video_dir: &Path) -> Vec<(Id, SoundOrigin)> {
     let mut found: Vec<(Id, SoundOrigin)> = Vec::new();
-    let brand = video_dir
-        .parent()
-        .and_then(Path::parent)
-        .map(|r| r.join("brand"));
-    let folders = [Some(video_dir.to_owned()), brand];
+    let folders = [Some(video_dir.to_owned()), brand_dir(video_dir)];
     for (dir, origin) in folders.iter().zip([SoundOrigin::Video, SoundOrigin::Brand]) {
         let Some(Ok(entries)) = dir.as_ref().map(|d| fs::read_dir(d.join("sounds"))) else {
             continue;
@@ -82,14 +90,14 @@ pub fn sounds(video_dir: &Path) -> Vec<(Id, SoundOrigin)> {
 
 /// `cut` with `sound` on the word of `take` that is spoken at `t`, or starts nearest it within
 /// a second: `override <take> word at=<its t> { sfx <sound> }`, replacing that word's sound and
-/// keeping its other changes. The sound plays from the word's start.
+/// keeping its other changes. The sound plays from the word's start. Also returns the word.
 pub fn with_sound(
     cut: &Cut,
     take: &Id,
     elements: Option<&Elements>,
     t: Micros,
     sound: Id,
-) -> Result<Cut, String> {
+) -> Result<(Cut, String), String> {
     let words = || {
         elements
             .into_iter()
@@ -103,19 +111,18 @@ pub fn with_sound(
                 .min_by_key(|w| w.t.0.abs_diff(t.0))
         })
         .ok_or("No word is spoken here. Sounds sit on a word, so pick one in the transcript")?;
-    Ok(crate::style::with_override(
-        cut,
-        take,
-        ElementKind::Word,
-        word.t,
-        |o| {
-            o.effects
-                .retain(|e| !matches!(e, OverrideEffect::Set(Effect::Sfx { .. })));
-            o.effects
-                .push(OverrideEffect::Set(Effect::Sfx { sound, gain: 0 }));
-            o.effects.sort_by_key(OverrideEffect::key);
-        },
-    ))
+    let text = word
+        .text(shot_core::Attr::Text)
+        .unwrap_or_default()
+        .to_owned();
+    let cut = crate::style::with_override(cut, take, ElementKind::Word, word.t, |o| {
+        o.effects
+            .retain(|e| !matches!(e, OverrideEffect::Set(Effect::Sfx { .. })));
+        o.effects
+            .push(OverrideEffect::Set(Effect::Sfx { sound, gain: 0 }));
+        o.effects.sort_by_key(OverrideEffect::key);
+    });
+    Ok((cut, text))
 }
 
 /// `cut` with `overlay` drawn on top of the overlays of the block at `at`.
@@ -327,8 +334,10 @@ mod tests {
         )
         .unwrap();
         let e = elements();
-        let placed = with_sound(&cut, &id("t01"), Some(&e), Micros(1_200_000), id("pop")).unwrap();
-        let again =
+        let (placed, word) =
+            with_sound(&cut, &id("t01"), Some(&e), Micros(1_200_000), id("pop")).unwrap();
+        assert_eq!(word, "deploy");
+        let (again, _) =
             with_sound(&placed, &id("t01"), Some(&e), Micros(1_300_000), id("tick")).unwrap();
         assert!(
             again

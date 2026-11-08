@@ -5,7 +5,11 @@
 //!
 //! A seek or a new plan stops the device and drops what is queued, so the next sound heard is
 //! the new position's. Starting after a seek fades in over 5 ms instead of clicking. Each plan
-//! measures its loudness gain on a thread of its own; until it lands the last plan's gain plays.
+//! measures its loudness gain on a thread of its own; until it lands the last plan's gain plays,
+//! then the new one glides in. When the music or sound effects cannot be read, the voice plays
+//! alone and [`Sound::warning`] says why.
+//!
+//! [`Audition`] plays one sound on its own for the sound picker, on an output of its own.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -13,7 +17,8 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use shot_core::Project;
+use shot_audio::sound::Source;
+use shot_core::{Id, Project};
 use shot_media::audio::SAMPLE_RATE;
 use shot_media::speaker::{Speaker, SpeakerClock};
 use shot_render::audio::{FADE_SAMPLES, TimelineAudio};
@@ -54,6 +59,8 @@ struct State {
     clock: Option<SpeakerClock>,
     /// Why there is no sound. The screen then paces by wall clock.
     error: Option<String>,
+    /// Why the voice plays without its music and sound effects.
+    warning: Option<String>,
     quit: bool,
 }
 
@@ -149,6 +156,11 @@ impl Sound {
     pub fn error(&self) -> Option<String> {
         self.shared.lock().error.clone()
     }
+
+    /// Why the voice plays without the plan's music and sound effects, if it does.
+    pub fn warning(&self) -> Option<String> {
+        self.shared.lock().warning.clone()
+    }
 }
 
 impl Drop for Sound {
@@ -176,6 +188,8 @@ fn feed(shared: Arc<Shared>) {
     let measuring = Arc::new(AtomicU64::new(0));
     let mut plan_generation = 0;
     let mut generation = 0;
+    // The gain the sound plays at, to see a new measurement land.
+    let mut gain = None;
     // How far into the fade-in after a restart the sound is.
     let mut faded = FADE_SAMPLES;
     let mut block = Vec::with_capacity(BLOCK);
@@ -190,7 +204,8 @@ fn feed(shared: Arc<Shared>) {
                 plan_generation = state.plan_generation;
                 let plan = state.plan.clone();
                 drop(state);
-                let placed = plan.map(|(map, dir, project, lock)| {
+                let mut warning = None;
+                audio = plan.map(|(map, dir, project, lock)| {
                     let score = match &lock {
                         Some(lock) => shot_render::export::preview_score_with(
                             &dir,
@@ -200,18 +215,15 @@ fn feed(shared: Arc<Shared>) {
                         ),
                         None => shot_render::export::preview_score(&dir, &project, &map.plan),
                     }
-                    .map_err(|e| e.to_string())?;
+                    .unwrap_or_else(|e| {
+                        warning = Some(format!("Playing the voice alone: {e}"));
+                        Score::default()
+                    });
                     measure(&shared, &measuring, plan_generation, &map, &dir, &score);
-                    Ok::<_, String>((shot_render::export::plan_audio(&dir, &map.plan), score))
+                    (shot_render::export::plan_audio(&dir, &map.plan), score)
                 });
                 state = shared.lock();
-                audio = match placed.transpose() {
-                    Ok(audio) => audio,
-                    Err(error) => {
-                        state.error = Some(error);
-                        None
-                    }
-                };
+                state.warning = warning;
                 // The new plan plays from the position the next seek sets.
                 finished = None;
             }
@@ -222,9 +234,16 @@ fn feed(shared: Arc<Shared>) {
                 faded = 0;
                 state.origin = next;
                 state.applied = generation;
+                gain = state.gain;
                 finished = audio.as_ref().map(|(timeline, score)| {
-                    Finished::new(timeline, score, state.gain.unwrap_or(0.0), next)
+                    Finished::new(timeline, score, gain.unwrap_or(0.0), next)
                 });
+            }
+            if state.gain != gain
+                && let (Some(new), Some(finished)) = (state.gain, finished.as_mut())
+            {
+                finished.set_gain(new);
+                gain = state.gain;
             }
             if !state.playing || state.error.is_some() || audio.is_none() {
                 speaker.stop();
@@ -287,4 +306,173 @@ fn measure(
         });
     // Without the thread the last plan's gain plays on.
     drop(spawned);
+}
+
+/// Plays one sound at a time on its own output, beside the preview's, so a sound can be heard
+/// before it is placed. The output opens with the first sound.
+pub struct Audition {
+    shared: Arc<AuditionShared>,
+    thread: Option<JoinHandle<()>>,
+}
+
+#[derive(Default)]
+struct AuditionShared {
+    state: Mutex<AuditionState>,
+    changed: Condvar,
+}
+
+impl AuditionShared {
+    fn lock(&self) -> MutexGuard<'_, AuditionState> {
+        self.state.lock().expect("audition state poisoned")
+    }
+}
+
+#[derive(Default)]
+struct AuditionState {
+    /// The sound to start, taken by the thread.
+    request: Option<Source>,
+    /// Counts starts and stops, so the thread drops a sound that was replaced or stopped.
+    generation: u64,
+    /// The name of the sound heard now, from the start asked for until it ends.
+    playing: Option<Id>,
+    error: Option<String>,
+    quit: bool,
+}
+
+impl Audition {
+    pub fn spawn() -> Self {
+        let shared = Arc::new(AuditionShared::default());
+        let thread = std::thread::Builder::new()
+            .name("shot-audition".into())
+            .spawn({
+                let shared = shared.clone();
+                move || audition(&shared)
+            })
+            .expect("spawning the audition thread");
+        Self {
+            shared,
+            thread: Some(thread),
+        }
+    }
+
+    /// Plays `name` from `source`, stopping the sound before.
+    pub fn play(&self, name: Id, source: Source) {
+        let mut state = self.shared.lock();
+        state.request = Some(source);
+        state.playing = Some(name);
+        state.error = None;
+        state.generation += 1;
+        self.shared.changed.notify_all();
+    }
+
+    pub fn stop(&self) {
+        let mut state = self.shared.lock();
+        if state.playing.take().is_some() {
+            state.request = None;
+            state.generation += 1;
+            self.shared.changed.notify_all();
+        }
+    }
+
+    /// The sound heard now.
+    pub fn playing(&self) -> Option<Id> {
+        self.shared.lock().playing.clone()
+    }
+
+    /// Why the last sound did not play.
+    pub fn error(&self) -> Option<String> {
+        self.shared.lock().error.clone()
+    }
+}
+
+impl Drop for Audition {
+    fn drop(&mut self) {
+        self.shared.lock().quit = true;
+        self.shared.changed.notify_all();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// Mono 48 kHz samples of a sound the library found.
+fn decode(source: &Source) -> Result<Vec<f32>, String> {
+    match source {
+        Source::Bundled(bundled) => Ok(bundled.decode().samples().to_vec()),
+        Source::File(path) => {
+            shot_render::voice::read_samples(path).map_err(|e| format!("{}: {e}", path.display()))
+        }
+    }
+}
+
+/// The audition thread: decodes each sound asked for and plays it to its end, unless another
+/// start or a stop comes first.
+fn audition(shared: &AuditionShared) {
+    let mut speaker: Option<Speaker> = None;
+    let mut seen = 0;
+    loop {
+        let (source, generation) = {
+            let mut state = shared.lock();
+            while state.generation == seen && !state.quit {
+                state = shared.changed.wait(state).expect("audition state poisoned");
+            }
+            if state.quit {
+                return;
+            }
+            seen = state.generation;
+            (state.request.take(), state.generation)
+        };
+        if let Some(speaker) = speaker.as_mut() {
+            speaker.clear();
+        }
+        let Some(source) = source else {
+            continue;
+        };
+        let played = decode(&source).and_then(|samples| {
+            let speaker = match speaker.as_mut() {
+                Some(speaker) => speaker,
+                None => speaker.insert(Speaker::open().map_err(|e| e.to_string())?),
+            };
+            play_out(shared, generation, speaker, &samples)
+        });
+        let mut state = shared.lock();
+        if state.generation == generation {
+            state.playing = None;
+            state.error = played.err();
+        }
+    }
+}
+
+/// Plays `samples` on `speaker` until they have been heard or `generation` is no longer the
+/// latest.
+fn play_out(
+    shared: &AuditionShared,
+    generation: u64,
+    speaker: &mut Speaker,
+    samples: &[f32],
+) -> Result<(), String> {
+    let mut pushed = 0;
+    // When the ring ran empty: the device's own buffer plays on for its latency.
+    let mut drained = None;
+    loop {
+        pushed += speaker.push(&samples[pushed..]);
+        if pushed == samples.len() || speaker.queued() >= PREFILL {
+            speaker.play().map_err(|e| e.to_string())?;
+        }
+        if pushed == samples.len() && speaker.queued() == 0 {
+            let since = drained.get_or_insert_with(std::time::Instant::now);
+            if since.elapsed() > speaker.latency() + FEED_INTERVAL {
+                speaker.stop();
+                return Ok(());
+            }
+        }
+        let state = shared.lock();
+        if state.generation != generation || state.quit {
+            return Ok(());
+        }
+        let _unused = shared
+            .changed
+            .wait_timeout(state, FEED_INTERVAL)
+            .expect("audition state poisoned");
+    }
 }
