@@ -259,14 +259,7 @@ impl DerivedPlan {
         Frame {
             scene: Scene {
                 background: BACKGROUND,
-                layers: vec![Layer {
-                    source: Source::Screen,
-                    frame: full,
-                    crop,
-                    radius: 0.0,
-                    blur: 0.0,
-                    shutter: Rect::ZERO,
-                }],
+                layers: vec![Layer::new(Source::Screen, full, crop, 0.0)],
             },
             drawing,
             cutaway: None,

@@ -1,6 +1,7 @@
 //! What the brand and the video give the overlay templates: the motion preset with the brand's
 //! feel, colors, fonts, Lottie templates and re-skins, and the chapter titles a chapter band
-//! shows. Read once per video from `cut.lock`, never from the style cascade ([0025]).
+//! shows. Read once per video from `cut.lock`, never from the style cascade ([0025]). Also what
+//! the brand gives the rest of the frame: the camera's frame, the stinger and the logo.
 //!
 //! A video without a lock, or a lock whose brand leaves something out, draws the defaults: the
 //! preset of its format (reaction reactive, opinion editorial, product tour launch, tutorial
@@ -14,11 +15,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use shot_core::{
-    Brand, BundledFont, Cut, FormatKind, Id, Micros, Overlay, ParamValue, PresetName, RangeEdit,
-    SlotType,
+    Brand, BundledFont, CameraShape, Cut, FormatKind, Id, Layout, Micros, Overlay, ParamValue,
+    PresetName, RangeEdit, SlotType,
 };
+use vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
 
 use crate::drawing::{Font, Rgba};
+use crate::layout::CameraFrame;
 use crate::lottie::{Filled, LottieError, LottieTemplate, SlotDecl, SlotKind, SlotValue};
 use crate::motion::{Feel, Motion, Moves, Preset};
 use crate::overlay::{self, Params, TemplateError};
@@ -126,7 +129,34 @@ pub enum ThemeError {
     NotReskinnable(String),
     #[error("re-skinned `{template}` declares slot `{slot}`, which it does not fill")]
     ReskinSlot { template: String, slot: String },
+    #[error("stinger {file}: {source}")]
+    Stinger { file: String, source: LottieError },
+    #[error("logo {file}: {reason}")]
+    Logo { file: String, reason: String },
 }
+
+/// The brand's stinger, filled and ready to draw.
+#[derive(Debug)]
+pub struct StingerAnimation {
+    pub lottie: Arc<Filled>,
+    /// When its frame fully covers the picture, after it starts.
+    pub peak: Micros,
+    /// The file's content hash.
+    pub hash: [u8; 32],
+}
+
+/// The brand's logo as straight-alpha RGBA, rasterized once.
+#[derive(Debug, Clone)]
+pub struct Logo {
+    pub image: ImageData,
+    /// The file's content hash.
+    pub hash: [u8; 32],
+}
+
+/// The longest side a logo is rasterized at.
+const LOGO_SIZE: u32 = 1024;
+/// The brand Lottie template a generated title plays as its logo reveal, when declared.
+pub const LOGO_REVEAL: &str = "logo-reveal";
 
 /// A Lottie template the brand declares, loaded and checked.
 #[derive(Debug)]
@@ -201,6 +231,10 @@ pub struct Theme {
     chapters: Vec<ChapterStart>,
     /// Everything above that every branded chunk depends on, for chunk keys.
     key: Vec<u8>,
+    /// How the camera is framed beside the screen, `None` for the layouts' own corners.
+    pub camera: Option<CameraFrame>,
+    pub stinger: Option<StingerAnimation>,
+    pub logo: Option<Logo>,
 }
 
 impl Default for Theme {
@@ -370,6 +404,29 @@ impl Theme {
             );
         }
         let chapters = cut.map(chapter_starts).unwrap_or_default();
+        let camera = brand.camera.map(|camera| {
+            let [r, g, b, _] = palette.accent.0;
+            CameraFrame::of(&camera, [r, g, b])
+        });
+        let stinger = match &brand.stinger {
+            None => None,
+            Some(stinger) => {
+                let error = |source| ThemeError::Stinger {
+                    file: stinger.file.clone(),
+                    source,
+                };
+                let lottie = LottieTemplate::load(&read(&stinger.file)?, &[]).map_err(error)?;
+                Some(StingerAnimation {
+                    lottie: Arc::new(lottie.fill(&[]).map_err(error)?),
+                    peak: stinger.peak,
+                    hash: lottie.hash(),
+                })
+            }
+        };
+        let logo = match &brand.logo {
+            None => None,
+            Some(file) => Some(load_logo(file, &read(file)?)?),
+        };
         let mut theme = Self {
             preset,
             motion: Motion::new(feel),
@@ -379,6 +436,9 @@ impl Theme {
             templates,
             chapters,
             key: Vec::new(),
+            camera,
+            stinger,
+            logo,
         };
         theme.key = theme.make_key(feel);
         Ok(theme)
@@ -405,6 +465,37 @@ impl Theme {
     /// branded template draws.
     pub fn key(&self) -> &[u8] {
         &self.key
+    }
+
+    /// The camera's frame as bytes, for the chunks of a layout that shows the camera beside the
+    /// screen; `None` where the brand frames no camera or the layout shows none to frame.
+    pub fn camera_key(&self, layout: Layout) -> Option<Vec<u8>> {
+        let camera = self.camera?;
+        if !matches!(layout, Layout::FaceContent | Layout::Split) {
+            return None;
+        }
+        let mut key = format!("{:?}{:?}", camera.shape, camera.shadow).into_bytes();
+        for value in [camera.corners, camera.border]
+            .into_iter()
+            .chain(camera.color)
+        {
+            key.extend_from_slice(&value.to_le_bytes());
+        }
+        Some(key)
+    }
+
+    /// The shape a mask wipe opens in: the camera's, or a circle.
+    pub fn wipe_shape(&self) -> CameraShape {
+        self.camera.map_or(CameraShape::Circle, |c| c.shape)
+    }
+
+    /// What the end card and a generated title draw from the brand besides a template's own
+    /// fields: the theme's key, the logo and the logo reveal.
+    pub fn end_card_key(&self) -> Vec<u8> {
+        let mut key = self.key.clone();
+        key.extend_from_slice(&self.logo.as_ref().map_or([0; 32], |l| l.hash));
+        key.extend_from_slice(&self.template_hash(LOGO_REVEAL).unwrap_or([0; 32]));
+        key
     }
 
     /// The number, from 1, and title of the chapter an overlay of `take` starting at `at`
@@ -567,6 +658,68 @@ impl Theme {
         }
         Ok(values)
     }
+}
+
+/// A logo file, SVG or PNG, as an image no larger than [`LOGO_SIZE`].
+fn load_logo(file: &str, bytes: &[u8]) -> Result<Logo, ThemeError> {
+    let error = |reason: String| ThemeError::Logo {
+        file: file.to_owned(),
+        reason,
+    };
+    let mut rgba = if file.to_ascii_lowercase().ends_with(".svg") {
+        let tree = resvg::usvg::Tree::from_data(bytes, &resvg::usvg::Options::default())
+            .map_err(|e| error(e.to_string()))?;
+        let size = tree.size();
+        let scale = LOGO_SIZE as f32 / size.width().max(size.height());
+        let (width, height) = (
+            (size.width() * scale).round().max(1.0) as u32,
+            (size.height() * scale).round().max(1.0) as u32,
+        );
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height)
+            .ok_or_else(|| error("it has no size".into()))?;
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::from_scale(scale, scale),
+            &mut pixmap.as_mut(),
+        );
+        // tiny-skia holds premultiplied alpha; the drawing takes straight alpha.
+        let mut data = pixmap.take();
+        for pixel in data.as_chunks_mut::<4>().0 {
+            let alpha = u16::from(pixel[3]);
+            if alpha > 0 && alpha < 255 {
+                for channel in &mut pixel[..3] {
+                    *channel = ((u16::from(*channel) * 255 + alpha / 2) / alpha).min(255) as u8;
+                }
+            }
+        }
+        image::RgbaImage::from_raw(width, height, data)
+            .ok_or_else(|| error("the raster has the wrong size".into()))?
+    } else {
+        image::load_from_memory(bytes)
+            .map_err(|e| error(e.to_string()))?
+            .into_rgba8()
+    };
+    let (width, height) = rgba.dimensions();
+    if width.max(height) > LOGO_SIZE {
+        let scale = LOGO_SIZE as f32 / width.max(height) as f32;
+        rgba = image::imageops::resize(
+            &rgba,
+            (width as f32 * scale).round().max(1.0) as u32,
+            (height as f32 * scale).round().max(1.0) as u32,
+            image::imageops::FilterType::Triangle,
+        );
+    }
+    let (width, height) = rgba.dimensions();
+    Ok(Logo {
+        image: ImageData {
+            data: Blob::new(Arc::new(rgba.into_raw())),
+            format: ImageFormat::Rgba8,
+            alpha_type: ImageAlphaType::Alpha,
+            width,
+            height,
+        },
+        hash: *blake3::hash(bytes).as_bytes(),
+    })
 }
 
 fn hex_color(text: &str) -> Option<Rgba> {
@@ -805,5 +958,38 @@ mod tests {
         // Half-second chunks: the chapter band in 0 and 1, the lower third in 8 and 9. The
         // blur in 4 and 5 and the bare chunks keep their keys.
         assert_eq!(changed, [0, 1, 8, 9]);
+    }
+
+    #[test]
+    fn the_camera_frame_rekeys_only_chunks_that_show_the_camera_beside_the_screen() {
+        let cut = shot_core::Cut::parse(
+            "chapter \"One\" {\n    take t01 {\n        keep from=0 to=3_000_000\n        \
+             layout face-content from=1_000_000 to=2_000_000\n    }\n}\n",
+        )
+        .unwrap();
+        let project = Project {
+            video: shot_core::Video::parse("title \"t\"\nstatus editing\nformat opinion\n")
+                .unwrap(),
+            script: shot_core::Script::parse("# t\n").unwrap(),
+            format: FormatKind::Opinion.preset(),
+            cut,
+        };
+        let timeline = Timeline::evaluate(&project);
+        let keys = |brand_text: &str| {
+            let theme = theme(&brand(brand_text)).unwrap();
+            let mut plan = ExportPlan::new(timeline.main(), 60, |_| MediaId::default());
+            overlay::key_chunks(&mut plan, &|_| Vec::new(), &theme);
+            plan.output_chunks()
+                .map(|(_, c)| c.hash)
+                .collect::<Vec<_>>()
+        };
+        let plain = keys("");
+        let framed = keys("camera shape=circle corners=24 border=8 shadow=soft\n");
+        let changed: Vec<usize> = (0..plain.len())
+            .filter(|&i| plain[i] != framed[i])
+            .collect();
+        // The face-content segment's two chunks; the opinion format's face layout around it
+        // fills the canvas and has no frame.
+        assert_eq!(changed, [2, 3]);
     }
 }

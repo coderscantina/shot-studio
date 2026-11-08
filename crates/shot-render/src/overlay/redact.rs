@@ -76,12 +76,13 @@ pub(crate) fn apply_blur(overlay: &Overlay, stage: &mut Stage) {
     let [right, bottom] = crop_at(frame.right, frame.bottom);
     let strength = p.int("strength").unwrap_or(STRENGTH).max(1) as f32;
     stage.scene.layers.push(Layer {
-        source: layer.source,
-        frame,
-        crop: Rect::new(left, top, right, bottom),
-        radius: 0.0,
         blur: (strength * view.scale()).max(2.0),
-        shutter: Rect::ZERO,
+        ..Layer::new(
+            layer.source,
+            frame,
+            Rect::new(left, top, right, bottom),
+            0.0,
+        )
     });
 }
 

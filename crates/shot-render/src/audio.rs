@@ -2,13 +2,23 @@
 //! over 5 ms where the source jumps. Export encodes it, the preview plays it, so both cut the
 //! same samples and fade them the same way. Bleeps silence the voice over their range; the
 //! export puts the tone in after the voice chain.
+//!
+//! A plan with bookends and transitions ([`TimelineAudio::of_plan`]) is silent under the
+//! bookends, and its voice follows the picture at each transition: a dip fades out to the cut
+//! and in after it, every other transition crossfades on equal-power curves over its middle,
+//! with the outgoing take running on past its edge and the incoming one starting early, as the
+//! picture's handles do. A stinger crosses over a quarter second around its cut.
 
 use std::collections::HashMap;
+use std::f32::consts::FRAC_PI_2;
 use std::ops::Range;
 use std::path::PathBuf;
 
-use shot_core::Id;
+use shot_core::{Id, TransitionKind};
 use shot_media::audio::{AudioError, PcmReader, SAMPLE_RATE};
+
+use crate::join::Piece;
+use crate::plan::ExportPlan;
 
 /// Fade length where the audio jumps, 5 ms.
 pub const FADE_SAMPLES: u64 = SAMPLE_RATE as u64 / 200;
@@ -37,14 +47,61 @@ struct Placed {
     fade_out: bool,
 }
 
+/// How the voice joins two pieces at a transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Blend {
+    /// The outgoing side fades out to the cut, the incoming one in after it.
+    Dip,
+    /// Both sides play across the middle, one fading out as the other fades in.
+    Cross,
+}
+
+/// A transition's voice, in output samples.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Join {
+    edge: u64,
+    /// From the edge to each end of the blend.
+    half: u64,
+    blend: Blend,
+    /// The segments on each side, `None` for a bookend.
+    before: Option<usize>,
+    after: Option<usize>,
+}
+
+impl Join {
+    /// The outgoing and incoming gains at output sample `n`.
+    fn gains(&self, n: u64) -> (f32, f32) {
+        let start = self.edge - self.half;
+        match self.blend {
+            Blend::Cross => {
+                let x = ((n - start) as f32 + 0.5) / (2 * self.half) as f32 * FRAC_PI_2;
+                (x.cos(), x.sin())
+            }
+            Blend::Dip if n < self.edge => {
+                let x = ((n - start) as f32 + 0.5) / self.half as f32 * FRAC_PI_2;
+                (x.cos(), 0.0)
+            }
+            Blend::Dip => {
+                let x = ((n - self.edge) as f32 + 0.5) / self.half as f32 * FRAC_PI_2;
+                (0.0, x.sin())
+            }
+        }
+    }
+}
+
 /// Reads output samples of a sequence of segments, from each take's mic track.
 pub struct TimelineAudio {
     segments: Vec<Placed>,
     track: Box<dyn Fn(&Id) -> PathBuf>,
     readers: HashMap<Id, PcmReader>,
+    /// Read the material past the segments' edges, so the segments' readers read on.
+    handles: HashMap<Id, PcmReader>,
     scratch: Vec<f32>,
     /// Output samples the voice is silenced over, in order.
     bleeps: Vec<Range<u64>>,
+    joins: Vec<Join>,
+    /// Output length in samples.
+    length: u64,
 }
 
 impl TimelineAudio {
@@ -79,11 +136,96 @@ impl TimelineAudio {
             previous = Some(segment);
         }
         Self {
+            length: placed.last().map_or(0, |s| s.output.end),
             segments: placed,
             track: Box::new(track),
             readers: HashMap::new(),
+            handles: HashMap::new(),
             scratch: Vec::new(),
             bleeps: Vec::new(),
+            joins: Vec::new(),
+        }
+    }
+
+    /// The voice of `plan` at its frame rate, which must divide [`SAMPLE_RATE`]: each segment
+    /// where the plan places it, silence under the bookends, and the transitions' blends.
+    pub fn of_plan(plan: &ExportPlan, track: impl Fn(&Id) -> PathBuf + 'static) -> Self {
+        let per_frame = u64::from(SAMPLE_RATE / plan.fps);
+        let mut placed: Vec<Placed> = Vec::with_capacity(plan.segments.len());
+        let mut previous: Option<Piece> = None;
+        for piece in &plan.pieces {
+            if let Piece::Segment(i) = *piece {
+                let segment = &plan.segments[i];
+                let continues = previous.is_some_and(|p| {
+                    p == Piece::Segment(i.wrapping_sub(1)) && segment.continues_previous
+                });
+                if let Some(last) = placed.last_mut().filter(|_| continues) {
+                    last.fade_out = false;
+                }
+                let start = segment.output_frame * per_frame;
+                placed.push(Placed {
+                    take: segment.segment.take.clone(),
+                    source_start: segment.source_frames.start * per_frame,
+                    output: start..start + segment.frames() * per_frame,
+                    fade_in: !continues,
+                    fade_out: true,
+                });
+            }
+            previous = Some(*piece);
+        }
+        let index = |piece| match piece {
+            Piece::Segment(i) => Some(i),
+            Piece::Bookend(_) => None,
+        };
+        let mut joins = Vec::new();
+        for t in &plan.transitions {
+            let (before, after) = (index(t.before), index(t.after));
+            // A join inside one take's continuous material has nothing to blend.
+            if let (Some(b), Some(a)) = (before, after)
+                && a == b + 1
+                && plan.segments[a].continues_previous
+            {
+                continue;
+            }
+            let (blend, half) = match t.kind {
+                TransitionKind::Cut => continue,
+                TransitionKind::Dip => (Blend::Dip, t.edge - t.window.start),
+                TransitionKind::Stinger => (
+                    Blend::Cross,
+                    (t.edge - t.window.start)
+                        .min(t.window.end - t.edge)
+                        .min(u64::from(plan.fps / 4)),
+                ),
+                _ => (Blend::Cross, t.edge - t.window.start),
+            };
+            if half == 0 {
+                continue;
+            }
+            if blend == Blend::Cross {
+                if let Some(b) = before {
+                    placed[b].fade_out = false;
+                }
+                if let Some(a) = after {
+                    placed[a].fade_in = false;
+                }
+            }
+            joins.push(Join {
+                edge: t.edge * per_frame,
+                half: half * per_frame,
+                blend,
+                before,
+                after,
+            });
+        }
+        Self {
+            segments: placed,
+            track: Box::new(track),
+            readers: HashMap::new(),
+            handles: HashMap::new(),
+            scratch: Vec::new(),
+            bleeps: Vec::new(),
+            joins,
+            length: plan.frames * per_frame,
         }
     }
 
@@ -116,7 +258,7 @@ impl TimelineAudio {
 
     /// Output length in samples.
     pub fn len(&self) -> u64 {
-        self.segments.last().map_or(0, |s| s.output.end)
+        self.length
     }
 
     pub fn is_empty(&self) -> bool {
@@ -135,6 +277,11 @@ impl TimelineAudio {
             .partition_point(|s| s.output.end <= range.start);
         let mut at = range.start;
         for segment in &self.segments[first..] {
+            if at < segment.output.start {
+                let gap = segment.output.start.min(range.end);
+                out.resize(out.len() + (gap - at) as usize, 0.0);
+                at = gap;
+            }
             if at >= range.end {
                 break;
             }
@@ -169,6 +316,7 @@ impl TimelineAudio {
         }
         out.resize(out.len() + (range.end - at) as usize, 0.0);
         let first = out.len() - (range.end - range.start) as usize;
+        self.blend(range.clone(), &mut out[first..])?;
         for bleep in &self.bleeps {
             let from = bleep.start.max(range.start);
             let to = bleep.end.min(range.end);
@@ -178,6 +326,79 @@ impl TimelineAudio {
             }
         }
         Ok(())
+    }
+}
+
+impl TimelineAudio {
+    /// Applies the joins' gains to `out`, output samples `range`, and adds the handles of
+    /// crossfades: the outgoing take after its edge, the incoming one before its edge.
+    fn blend(&mut self, range: Range<u64>, out: &mut [f32]) -> Result<(), TimelineAudioError> {
+        for join in self.joins.clone() {
+            let from = range.start.max(join.edge - join.half);
+            let to = range.end.min(join.edge + join.half);
+            if from >= to {
+                continue;
+            }
+            for n in from..to {
+                let (before, after) = join.gains(n);
+                out[(n - range.start) as usize] *= if n < join.edge { before } else { after };
+            }
+            if join.blend == Blend::Dip {
+                continue;
+            }
+            if let Some(b) = join.before
+                && to > join.edge
+            {
+                let segment = self.segments[b].clone();
+                let source_end = segment.source_start + (segment.output.end - segment.output.start);
+                let start = from.max(join.edge);
+                let samples =
+                    self.handle(&segment.take, source_end + (start - join.edge), to - start)?;
+                for (i, s) in samples.iter().enumerate() {
+                    let n = start + i as u64;
+                    out[(n - range.start) as usize] += s * join.gains(n).0;
+                }
+            }
+            if let Some(a) = join.after
+                && from < join.edge
+            {
+                let segment = self.segments[a].clone();
+                let end = to.min(join.edge);
+                // The take has nothing before its start: the handle is silence there.
+                let early = join.edge - from;
+                let skip = early.saturating_sub(segment.source_start);
+                let samples = self.handle(
+                    &segment.take,
+                    segment.source_start.saturating_sub(early),
+                    (end - from).saturating_sub(skip),
+                )?;
+                for (i, s) in samples.iter().enumerate() {
+                    let n = from + skip + i as u64;
+                    out[(n - range.start) as usize] += s * join.gains(n).1;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// `count` samples of `take`'s mic from source sample `from`, through the handle reader.
+    fn handle(&mut self, take: &Id, from: u64, count: u64) -> Result<Vec<f32>, TimelineAudioError> {
+        let path = (self.track)(take);
+        let reader = match self.handles.entry(take.clone()) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(PcmReader::open(&path).map_err(|source| TimelineAudioError {
+                    path: path.clone(),
+                    source,
+                })?)
+            }
+        };
+        let mut samples = Vec::with_capacity(count as usize);
+        reader
+            .read(from, from + count, &mut samples)
+            .map_err(|source| TimelineAudioError { path, source })?;
+        samples.resize(count as usize, 0.0);
+        Ok(samples)
     }
 }
 
@@ -249,6 +470,84 @@ mod tests {
             ]
         );
         assert_eq!(audio.len(), 120_000);
+    }
+
+    /// A mono 16-bit WAV of `seconds` at a constant `level`.
+    fn constant_wav(path: &std::path::Path, seconds: u32, level: f32) {
+        let samples = SAMPLE_RATE * seconds;
+        let mut bytes = Vec::new();
+        let mut put = |b: &[u8]| bytes.extend_from_slice(b);
+        put(b"RIFF");
+        put(&(36 + samples * 2).to_le_bytes());
+        put(b"WAVEfmt ");
+        put(&16u32.to_le_bytes());
+        put(&1u16.to_le_bytes());
+        put(&1u16.to_le_bytes());
+        put(&SAMPLE_RATE.to_le_bytes());
+        put(&(SAMPLE_RATE * 2).to_le_bytes());
+        put(&2u16.to_le_bytes());
+        put(&16u16.to_le_bytes());
+        put(b"data");
+        put(&(samples * 2).to_le_bytes());
+        let value = ((level * 32767.0) as i16).to_le_bytes();
+        for _ in 0..samples {
+            put(&value);
+        }
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn the_voice_rests_under_the_intro_and_crosses_over_a_dissolve() {
+        use crate::join::{BookendInput, Join, Joins};
+        use shot_core::{Cut, FormatKind, Micros, Project, Script, Target, Timeline, Video};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mic = dir.path().join("mic.wav");
+        constant_wav(&mic, 4, 0.5);
+        let project = Project {
+            video: Video::parse("title \"t\"\nstatus editing\nformat tutorial\n").unwrap(),
+            script: Script::parse("# t\n").unwrap(),
+            format: FormatKind::Tutorial.preset(),
+            cut: Cut::parse(
+                "chapter \"One\" {\n    take t01 {\n        keep from=0 to=1_000_000\n    }\n}\n\
+                 chapter \"Two\" {\n    take t01 {\n        keep from=2_000_000 to=3_000_000\n    }\n}\n",
+            )
+            .unwrap(),
+        };
+        let joins = Joins {
+            intro: Some(BookendInput {
+                bumper: None,
+                title: Some("t".into()),
+                length: Micros(500_000),
+                identity: Vec::new(),
+            }),
+            transitions: vec![Join {
+                take: Id::new("t01").unwrap(),
+                at: Micros(2_000_000),
+                target: Target::ChapterStart,
+                kind: TransitionKind::Dissolve,
+                length: Micros(500_000),
+            }],
+            ..Joins::default()
+        };
+        let plan = crate::plan::ExportPlan::new(Timeline::evaluate(&project).main(), 60, |_| {
+            shot_core::MediaId::default()
+        })
+        .with_joins(&joins);
+        let mut audio = TimelineAudio::of_plan(&plan, move |_| mic.clone());
+        assert_eq!(audio.len(), 2_500 * 48);
+        let mut out = Vec::new();
+        audio.read(0..audio.len(), &mut out).unwrap();
+        let at = |ms: u64| out[(ms * 48) as usize];
+        // Silent under the intro, then the voice faded in over 5 ms where it starts.
+        assert_eq!(at(400), 0.0);
+        assert!((at(800) - 0.5).abs() < 1e-3);
+        // The edge is at 1.5 s: on equal-power curves both takes play across the middle, the
+        // first one past its kept range and the second one before its own.
+        assert!((at(1_260) - 0.5).abs() < 0.02);
+        assert!((out[1_500 * 48] - 0.5 * std::f32::consts::SQRT_2).abs() < 1e-2);
+        assert!((at(1_740) - 0.5).abs() < 0.02);
+        assert!((at(2_000) - 0.5).abs() < 1e-3);
     }
 
     #[test]

@@ -343,11 +343,12 @@ pub fn file(overlay: &Overlay) -> Option<&str> {
     }
 }
 
-/// Extends the key of every chunk with what its overlays draw beyond their own parameters:
+/// Extends the key of every chunk with what it draws beyond its segment's own values:
 /// `identity` of each file an overlay names, so a file replaced under the same name renders
 /// again, and where a branded template draws, the theme's preset, colors and fonts, a brand
-/// Lottie's file hash and a chapter band's title. A chunk where nothing branded draws keeps its
-/// key when the brand changes.
+/// Lottie's file hash and a chapter band's title. Where the brand frames the camera beside the
+/// screen, the camera's frame. A chunk where nothing branded draws keeps its key when the brand
+/// changes.
 pub fn key_chunks(
     plan: &mut crate::plan::ExportPlan,
     identity: &dyn Fn(&str) -> Vec<u8>,
@@ -362,34 +363,43 @@ pub fn key_chunks(
             ) else {
                 continue;
             };
-            let mut input = Vec::new();
-            let mut branded = false;
-            let take = &planned.segment.take;
-            for overlay in planned
-                .segment
-                .overlays
-                .iter()
-                .filter(|o| o.range.overlaps(span))
-            {
-                if let Some(file) = file(overlay) {
-                    let id = identity(file);
-                    input.extend_from_slice(&(id.len() as u64).to_le_bytes());
-                    input.extend_from_slice(&id);
-                }
-                if let Some(key) = crate::theme::overlay_key(theme, overlay, take) {
-                    branded = true;
-                    input.extend_from_slice(&(key.len() as u64).to_le_bytes());
-                    input.extend_from_slice(&key);
-                }
-            }
-            if branded {
-                input.extend_from_slice(theme.key());
-            }
+            let input = span_input(&planned.segment, span, identity, theme);
             if !input.is_empty() {
                 chunk.hash = chunk.hash.extend(&input);
             }
         }
     }
+}
+
+/// What [`key_chunks`] adds to the key of `segment`'s frames over `span`, empty for nothing.
+pub(crate) fn span_input(
+    segment: &shot_core::Segment,
+    span: TimeRange,
+    identity: &dyn Fn(&str) -> Vec<u8>,
+    theme: &Theme,
+) -> Vec<u8> {
+    let mut input = Vec::new();
+    let mut branded = false;
+    for overlay in segment.overlays.iter().filter(|o| o.range.overlaps(span)) {
+        if let Some(file) = file(overlay) {
+            let id = identity(file);
+            input.extend_from_slice(&(id.len() as u64).to_le_bytes());
+            input.extend_from_slice(&id);
+        }
+        if let Some(key) = crate::theme::overlay_key(theme, overlay, &segment.take) {
+            branded = true;
+            input.extend_from_slice(&(key.len() as u64).to_le_bytes());
+            input.extend_from_slice(&key);
+        }
+    }
+    if branded {
+        input.extend_from_slice(theme.key());
+    }
+    if let Some(camera) = theme.camera_key(segment.layout) {
+        input.extend_from_slice(b"camera");
+        input.extend_from_slice(&camera);
+    }
+    input
 }
 
 /// A clip a b-roll overlay cuts away to: the screen layer shows `file` at `time` instead of the
@@ -449,6 +459,29 @@ pub(crate) fn apply(overlay: &Overlay, stage: &mut Stage) {
         redact::BLUR_TEMPLATE => redact::apply_blur(overlay, stage),
         _ => {}
     }
+}
+
+/// Draws `overlay` at `t` over `frame` on its own, for an overlay the plan places rather than a
+/// segment: the end card over the last seconds.
+pub(crate) fn draw_alone(
+    overlay: &Overlay,
+    t: Micros,
+    canvas: Canvas,
+    look: &Look,
+    frame: &mut crate::frame::Frame,
+) {
+    apply(
+        overlay,
+        &mut Stage {
+            t,
+            canvas,
+            look,
+            screen: &mut None,
+            scene: &mut frame.scene,
+            drawing: &mut frame.drawing,
+            cutaway: &mut frame.cutaway,
+        },
+    );
 }
 
 /// A brand Lottie template drawn over the whole frame: its composition scaled to the canvas

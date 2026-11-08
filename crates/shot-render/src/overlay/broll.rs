@@ -85,15 +85,8 @@ pub(crate) fn apply(overlay: &Overlay, stage: &mut Stage) {
                 file: path.to_owned(),
                 time: Micros(params.time("start").unwrap_or(Micros(0)).0 + elapsed.0),
             });
-            stage.scene.layers = vec![Layer {
-                source: Source::Screen,
-                frame: full,
-                // The export and preview fit the clip once they know its size, see `fit_cutaway`.
-                crop: Rect::UNIT,
-                radius: 0.0,
-                blur: 0.0,
-                shutter: Rect::ZERO,
-            }];
+            // The export and preview fit the clip once they know its size, see `fit_cutaway`.
+            stage.scene.layers = vec![Layer::new(Source::Screen, full, Rect::UNIT, 0.0)];
             // Nothing of the take shows through a hard cut.
             stage.drawing.under.clear();
             stage.drawing.over.clear();

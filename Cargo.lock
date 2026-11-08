@@ -6458,6 +6458,7 @@ dependencies = [
  "objc2-metal 0.3.2",
  "parley",
  "pollster",
+ "resvg 0.46.0",
  "serde",
  "serde_json",
  "shot-analyze",

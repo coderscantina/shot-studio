@@ -15,9 +15,15 @@
 //! centers on the zoom's point, as far as the slot's crop allows.
 //!
 //! Capture does not record window bounds yet, so `window` shows the whole screen as the window.
+//!
+//! The brand's `camera` node frames the camera wherever it sits beside the screen, in
+//! `face-content` and `split` ([`LayoutSpec::with_camera`]): its shape and corners, a border in
+//! the accent color and a shadow that falls away from the scene's light. `face` fills the canvas
+//! and has no frame to style.
 
-use shot_core::{DeviceFrame, Effects, Layout, WindowStyle};
+use shot_core::{CameraShape, DeviceFrame, Effects, Layout, Shadow, WindowStyle};
 
+use crate::materials::LIGHT;
 use crate::zoom::Punch;
 
 /// The size of the output in pixels.
@@ -128,6 +134,48 @@ pub struct Slot {
     pub frame: Rect,
     /// Corner radius in design canvas pixels.
     pub radius: f32,
+    /// In design canvas pixels, like the shadow's offset and blur.
+    pub border: Option<Border>,
+    pub shadow: Option<DropShadow>,
+}
+
+/// How the brand frames the camera, in design canvas pixels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CameraFrame {
+    pub shape: CameraShape,
+    pub corners: f32,
+    /// 0 for none.
+    pub border: f32,
+    /// Gamma-encoded RGB of the border.
+    pub color: [f32; 3],
+    pub shadow: Shadow,
+}
+
+impl CameraFrame {
+    /// The brand's `camera` node, its border in `accent`.
+    pub fn of(camera: &shot_core::Camera, accent: [f32; 3]) -> Self {
+        Self {
+            shape: camera.shape,
+            corners: f32::from(camera.corners),
+            border: f32::from(camera.border),
+            color: accent,
+            shadow: camera.shadow,
+        }
+    }
+
+    /// The shadow of a camera frame lifted off the canvas, falling away from the light.
+    fn drop_shadow(self) -> Option<DropShadow> {
+        let (elevation, blur, alpha) = match self.shadow {
+            Shadow::None => return None,
+            Shadow::Soft => (48.0, 40.0, 0.55),
+            Shadow::Hard => (18.0, 3.0, 0.75),
+        };
+        Some(DropShadow {
+            offset: LIGHT.shadow_offset(elevation),
+            blur,
+            alpha,
+        })
+    }
 }
 
 /// The fixed arrangement of a layout. Slots draw in order, later ones on top.
@@ -160,6 +208,8 @@ impl LayoutSpec {
             source,
             frame,
             radius,
+            border: None,
+            shadow: None,
         };
         let spec = match layout {
             Layout::Face => Self {
@@ -212,6 +262,56 @@ impl LayoutSpec {
         Ok(spec)
     }
 
+    /// The layout with `camera` framing its camera slot when the camera sits beside the screen.
+    /// A circle is the largest square of the slot: in a corner over the screen it keeps to that
+    /// corner, elsewhere it is centered.
+    pub fn with_camera(mut self, camera: CameraFrame) -> Self {
+        let screen = self
+            .slots
+            .iter()
+            .find(|s| s.source == Source::Screen)
+            .map(|s| s.frame);
+        let Some(screen) = screen else {
+            return self;
+        };
+        for slot in self.slots.iter_mut().filter(|s| s.source == Source::Camera) {
+            let f = slot.frame;
+            slot.radius = match camera.shape {
+                CameraShape::Rounded => camera.corners.min(f.width().min(f.height()) / 2.0),
+                CameraShape::Square => 0.0,
+                CameraShape::Circle => {
+                    let side = f.width().min(f.height());
+                    let over_screen =
+                        screen.contains([f.left, f.top]) && screen.contains([f.right, f.bottom]);
+                    let (cx, cy) = ((f.left + f.right) / 2.0, (f.top + f.bottom) / 2.0);
+                    let (left, top) = if over_screen {
+                        let left = if cx > DESIGN_WIDTH / 2.0 {
+                            f.right - side
+                        } else {
+                            f.left
+                        };
+                        let top = if cy > FULL.bottom / 2.0 {
+                            f.bottom - side
+                        } else {
+                            f.top
+                        };
+                        (left, top)
+                    } else {
+                        (cx - side / 2.0, cy - side / 2.0)
+                    };
+                    slot.frame = Rect::new(left, top, left + side, top + side);
+                    side / 2.0
+                }
+            };
+            slot.border = (camera.border > 0.0).then_some(Border {
+                width: camera.border,
+                color: camera.color,
+            });
+            slot.shadow = camera.drop_shadow();
+        }
+        self
+    }
+
     /// Whether any slot draws `source`.
     pub fn uses(&self, source: Source) -> bool {
         self.slots.iter().any(|slot| slot.source == source)
@@ -242,12 +342,16 @@ impl LayoutSpec {
                     };
                 }
                 Layer {
-                    source: slot.source,
-                    frame,
-                    crop,
-                    radius: slot.radius * scale,
-                    blur: 0.0,
-                    shutter: Rect::ZERO,
+                    border: slot.border.map(|b| Border {
+                        width: b.width * scale,
+                        ..b
+                    }),
+                    shadow: slot.shadow.map(|s| DropShadow {
+                        offset: s.offset.map(|o| o * scale),
+                        blur: s.blur * scale,
+                        alpha: s.alpha,
+                    }),
+                    ..Layer::new(slot.source, frame, crop, slot.radius * scale)
                 }
             })
             .collect();
@@ -337,9 +441,62 @@ pub struct Layer {
     /// How `crop` changes from the shutter's opening to its closing, for motion blur. Zero when
     /// the layer holds still.
     pub shutter: Rect,
+    /// 1 for an opaque layer.
+    pub opacity: f32,
+    pub border: Option<Border>,
+    pub shadow: Option<DropShadow>,
+}
+
+/// A border drawn inside a layer's edge.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Border {
+    /// In canvas pixels.
+    pub width: f32,
+    /// Gamma-encoded RGB.
+    pub color: [f32; 3],
+}
+
+/// A black shadow of a layer's shape under it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DropShadow {
+    /// From the layer to its shadow, in canvas pixels.
+    pub offset: [f32; 2],
+    /// Standard deviation of the shadow's edge, in canvas pixels.
+    pub blur: f32,
+    pub alpha: f32,
 }
 
 impl Layer {
+    /// A sharp, opaque layer that holds still.
+    pub fn new(source: Source, frame: Rect, crop: Rect, radius: f32) -> Self {
+        Self {
+            source,
+            frame,
+            crop,
+            radius,
+            blur: 0.0,
+            shutter: Rect::ZERO,
+            opacity: 1.0,
+            border: None,
+            shadow: None,
+        }
+    }
+
+    /// What drawing the layer covers on the canvas: its frame, and its shadow.
+    pub fn extent(&self) -> Rect {
+        let Some(shadow) = self.shadow else {
+            return self.frame;
+        };
+        let reach = shadow.blur * 3.0;
+        let f = self.frame;
+        Rect::new(
+            f.left.min(f.left + shadow.offset[0]) - reach,
+            f.top.min(f.top + shadow.offset[1]) - reach,
+            f.right.max(f.right + shadow.offset[0]) + reach,
+            f.bottom.max(f.bottom + shadow.offset[1]) + reach,
+        )
+    }
+
     /// How far the shown content moves on the canvas during the shutter, in canvas pixels.
     pub fn travel(&self) -> f32 {
         let s = self.shutter;
@@ -465,6 +622,49 @@ mod tests {
         )
         .unwrap();
         assert!(framed.slots[0].frame.bottom < 2160.0 - 64.0 - 96.0 + 0.01);
+    }
+
+    #[test]
+    fn the_brand_frames_the_camera_beside_the_screen() {
+        let camera = CameraFrame {
+            shape: CameraShape::Circle,
+            corners: 24.0,
+            border: 8.0,
+            color: [1.0, 0.0, 0.0],
+            shadow: Shadow::Soft,
+        };
+        let half = Canvas {
+            width: 1920,
+            height: 1080,
+        };
+        // An inset over the screen keeps to its corner, a panel beside it is centered.
+        let inset = LayoutSpec::of(Layout::FaceContent)
+            .unwrap()
+            .with_camera(camera)
+            .scene(half, SIZES, NONE);
+        let circle = inset.layers[1];
+        assert_close(circle.frame, Rect::new(1641.0, 801.0, 1884.0, 1044.0));
+        assert_eq!(circle.radius, 121.5);
+        assert_eq!(circle.border.unwrap().width, 4.0);
+        let shadow = circle.shadow.unwrap();
+        assert!(shadow.offset[0] > 0.0 && shadow.offset[1] > 0.0);
+        assert!(circle.extent().right > circle.frame.right);
+        assert_eq!(inset.layers[0].shadow, None);
+        let panel = LayoutSpec::of(Layout::Split)
+            .unwrap()
+            .with_camera(camera)
+            .scene(Canvas::UHD, SIZES, NONE)
+            .layers[1];
+        assert_close(panel.frame, Rect::new(2684.0, 540.0, 3764.0, 1620.0));
+        let square = LayoutSpec::of(Layout::Split)
+            .unwrap()
+            .with_camera(CameraFrame {
+                shape: CameraShape::Square,
+                ..camera
+            });
+        assert_eq!(square.slots[1].radius, 0.0);
+        let face = LayoutSpec::of(Layout::Face).unwrap();
+        assert_eq!(face.clone().with_camera(camera), face);
     }
 
     #[test]

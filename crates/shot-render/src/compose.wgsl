@@ -2,7 +2,8 @@
 //
 // The source's YCbCr planes are sampled and turned into RGB with the source's matrix, the layer's
 // rounded corners give coverage, and the color goes back to YCbCr in the target's range and
-// matrix. Blending in YCbCr equals blending in RGB, because the conversion is affine.
+// matrix. Blending in YCbCr equals blending in RGB, because the conversion is affine. A layer can
+// carry a border inside its edge and a drop shadow outside it, and an opacity over everything.
 
 struct Layer {
     // Destination in canvas pixels: left, top, right, bottom.
@@ -19,10 +20,17 @@ struct Layer {
     blur: f32,
     // Motion blur samples, 1 when the layer holds still.
     samples: f32,
+    opacity: f32,
     // Luma weights Kr and Kb of the source matrix, then of the target matrix.
     weights: vec4<f32>,
     // How the crop changes over the shutter, in texture coordinates.
     shutter: vec4<f32>,
+    // The border's gamma-encoded RGB, and its width in canvas pixels in w, 0 for none.
+    border: vec4<f32>,
+    // The drop shadow's offset in canvas pixels, its standard deviation and its alpha, 0 for none.
+    shadow: vec4<f32>,
+    // What the draw covers in canvas pixels: the frame, grown to hold the shadow.
+    quad: vec4<f32>,
 }
 
 // RGB from normalized luma and centered chroma with luma weights Kr and Kb.
@@ -46,14 +54,18 @@ struct Varyings {
     @location(2) motion: vec2<f32>,
 }
 
-// A triangle strip over the layer's frame.
+// A triangle strip over the layer's quad. Texture coordinates run on past the frame's edges.
+// Where the quad is the frame, `at` is exactly the corner, so a layer without a shadow samples
+// the very coordinates it would over its frame alone.
 @vertex
 fn vertex(@builtin(vertex_index) index: u32) -> Varyings {
     let corner = vec2<f32>(f32(index & 1u), f32((index >> 1u) & 1u));
-    let canvas = mix(layer.frame.xy, layer.frame.zw, corner);
+    let canvas = mix(layer.quad.xy, layer.quad.zw, corner);
     let ndc = vec2<f32>(canvas.x / layer.canvas.x * 2.0 - 1.0, 1.0 - canvas.y / layer.canvas.y * 2.0);
-    let uv = mix(layer.crop.xy, layer.crop.zw, corner);
-    return Varyings(vec4<f32>(ndc, 0.0, 1.0), canvas, uv, mix(layer.shutter.xy, layer.shutter.zw, corner));
+    let size = layer.frame.zw - layer.frame.xy;
+    let at = mix((layer.quad.xy - layer.frame.xy) / size, (layer.quad.zw - layer.frame.xy) / size, corner);
+    let uv = mix(layer.crop.xy, layer.crop.zw, at);
+    return Varyings(vec4<f32>(ndc, 0.0, 1.0), canvas, uv, mix(layer.shutter.xy, layer.shutter.zw, at));
 }
 
 fn source_rgb(uv: vec2<f32>) -> vec3<f32> {
@@ -121,24 +133,44 @@ fn target_ycbcr(rgb: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(y, c + vec2<f32>(128.0 / 255.0));
 }
 
-// Antialiased coverage of the rounded frame at a canvas position.
-fn coverage(canvas: vec2<f32>) -> f32 {
+// Signed distance from a canvas position to the rounded frame's edge, negative inside.
+fn edge_distance(canvas: vec2<f32>) -> f32 {
     let center = (layer.frame.xy + layer.frame.zw) * 0.5;
     let half_size = (layer.frame.zw - layer.frame.xy) * 0.5;
     let q = abs(canvas - center) - half_size + vec2<f32>(layer.radius);
-    let distance = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - layer.radius;
-    return clamp(0.5 - distance, 0.0, 1.0);
+    return length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - layer.radius;
+}
+
+// The layer's RGB at a point and its alpha: the source with its border, over its drop shadow,
+// with antialiased edges. The shadow is black, its edge a gaussian of the shadow's deviation,
+// through the logistic approximation of the normal distribution.
+fn shaded(input: Varyings) -> vec4<f32> {
+    let distance = edge_distance(input.canvas);
+    let inside = clamp(0.5 - distance, 0.0, 1.0);
+    var rgb = layer_rgb(input.uv, input.motion);
+    if layer.border.w > 0.0 {
+        rgb = mix(layer.border.rgb, rgb, clamp(0.5 - (distance + layer.border.w), 0.0, 1.0));
+    }
+    var alpha = inside;
+    if layer.shadow.w > 0.0 {
+        let away = edge_distance(input.canvas - layer.shadow.xy);
+        let shadow = layer.shadow.w / (1.0 + exp(1.702 * away / max(layer.shadow.z, 0.5)));
+        alpha = inside + shadow * (1.0 - inside);
+        rgb = rgb * inside / max(alpha, 1e-5);
+    }
+    return vec4<f32>(rgb, alpha * layer.opacity);
 }
 
 @fragment
 fn luma_plane(input: Varyings) -> @location(0) vec4<f32> {
-    let ycbcr = target_ycbcr(layer_rgb(input.uv, input.motion));
-    return vec4<f32>(ycbcr.x, 0.0, 0.0, coverage(input.canvas));
+    let color = shaded(input);
+    return vec4<f32>(target_ycbcr(color.rgb).x, 0.0, 0.0, color.a);
 }
 
 // Runs once per 2x2 block of canvas pixels, at the block's center.
 @fragment
 fn chroma_plane(input: Varyings) -> @location(0) vec4<f32> {
-    let ycbcr = target_ycbcr(layer_rgb(input.uv, input.motion));
-    return vec4<f32>(ycbcr.y, ycbcr.z, 0.0, coverage(input.canvas));
+    let color = shaded(input);
+    let ycbcr = target_ycbcr(color.rgb);
+    return vec4<f32>(ycbcr.y, ycbcr.z, 0.0, color.a);
 }
