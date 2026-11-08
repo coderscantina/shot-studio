@@ -50,6 +50,10 @@ fn word_selection() -> gpui::Hsla {
     gpui::Hsla::from(ACCENT).opacity(0.32)
 }
 
+/// The keys that cut words or remove the picked element, as hints show them: Backspace and
+/// forward Delete do the same.
+pub const DELETE_KEYS: &str = "⌫ ⌦";
+
 /// How long "Saved" shows after an edit is written.
 const SAVED_FOR: Duration = Duration::from_millis(1600);
 
@@ -91,6 +95,7 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("space", TogglePlay, context),
         KeyBinding::new("backspace", DeleteSelection, context),
+        KeyBinding::new("delete", DeleteSelection, context),
         KeyBinding::new("r", RestoreSelection, context),
         KeyBinding::new("escape", ClearSelection, context),
         KeyBinding::new("1", Layout1, context),

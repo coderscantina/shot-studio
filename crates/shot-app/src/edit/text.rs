@@ -729,7 +729,7 @@ fn selection_toolbar(this: &EditScreen, room: f32, cx: &mut Context<EditScreen>)
                 )
                 .when(kept, |bar| {
                     bar.child(
-                        tool("cut", "Cut", "⌫")
+                        tool("cut", "Cut", super::DELETE_KEYS)
                             .id("text-tool-cut")
                             .cursor_pointer()
                             .hover(|s| s.bg(FLOAT_ON))
@@ -895,7 +895,7 @@ fn inspector(this: &EditScreen, cx: &mut Context<EditScreen>) -> Stateful<Div> {
                     .flex_col()
                     .gap(px(8.))
                     .child(label("Click a word to select it, Shift-click to extend"))
-                    .child(hint("⌫", "Cut the selected words"))
+                    .child(hint(super::DELETE_KEYS, "Cut the selected words"))
                     .child(hint("R", "Restore cut words"))
                     .child(hint("Z", "Zoom in on them"))
                     .child(hint("S", "Place a sound"))
@@ -1034,7 +1034,7 @@ fn zoom_section(
         })
         .child(
             div().flex().items_center().gap(px(10.)).child(
-                tool("close", "Remove", "⌫")
+                tool("close", "Remove", super::DELETE_KEYS)
                     .id("text-zoom-remove")
                     .bg(RAISED)
                     .cursor_pointer()
