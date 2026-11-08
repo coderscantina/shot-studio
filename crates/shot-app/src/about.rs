@@ -63,13 +63,16 @@ fn credits() -> Credits {
     }
 }
 
-/// Sets the app menu with About and Quit (⌘Q). Call once at startup.
+/// Sets the app menu with About, Welcome, Open (⌘O) and Quit (⌘Q). Call once at startup.
 pub fn init(cx: &mut App) {
     cx.on_action(|_: &About, cx| open(cx));
     cx.on_action(|_: &Quit, cx| cx.quit());
     cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
     cx.set_menus([Menu::new("Shot Studio").items([
         MenuItem::action("About Shot Studio", About),
+        MenuItem::separator(),
+        MenuItem::action("Welcome to Shot Studio", crate::welcome::ShowWelcome),
+        MenuItem::action("Open Video Folder…", crate::welcome::OpenVideo),
         MenuItem::separator(),
         MenuItem::action("Quit Shot Studio", Quit),
     ])]);

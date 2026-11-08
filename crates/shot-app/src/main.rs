@@ -1,7 +1,7 @@
 //! gpui UI, bundled as "Shot Studio.app" by `scripts/bundle.sh`.
 //!
 //! `shot-app <video-folder>` opens a video folder on its Edit screen, with Record one click away.
-//! Without arguments, as when started from Finder, it opens the About window.
+//! Without arguments, as when started from Finder, it opens the welcome window.
 //!
 //! `shot-app [flags] <video.mp4>` opens the preview spike window on one file:
 //!
@@ -42,6 +42,7 @@ mod studio;
 mod style;
 mod theme;
 mod ui;
+mod welcome;
 mod zoom;
 
 use std::path::PathBuf;
@@ -52,13 +53,10 @@ use preview::Options;
 
 fn main() -> ExitCode {
     if std::env::args().len() == 1 {
-        gpui_platform::application()
-            .with_assets(theme::Assets)
-            .run(|cx| {
-                theme::init(cx);
-                about::init(cx);
-                about::open(cx);
-            });
+        studio_app().run(|cx| {
+            init(cx);
+            welcome::open(cx);
+        });
         return ExitCode::SUCCESS;
     }
     let options = match parse_args(std::env::args().skip(1)) {
@@ -82,19 +80,32 @@ fn main() -> ExitCode {
     }
     if options.video.is_dir() && options.bench.is_none() {
         let dir = options.video;
-        gpui_platform::application()
-            .with_assets(theme::Assets)
-            .run(move |cx| {
-                about::init(cx);
-                if let Err(error) = studio::open(&dir, cx) {
-                    eprintln!("{}: {error}", dir.display());
-                    cx.quit();
-                }
-            });
+        studio_app().run(move |cx| {
+            init(cx);
+            if let Err(error) = studio::open(&dir, cx) {
+                eprintln!("{}: {error}", dir.display());
+                cx.quit();
+            }
+        });
         return ExitCode::SUCCESS;
     }
     gpui_platform::application().run(move |cx| preview::open(options, cx));
     ExitCode::SUCCESS
+}
+
+/// The app that shows the welcome and studio windows.
+fn studio_app() -> gpui::Application {
+    let app = gpui_platform::application().with_assets(theme::Assets);
+    app.on_reopen(welcome::on_reopen);
+    app
+}
+
+/// Fonts, theme, menus and key bindings, once per app run.
+fn init(cx: &mut gpui::App) {
+    theme::init(cx);
+    about::init(cx);
+    welcome::init(cx);
+    studio::bind_keys(cx);
 }
 
 fn parse_args(args: impl Iterator<Item = String>) -> Result<Options, String> {

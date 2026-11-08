@@ -537,7 +537,7 @@ pub fn format_name(format: FormatKind) -> &'static str {
     }
 }
 
-fn format_color(format: FormatKind) -> Rgba {
+pub fn format_color(format: FormatKind) -> Rgba {
     match format {
         FormatKind::Reaction => FORMAT_REACTION,
         FormatKind::Opinion => FORMAT_OPINION,

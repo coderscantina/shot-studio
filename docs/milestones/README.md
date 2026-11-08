@@ -46,7 +46,7 @@ Settled on 2026-11-08: every Proposed record (0011, 0013 to 0025) adopted, the l
 
 Found by agents and waiting for a task. Remove a line when it's fixed.
 
-- Double-clicking the app opens only About: there is no way to open a video folder from Finder yet. The app has a placeholder icon, unstripped binaries (105 MB), and CI does not catch a stale `crates.txt`.
+- The app has a placeholder icon, unstripped binaries (105 MB), and CI does not catch a stale `crates.txt`.
 - One watch save of six took 65 s: its build took 9.7 s but the change was noticed about 55 s late, cause not found (the disk was nearly full). `shot check` still takes about 40 s on one export because seeks past 250 s cost 150 ms in VideoToolbox; a forward-reading keyframe decoder in shot-media would fix it. An export needs about 12.8 GB free for the main cut (`<cut>.partial` beside the old file). On the sound-effect-heavy channel one save re-rendered far more than 2 chunks, likely `beat-sync` moving later cards when the cut shortens.
 - Captions draw over the link card on the monitor (export keeps main-cut captions in the sidecar). The Record layout switcher from the mockup is not built; the Styled/Raw switch takes its place.
 - The painter has no prefetch for the second side of a two-sided transition (the engine queues 18 frames instead), and `paint` does not return the screen layer it drew, so the engine lays out paused frames twice to map callout clicks. `--bench-edit --glass` draws its own pass although `Painter::set_decoration` now exists.

@@ -42,14 +42,19 @@ pub struct Studio {
     _continue: Subscription,
 }
 
-pub fn open(dir: &Path, cx: &mut App) -> Result<(), String> {
-    let folder = VideoFolder::open(dir)?;
-    crate::theme::init(cx);
+/// Binds the keys of every screen. Call once at startup.
+pub fn bind_keys(cx: &mut App) {
     edit::bind_keys(cx);
     record::bind_keys(cx);
     cut::bind_keys(cx);
     script::bind_keys(cx);
     ship::bind_keys(cx);
+}
+
+/// Opens a window on the video folder at `dir` and adds it to the recent videos. Needs
+/// [`crate::theme::init`] and [`bind_keys`].
+pub fn open(dir: &Path, cx: &mut App) -> Result<(), String> {
+    let folder = VideoFolder::open(dir)?;
     let bounds = Bounds::centered(None, size(px(1600.), px(1000.)), cx);
     cx.open_window(
         WindowOptions {
@@ -73,6 +78,7 @@ pub fn open(dir: &Path, cx: &mut App) -> Result<(), String> {
         },
     )
     .map_err(|e| e.to_string())?;
+    crate::welcome::remember(dir);
     cx.activate(true);
     Ok(())
 }

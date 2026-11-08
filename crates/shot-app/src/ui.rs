@@ -148,7 +148,7 @@ pub fn alert(message: impl Into<SharedString>) -> Div {
         .border_color(Hsla::from(RECORD).opacity(0.3))
         .text_color(TEXT)
         .child(icon("alert", ICON, RECORD_TEXT))
-        .child(div().flex_1().child(message.into()))
+        .child(div().flex_1().min_w_0().child(message.into()))
 }
 
 /// What a proposal action looks like: Accept in lime, Reject with its key, the rest quiet.
