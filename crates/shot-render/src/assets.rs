@@ -1,6 +1,6 @@
 //! The files frames draw from besides the video tracks, read once per video folder: each take's
-//! event log, the code-diff snapshots in `sources/` and the b-roll stills and diffs overlays
-//! name.
+//! event log, the code-diff snapshots in `sources/`, the b-roll stills and diffs overlays name,
+//! and the video's theme with the brand's fonts and Lottie templates.
 
 use std::collections::HashMap;
 use std::fs;
@@ -15,6 +15,7 @@ use crate::code_diff::{CodeDiff, CodeDiffOverlay};
 use crate::events::{EventLog, EventsError};
 use crate::frame::Look;
 use crate::overlay::broll::{self, Media};
+use crate::theme::{Theme, ThemeError};
 
 /// The event log of a take, by file name inside `media/<take>/`.
 pub const EVENTS_FILE: &str = "events.jsonl";
@@ -30,6 +31,8 @@ pub enum AssetError {
         path: PathBuf,
         source: image::ImageError,
     },
+    #[error(transparent)]
+    Theme(#[from] ThemeError),
 }
 
 /// Stills larger than this are scaled down to it, the size of the canvas.
@@ -39,19 +42,41 @@ const MAX_STILL: (u32, u32) = (3840, 2160);
 #[derive(Debug)]
 pub struct Assets {
     dir: PathBuf,
+    /// Read from the folder on first use unless given.
+    theme: Option<Arc<Theme>>,
     events: HashMap<Id, Option<Arc<EventLog>>>,
     diffs: HashMap<String, Arc<CodeDiff>>,
     images: HashMap<String, ImageData>,
 }
 
 impl Assets {
+    /// The assets of a video folder, its theme read from its files on first use.
     pub fn new(video_dir: &Path) -> Self {
         Self {
             dir: video_dir.to_owned(),
+            theme: None,
             events: HashMap::new(),
             diffs: HashMap::new(),
             images: HashMap::new(),
         }
+    }
+
+    /// The assets of a video folder with its theme already read.
+    pub fn with_theme(video_dir: &Path, theme: Arc<Theme>) -> Self {
+        Self {
+            theme: Some(theme),
+            ..Self::new(video_dir)
+        }
+    }
+
+    /// The video's theme, read from its `video.kdl`, `cut.kdl` and `cut.lock` on first use.
+    pub fn theme(&mut self) -> Result<Arc<Theme>, AssetError> {
+        if let Some(theme) = &self.theme {
+            return Ok(theme.clone());
+        }
+        let theme = Arc::new(Theme::open(&self.dir)?);
+        self.theme = Some(theme.clone());
+        Ok(theme)
     }
 
     /// What a segment of `take` with `overlays` draws with `effects`. A take without an event
@@ -84,6 +109,8 @@ impl Assets {
             events: self.events(take)?,
             diffs,
             images,
+            theme: self.theme()?,
+            take: Some(take.clone()),
         })
     }
 

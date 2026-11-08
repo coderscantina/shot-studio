@@ -1,15 +1,19 @@
-//! The `lower-third` template: a name or a line of text at the bottom left, sliding in.
+//! The `lower-third` template: a name or a line of text at the bottom left, on a card that
+//! comes in from the left with its line in kinetic type.
 //!
 //! | Parameter | Value |
 //! | --- | --- |
 //! | `text` | the line, usually a name or a channel |
 //! | `subtitle` | optional, a smaller line under it |
 
-use shot_core::Micros;
+use shot_core::{Micros, Overlay, TimeRange};
 
-use super::{ParamKind, ParamSpec, Params, TemplateSpec};
-use crate::drawing::{Font, Rgba, Shape};
-use crate::layout::{Canvas, Rect};
+use super::card::Card;
+use super::{ParamKind, ParamSpec, Params, Stage, TemplateSpec};
+use crate::drawing::Shape;
+use crate::kinetic::Kinetic;
+use crate::layout::Rect;
+use crate::motion::Part;
 
 pub const TEMPLATE: &str = "lower-third";
 
@@ -23,52 +27,80 @@ pub const SPEC: TemplateSpec = TemplateSpec {
     animated: true,
 };
 
-/// The default `enter` and `exit`.
-const SLIDE: Micros = Micros(300_000);
-
-pub fn draw(params: Params, t: Micros, canvas: Canvas) -> Vec<Shape> {
+pub(crate) fn apply(overlay: &Overlay, stage: &mut Stage) {
+    let params = Params(overlay);
     let Some(text) = params.text("text") else {
-        return Vec::new();
+        return;
     };
-    let presence = params.presence(SLIDE).at(t);
-    if presence <= 0.0 {
-        return Vec::new();
-    }
-    let s = canvas.width as f32 / 3840.0;
+    let theme = stage.theme();
+    let (canvas, s, t) = (stage.canvas, stage.scale(), stage.t);
+    let motion = params.motion(theme);
+    let palette = &theme.palette;
     let subtitle = params.text("subtitle");
     let size = 84.0 * s;
-    let width = (text.chars().count() as f32 * size * 0.56 + 160.0 * s).max(700.0 * s);
+    let longest = text
+        .chars()
+        .count()
+        .max(subtitle.map_or(0, |s| s.chars().count() * 4 / 7));
+    let width = (longest as f32 * size * 0.56 + 160.0 * s).max(700.0 * s);
     let height = if subtitle.is_some() { 230.0 } else { 160.0 } * s;
-    let left = 120.0 * s - (1.0 - presence) * 120.0 * s;
+    let left = 120.0 * s;
     let top = canvas.height as f32 * 0.78;
-    let fade = |c: Rgba| c.faded(presence);
+    let text_range = TimeRange::new(
+        Micros(overlay.range.from().0 + motion.stagger.0),
+        overlay.range.to(),
+    )
+    .unwrap_or(overlay.range);
+    let words = text.split_whitespace().count();
     let mut shapes = vec![
-        Shape::Rect {
-            rect: Rect::new(left, top, left + width, top + height),
+        Shape::Clip {
+            rect: Rect::new(0.0, 0.0, width, height),
             radius: 20.0 * s,
-            color: fade(Rgba::hex(0x16181D, 0.92)),
+            shapes: vec![Shape::Rect {
+                rect: Rect::new(0.0, 0.0, 12.0 * s, height),
+                radius: 0.0,
+                color: palette.accent,
+            }],
         },
-        Shape::Rect {
-            rect: Rect::new(left, top, left + 12.0 * s, top + height),
-            radius: 6.0 * s,
-            color: fade(Rgba::hex(0xC8F25A, 1.0)),
-        },
-        Shape::Text {
-            origin: [left + 64.0 * s, top + 34.0 * s],
+        Shape::Kinetic(Box::new(Kinetic {
+            origin: [64.0 * s, 34.0 * s],
             text: text.to_owned(),
             size,
-            font: Font::Sans,
-            color: fade(Rgba::hex(0xF0F3F6, 1.0)),
-        },
+            font: theme.fonts.heading(),
+            color: palette.text,
+            width: None,
+            reveal: theme.moves.reveal,
+            unit: theme.moves.unit,
+            motion,
+            range: text_range,
+            t: motion.freeze(text_range, words, t),
+        })),
     ];
     if let Some(subtitle) = subtitle {
         shapes.push(Shape::Text {
-            origin: [left + 64.0 * s, top + 148.0 * s],
+            origin: [64.0 * s, 148.0 * s],
             text: subtitle.to_owned(),
             size: 48.0 * s,
-            font: Font::Sans,
-            color: fade(Rgba::hex(0x9AA4B2, 1.0)),
+            font: theme.fonts.body(),
+            color: palette.muted(),
         });
     }
-    shapes
+    let moves = theme.moves;
+    Card {
+        size: [width, height],
+        radius: 20.0 * s,
+        rest: [left + width / 2.0, top + height / 2.0],
+        from: [-(width * 0.5 + 160.0 * s), 0.0],
+        fill: palette.card.faded(0.92),
+        shapes,
+        scale: s,
+    }
+    .draw(
+        &motion,
+        &moves,
+        overlay.range,
+        Part::WHOLE,
+        t,
+        stage.drawing,
+    );
 }

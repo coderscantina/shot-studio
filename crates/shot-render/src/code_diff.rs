@@ -16,9 +16,11 @@ use std::path::Path;
 
 use shot_core::{Id, Micros, Overlay, ParamValue, TimeRange, Word};
 
-use crate::drawing::{Font, Rgba, Shape};
+use crate::drawing::{Rgba, Shape};
 use crate::layout::{Canvas, Rect};
-use crate::overlay::{ParamKind, ParamSpec, TemplateSpec};
+use crate::motion::{Motion, Part};
+use crate::overlay::{ParamKind, ParamSpec, Params, Stage, TemplateSpec};
+use crate::theme::Theme;
 
 /// The template name in `cut.kdl`.
 pub const TEMPLATE: &str = "code-diff";
@@ -36,8 +38,6 @@ pub const SPEC: TemplateSpec = TemplateSpec {
 
 /// The share of the overlay's range spent typing; the rest holds the full diff.
 const TYPING_SHARE: f32 = 0.6;
-/// The panel fades in and out over this long.
-const FADE: f32 = 250_000.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineKind {
@@ -193,23 +193,31 @@ impl CodeDiffOverlay {
     }
 
     /// The panel at media time `t`: the lines typed so far and the highlight once it is due.
-    pub fn draw(&self, diff: &CodeDiff, t: Micros, canvas: Canvas) -> Vec<Shape> {
+    /// It rises in on the theme's springs with `motion` and types in the brand's mono font.
+    pub fn draw(
+        &self,
+        diff: &CodeDiff,
+        t: Micros,
+        canvas: Canvas,
+        theme: &Theme,
+        motion: &Motion,
+    ) -> Vec<Shape> {
         if t < self.range.from() || t >= self.range.to() {
             return Vec::new();
         }
         let s = canvas.width as f32 / 3840.0;
-        let from = self.range.from().0 as f32;
         let duration = self.range.duration().0 as f32;
-        let elapsed = t.0 as f32 - from;
-        let fade = (elapsed / FADE)
-            .min((self.range.to().0 as f32 - t.0 as f32) / FADE)
-            .clamp(0.0, 1.0);
+        let elapsed = (t.0 - self.range.from().0) as f32;
+        let pose = motion.pose(self.range, Part::WHOLE, t);
+        let fade = pose.presence();
+        let rise = pose.offset() * 140.0 * s * motion.travel;
+        let palette = &theme.palette;
 
         let panel = Rect::new(
             canvas.width as f32 * 0.17,
-            canvas.height as f32 * 0.15,
+            canvas.height as f32 * 0.15 + rise,
             canvas.width as f32 * 0.83,
-            canvas.height as f32 * 0.85,
+            canvas.height as f32 * 0.85 + rise,
         );
         let size = 44.0 * s;
         let line_height = size * 1.55;
@@ -252,12 +260,12 @@ impl CodeDiffOverlay {
             let top = panel.top + pad + row as f32 * line_height;
             let band = Rect::new(panel.left, top, panel.right, top + line_height);
             let tint = match line.kind {
-                LineKind::Added => Some(Rgba::hex(0xC8F25A, 0.07)),
+                LineKind::Added => Some(palette.accent.faded(0.07)),
                 LineKind::Removed => Some(Rgba::hex(0xFF5A52, 0.08)),
                 _ => None,
             };
             let tint = if highlight == Some(index) {
-                Some(Rgba::hex(0xC8F25A, 0.2))
+                Some(palette.accent.faded(HIGHLIGHT_ALPHA))
             } else {
                 tint
             };
@@ -269,9 +277,9 @@ impl CodeDiffOverlay {
                 });
             }
             let color = match line.kind {
-                LineKind::File | LineKind::Hunk => Rgba::hex(0x5E6570, 1.0),
-                LineKind::Context => Rgba::hex(0xC3C9D3, 1.0),
-                LineKind::Added => Rgba::hex(0xC8F25A, 1.0),
+                LineKind::File | LineKind::Hunk => palette.muted().faded(0.6),
+                LineKind::Context => palette.text.faded(0.82),
+                LineKind::Added => palette.accent,
                 LineKind::Removed => Rgba::hex(0xFF8A80, 1.0),
             };
             let origin = [panel.left + pad, top + (line_height - size * 1.2) / 2.0];
@@ -279,7 +287,7 @@ impl CodeDiffOverlay {
                 origin,
                 text: text.clone(),
                 size,
-                font: Font::Mono,
+                font: theme.fonts.mono(),
                 color: color.faded(fade),
             });
             let last = index + 1 == shown.len();
@@ -293,10 +301,11 @@ impl CodeDiffOverlay {
                         top + line_height * 0.82,
                     ),
                     radius: 2.0 * s,
-                    color: Rgba::hex(0xC8F25A, fade),
+                    color: palette.accent.faded(fade),
                 });
             }
         }
+        let [r, g, b, _] = palette.background.0;
         vec![
             Shape::Shadow {
                 rect: panel,
@@ -307,7 +316,7 @@ impl CodeDiffOverlay {
             Shape::Rect {
                 rect: panel,
                 radius: 28.0 * s,
-                color: Rgba::hex(0x0A0B0D, fade),
+                color: Rgba([r * 0.7, g * 0.7, b * 0.7, fade]),
             },
             Shape::Clip {
                 rect: panel,
@@ -316,6 +325,21 @@ impl CodeDiffOverlay {
             },
         ]
     }
+}
+
+/// The highlighted line's tint, in the accent color.
+const HIGHLIGHT_ALPHA: f32 = 0.2;
+
+pub(crate) fn apply(overlay: &Overlay, stage: &mut Stage) {
+    let Some(code) = CodeDiffOverlay::of(overlay) else {
+        return;
+    };
+    let Some(diff) = stage.look.diffs.get(&code.diff) else {
+        return;
+    };
+    let motion = Params(overlay).motion(stage.theme());
+    let shapes = code.draw(diff, stage.t, stage.canvas, stage.theme(), &motion);
+    stage.drawing.over.extend(shapes);
 }
 
 #[cfg(test)]
@@ -418,8 +442,11 @@ index 1111111..2222222 100644
             highlight_line: Some(8),
             highlight_at: Some(Micros(8_000_000)),
         };
+        let theme = Theme::default();
+        let motion = theme.motion;
+        let draw = |t| overlay.draw(&diff, Micros(t), Canvas::UHD, &theme, &motion);
         let texts = |t| -> Vec<String> {
-            let shapes = overlay.draw(&diff, Micros(t), Canvas::UHD);
+            let shapes = draw(t);
             let Some(Shape::Clip { shapes, .. }) = shapes.last() else {
                 return Vec::new();
             };
@@ -436,9 +463,9 @@ index 1111111..2222222 100644
         assert!(halfway.len() < diff.lines.len());
         assert_eq!(texts(7_000_000).len(), diff.lines.len());
         let highlighted = |t| {
-            overlay.draw(&diff, Micros(t), Canvas::UHD).iter().any(|s| {
+            draw(t).iter().any(|s| {
                 matches!(s, Shape::Clip { shapes, .. } if shapes.iter().any(|s| matches!(s,
-                    Shape::Rect { color, .. } if (color.0[3] - 0.2).abs() < 1e-3)))
+                    Shape::Rect { color, .. } if (color.0[3] - HIGHLIGHT_ALPHA).abs() < 1e-3)))
             })
         };
         assert!(!highlighted(7_900_000));

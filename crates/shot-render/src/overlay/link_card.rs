@@ -14,9 +14,12 @@
 
 use shot_core::{Micros, Overlay, ParamValue, TimeRange, Word};
 
-use super::{ParamKind, ParamSpec, Params, TemplateSpec, overlay};
-use crate::drawing::{Font, Rgba, Shape};
-use crate::layout::{Canvas, Rect};
+use super::card::Card;
+use super::{ParamKind, ParamSpec, Params, Stage, TemplateSpec, overlay};
+use crate::drawing::{Rgba, Shape};
+use crate::kinetic::Kinetic;
+use crate::layout::Rect;
+use crate::motion::Part;
 
 pub const TEMPLATE: &str = "link-card";
 
@@ -32,8 +35,6 @@ pub const SPEC: TemplateSpec = TemplateSpec {
 
 /// How long a card stays from the word where its URL is said.
 pub const HOLD: Micros = Micros(6_000_000);
-/// The default `enter` and `exit`.
-const SLIDE: Micros = Micros(350_000);
 
 /// What a URL points at, for the card's label and stripe.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,96 +119,117 @@ impl LinkCard {
         }
     }
 
-    /// The card at `t`: slides in from the left edge over `enter`, out over `exit`.
-    pub fn draw(&self, params: Params, t: Micros, canvas: Canvas) -> Vec<Shape> {
-        let s = canvas.width as f32 / 3840.0;
-        let presence = params.presence(SLIDE).at(t);
-        if presence <= 0.0 {
-            return Vec::new();
-        }
-        let (label, title) = self.text();
-        let width = (1500.0 * s).min(canvas.width as f32 * 0.8);
-        let height = 300.0 * s;
-        let margin = 120.0 * s;
-        let left = margin - (1.0 - presence) * (width + margin);
-        let top = canvas.height as f32 * 0.9 - height;
-        let card = Rect::new(left, top, left + width, top + height);
-        let (mark, mark_color) = self.badge();
-        let stripe = if self.accent {
-            Rgba::hex(0xC8F25A, 1.0)
-        } else {
-            mark_color
-        };
-        let fade = |c: Rgba| c.faded(presence);
-        let badge = Rect::new(
-            left + 64.0 * s,
-            top + 70.0 * s,
-            left + 224.0 * s,
-            top + 230.0 * s,
-        );
-        let text_left = badge.right + 56.0 * s;
-        let shown_url = self.url.trim_start_matches("https://");
-        vec![
-            Shape::Shadow {
-                rect: card,
-                radius: 36.0 * s,
-                blur: 40.0 * s,
-                color: fade(Rgba::hex(0x000000, 0.5)),
-            },
-            Shape::Clip {
-                rect: card,
-                radius: 36.0 * s,
-                shapes: vec![
-                    Shape::Rect {
-                        rect: card,
-                        radius: 0.0,
-                        color: fade(Rgba::hex(0x16181D, 0.96)),
-                    },
-                    Shape::Rect {
-                        rect: Rect::new(left, top, left + 14.0 * s, top + height),
-                        radius: 0.0,
-                        color: fade(stripe),
-                    },
-                ],
-            },
-            Shape::Rect {
-                rect: badge,
-                radius: 28.0 * s,
-                color: fade(Rgba::hex(0x24272E, 1.0)),
-            },
-            Shape::Label {
-                center: [
-                    (badge.left + badge.right) / 2.0,
-                    (badge.top + badge.bottom) / 2.0,
-                ],
-                text: mark.to_owned(),
-                size: 56.0 * s,
-                color: fade(mark_color),
-                background: Rgba::hex(0x000000, 0.0),
-            },
-            Shape::Text {
-                origin: [text_left, top + 48.0 * s],
-                text: label,
-                size: 44.0 * s,
-                font: Font::Sans,
-                color: fade(Rgba::hex(0x9AA4B2, 1.0)),
-            },
-            Shape::Text {
-                origin: [text_left, top + 108.0 * s],
-                text: clip_chars(&title, 34),
-                size: 72.0 * s,
-                font: Font::Sans,
-                color: fade(Rgba::hex(0xF0F3F6, 1.0)),
-            },
-            Shape::Text {
-                origin: [text_left, top + 204.0 * s],
-                text: clip_chars(shown_url, 52),
-                size: 38.0 * s,
-                font: Font::Mono,
-                color: fade(Rgba::hex(0x6B7380, 1.0)),
-            },
-        ]
+    /// The URL as the card shows it, without its scheme.
+    pub fn shown_url(&self) -> &str {
+        self.url
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
     }
+}
+
+/// The card at the bottom left: it comes in from the left edge as one sheet, its title in the
+/// preset's kinetic type a stagger later.
+pub(crate) fn apply(overlay: &Overlay, stage: &mut Stage) {
+    let Some(card) = LinkCard::of(overlay) else {
+        return;
+    };
+    let theme = stage.theme();
+    let (canvas, s, t) = (stage.canvas, stage.scale(), stage.t);
+    let motion = Params(overlay).motion(theme);
+    let palette = &theme.palette;
+    let (label, title) = card.text();
+    let width = (1500.0 * s).min(canvas.width as f32 * 0.8);
+    let height = 300.0 * s;
+    let margin = 120.0 * s;
+    let (mark, mark_color) = card.badge();
+    let stripe = if card.accent {
+        palette.accent
+    } else {
+        mark_color
+    };
+    let badge = Rect::new(64.0 * s, 70.0 * s, 224.0 * s, 230.0 * s);
+    let text_left = badge.right + 56.0 * s;
+    let title = clip_chars(&title, 34);
+    let words = title.split_whitespace().count();
+    let text_range = TimeRange::new(
+        Micros(overlay.range.from().0 + motion.stagger.0),
+        overlay.range.to(),
+    )
+    .unwrap_or(overlay.range);
+    let shapes = vec![
+        Shape::Clip {
+            rect: Rect::new(0.0, 0.0, width, height),
+            radius: 36.0 * s,
+            shapes: vec![Shape::Rect {
+                rect: Rect::new(0.0, 0.0, 14.0 * s, height),
+                radius: 0.0,
+                color: stripe,
+            }],
+        },
+        Shape::Rect {
+            rect: badge,
+            radius: 28.0 * s,
+            color: palette.text.faded(0.08),
+        },
+        Shape::Centered {
+            center: [
+                (badge.left + badge.right) / 2.0,
+                (badge.top + badge.bottom) / 2.0,
+            ],
+            text: mark.to_owned(),
+            size: 56.0 * s,
+            font: theme.fonts.heading(),
+            color: mark_color,
+        },
+        Shape::Text {
+            origin: [text_left, 48.0 * s],
+            text: label,
+            size: 44.0 * s,
+            font: theme.fonts.body(),
+            color: palette.muted(),
+        },
+        Shape::Kinetic(Box::new(Kinetic {
+            origin: [text_left, 108.0 * s],
+            text: title,
+            size: 72.0 * s,
+            font: theme.fonts.heading(),
+            color: palette.text,
+            width: None,
+            reveal: theme.moves.reveal,
+            unit: theme.moves.unit,
+            motion,
+            range: text_range,
+            t: motion.freeze(text_range, words, t),
+        })),
+        Shape::Text {
+            origin: [text_left, 204.0 * s],
+            text: clip_chars(card.shown_url(), 52),
+            size: 38.0 * s,
+            font: theme.fonts.mono(),
+            color: palette.muted().faded(0.75),
+        },
+    ];
+    let moves = theme.moves;
+    Card {
+        size: [width, height],
+        radius: 36.0 * s,
+        rest: [
+            margin + width / 2.0,
+            canvas.height as f32 * 0.9 - height / 2.0,
+        ],
+        from: [-(width + 2.0 * margin), 0.0],
+        fill: palette.card.faded(0.96),
+        shapes,
+        scale: s,
+    }
+    .draw(
+        &motion,
+        &moves,
+        overlay.range,
+        Part::WHOLE,
+        t,
+        stage.drawing,
+    );
 }
 
 fn clip_chars(text: &str, max: usize) -> String {
@@ -358,7 +380,7 @@ mod tests {
     #[test]
     fn the_card_shows_from_the_word_where_the_url_is_said() {
         use crate::frame::{Look, Shot, compose};
-        use crate::layout::Sources;
+        use crate::layout::{Canvas, Sources};
         use shot_core::Layout;
 
         let said = words("my PR is at github.com/coderscantina/shot-studio/pull/1 today");
@@ -375,7 +397,7 @@ mod tests {
                 camera: (1920, 1080),
             };
             let frame = compose(&shot, &Look::default(), Canvas::UHD, sizes).unwrap();
-            format!("{:?}", frame.drawing.over).contains("coderscantina/shot-studio #1")
+            format!("{:?}", frame.drawing.sheets).contains("coderscantina/shot-studio #1")
         };
         // The URL is the 5th word, said from 1.6 s.
         assert!(!shows_card(1_599_999));

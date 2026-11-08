@@ -5,7 +5,7 @@
 //! | `file` | optional, relative to the video folder: a still (`.png`, `.jpg`), a clip (`.mp4`, `.mov`) or a diff snapshot (`.diff`). Without it the overlay is an empty slot waiting for a pick, and draws nothing |
 //! | `start` | optional, the media time in the clip where the cutaway starts, 0 by default |
 //!
-//! A still fades in and out over `enter` and `exit` and pushes in slowly. A clip cuts in and out
+//! A still fades in on the preset's springs, settling from a little closer, and pushes in slowly. A clip cuts in and out
 //! hard: the frame's screen layer shows the clip ([`super::Cutaway`]) and nothing of the take
 //! draws under it. A diff types out on a dark panel like `code-diff`. Files come from the
 //! video's `sources/`, other takes' screen recordings, git diffs or the channel's `library/`.
@@ -16,8 +16,10 @@ use shot_core::{Micros, Overlay, ParamValue, TimeRange};
 
 use super::{Cutaway, ParamKind, ParamSpec, Params, Stage, TemplateSpec, overlay};
 use crate::code_diff::CodeDiffOverlay;
-use crate::drawing::{Rgba, Shape};
+use crate::drawing::{Placement, Shape, Sheet};
 use crate::layout::{Layer, Rect, Source};
+use crate::materials;
+use crate::motion::Part;
 
 pub const TEMPLATE: &str = "b-roll";
 
@@ -31,10 +33,10 @@ pub const SPEC: TemplateSpec = TemplateSpec {
     animated: true,
 };
 
-/// The default `enter` and `exit` of stills and diffs.
-const FADE: Micros = Micros(300_000);
 /// How far a still pushes in over its range.
 const PUSH: f32 = 0.06;
+/// How much closer a still starts before it settles, at full density.
+const SETTLE: f32 = 0.05;
 /// Idle screen at least this long gets a slot.
 pub const IDLE_MIN: Micros = Micros(8_000_000);
 /// How long a slot at a B marker lasts.
@@ -101,31 +103,56 @@ pub(crate) fn apply(overlay: &Overlay, stage: &mut Stage) {
             let Some(image) = stage.look.images.get(path) else {
                 return;
             };
-            let presence = params.presence(FADE).at(stage.t);
-            let progress = elapsed.0 as f32 / overlay.range.duration().0.max(1) as f32;
-            let zoom = 1.0 + PUSH * progress;
-            let crop = cover(
-                image.width as f32 / image.height as f32,
-                canvas.width as f32 / canvas.height as f32,
-                zoom,
-            );
-            stage.drawing.over.push(Shape::Image {
-                rect: full,
+            let motion = params.motion(stage.theme());
+            let (width, height) = (image.width as f32, image.height as f32);
+            let fit = (canvas.width as f32 / width).max(canvas.height as f32 / height);
+            let place = |t: Micros| {
+                let pose = motion.pose(overlay.range, Part::WHOLE, t);
+                let since = t.0.saturating_sub(overlay.range.from().0);
+                let progress = since as f32 / overlay.range.duration().0.max(1) as f32;
+                // Settles in from a little closer, then pushes in slowly.
+                let settle = (1.0 - pose.enter.clamp(0.0, 1.0)) * SETTLE * motion.travel.min(1.0);
+                Placement {
+                    center: [canvas.width as f32 / 2.0, canvas.height as f32 / 2.0],
+                    scale: fit * (1.0 + PUSH * progress + settle),
+                    tilt: [0.0, 0.0],
+                    opacity: pose.presence(),
+                }
+            };
+            let placement = materials::shutter(stage.t).map(place);
+            if placement.iter().all(|p| p.opacity >= 1.0) {
+                // A cutaway at full strength hides everything drawn before it.
+                stage.drawing.over.clear();
+                stage.drawing.sheets.clear();
+                stage.drawing.shadows.clear();
+            }
+            // Drawn flat at its own size, so vello reads every texel exactly wherever the image
+            // sits in its atlas, and scaled by the sheet's placement.
+            stage.drawing.sheets.push(Sheet {
+                size: [width, height],
                 radius: 0.0,
-                image: image.clone(),
-                crop,
-                opacity: presence,
+                glass: None,
+                shapes: vec![Shape::Image {
+                    rect: Rect::new(0.0, 0.0, width, height),
+                    radius: 0.0,
+                    image: image.clone(),
+                    crop: Rect::UNIT,
+                    opacity: 1.0,
+                }],
+                placement,
             });
         }
         Media::Diff => {
             let Some(diff) = stage.look.diffs.get(path) else {
                 return;
             };
-            let presence = params.presence(FADE).at(stage.t);
+            let theme = stage.theme();
+            let motion = params.motion(theme);
+            let presence = motion.pose(overlay.range, Part::WHOLE, stage.t).presence();
             stage.drawing.over.push(Shape::Rect {
                 rect: full,
                 radius: 0.0,
-                color: Rgba::hex(0x0F1115, presence),
+                color: theme.palette.background.faded(presence),
             });
             let panel = CodeDiffOverlay {
                 range: overlay.range,
@@ -133,7 +160,8 @@ pub(crate) fn apply(overlay: &Overlay, stage: &mut Stage) {
                 highlight_line: None,
                 highlight_at: None,
             };
-            stage.drawing.over.extend(panel.draw(diff, stage.t, canvas));
+            let shapes = panel.draw(diff, stage.t, canvas, theme, &motion);
+            stage.drawing.over.extend(shapes);
         }
     }
 }

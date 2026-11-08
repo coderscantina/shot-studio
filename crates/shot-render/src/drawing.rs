@@ -10,6 +10,7 @@ use vello::peniko::ImageData;
 use crate::kinetic::Kinetic;
 use crate::layout::Rect;
 use crate::lottie::Filled;
+use crate::typeface::Face;
 
 /// Straight-alpha sRGB.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -27,10 +28,12 @@ impl Rgba {
     }
 }
 
+/// The system fonts, or a font file by content (see [`crate::typeface`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Font {
     Sans,
     Mono,
+    Face(Face),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -58,6 +61,14 @@ pub enum Shape {
     /// One line of text with its top left at `origin`.
     Text {
         origin: [f32; 2],
+        text: String,
+        size: f32,
+        font: Font,
+        color: Rgba,
+    },
+    /// One line of text centered on `center`.
+    Centered {
+        center: [f32; 2],
         text: String,
         size: f32,
         font: Font,
@@ -116,6 +127,8 @@ pub enum Shape {
         scale: f32,
         elapsed: Micros,
         opacity: f32,
+        /// What its text slots draw in.
+        font: Font,
     },
 }
 
@@ -146,6 +159,9 @@ impl Shape {
                 origin[1] + size * 1.5,
             ),
             Self::Label {
+                center, text, size, ..
+            }
+            | Self::Centered {
                 center, text, size, ..
             } => {
                 let (w, h) = label_box(text, *size);

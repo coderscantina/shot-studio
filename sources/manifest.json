@@ -127,6 +127,54 @@
       "assets": [
         "crates/shot-audio/assets/sounds/bed-lofi.flac"
       ]
+    },
+    {
+      "name": "Geist and Geist Mono",
+      "repository": "https://github.com/google/fonts",
+      "path": "ofl/geist, ofl/geistmono",
+      "revision": "86aced91de05cd4f96a06838124cca45be337b2b",
+      "license": "OFL-1.1",
+      "contributes": "Bundled fonts geist and geist-mono, the variable TTFs, the default heading, body and mono fonts of overlay templates. License text in crates/shot-render/assets/fonts/OFL-Geist.txt.",
+      "assets": [
+        "crates/shot-render/assets/fonts/Geist.ttf",
+        "crates/shot-render/assets/fonts/GeistMono.ttf",
+        "crates/shot-render/assets/fonts/OFL-Geist.txt"
+      ]
+    },
+    {
+      "name": "Inter",
+      "repository": "https://github.com/google/fonts",
+      "path": "ofl/inter",
+      "revision": "86aced91de05cd4f96a06838124cca45be337b2b",
+      "license": "OFL-1.1",
+      "contributes": "Bundled font inter, the variable TTF (opsz, wght).",
+      "assets": [
+        "crates/shot-render/assets/fonts/Inter.ttf",
+        "crates/shot-render/assets/fonts/OFL-Inter.txt"
+      ]
+    },
+    {
+      "name": "JetBrains Mono",
+      "repository": "https://github.com/google/fonts",
+      "path": "ofl/jetbrainsmono",
+      "revision": "86aced91de05cd4f96a06838124cca45be337b2b",
+      "license": "OFL-1.1",
+      "contributes": "Bundled font jetbrains-mono, the variable TTF.",
+      "assets": [
+        "crates/shot-render/assets/fonts/JetBrainsMono.ttf",
+        "crates/shot-render/assets/fonts/OFL-JetBrainsMono.txt"
+      ]
+    },
+    {
+      "name": "Noto Animated Emoji",
+      "repository": "https://googlefonts.github.io/noto-emoji-animation/",
+      "revision": "https://fonts.gstatic.com/s/e/notoemoji/latest/<codepoint>/lottie.json, fetched 2026-11-08 (last modified 2026-09-16)",
+      "license": "CC-BY-4.0",
+      "attribution": "Noto Animated Emoji by Google, CC BY 4.0",
+      "contributes": "The pop template's animated emoji: 👍 1f44d, 👏 1f44f, 😍 1f60d, 🥳 1f973, ✅ 2705, ✨ 2728, ❤️ 2764_fe0f unchanged; 🔥 1f525, 😂 1f602, 👀 1f440, 🎉 1f389 with their spatial position curves (ti, to) removed, which velato draws as straight moves anyway. Picked as the ones velato draws without findings. JSON re-serialized compactly.",
+      "assets": [
+        "crates/shot-render/assets/emoji/"
+      ]
     }
   ]
 }

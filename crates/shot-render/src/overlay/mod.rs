@@ -1,35 +1,53 @@
 //! Overlay templates: the typed meaning of `overlay <template> from=... to=... { ... }` in
-//! `cut.kdl`.
+//! `cut.kdl` and `cut.lock`.
 //!
 //! Each template is a [`TemplateSpec`]: its name, its parameters with their kinds and whether
-//! they are required, and the keyframes it animates by. The spec is the template's contract with
-//! `cut.kdl` and is independent of how the renderer draws it: a renderer change bumps
-//! [`shot_core::RENDERER_VERSION`] and leaves every spec and every file as it is, and a spec only
-//! grows by optional parameters, so an older `cut.kdl` always reads the same.
+//! they are required. The spec is the template's contract with the files and is independent of
+//! how the renderer draws it: a renderer change bumps [`shot_core::RENDERER_VERSION`] and leaves
+//! every spec and every file as it is, and a spec only grows by optional parameters, so an older
+//! `cut.kdl` always reads the same.
 //!
-//! Every template that draws takes two keyframe parameters besides its own: `enter` and `exit`,
-//! the time in microseconds it takes to come in after `from` and to go out before `to`
-//! ([`Keyframes::presence`]). The templates:
+//! Every template that draws moves on the motion system ([`crate::motion`]) in the video's
+//! preset with the brand's feel, colors and fonts ([`crate::theme`]), and takes two duration
+//! hints besides its own parameters: `enter` and `exit`, the microseconds its springs take to
+//! come in after `from` and to settle out before `to`. The templates:
 //!
-//! - `code-diff` ([`crate::code_diff`]): a diff snapshot typed out, one line highlighted.
 //! - `link-card` ([`link_card`]): a card for a URL said in the transcript.
 //! - `lower-third` ([`lower_third`]): a name or line at the bottom left.
 //! - `highlight` ([`highlight`]): a box on the screen recording around text you react to.
 //! - `b-roll` ([`broll`]): a cutaway to a still, a clip or a diff over idle screen or a B marker.
-//! - `blur` and `bleep` ([`redact`]): a blurred rectangle of the screen, a tone over words.
+//! - `code-diff` ([`crate::code_diff`]): a diff snapshot typed out, one line highlighted.
+//! - `chapter-band` ([`chapter_band`]): the chapter's title on a band as the chapter starts.
+//! - `end-card` ([`end_card`]): the end screen with YouTube's element areas kept free.
+//! - `callout` ([`callout`]): a label pointing at a click or a box on the screen.
+//! - `pop` ([`pop`]): an emoji, a word or a channel sticker popping in.
+//! - `blur` and `bleep` ([`redact`]): a blurred rectangle of the screen, a tone over words. They
+//!   switch hard: a fade would reveal what they hide.
+//!
+//! A brand re-skins `link-card`, `lower-third`, `chapter-band` and `end-card` by declaring a
+//! Lottie template of the same name ([`reskin_slots`] lists what each fills), and declares new
+//! templates the same way; [`crate::theme::Theme::check`] checks overlays against both.
 
 pub mod broll;
+pub mod callout;
+mod card;
+pub mod chapter_band;
+pub mod end_card;
 pub mod highlight;
 pub mod link_card;
 pub mod lower_third;
+pub mod pop;
 pub mod redact;
 
 use shot_core::{Id, Micros, Overlay, ParamValue, TimeRange};
 
 use crate::code_diff;
-use crate::drawing::Drawing;
+use crate::drawing::{Drawing, Shape};
 use crate::frame::{Look, ScreenView};
 use crate::layout::{Canvas, Layer, Scene};
+use crate::lottie::{SlotKind, SlotValue};
+use crate::motion::Motion;
+use crate::theme::Theme;
 
 /// The kind of value a parameter holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,28 +115,32 @@ pub struct TemplateSpec {
     /// One line for the inspector.
     pub about: &'static str,
     pub params: &'static [ParamSpec],
-    /// Whether `enter` and `exit` apply. Bleep has no picture to fade.
+    /// Whether it moves on springs and takes `enter` and `exit`. Blur and bleep switch hard.
     pub animated: bool,
 }
 
-/// The keyframe parameters of every animated template.
+/// The duration hints of every animated template.
 pub const KEYFRAME_PARAMS: [ParamSpec; 2] = [
     ParamSpec::optional("enter", ParamKind::Time, "how long it takes to come in"),
     ParamSpec::optional("exit", ParamKind::Time, "how long it takes to go out"),
 ];
 
 /// Every template, in the order the inspector offers them.
-pub const TEMPLATES: [&TemplateSpec; 7] = [
+pub const TEMPLATES: [&TemplateSpec; 11] = [
     &link_card::SPEC,
     &lower_third::SPEC,
     &highlight::SPEC,
     &broll::SPEC,
     &code_diff::SPEC,
+    &chapter_band::SPEC,
+    &end_card::SPEC,
+    &callout::SPEC,
+    &pop::SPEC,
     &redact::BLUR,
     &redact::BLEEP,
 ];
 
-/// The spec of the template `name`.
+/// The spec of the built-in template `name`.
 pub fn spec(name: &str) -> Option<&'static TemplateSpec> {
     TEMPLATES.into_iter().find(|spec| spec.name == name)
 }
@@ -138,10 +160,13 @@ pub enum TemplateError {
         param: String,
         kind: &'static str,
     },
+    #[error("brand template `{template}`: {error}")]
+    Lottie { template: String, error: String },
 }
 
-/// Checks `overlay` against its template's spec: a known template, known parameters of the
-/// right kind, and every required one.
+/// Checks `overlay` against its built-in template's spec: a known template, known parameters of
+/// the right kind, and every required one. Brand templates are checked by
+/// [`Theme::check`](crate::theme::Theme::check).
 pub fn check(overlay: &Overlay) -> Result<&'static TemplateSpec, TemplateError> {
     let name = overlay.template.as_str();
     let spec = spec(name).ok_or_else(|| TemplateError::Unknown(name.to_owned()))?;
@@ -174,7 +199,79 @@ pub fn check(overlay: &Overlay) -> Result<&'static TemplateSpec, TemplateError> 
             param: missing.name.to_owned(),
         });
     }
+    if name == pop::TEMPLATE {
+        pop::check(overlay)?;
+    }
     Ok(spec)
+}
+
+/// The slots a brand Lottie that re-skins template `name` may declare, `None` for templates
+/// drawn by code alone.
+pub fn reskin_slots(name: &str) -> Option<&'static [(&'static str, SlotKind)]> {
+    const ACCENT: (&str, SlotKind) = ("accent", SlotKind::Color);
+    Some(match name {
+        link_card::TEMPLATE => &[
+            ("label", SlotKind::Text),
+            ("title", SlotKind::Text),
+            ("url", SlotKind::Text),
+            ACCENT,
+        ],
+        lower_third::TEMPLATE | end_card::TEMPLATE => &[
+            ("text", SlotKind::Text),
+            ("subtitle", SlotKind::Text),
+            ACCENT,
+        ],
+        chapter_band::TEMPLATE => &[("text", SlotKind::Text), ("label", SlotKind::Text), ACCENT],
+        _ => return None,
+    })
+}
+
+/// The values a re-skinned overlay gives its Lottie's slots, by [`reskin_slots`] name.
+pub(crate) fn reskin_values(
+    overlay: &Overlay,
+    theme: &Theme,
+    take: &Id,
+) -> Vec<(&'static str, SlotValue)> {
+    let p = Params(overlay);
+    let text = |s: &str| SlotValue::Text(s.to_owned());
+    let mut values = vec![("accent", SlotValue::Color(theme.palette.accent))];
+    match overlay.template.as_str() {
+        link_card::TEMPLATE => {
+            if let Some(card) = link_card::LinkCard::of(overlay) {
+                let (label, title) = card.text();
+                values.push(("label", text(&label)));
+                values.push(("title", text(&title)));
+                values.push(("url", text(card.shown_url())));
+            }
+        }
+        lower_third::TEMPLATE | end_card::TEMPLATE => {
+            let line = match overlay.template.as_str() {
+                end_card::TEMPLATE => p.text("text").unwrap_or(end_card::HEADLINE),
+                _ => p.text("text").unwrap_or_default(),
+            };
+            values.push(("text", text(line)));
+            values.extend(p.text("subtitle").map(|s| ("subtitle", text(s))));
+        }
+        chapter_band::TEMPLATE => {
+            let title = chapter_band::title(overlay, theme, Some(take)).unwrap_or_default();
+            values.push(("text", text(title)));
+            values.extend(p.text("label").map(|s| ("label", text(s))));
+        }
+        _ => {}
+    }
+    values
+}
+
+/// Whether the overlay draws anything of the brand: its colors, fonts or motion. `blur` and
+/// `bleep` do not, and neither do a b-roll clip, which cuts in hard, or an empty b-roll slot.
+pub fn branded(overlay: &Overlay) -> bool {
+    match overlay.template.as_str() {
+        redact::BLUR_TEMPLATE | redact::BLEEP_TEMPLATE => false,
+        broll::TEMPLATE => {
+            broll::file(overlay).is_some_and(|(_, media)| media != broll::Media::Clip)
+        }
+        _ => true,
+    }
 }
 
 /// Typed access to an overlay's parameters. A value of the wrong kind reads as missing; [`check`]
@@ -218,13 +315,11 @@ impl<'a> Params<'a> {
             .map(Micros)
     }
 
-    /// The overlay's presence over its range, from its `enter` and `exit`.
-    pub fn presence(self, default: Micros) -> Keyframes {
-        Keyframes::presence(
-            self.0.range,
-            self.time("enter").unwrap_or(default),
-            self.time("exit").unwrap_or(default),
-        )
+    /// The theme's springs fitted to the overlay's `enter` and `exit` hints.
+    pub fn motion(self, theme: &Theme) -> Motion {
+        theme
+            .motion
+            .with_hints(self.time("enter"), self.time("exit"))
     }
 }
 
@@ -248,10 +343,16 @@ pub fn file(overlay: &Overlay) -> Option<&str> {
     }
 }
 
-/// Extends the key of every chunk that shows an overlay drawing from a file with `identity` of
-/// that file, so a file replaced under the same name renders again. `cut.kdl` only names the
-/// file, and the contract's hash covers what it names.
-pub fn key_assets(plan: &mut crate::plan::ExportPlan, identity: &dyn Fn(&str) -> Vec<u8>) {
+/// Extends the key of every chunk with what its overlays draw beyond their own parameters:
+/// `identity` of each file an overlay names, so a file replaced under the same name renders
+/// again, and where a branded template draws, the theme's preset, colors and fonts, a brand
+/// Lottie's file hash and a chapter band's title. A chunk where nothing branded draws keeps its
+/// key when the brand changes.
+pub fn key_chunks(
+    plan: &mut crate::plan::ExportPlan,
+    identity: &dyn Fn(&str) -> Vec<u8>,
+    theme: &Theme,
+) {
     let fps = plan.fps;
     for planned in &mut plan.segments {
         for chunk in &mut planned.chunks {
@@ -262,68 +363,32 @@ pub fn key_assets(plan: &mut crate::plan::ExportPlan, identity: &dyn Fn(&str) ->
                 continue;
             };
             let mut input = Vec::new();
-            for file in planned
+            let mut branded = false;
+            let take = &planned.segment.take;
+            for overlay in planned
                 .segment
                 .overlays
                 .iter()
                 .filter(|o| o.range.overlaps(span))
-                .filter_map(file)
             {
-                let id = identity(file);
-                input.extend_from_slice(&(id.len() as u64).to_le_bytes());
-                input.extend_from_slice(&id);
+                if let Some(file) = file(overlay) {
+                    let id = identity(file);
+                    input.extend_from_slice(&(id.len() as u64).to_le_bytes());
+                    input.extend_from_slice(&id);
+                }
+                if let Some(key) = crate::theme::overlay_key(theme, overlay, take) {
+                    branded = true;
+                    input.extend_from_slice(&(key.len() as u64).to_le_bytes());
+                    input.extend_from_slice(&key);
+                }
+            }
+            if branded {
+                input.extend_from_slice(theme.key());
             }
             if !input.is_empty() {
                 chunk.hash = chunk.hash.extend(&input);
             }
         }
-    }
-}
-
-/// A value over media time: keyframes eased into each other, held before the first and after
-/// the last.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Keyframes(Vec<(Micros, f32)>);
-
-impl Keyframes {
-    /// Keyframes in time order.
-    pub fn new(mut frames: Vec<(Micros, f32)>) -> Self {
-        frames.sort_by_key(|(t, _)| *t);
-        Self(frames)
-    }
-
-    /// 0 at the range's start rising to 1 over `enter`, 1 until `exit` before its end, then
-    /// back to 0. A range too short for both meets in the middle.
-    pub fn presence(range: TimeRange, enter: Micros, exit: Micros) -> Self {
-        let (from, to) = (range.from().0, range.to().0);
-        let middle = from + (to - from) / 2;
-        let rise = (from + enter.0).min(middle);
-        let fall = to.saturating_sub(exit.0).max(middle);
-        Self::new(vec![
-            (Micros(from), 0.0),
-            (Micros(rise), 1.0),
-            (Micros(fall), 1.0),
-            (Micros(to), 0.0),
-        ])
-    }
-
-    /// The value at `t`, eased with smoothstep between keyframes.
-    pub fn at(&self, t: Micros) -> f32 {
-        let Some(&(first_t, first)) = self.0.first() else {
-            return 0.0;
-        };
-        if t <= first_t {
-            return first;
-        }
-        for pair in self.0.windows(2) {
-            let ((a_t, a), (b_t, b)) = (pair[0], pair[1]);
-            if t < b_t {
-                let p = (t.0 - a_t.0) as f32 / (b_t.0 - a_t.0).max(1) as f32;
-                let eased = p * p * (3.0 - 2.0 * p);
-                return a + (b - a) * eased;
-            }
-        }
-        self.0.last().map_or(0.0, |(_, v)| *v)
     }
 }
 
@@ -349,41 +414,61 @@ pub(crate) struct Stage<'a> {
     pub cutaway: &'a mut Option<Cutaway>,
 }
 
+impl<'a> Stage<'a> {
+    pub fn theme(&self) -> &'a Theme {
+        &self.look.theme
+    }
+
+    /// Canvas pixels per 4K pixel.
+    pub fn scale(&self) -> f32 {
+        self.canvas.width as f32 / 3840.0
+    }
+}
+
 /// Applies `overlay` to the frame at `stage.t`. Overlays draw in file order, later on top.
 pub(crate) fn apply(overlay: &Overlay, stage: &mut Stage) {
     if stage.t < overlay.range.from() || stage.t >= overlay.range.to() {
         return;
     }
+    if let Some(take) = &stage.look.take
+        && let Ok(Some(lottie)) = stage.theme().lottie(overlay, take)
+    {
+        draw_full_frame(lottie, overlay, stage);
+        return;
+    }
     match overlay.template.as_str() {
-        code_diff::TEMPLATE => {
-            if let Some(code) = code_diff::CodeDiffOverlay::of(overlay)
-                && let Some(diff) = stage.look.diffs.get(&code.diff)
-            {
-                stage
-                    .drawing
-                    .over
-                    .extend(code.draw(diff, stage.t, stage.canvas));
-            }
-        }
-        link_card::TEMPLATE => {
-            if let Some(card) = link_card::LinkCard::of(overlay) {
-                stage
-                    .drawing
-                    .over
-                    .extend(card.draw(Params(overlay), stage.t, stage.canvas));
-            }
-        }
-        lower_third::TEMPLATE => {
-            stage
-                .drawing
-                .over
-                .extend(lower_third::draw(Params(overlay), stage.t, stage.canvas));
-        }
+        code_diff::TEMPLATE => code_diff::apply(overlay, stage),
+        link_card::TEMPLATE => link_card::apply(overlay, stage),
+        lower_third::TEMPLATE => lower_third::apply(overlay, stage),
         highlight::TEMPLATE => highlight::apply(overlay, stage),
         broll::TEMPLATE => broll::apply(overlay, stage),
+        chapter_band::TEMPLATE => chapter_band::apply(overlay, stage),
+        end_card::TEMPLATE => end_card::apply(overlay, stage),
+        callout::TEMPLATE => callout::apply(overlay, stage),
+        pop::TEMPLATE => pop::apply(overlay, stage),
         redact::BLUR_TEMPLATE => redact::apply_blur(overlay, stage),
         _ => {}
     }
+}
+
+/// A brand Lottie template drawn over the whole frame: its composition scaled to the canvas
+/// width and centered, playing from the overlay's start and holding its last frame.
+fn draw_full_frame(
+    lottie: std::sync::Arc<crate::lottie::Filled>,
+    overlay: &Overlay,
+    stage: &mut Stage,
+) {
+    let (width, height) = lottie.size();
+    let scale = stage.canvas.width as f32 / width as f32;
+    let top = (stage.canvas.height as f32 - height as f32 * scale) / 2.0;
+    stage.drawing.over.push(Shape::Lottie {
+        lottie,
+        origin: [0.0, top],
+        scale,
+        elapsed: Micros(stage.t.0 - overlay.range.from().0),
+        opacity: 1.0,
+        font: stage.theme().fonts.body(),
+    });
 }
 
 #[cfg(test)]
@@ -422,21 +507,20 @@ mod tests {
             check(&overlay("sparkles", range(0, 1), vec![])),
             Err(TemplateError::Unknown(_))
         ));
-    }
-
-    #[test]
-    fn presence_rises_holds_and_falls() {
-        let k = Keyframes::presence(
-            range(1_000_000, 3_000_000),
-            Micros(500_000),
-            Micros(250_000),
+        let blur = overlay(
+            "blur",
+            range(0, 1),
+            vec![
+                ("x", ParamValue::Integer(0)),
+                ("y", ParamValue::Integer(0)),
+                ("width", ParamValue::Integer(10)),
+                ("height", ParamValue::Integer(10)),
+                ("enter", ParamValue::Integer(100_000)),
+            ],
         );
-        assert_eq!(k.at(Micros(1_000_000)), 0.0);
-        assert_eq!(k.at(Micros(1_250_000)), 0.5);
-        assert_eq!(k.at(Micros(2_000_000)), 1.0);
-        assert_eq!(k.at(Micros(2_875_000)), 0.5);
-        assert_eq!(k.at(Micros(3_000_000)), 0.0);
-        let short = Keyframes::presence(range(0, 400_000), Micros(500_000), Micros(500_000));
-        assert_eq!(short.at(Micros(200_000)), 1.0);
+        assert!(matches!(
+            check(&blur),
+            Err(TemplateError::UnknownParam { .. })
+        ));
     }
 }

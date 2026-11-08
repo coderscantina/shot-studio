@@ -6,7 +6,10 @@
 //! window's shadow and device frame) rarely changes within a segment, so it is drawn again only
 //! when its shapes change.
 
-use parley::{FontContext, GenericFamily, LayoutContext, PositionedLayoutItem, StyleProperty};
+use parley::fontique::{Blob, FontInfoOverride};
+use parley::{
+    FontContext, FontFamilyName, GenericFamily, LayoutContext, PositionedLayoutItem, StyleProperty,
+};
 use vello::kurbo::{Affine, BezPath, Circle, Rect as KRect, RoundedRect, Stroke};
 use vello::peniko::{Color, Fill, Gradient, ImageBrush};
 use vello::{AaConfig, AaSupport, RenderParams, Renderer, RendererOptions, Scene};
@@ -416,6 +419,21 @@ fn draw(scene: &mut Scene, ink: &mut Ink, transform: Affine, shape: &Shape) {
             let at = transform * Affine::translate((f64::from(origin[0]), f64::from(origin[1])));
             glyphs(scene, fonts, layouts, at, text, *size, *font, *c);
         }
+        Shape::Centered {
+            center,
+            text,
+            size,
+            font,
+            color: c,
+        } => {
+            let (width, height) = measure(fonts, layouts, text, *size, *font);
+            let at = transform
+                * Affine::translate((
+                    f64::from(center[0] - width / 2.0),
+                    f64::from(center[1] - height / 2.0),
+                ));
+            glyphs(scene, fonts, layouts, at, text, *size, *font, *c);
+        }
         Shape::Label {
             center,
             text,
@@ -512,6 +530,7 @@ fn draw(scene: &mut Scene, ink: &mut Ink, transform: Affine, shape: &Shape) {
             scale,
             elapsed,
             opacity,
+            font,
         } => {
             let at = transform
                 * Affine::translate((f64::from(origin[0]), f64::from(origin[1])))
@@ -519,7 +538,15 @@ fn draw(scene: &mut Scene, ink: &mut Ink, transform: Affine, shape: &Shape) {
             let frame = lottie.frame_at(*elapsed);
             lottie.draw(&mut ink.lottie, scene, frame, at, f64::from(*opacity));
             for text in lottie.texts(frame) {
-                slot_text(scene, &mut ink.fonts, &mut ink.layouts, at, &text, *opacity);
+                slot_text(
+                    scene,
+                    &mut ink.fonts,
+                    &mut ink.layouts,
+                    at,
+                    &text,
+                    *opacity,
+                    *font,
+                );
             }
         }
         Shape::Clip {
@@ -767,8 +794,9 @@ fn slot_text(
     transform: Affine,
     text: &PlacedText,
     opacity: f32,
+    font: Font,
 ) {
-    let layout = text_layout(fonts, layouts, &text.text, text.size, Font::Sans);
+    let layout = text_layout(fonts, layouts, &text.text, text.size, font);
     let baseline = layout.lines().next().map_or(0.0, |l| l.metrics().baseline);
     let shift = match text.justify {
         Justify::Left => 0.0,
@@ -778,16 +806,7 @@ fn slot_text(
     let at =
         transform * text.transform * Affine::translate((-f64::from(shift), -f64::from(baseline)));
     let ink = text.color.faded(text.opacity * opacity);
-    glyphs(
-        scene,
-        fonts,
-        layouts,
-        at,
-        &text.text,
-        text.size,
-        Font::Sans,
-        ink,
-    );
+    glyphs(scene, fonts, layouts, at, &text.text, text.size, font, ink);
 }
 
 /// The macOS arrow, one unit tall, tip at the origin.
@@ -817,14 +836,46 @@ fn text_layout(
     size: f32,
     font: Font,
 ) -> parley::Layout<()> {
+    let family = match font {
+        Font::Face(face) => {
+            let family = face.family();
+            if fonts.collection.family_id(&family).is_none() {
+                let file = face.file();
+                fonts.collection.register_fonts(
+                    Blob::new(file.bytes),
+                    Some(FontInfoOverride {
+                        family_name: Some(&family),
+                        ..FontInfoOverride::default()
+                    }),
+                );
+            }
+            Some(family)
+        }
+        Font::Sans | Font::Mono => None,
+    };
+    // A brand font falls back to the system for glyphs it lacks, emoji most of all.
+    let stack: Vec<FontFamilyName> = match (&family, font) {
+        (Some(family), _) => vec![
+            FontFamilyName::named(family),
+            FontFamilyName::Generic(GenericFamily::SystemUi),
+            FontFamilyName::Generic(GenericFamily::Emoji),
+        ],
+        (None, Font::Mono) => vec![FontFamilyName::Generic(GenericFamily::Monospace)],
+        (None, _) => vec![FontFamilyName::Generic(GenericFamily::SystemUi)],
+    };
     let mut builder = layouts.ranged_builder(fonts, text, 1.0, true);
     builder.push_default(StyleProperty::FontSize(size));
-    builder.push_default(StyleProperty::from(match font {
-        Font::Sans => GenericFamily::SystemUi,
-        Font::Mono => GenericFamily::Monospace,
-    }));
-    if font == Font::Sans {
-        builder.push_default(StyleProperty::FontWeight(parley::FontWeight::SEMI_BOLD));
+    builder.push_default(StyleProperty::from(stack.as_slice()));
+    match font {
+        Font::Sans => {
+            builder.push_default(StyleProperty::FontWeight(parley::FontWeight::SEMI_BOLD));
+        }
+        Font::Face(face) => {
+            builder.push_default(StyleProperty::FontWeight(parley::FontWeight::new(
+                f32::from(face.weight),
+            )));
+        }
+        Font::Mono => {}
     }
     let mut layout = builder.build(text);
     layout.break_all_lines(None);

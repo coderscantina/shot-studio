@@ -1,298 +1,249 @@
-//! The motion reel: every motion system feature on one repeating stretch, per preset, drawn over
-//! a frame, for the golden frames, the demo clips and the export timing. Tests only; the
-//! templates take these moves over in milestone 11's later work.
+//! The templates reel: every overlay template on one 24 s stretch, per preset, for the golden
+//! frames, the evidence frames and clips, the export timing and the preview budget. Tests only.
 
-use std::sync::{Arc, OnceLock};
+use std::collections::HashMap;
+use std::sync::Arc;
 
-use serde_json::json;
-use shot_core::{Micros, TimeRange};
+use shot_core::{Brand, FormatKind, Micros, Overlay, ParamValue, TimeRange, Zoom};
+use vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
 
-use crate::drawing::{Font, Glass, Placement, Rgba, Shape, Sheet, SoftShadow};
-use crate::frame::Frame;
-use crate::kinetic::{self, Kinetic};
-use crate::layout::{Canvas, Rect};
-use crate::lottie::{Filled, LottieTemplate, SlotDecl, SlotKind, SlotValue};
-use crate::materials::{self, LIGHT};
-use crate::motion::{Part, Preset, Reveal};
+use crate::code_diff::CodeDiff;
+use crate::frame::Look;
+use crate::motion::Preset;
+use crate::overlay::overlay;
+use crate::theme::Theme;
 
-/// One pass of the reel; it repeats after this.
-pub(crate) const CYCLE: Micros = Micros(6_000_000);
+/// One pass of the reel.
+pub(crate) const REEL: Micros = Micros(24_000_000);
+
+/// The diff the code-diff and b-roll diff draw.
+pub(crate) const DIFF: &str = "diff --git a/src/deploy.rs b/src/deploy.rs
+--- a/src/deploy.rs
++++ b/src/deploy.rs
+@@ -1,6 +1,7 @@
+ pub fn deploy(day: Weekday) -> Result<(), Refusal> {
+-    if day == Weekday::Fri {
+-        return Err(Refusal::Friday);
+-    }
++    let checks = Checks::run()?;
++    checks.require_green()?;
+     ship()
+ }
+";
+pub(crate) const DIFF_FILE: &str = "sources/reel.diff";
+pub(crate) const STILL_FILE: &str = "sources/reel.png";
+
+/// Where each template shows in the reel, from its start, and what it is called in evidence.
+pub(crate) const MOMENTS: [(&str, u64); 11] = [
+    ("chapter-band", 1_200_000),
+    ("lower-third", 2_400_000),
+    ("link-card", 4_400_000),
+    ("highlight", 6_200_000),
+    ("callout", 7_000_000),
+    ("pop-emoji", 7_400_000),
+    ("pop-word", 9_600_000),
+    ("code-diff", 13_400_000),
+    ("b-roll", 16_900_000),
+    ("end-card", 20_500_000),
+    ("blur", 3_600_000),
+];
 
 fn range(from: u64, to: u64) -> TimeRange {
     TimeRange::new(Micros(from), Micros(to)).expect("from before to")
 }
 
-/// Draws the reel of `preset` at media time `t`, repeating every `period`, its moves in the
-/// first [`CYCLE`] of each.
-pub(crate) fn decorate(
-    preset: Preset,
-    period: Micros,
-    t: Micros,
-    canvas: Canvas,
-    frame: &mut Frame,
-) {
-    let local = Micros(t.0 % period.0);
-    if local >= CYCLE {
-        return;
-    }
-    let s = canvas.width as f32 / 3840.0;
-    let motion = preset.motion();
-    let moves = preset.moves();
-    let drawing = &mut frame.drawing;
-
-    // A card on a sheet: slides in from the left, tilting on the way, on glass where the preset
-    // uses it, with a soft shadow that follows.
-    let card = range(400_000, 5_400_000);
-    let size = [1500.0 * s, 380.0 * s];
-    let rest = [120.0 * s + size[0] / 2.0, canvas.height as f32 * 0.62];
-    let place = |t: Micros| {
-        let pose = motion.pose(card, Part::WHOLE, t);
-        let away = pose.offset();
-        let mut placement = Placement {
-            center: [
-                rest[0] - away * (size[0] + 200.0 * s) * motion.travel.min(1.0),
-                rest[1],
+/// Every template, on take time from `start`.
+pub(crate) fn overlays(start: u64) -> Vec<Overlay> {
+    let at = |from: u64, to: u64| range(start + from, start + to);
+    let text = |s: &str| ParamValue::Text(s.to_owned());
+    let int = ParamValue::Integer;
+    vec![
+        overlay(
+            "chapter-band",
+            at(200_000, 2_800_000),
+            vec![
+                ("text", text("Why we ship on Fridays")),
+                ("label", text("Chapter 2")),
             ],
-            scale: if moves.reveal == Reveal::Pop {
-                0.7 + 0.3 * pose.enter.max(0.0) * (1.0 - pose.exit * 0.3)
-            } else {
-                1.0
-            },
-            tilt: [moves.tilt * 0.4 * away, -moves.tilt * away],
-            opacity: pose.presence(),
-        };
-        if moves.glass {
-            let camera = materials::drift(t, Micros(2_900_000), 18.0 * s, [1.0, -0.3]);
-            placement = materials::parallax(placement, 0.8, camera);
-        }
-        placement
-    };
-    let [open, close] = materials::shutter(local).map(place);
-    if open.opacity > 0.0 || close.opacity > 0.0 {
-        let panel = if moves.glass {
-            Vec::new()
-        } else {
-            vec![Shape::Rect {
-                rect: Rect::new(0.0, 0.0, size[0], size[1]),
-                radius: 36.0 * s,
-                color: Rgba::hex(0x15171C, 0.96),
-            }]
-        };
-        let title = Shape::Text {
-            origin: [96.0 * s, 150.0 * s],
-            text: "Ship it on Friday".into(),
-            size: 120.0 * s,
-            font: Font::Sans,
-            color: Rgba::hex(0xFFFFFF, 1.0),
-        };
-        let label = Shape::Text {
-            origin: [96.0 * s, 60.0 * s],
-            text: format!("{} preset", preset.name()),
-            size: 56.0 * s,
-            font: Font::Sans,
-            color: Rgba::hex(0xC8F25A, 1.0),
-        };
-        let stripe = Shape::Rect {
-            rect: Rect::new(0.0, 0.0, 18.0 * s, size[1]),
-            radius: 9.0 * s,
-            color: Rgba::hex(0xC8F25A, 1.0),
-        };
-        drawing.sheets.push(Sheet {
-            size,
-            radius: 36.0 * s,
-            glass: moves.glass.then_some(Glass {
-                blur: 36.0 * s,
-                tint: Rgba::hex(0x101216, 0.45),
-            }),
-            shapes: panel.into_iter().chain([stripe, label, title]).collect(),
-            placement: [open, close],
-        });
-        let now = place(local);
-        let [dx, dy] = LIGHT.shadow_offset(70.0 * s);
-        let half = [size[0] / 2.0 * now.scale, size[1] / 2.0 * now.scale];
-        drawing.shadows.push(SoftShadow {
-            shapes: vec![Shape::Rect {
-                rect: Rect::new(
-                    now.center[0] - half[0],
-                    now.center[1] - half[1],
-                    now.center[0] + half[0],
-                    now.center[1] + half[1],
+        ),
+        overlay(
+            "lower-third",
+            at(1_000_000, 5_000_000),
+            vec![
+                ("text", text("Mike Wallner")),
+                ("subtitle", text("Coder's Cantina")),
+            ],
+        ),
+        overlay(
+            "blur",
+            at(3_000_000, 5_000_000),
+            vec![
+                ("x", int(2400)),
+                ("y", int(1500)),
+                ("width", int(800)),
+                ("height", int(200)),
+            ],
+        ),
+        overlay(
+            "link-card",
+            at(3_200_000, 8_600_000),
+            vec![
+                (
+                    "url",
+                    text("https://github.com/coderscantina/shot-studio/pull/1"),
                 ),
-                radius: 36.0 * s,
-                color: Rgba::hex(0x000000, 1.0),
-            }],
-            blur: 40.0 * s,
-            color: Rgba::hex(0x000000, 0.5 * now.opacity),
-            offset: [dx, dy],
-        });
-    }
-
-    // A headline in the preset's kinetic type.
-    let headline = range(900_000, 5_000_000);
-    if (headline.from()..headline.to()).contains(&local) {
-        drawing.over.push(Shape::Kinetic(Box::new(Kinetic {
-            origin: [160.0 * s, 150.0 * s],
-            text: "Springs, glass and kinetic type".into(),
-            size: 150.0 * s,
-            font: Font::Sans,
-            color: Rgba::hex(0xFFFFFF, 1.0),
-            width: Some(2600.0 * s),
-            reveal: moves.reveal,
-            unit: moves.unit,
-            motion,
-            range: headline,
-            t: local,
-        })));
-    }
-
-    // A badge flying in from the right, motion blurred on the way.
-    let badge = range(700_000, 5_200_000);
-    let badge_size = [520.0 * s, 130.0 * s];
-    let badge_at = |t: Micros| {
-        let pose = motion.pose(badge, Part::WHOLE, t);
-        Placement {
-            center: [
-                canvas.width as f32 - 640.0 * s
-                    + pose.offset() * 1400.0 * s * motion.travel.min(1.0),
-                canvas.height as f32 * 0.38,
+                ("accent", ParamValue::Bool(true)),
             ],
-            scale: 1.0,
-            tilt: [0.0, 0.0],
-            opacity: pose.presence(),
-        }
-    };
-    let placement = materials::shutter(local).map(badge_at);
-    if placement.iter().any(|p| p.opacity > 0.0) {
-        drawing.sheets.push(Sheet {
-            size: badge_size,
-            radius: 0.0,
-            glass: None,
-            shapes: vec![Shape::Label {
-                center: [badge_size[0] / 2.0, badge_size[1] / 2.0],
-                text: "motion blur".into(),
-                size: 72.0 * s,
-                color: Rgba::hex(0x0A0B0D, 1.0),
-                background: Rgba::hex(0xC8F25A, 1.0),
-            }],
-            placement,
-        });
-    }
+        ),
+        overlay(
+            "highlight",
+            at(5_000_000, 8_000_000),
+            vec![
+                ("x", int(820)),
+                ("y", int(412)),
+                ("width", int(1340)),
+                ("height", int(64)),
+            ],
+        ),
+        overlay(
+            "callout",
+            at(5_600_000, 9_000_000),
+            vec![
+                ("x", int(2200)),
+                ("y", int(600)),
+                ("width", int(900)),
+                ("height", int(120)),
+                ("text", text("Deploy button")),
+            ],
+        ),
+        overlay("pop", at(6_600_000, 8_200_000), vec![("text", text("🔥"))]),
+        overlay(
+            "callout",
+            at(8_400_000, 10_400_000),
+            vec![
+                ("x", int(3000)),
+                ("y", int(1700)),
+                ("text", text("Click here")),
+            ],
+        ),
+        overlay(
+            "pop",
+            at(9_000_000, 10_400_000),
+            vec![
+                ("text", text("Ship it")),
+                ("x", int(1920)),
+                ("y", int(1080)),
+                ("size", int(300)),
+            ],
+        ),
+        overlay(
+            "code-diff",
+            at(10_600_000, 15_800_000),
+            vec![
+                ("diff", text(DIFF_FILE)),
+                ("highlight-line", int(9)),
+                ("highlight-at", int((start + 13_000_000) as i64)),
+            ],
+        ),
+        overlay(
+            "b-roll",
+            at(16_000_000, 18_000_000),
+            vec![("file", text(STILL_FILE))],
+        ),
+        overlay(
+            "end-card",
+            at(18_200_000, 24_000_000),
+            vec![("subtitle", text("New videos every Friday"))],
+        ),
+    ]
+}
 
-    // A word pop caption, one word after another.
-    let words = ["word", "pop", "captions", "settle"];
-    let start = 1_000_000;
-    if (start..start + 4 * 700_000).contains(&local.0) {
-        let index = ((local.0 - start) / 700_000) as usize;
-        let since = Micros(local.0 - start - index as u64 * 700_000);
-        drawing.over.push(Shape::Caption {
-            center: [canvas.width as f32 / 2.0, canvas.height as f32 * 0.88],
-            width: canvas.width as f32 * 0.8,
-            words: words.iter().map(|w| (*w).to_owned()).collect(),
-            highlight: Some(index),
-            size: 96.0 * s,
-            color: Rgba::hex(0xFFFFFF, 1.0),
-            accent: Rgba::hex(0xC8F25A, 1.0),
-            background: Rgba::hex(0x0A0B0D, 0.78),
-            pop: kinetic::word_pop(since),
-        });
-    }
+/// The reel's zoom: springs in on the highlight and callout and out again.
+pub(crate) fn zooms(start: u64) -> Vec<Zoom> {
+    vec![Zoom {
+        scale: 150,
+        range: range(start + 4_600_000, start + 9_400_000),
+        center: Some(shot_core::Point { x: 1800, y: 700 }),
+        by: None,
+    }]
+}
 
-    // A Lottie sticker with its label drawn by parley.
-    let sticker = range(1_200_000, 4_200_000);
-    if (sticker.from()..sticker.to()).contains(&local) {
-        drawing.over.push(Shape::Lottie {
-            lottie: sticker_lottie(),
-            origin: [canvas.width as f32 - 760.0 * s, 260.0 * s],
-            scale: 1.4 * s,
-            elapsed: Micros(local.0 - sticker.from().0),
-            opacity: 1.0,
-        });
+/// The format whose default preset is `preset`.
+pub(crate) fn format_of(preset: Preset) -> FormatKind {
+    match preset {
+        Preset::Reactive => FormatKind::Reaction,
+        Preset::Editorial => FormatKind::Opinion,
+        Preset::Launch => FormatKind::ProductTour,
+        Preset::Calm => FormatKind::Tutorial,
     }
 }
 
-/// A star that pops in and spins, its color and label filled through slots. The label is
-/// parented to the star, so it pops and turns with it.
-fn sticker_lottie() -> Arc<Filled> {
-    static STICKER: OnceLock<Arc<Filled>> = OnceLock::new();
-    STICKER
-        .get_or_init(|| {
-            let prop = |k| json!({ "a": 0, "k": k });
-            let file = json!({
-                "v": "5.7.0", "fr": 60, "ip": 0, "op": 180, "w": 400, "h": 400, "layers": [
-                    {
-                        "ty": 5, "nm": "Label", "ind": 1, "parent": 2, "ip": 0, "op": 180, "st": 0,
-                        "ks": { "a": prop(json!([0, 0])), "s": prop(json!([100, 100])),
-                                "o": prop(json!(100)), "r": prop(json!(0)),
-                                "p": prop(json!([0, 16])) },
-                        "t": { "d": { "sid": "label", "k": [{ "t": 0, "s": {
-                            "s": 44, "t": "NEW", "j": 2, "fc": [0.04, 0.04, 0.05], "f": "Sans"
-                        } }] } }
-                    },
-                    {
-                        "ty": 4, "nm": "Star", "ind": 2, "ip": 0, "op": 180, "st": 0,
-                        "ks": {
-                            "a": prop(json!([0, 0])), "o": prop(json!(100)),
-                            "p": prop(json!([200, 200])),
-                            "r": { "a": 1, "k": [
-                                { "t": 0, "s": [-30], "i": { "x": [0.2], "y": [1] }, "o": { "x": [0.4], "y": [0] } },
-                                { "t": 180, "s": [60] }
-                            ] },
-                            "s": { "a": 1, "k": [
-                                { "t": 0, "s": [0, 0], "i": { "x": [0.3], "y": [1.6] }, "o": { "x": [0.4], "y": [0] } },
-                                { "t": 24, "s": [100, 100], "i": { "x": [0.5], "y": [1] }, "o": { "x": [0.5], "y": [0] } },
-                                { "t": 180, "s": [100, 100] }
-                            ] }
-                        },
-                        "shapes": [{ "ty": "gr", "it": [
-                            { "ty": "sr", "sy": 1, "d": 1, "pt": prop(json!(8)), "p": prop(json!([0, 0])),
-                              "r": prop(json!(0)), "ir": prop(json!(110)), "is": prop(json!(0)),
-                              "or": prop(json!(170)), "os": prop(json!(0)) },
-                            { "ty": "fl", "c": { "a": 0, "k": [1, 0.5, 0.3], "sid": "accent" },
-                              "o": prop(json!(100)) },
-                            { "ty": "tr", "a": prop(json!([0, 0])), "p": prop(json!([0, 0])),
-                              "s": prop(json!([100, 100])), "r": prop(json!(0)), "o": prop(json!(100)) }
-                        ] }]
-                    }
-                ]
-            });
-            let bytes = serde_json::to_vec(&file).expect("json");
-            let decl = |name: &str, kind| SlotDecl {
-                name: name.to_owned(),
-                kind,
-                required: true,
-            };
-            let template = LottieTemplate::load(
-                &bytes,
-                &[decl("label", SlotKind::Text), decl("accent", SlotKind::Color)],
-            )
-            .expect("the sticker loads");
-            let filled = template
-                .fill(&[
-                    ("label", SlotValue::Text("NEW".into())),
-                    ("accent", SlotValue::Color(Rgba::hex(0xC8F25A, 1.0))),
-                ])
-                .expect("the sticker fills");
-            Arc::new(filled)
-        })
-        .clone()
+pub(crate) fn theme(preset: Preset) -> Theme {
+    Theme::new(&Brand::default(), format_of(preset), None, &|_| {
+        unreachable!("no brand files")
+    })
+    .expect("the default brand reads no files")
+}
+
+/// A still for the b-roll: a gradient with stripes, so the push in shows.
+pub(crate) fn still() -> ImageData {
+    let (width, height) = (1600u32, 900u32);
+    let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            let stripe = ((x + y) / 60) % 2 == 0;
+            let r = (40 + x * 120 / width) as u8;
+            let g = (60 + y * 100 / height) as u8;
+            let b = if stripe { 160 } else { 110 };
+            pixels.extend_from_slice(&[r, g, b, 255]);
+        }
+    }
+    ImageData {
+        data: Blob::new(Arc::new(pixels)),
+        format: ImageFormat::Rgba8,
+        alpha_type: ImageAlphaType::Alpha,
+        width,
+        height,
+    }
+}
+
+/// The look a reel frame draws with: the preset's theme and the files the reel names.
+pub(crate) fn look(preset: Preset, effects: shot_core::Effects) -> Look {
+    let diff = Arc::new(CodeDiff::parse(DIFF));
+    Look {
+        effects,
+        diffs: HashMap::from([(DIFF_FILE.to_owned(), diff)]),
+        images: HashMap::from([(STILL_FILE.to_owned(), still())]),
+        theme: Arc::new(theme(preset)),
+        take: Some(shot_core::Id::new("t01").expect("an id")),
+        ..Look::default()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::export::{Decoration, ExportOptions, ExportReport, export_decorated};
-    use crate::frame::{Look, Shot, compose};
+    use crate::drawing::{Font, Rgba, Shape};
+    use crate::export::{ExportOptions, ExportReport, export};
+    use crate::frame::{Frame, Shot, compose};
     use crate::graph::Renderer;
-    use crate::layout::{Scene, Sources};
+    use crate::layout::{Canvas, Rect, Scene, Sources};
     use crate::surface::{BufferPool, Matrix, Range, read_rgb};
-    use shot_core::{Effects, Layout, Point, Zoom, ZoomMotion};
+    use shot_core::{Effects, Layout, ZoomMotion};
 
     const PREVIEW: Canvas = Canvas {
         width: 1280,
         height: 720,
     };
 
-    /// A busy screen to zoom into and blur: stripes, blocks and text.
+    fn smooth() -> Effects {
+        Effects {
+            zoom_motion: ZoomMotion::Smooth,
+            ..Effects::default()
+        }
+    }
+
+    /// A busy screen to zoom into, point at and blur: stripes, blocks and text.
     fn screen(
         renderer: &Renderer,
     ) -> objc2_core_foundation::CFRetained<objc2_core_video::CVPixelBuffer> {
@@ -314,12 +265,11 @@ mod tests {
                 color: Rgba::hex(0xFFFFFF, 1.0),
             });
         }
-        let scene = Scene {
-            background: [0.1, 0.1, 0.12],
-            layers: Vec::new(),
-        };
         let frame = Frame {
-            scene,
+            scene: Scene {
+                background: [0.1, 0.1, 0.12],
+                layers: Vec::new(),
+            },
             drawing,
             cutaway: None,
         };
@@ -336,42 +286,28 @@ mod tests {
         buffer
     }
 
-    fn frame_at(preset: Preset, t: Micros) -> Frame {
-        let zooms = [Zoom {
-            scale: 180,
-            range: range(1_500_000, 4_500_000),
-            center: Some(Point { x: 2600, y: 900 }),
-            by: None,
-        }];
-        let look = Look {
-            effects: Effects {
-                zoom_motion: ZoomMotion::Smooth,
-                ..Effects::default()
-            },
-            ..Look::default()
-        };
+    fn frame_at(look: &Look, overlays: &[Overlay], t: Micros, canvas: Canvas) -> Frame {
         let shot = Shot {
             layout: Layout::Content,
-            zooms: &zooms,
-            overlays: &[],
+            zooms: &zooms(0),
+            overlays,
             time: t,
         };
         let sizes = Sources {
             screen: (3840, 2160),
             camera: (1920, 1080),
         };
-        let mut frame = compose(&shot, &look, PREVIEW, sizes).unwrap();
-        decorate(preset, CYCLE, t, PREVIEW, &mut frame);
-        frame
+        compose(&shot, look, canvas, sizes).unwrap()
     }
 
     fn render(
         renderer: &Renderer,
         source: &objc2_core_video::CVPixelBuffer,
         frame: &Frame,
-    ) -> blake3::Hash {
+        canvas: Canvas,
+    ) -> Vec<[u8; 3]> {
         let pool =
-            BufferPool::new(PREVIEW.width, PREVIEW.height, Range::Full, Matrix::Bt601).unwrap();
+            BufferPool::new(canvas.width, canvas.height, Range::Full, Matrix::Bt601).unwrap();
         let target = pool.buffer().unwrap();
         renderer
             .draw(
@@ -383,33 +319,43 @@ mod tests {
                 &target,
             )
             .unwrap();
-        let pixels: Vec<u8> = read_rgb(&target).unwrap().into_iter().flatten().collect();
-        blake3::hash(&pixels)
+        read_rgb(&target).unwrap()
+    }
+
+    fn digest(pixels: &[[u8; 3]]) -> blake3::Hash {
+        blake3::hash(pixels.as_flattened())
     }
 
     #[test]
     #[ignore = "needs the GPU"]
-    fn every_frame_is_the_same_reached_by_playing_or_by_seeking() {
+    fn every_template_frame_is_the_same_reached_by_playing_or_by_seeking() {
         let renderer = Renderer::new().unwrap();
         let source = screen(&renderer);
         let fps = 60;
-        let frames = CYCLE.0 * fps / 1_000_000;
+        let frames = REEL.0 * fps / 1_000_000;
+        let overlays = overlays(0);
         for preset in Preset::ALL {
+            let look = look(preset, smooth());
             let time = |frame: u64| Micros(frame * 1_000_000 / fps);
-            let played: Vec<blake3::Hash> = (0..frames)
-                .map(|f| render(&renderer, &source, &frame_at(preset, time(f))))
-                .collect();
+            let at = |on: &Renderer, f| {
+                digest(&render(
+                    on,
+                    &source,
+                    &frame_at(&look, &overlays, time(f), PREVIEW),
+                    PREVIEW,
+                ))
+            };
+            let played: Vec<blake3::Hash> = (0..frames).map(|f| at(&renderer, f)).collect();
             // Seeks in a fixed pseudo-random order, on the same renderer and on a fresh one.
             let fresh = Renderer::new().unwrap();
             let mut state: u64 = 0x2545_F491_4F6C_DD1D;
-            for seek in 0..40 {
+            for seek in 0..60 {
                 state ^= state << 13;
                 state ^= state >> 7;
                 state ^= state << 17;
                 let f = state % frames;
                 let on = if seek % 2 == 0 { &renderer } else { &fresh };
-                let seen = render(on, &source, &frame_at(preset, time(f)));
-                assert_eq!(seen, played[f as usize], "{preset:?} frame {f}");
+                assert_eq!(at(on, f), played[f as usize], "{preset:?} frame {f}");
             }
         }
     }
@@ -421,115 +367,136 @@ mod tests {
         dir
     }
 
-    /// A video folder over the generated target project's media, with smooth zooms.
-    fn project(dir: &std::path::Path, cut: &str) -> shot_core::Project {
+    #[test]
+    #[ignore = "needs the GPU and the generated screen fixture; writes docs/evidence/m11"]
+    fn frames_per_template_per_preset() {
+        let fixtures = std::path::PathBuf::from(std::env::var("SHOT_FIXTURES").unwrap());
+        let decoder =
+            shot_media::videotoolbox::Decoder::open_native(&fixtures.join("screen-30s.mp4"))
+                .unwrap();
+        let mut cursor = crate::cursor::FrameCursor::new(decoder);
+        let renderer = Renderer::new().unwrap();
+        let canvas = Canvas {
+            width: 1920,
+            height: 1080,
+        };
+        let overlays = overlays(0);
+        for preset in Preset::ALL {
+            let look = look(preset, smooth());
+            for (name, t) in MOMENTS {
+                let source = cursor
+                    .goto(std::time::Duration::from_micros(t % 30_000_000))
+                    .unwrap()
+                    .unwrap()
+                    .buffer
+                    .clone();
+                let frame = frame_at(&look, &overlays, Micros(t), canvas);
+                let pixels = render(&renderer, &source, &frame, canvas);
+                let image = image::RgbImage::from_raw(canvas.width, canvas.height, pixels.concat())
+                    .unwrap();
+                image
+                    .save(evidence().join(format!("templates-{}-{name}.png", preset.name())))
+                    .unwrap();
+            }
+        }
+    }
+
+    /// A video folder of `format` over the generated target project's media, with the reel's
+    /// files in `sources/` with the screen recording in the content layout.
+    fn project(dir: &std::path::Path, format: FormatKind, cut: &str) -> shot_core::Project {
         let fixtures =
             std::path::PathBuf::from(std::env::var("SHOT_FIXTURES").expect("SHOT_FIXTURES is set"))
                 .join("target-project");
         std::os::unix::fs::symlink(fixtures.join("media"), dir.join("media")).unwrap();
-        let format = std::fs::read_to_string(fixtures.join("format.kdl")).unwrap();
+        std::fs::create_dir_all(dir.join("sources")).unwrap();
+        std::fs::write(dir.join(DIFF_FILE), DIFF).unwrap();
+        let still = still();
+        image::RgbaImage::from_raw(still.width, still.height, still.data.data().to_vec())
+            .unwrap()
+            .save(dir.join(STILL_FILE))
+            .unwrap();
         shot_core::Project {
-            video: shot_core::Video::parse("title \"t\"\nstatus editing\nformat opinion\n")
-                .unwrap(),
+            video: shot_core::Video::parse(&format!(
+                "title \"t\"\nstatus editing\nformat {}\n",
+                format.as_str()
+            ))
+            .unwrap(),
             script: shot_core::Script::parse("# t\n").unwrap(),
-            format: shot_core::Format::parse(&format!("{format}zoom-motion smooth\n")).unwrap(),
+            format: shot_core::Format::parse(&format!(
+                "{}zoom-motion smooth\n",
+                std::fs::read_to_string(fixtures.join("format.kdl"))
+                    .unwrap()
+                    .replace("layouts face split", "layouts content face split")
+            ))
+            .unwrap(),
             cut: shot_core::Cut::parse(cut).unwrap(),
         }
     }
 
-    fn export(
+    /// The reel's overlays and zoom every `period` of the take's kept ranges in `cut`.
+    fn with_reels(project: &mut shot_core::Project, period: u64) {
+        for take in project.cut.chapters.iter_mut().flat_map(|c| &mut c.takes) {
+            let kept: Vec<TimeRange> = take
+                .ranges
+                .iter()
+                .filter_map(|r| match r {
+                    shot_core::RangeEdit::Keep(range) => Some(*range),
+                    shot_core::RangeEdit::Remove { .. } => None,
+                })
+                .collect();
+            let (Some(first), Some(last)) = (kept.first(), kept.last()) else {
+                continue;
+            };
+            let mut start = first.from().0.div_ceil(period) * period;
+            while start + REEL.0 <= last.to().0 {
+                take.overlays.extend(overlays(start));
+                take.zooms.extend(zooms(start));
+                start += period;
+            }
+        }
+    }
+
+    fn timed_export(
         dir: &std::path::Path,
         project: &shot_core::Project,
         out: &std::path::Path,
-        decoration: Decoration,
     ) -> ExportReport {
-        export_decorated(
-            dir,
-            project,
-            "main",
-            out,
-            ExportOptions::default(),
-            Some(decoration),
-            &|_| {},
-        )
-        .unwrap()
-    }
-
-    fn reactive(t: Micros, canvas: Canvas, frame: &mut Frame) {
-        decorate(Preset::Reactive, CYCLE, t, canvas, frame);
-    }
-    fn editorial(t: Micros, canvas: Canvas, frame: &mut Frame) {
-        decorate(Preset::Editorial, CYCLE, t, canvas, frame);
-    }
-    fn launch(t: Micros, canvas: Canvas, frame: &mut Frame) {
-        decorate(Preset::Launch, CYCLE, t, canvas, frame);
-    }
-    fn calm(t: Micros, canvas: Canvas, frame: &mut Frame) {
-        decorate(Preset::Calm, CYCLE, t, canvas, frame);
-    }
-    /// Launch moves, the costliest, for 6 s of every 20 s.
-    fn typical(t: Micros, canvas: Canvas, frame: &mut Frame) {
-        decorate(Preset::Launch, Micros(20_000_000), t, canvas, frame);
+        export(dir, project, "main", out, ExportOptions::default(), &|_| {}).unwrap()
     }
 
     #[test]
     #[ignore = "needs the generated target project and the hardware HEVC encoder; writes docs/evidence/m11"]
-    fn demo_clips_per_preset_through_the_export() {
-        // 6 s of the take from a whole cycle in, with a zoom springing in and out.
-        let cut = r#"chapter "Reel" {
-    take t01 {
-        keep from=12_000_000 to=18_000_000
-        zoom 160 from=13_500_000 to=16_500_000 x=2600 y=900
-    }
-}
-"#;
-        let reels = [
-            Decoration {
-                name: "reactive",
-                draw: reactive,
-            },
-            Decoration {
-                name: "editorial",
-                draw: editorial,
-            },
-            Decoration {
-                name: "launch",
-                draw: launch,
-            },
-            Decoration {
-                name: "calm",
-                draw: calm,
-            },
-        ];
-        for reel in reels {
+    fn template_clips_per_preset_through_the_export() {
+        let cut = format!(
+            "chapter \"Reel\" {{\n    take t01 {{\n        keep from=12_000_000 to={}\n    }}\n}}\n",
+            12_000_000 + REEL.0
+        );
+        for preset in Preset::ALL {
             let dir = tempfile::tempdir().unwrap();
-            let project = project(dir.path(), cut);
-            let out = evidence().join(format!("{}.mp4", reel.name));
-            let report = export(dir.path(), &project, &out, reel);
+            let mut project = project(dir.path(), format_of(preset), &cut);
+            with_reels(&mut project, 12_000_000);
+            let out = evidence().join(format!("templates-{}.mp4", preset.name()));
+            let report = timed_export(dir.path(), &project, &out);
             println!(
                 "{}: {} frames in {:?}",
-                reel.name, report.frames, report.render_time
+                preset.name(),
+                report.frames,
+                report.render_time
             );
         }
     }
 
     #[test]
     #[ignore = "needs the generated target project and the hardware HEVC encoder, takes minutes"]
-    fn the_full_fixture_with_glass_and_motion_blur_exports_faster_than_realtime() {
+    fn the_full_fixture_with_templates_exports_faster_than_realtime() {
         let fixtures = std::path::PathBuf::from(std::env::var("SHOT_FIXTURES").unwrap());
         let cut = std::fs::read_to_string(fixtures.join("target-project/cut.kdl")).unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let project = project(dir.path(), &cut);
+        // Launch is the costliest preset: glass, tilt and glyph by glyph type.
+        let mut project = project(dir.path(), FormatKind::ProductTour, &cut);
+        with_reels(&mut project, 60_000_000);
         let out = dir.path().join("main.mp4");
-        let report = export(
-            dir.path(),
-            &project,
-            &out,
-            Decoration {
-                name: "typical",
-                draw: typical,
-            },
-        );
+        let report = timed_export(dir.path(), &project, &out);
         let total = report.render_time + report.join_time;
         let speed = report.duration().as_secs_f64() / total.as_secs_f64();
         println!(
@@ -544,7 +511,7 @@ mod tests {
 
     #[test]
     #[ignore = "needs the generated screen fixture and the GPU; run with --release"]
-    fn preview_frames_with_glass_and_motion_blur_fit_the_frame_budget() {
+    fn preview_frames_with_templates_fit_the_frame_budget() {
         let fixtures = std::path::PathBuf::from(std::env::var("SHOT_FIXTURES").unwrap());
         let decoder =
             shot_media::videotoolbox::Decoder::open_native(&fixtures.join("screen-30s.mp4"))
@@ -557,42 +524,20 @@ mod tests {
         };
         let pool =
             BufferPool::new(preview.width, preview.height, Range::Full, Matrix::Bt601).unwrap();
-        let zooms = [Zoom {
-            scale: 180,
-            range: range(1_500_000, 4_500_000),
-            center: Some(Point { x: 2600, y: 900 }),
-            by: None,
-        }];
-        let look = Look {
-            effects: Effects {
-                zoom_motion: ZoomMotion::Smooth,
-                ..Effects::default()
-            },
-            ..Look::default()
-        };
+        let overlays = overlays(0);
         for preset in Preset::ALL {
+            let look = look(preset, smooth());
             let mut times = Vec::new();
-            for frame in 0..(CYCLE.0 * 60 / 1_000_000) {
+            for frame in 0..(REEL.0 * 60 / 1_000_000) {
                 let t = Micros(frame * 1_000_000 / 60);
                 let source = cursor
-                    .goto(std::time::Duration::from_micros(t.0))
+                    .goto(std::time::Duration::from_micros(t.0 % 30_000_000))
                     .unwrap()
                     .unwrap()
                     .buffer
                     .clone();
                 let started = std::time::Instant::now();
-                let shot = Shot {
-                    layout: Layout::Content,
-                    zooms: &zooms,
-                    overlays: &[],
-                    time: t,
-                };
-                let sizes = Sources {
-                    screen: crate::surface::size(&source),
-                    camera: (1, 1),
-                };
-                let mut drawn = compose(&shot, &look, preview, sizes).unwrap();
-                decorate(preset, CYCLE, t, preview, &mut drawn);
+                let drawn = frame_at(&look, &overlays, t, preview);
                 let target = pool.buffer().unwrap();
                 renderer
                     .draw(

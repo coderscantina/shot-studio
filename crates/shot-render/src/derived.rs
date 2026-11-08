@@ -140,8 +140,10 @@ pub struct DerivedPlan {
 pub struct DerivedInputs<'a> {
     pub fps: u32,
     pub media: &'a dyn Fn(&Id) -> MediaId,
-    /// The identity of a file an overlay names, see [`crate::overlay::key_assets`].
+    /// The identity of a file an overlay names, see [`crate::overlay::key_chunks`].
     pub assets: &'a dyn Fn(&str) -> Vec<u8>,
+    /// The video's theme, which branded main chunks are keyed by.
+    pub theme: &'a crate::theme::Theme,
     pub faces: &'a HashMap<Id, FaceTrack>,
     pub transcripts: &'a HashMap<Id, Transcript>,
 }
@@ -156,7 +158,7 @@ impl DerivedPlan {
         };
         let fps = inputs.fps;
         let mut main_plan = ExportPlan::new(main, fps, inputs.media);
-        crate::overlay::key_assets(&mut main_plan, inputs.assets);
+        crate::overlay::key_chunks(&mut main_plan, inputs.assets, inputs.theme);
         let mut plan = ExportPlan::new(derived, fps, inputs.media);
         let cues = captions::cues(&plan, inputs.transcripts, &derived.caption_fixes);
         let width = window_width(kind);
@@ -547,6 +549,7 @@ mod tests {
                 fps: 60,
                 media: &|_| MediaId::default(),
                 assets: &|_| Vec::new(),
+                theme: &crate::theme::Theme::default(),
                 faces,
                 transcripts: &HashMap::new(),
             },
@@ -652,6 +655,7 @@ short s {
                     fps: 60,
                     media: &|_| MediaId::default(),
                     assets: &|_| Vec::new(),
+                    theme: &crate::theme::Theme::default(),
                     faces: &HashMap::new(),
                     transcripts,
                 },
