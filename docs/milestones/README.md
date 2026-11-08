@@ -16,7 +16,7 @@ Mark a milestone complete only after its acceptance criteria pass and an evidenc
 | 08 | [Planning, agents and ship](08-planning-agents-and-ship.md) | 03, 04, 07 | Core, Agents | Complete, the real YouTube upload waits for Mike's OAuth client. [Evidence](../evidence/m08-planning-agents-and-ship.md) |
 | 10 | [Semantic core](10-semantic-core.md) | 07, 08 | Core, Analysis, Media, App | Items 1 to 6 and 8 on `milestone/10-12`, item 7 waits for a design round with Mike. [Evidence](../evidence/m10-semantic-core.md) |
 | 11 | [Motion system and effects as styles](11-effects-as-styles.md) | 10 (items 1 to 4 can start earlier) | Media, App | Built on `milestone/10-12`; Mike's reel scores are the open criterion. [Evidence](../evidence/m11-effects-as-styles.md) |
-| 12 | [Styled monitor and watch builds](12-styled-monitor-and-watch-builds.md) | 10, 11 | App, Media, Agents | Not started |
+| 12 | [Styled monitor and watch builds](12-styled-monitor-and-watch-builds.md) | 10, 11 | App, Media, Agents | Built on `milestone/10-12`; the watch rebuild time is being fixed, the URL card latency waits for Mike. [Evidence](../evidence/m12-styled-monitor-and-watch-builds.md) |
 | 09 | [Release gate](09-release-gate.md) | 01 to 08, 10 to 12 | Core | Not started |
 
 Milestone 02 is a go/no-go gate. If gpui can't show a 4K60 VideoToolbox decode without a CPU copy, stop and bring the measurements to Mike before 03 starts, because the UI choice changes.
@@ -41,6 +41,7 @@ Waiting for Mike. One line each with a recommendation and a link to its record. 
 - The lock carries the resolved brand and asset hashes behind a versioned header. Recommend adopting: a lock alone renders the same frames. [0025](../decisions/0025-lock-carries-the-resolved-style.md)
 - Pacing is now the cut rules' breath; the `pacing` keyword is read once by migration. Jump-cut punch-ins on every other cut have no rule form (selectors cannot count cuts), so new videos get none and migrated ones keep theirs as overrides. Recommend accepting both for now and adding an `every=2` selector filter if you miss the punch-ins. [Evidence](../evidence/m10/migrate.md)
 - Golden-frame tests: allow ±1 code value on a handful of pixels. vello's partial coverage flips one chroma sample on a letter edge in 3 of 8 reel runs. Recommend allowing it; the per-area golden tests stay strict and pass. [Evidence](../evidence/m11-effects-as-styles.md)
+- URL card latency on the live monitor: measured median 1.31 s against 500 ms; the wait is whisper's 1 s decode step. Recommend relaxing the target to 1.5 s; meeting 500 ms needs a second fast decode of the last seconds every 250 ms while recording, at extra GPU cost. [Evidence](../evidence/m12-styled-monitor-and-watch-builds.md)
 - Score the four reels (`docs/evidence/m11/reel-*.mp4`, 81 s each, timecoded list in the report); milestone 11 needs 8 or higher per preset.
 - Semantic video: committed elements per take, cascading style rules, a generated `cut.lock`, pacing as style, review decisions as overrides, shipped videos pinned at their tag. Settled in the effects grill on 2026-11-07; adopt once milestone 10 settles the grammar. [0019](../decisions/0019-semantic-video-elements-and-style.md)
 - A channel `brand/brand.kdl` with partial overrides per video, bundled and repo fonts, bumpers git-ignored, styles imported from git. Settled in the effects grill. [0020](../decisions/0020-channel-brand-and-shared-styles.md)
@@ -60,6 +61,8 @@ Waiting for Mike. One line each with a recommendation and a link to its record. 
 Found by agents and waiting for a task. Remove a line when it's fixed.
 
 - Record does not warn when the camera delivers black frames.
+- The live URL reader turns whisper's half-joined "github.com slash zedindustry slash zed." into just `https://github.com`. Captions draw over the link card on the monitor (export keeps main-cut captions in the sidecar). The Record layout switcher from the mockup is not built; the Styled/Raw switch takes its place.
+- Proposal cache folders under `.shot/cache/proposals/` are never cleaned up after accept or reject, and the contract does not name that folder yet.
 - The painter has no prefetch for the second side of a two-sided transition (the engine queues 18 frames instead), and `paint` does not return the screen layer it drew, so the engine lays out paused frames twice to map callout clicks. `--bench-edit --glass` draws its own pass although `Painter::set_decoration` now exists.
 - Stingers and derived cuts do not snap to the beat. The bookend title and word-pop captions have no phase sounds. The contract's `sounds` row does not yet say which templates count as cards or pops, that clicks need a ripple, or that a phase plays on its first frame.
 - The shot-app watchdog test (`the_watchdog_names_where_a_stalled_thread_waits_or_runs`) fails about one run in three at load average 15.
