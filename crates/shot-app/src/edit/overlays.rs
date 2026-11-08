@@ -49,7 +49,7 @@ fn placed(this: &EditScreen) -> Vec<Placed<'_>> {
             let frames = out_frame(from)..out_frame(to);
             match out
                 .iter_mut()
-                .find(|p| p.at == span.at && std::ptr::eq(p.overlay, overlay))
+                .find(|p| p.at == span.at && p.overlay == overlay)
             {
                 Some(p) => p.frames.end = p.frames.end.max(frames.end),
                 None => out.push(Placed {
