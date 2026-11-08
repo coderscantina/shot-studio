@@ -18,6 +18,13 @@ pub fn next_take_id<'a>(existing: impl IntoIterator<Item = &'a str>) -> Id {
     Id::new(format!("t{:02}", highest + 1)).expect("tNN is a valid id")
 }
 
+/// Whether `take` was recorded with `file` switched off: its folder is in `media/` and the file
+/// is not. A missing take folder says nothing, media stays out of git, so a clone has none.
+pub fn not_recorded(video_dir: &Path, take: &Id, file: &str) -> bool {
+    let dir = video_dir.join("media").join(take.as_str());
+    dir.is_dir() && !dir.join(file).exists()
+}
+
 /// Creates `media/<take>/` in `video_dir` for a new take and returns its id and path.
 pub fn create_take_dir(video_dir: &Path) -> io::Result<(Id, PathBuf)> {
     let media = video_dir.join("media");
@@ -56,5 +63,16 @@ mod tests {
         assert_eq!(first.as_str(), "t01");
         assert!(dir.is_dir());
         assert_eq!(create_take_dir(video.path()).unwrap().0.as_str(), "t02");
+    }
+
+    #[test]
+    fn a_track_is_not_recorded_only_when_its_take_folder_is_there_without_it() {
+        let video = tempfile::tempdir().unwrap();
+        let (take, dir) = create_take_dir(video.path()).unwrap();
+        std::fs::write(dir.join("screen.mp4"), b"").unwrap();
+        assert!(not_recorded(video.path(), &take, "mic.mp4"));
+        assert!(!not_recorded(video.path(), &take, "screen.mp4"));
+        let cloned = Id::new("t09").unwrap();
+        assert!(!not_recorded(video.path(), &cloned, "mic.mp4"));
     }
 }

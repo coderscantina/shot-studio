@@ -463,3 +463,65 @@ fn a_caption_look_or_line_break_changes_only_burned_in_chunks() {
     assert_eq!(main_keys(&after), main_keys(&split));
     assert_ne!(derived_keys(&after, 1), derived_keys(&split, 1));
 }
+
+/// A talking-head video that records no screen and no system audio.
+const RECORD_LAYER: &str = "record screen=#false camera=#true mic=#true system-audio=#false\n";
+
+#[test]
+fn the_record_node_round_trips_and_switches_tracks_per_video() {
+    assert_in_contract(RECORD_LAYER);
+    let layer = shot_core::FormatLayer::parse(RECORD_LAYER).unwrap();
+    assert_eq!(layer.to_kdl(), RECORD_LAYER);
+    let channel = Format::parse(FORMAT).unwrap();
+    assert_eq!(channel.inputs(), shot_core::Inputs::default());
+    let video = channel.resolve([&layer]);
+    let inputs = video.inputs();
+    assert!(!inputs.screen && inputs.camera && inputs.mic && !inputs.system_audio);
+    let full = video.to_kdl();
+    assert!(
+        full.ends_with(RECORD_LAYER),
+        "written after the settings:\n{full}"
+    );
+    assert_eq!(Format::parse(&full).unwrap(), video);
+    assert!(shot_core::FormatLayer::parse("record screen=#false\n").is_err());
+}
+
+#[test]
+fn a_take_without_a_track_falls_back_to_the_layout_it_can_draw() {
+    assert_eq!(Layout::FaceContent.for_tracks(true, false), Layout::Content);
+    assert_eq!(Layout::Split.for_tracks(true, false), Layout::Content);
+    assert_eq!(Layout::Window.for_tracks(true, false), Layout::Window);
+    assert_eq!(Layout::Split.for_tracks(false, true), Layout::Face);
+    assert_eq!(Layout::Window.for_tracks(false, true), Layout::Face);
+    assert_eq!(Layout::Split.for_tracks(true, true), Layout::Split);
+    assert_eq!(Layout::Split.for_tracks(false, false), Layout::Split);
+}
+
+const THUMBNAIL: &str = include_str!("../../../fixtures/examples/thumbnail.kdl");
+
+#[test]
+fn the_thumbnail_design_round_trips_and_names_its_upload() {
+    use shot_core::thumbnail::{FaceStyle, StickerShape, ThumbnailDesign, ThumbnailPreset};
+    assert_in_contract(THUMBNAIL);
+    let design = ThumbnailDesign::parse(THUMBNAIL).unwrap();
+    assert_eq!(design.to_kdl(), THUMBNAIL);
+    let upload = design.uploaded().unwrap();
+    assert_eq!(upload.preset, ThumbnailPreset::BigFace);
+    assert_eq!(upload.face, FaceStyle::Off);
+    assert_eq!(upload.stickers[0].shape, StickerShape::Emoji);
+    assert_eq!(upload.stickers[0].emoji.as_deref(), Some("🔥"));
+    assert_eq!(design.free_name().as_str(), "c");
+    assert_eq!(
+        ThumbnailDesign::parse("").unwrap(),
+        ThumbnailDesign::default()
+    );
+    for broken in [
+        "upload z\nvariant a preset=screen {\n}\n",
+        "variant a preset=screen {\n}\n",
+        "upload a\nvariant a preset=screen {\n    headline \"1\" \"2\" \"3\" color=text style=outline\n}\n",
+        "upload a\nvariant a preset=screen {\n    sticker emoji x=1 y=1 size=50 turn=0\n}\n",
+        "upload a\nvariant a preset=screen {\n    background screen dim=95\n}\n",
+    ] {
+        assert!(ThumbnailDesign::parse(broken).is_err(), "{broken}");
+    }
+}

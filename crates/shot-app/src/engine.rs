@@ -404,17 +404,23 @@ fn screen_map(
         return Ok(None);
     };
     let theme = assets.theme().map_err(|e| e.to_string())?;
-    let mut specs = vec![theme.layout(span.layout, &plan.effects.window)];
+    let take = plan.dir.join("media").join(span.take.as_str());
+    // A take recorded without the camera or the screen draws the layout it can.
+    let tracks = (
+        take.join("screen.mp4").exists(),
+        take.join("camera.mp4").exists(),
+    );
+    let layout = span.layout.for_tracks(tracks.0, tracks.1);
+    let mut specs = vec![theme.layout(layout, &plan.effects.window)];
     specs.extend(
         span.switch
             .as_ref()
-            .map(|s| theme.layout(s.from, &plan.effects.window)),
+            .map(|s| theme.layout(s.from.for_tracks(tracks.0, tracks.1), &plan.effects.window)),
     );
     let specs = specs
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
-    let take = plan.dir.join("media").join(span.take.as_str());
     let mut size_of = |source, file| -> Result<Option<(u32, u32)>, String> {
         let path = take.join(file);
         if !specs.iter().any(|s| s.uses(source)) || !path.exists() {
@@ -440,7 +446,7 @@ fn screen_map(
         .look(&span.take, &span.overlays, plan.effects)
         .map_err(|e| e.to_string())?;
     let shot = Shot {
-        layout: span.layout,
+        layout,
         zooms: &span.zooms,
         overlays: &span.overlays,
         time: frame_time(span.source_frame(frame), FPS),

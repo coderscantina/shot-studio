@@ -17,6 +17,7 @@ mod migrate;
 mod script;
 mod style;
 mod takes;
+pub mod thumbnail;
 mod timeline;
 mod transcript;
 mod values;
@@ -39,6 +40,7 @@ pub use edit::{Decision, EditError, Placed, TakeAt, WordState, WordView};
 pub use element::{Attr, AttrValue, DuplicateElement, Element, ElementKind, Elements};
 pub use engine::{StyleError, StyleInput, build};
 pub use error::ParseError;
+pub use format::Inputs;
 pub use format::{
     AutoCut, AutoZoom, CaptionStyle, Color, CursorStyle, DeviceFrame, Effects, Format, FormatKind,
     FormatLayer, Keystrokes, Layout, LayoutName, LayoutSwitch, Pacing, PrompterMode, RuleKind,

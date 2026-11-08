@@ -20,6 +20,8 @@ shot-media = { path = "../shot-media" }
 shot-board = { path = "../shot-board" }
 shot-mcp = { path = "../shot-mcp" }
 shot-ship = { path = "../shot-ship" }
+# The thumbnail studio hands its renders to gpui as image frames.
+image = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { workspace = true }

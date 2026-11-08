@@ -417,6 +417,73 @@ impl Renderer {
     }
 }
 
+impl Renderer {
+    /// Draws `groups` into a new `width` by `height` RGBA texture and reads it back as
+    /// straight-alpha RGBA8 rows, for stills such as thumbnails.
+    pub(crate) fn draw_still(
+        &self,
+        groups: &[(vello::kurbo::Affine, Vec<crate::drawing::Shape>)],
+        (width, height): (u32, u32),
+    ) -> Result<Vec<u8>, RenderError> {
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("still"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        self.vector
+            .lock()
+            .expect("vector pass poisoned")
+            .render_groups(&self.device, &self.queue, groups, (width, height), &view)?;
+        let row = (width * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("still readback"),
+            size: u64::from(row * height),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        encoder.copy_texture_to_buffer(
+            texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row),
+                    rows_per_image: Some(height),
+                },
+            },
+            texture.size(),
+        );
+        self.queue.submit([encoder.finish()]);
+        let slice = buffer.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|e| RenderError::Gpu(e.to_string()))?;
+        let mapped = slice
+            .get_mapped_range()
+            .map_err(|e| RenderError::Gpu(e.to_string()))?;
+        let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+        for line in mapped.chunks(row as usize) {
+            rgba.extend_from_slice(&line[..(width * 4) as usize]);
+        }
+        Ok(rgba)
+    }
+}
+
 fn begin_pass<'a>(
     encoder: &'a mut wgpu::CommandEncoder,
     view: &wgpu::TextureView,

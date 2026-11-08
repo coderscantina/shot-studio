@@ -333,6 +333,12 @@ impl Painter {
     ) -> Result<Drawn, PaintError> {
         let segment = &plan.segments[index].segment;
         let theme = self.assets.theme()?;
+        let take = self.dir.join("media").join(segment.take.as_str());
+        // A take recorded without the camera or the screen draws the layout it can.
+        let tracks = (
+            take.join(SCREEN_FILE).exists(),
+            take.join(CAMERA_FILE).exists(),
+        );
         let time = frame_time(source_frame, plan.fps);
         let switch = match layout {
             Some(_) => None,
@@ -342,12 +348,14 @@ impl Painter {
                     && time < s.window.to()
             }),
         };
-        let layout = layout.unwrap_or(segment.layout);
+        let layout = layout
+            .unwrap_or(segment.layout)
+            .for_tracks(tracks.0, tracks.1);
         let mut specs = vec![theme.layout(layout, &self.effects.window)?];
         if let Some(switch) = switch {
-            specs.push(theme.layout(switch.from, &self.effects.window)?);
+            let from = switch.from.for_tracks(tracks.0, tracks.1);
+            specs.push(theme.layout(from, &self.effects.window)?);
         }
-        let take = self.dir.join("media").join(segment.take.as_str());
         let mut decoded = Sources::<Option<Decoded>>::default();
         for (source, file) in [(Source::Screen, SCREEN_FILE), (Source::Camera, CAMERA_FILE)] {
             let path = take.join(file);

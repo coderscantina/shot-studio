@@ -46,6 +46,7 @@ fn facts<'a>(
     Facts {
         transcript,
         speech,
+        voice: true,
         duration: Micros(20_000_000),
         still: &[],
         markers,
@@ -76,6 +77,20 @@ fn the_transcript_gives_words_sentences_whole_gaps_fillers_retakes_and_urls() {
         ]
     );
     assert_eq!(elements.of_kind(Word).count(), 10);
+}
+
+#[test]
+fn a_take_without_a_mic_has_no_silences() {
+    let t = Transcript::new(Id::new("t01").unwrap());
+    let speech = Speech::default();
+    let input = Input::default();
+    let mut silent = facts(&t, &speech, &[], &input, None);
+    assert!(
+        !lines(&local(&silent), &[ElementKind::Silence]).is_empty(),
+        "with a mic, twenty seconds without words are a silence"
+    );
+    silent.voice = false;
+    assert!(lines(&local(&silent), &[ElementKind::Silence, ElementKind::Pause]).is_empty());
 }
 
 #[test]

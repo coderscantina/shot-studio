@@ -115,6 +115,7 @@ embedded!(
     "check",
     "chevron-down",
     "compare",
+    "chevron-right",
     "close",
     "copy",
     "cursor",

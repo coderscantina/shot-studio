@@ -89,6 +89,10 @@ fn rough_cut_of(folder: &VideoFolder, cut: &Cut, take: &Id, change: Change) -> R
         // Without words the rules cannot tell a silence from a sentence end.
         return Ok(cut.clone());
     };
+    if folder.without_mic(take) {
+        // Without a mic nothing tells a pause from speech: the whole take would read as silence.
+        return Ok(cut.clone());
+    }
     let speech = cache::read_speech(&folder.dir, take)
         .map_err(|e| e.to_string())?
         .unwrap_or_default();

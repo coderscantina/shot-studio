@@ -7,6 +7,7 @@
 //! uploads run on threads and report back over a channel the screen polls. One run, an export
 //! or a ship, goes at a time; Esc stops it.
 
+mod thumbnail;
 mod words;
 
 use std::collections::HashMap;
@@ -46,6 +47,7 @@ actions!(
         ShipVideo,
         ExportCut,
         FindThumbnails,
+        OpenStudio,
         Stop,
         NextCut,
         PreviousCut
@@ -70,10 +72,12 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-enter", ShipVideo, context),
         KeyBinding::new("e", ExportCut, context),
         KeyBinding::new("t", FindThumbnails, context),
+        KeyBinding::new("d", OpenStudio, context),
         KeyBinding::new("escape", Stop, context),
         KeyBinding::new("down", NextCut, context),
         KeyBinding::new("up", PreviousCut, context),
     ]);
+    thumbnail::bind_keys(cx);
 }
 
 enum Event {
@@ -195,6 +199,8 @@ pub struct ShipScreen {
     candidates: Vec<PathBuf>,
     /// The candidate the thumbnail was picked from.
     picked: Option<PathBuf>,
+    /// The thumbnail the studio rendered, when that is the one Ship uploads.
+    designed: Option<Arc<gpui::Image>>,
     search: Option<Search>,
     search_note: Option<String>,
     claude: Option<Claude>,
@@ -211,6 +217,8 @@ pub struct ShipScreen {
     focus: FocusHandle,
     /// The side column above the pinned publish bar.
     side_scroll: ScrollHandle,
+    /// The thumbnail studio while it is open, in place of the screen.
+    studio: Option<(Entity<thumbnail::ThumbnailStudio>, gpui::Subscription)>,
 }
 
 impl Focusable for ShipScreen {
@@ -241,6 +249,7 @@ impl ShipScreen {
             free: None,
             candidates: Vec::new(),
             picked: None,
+            designed: None,
             search: None,
             search_note: None,
             claude: Claude::find(),
@@ -254,7 +263,29 @@ impl ShipScreen {
             polling: false,
             focus: cx.focus_handle(),
             side_scroll: ScrollHandle::new(),
+            studio: None,
         }
+    }
+
+    /// Opens the thumbnail studio over the screen. Closing it picks up the new thumbnail.
+    fn open_studio(&mut self, _: &OpenStudio, window: &mut Window, cx: &mut Context<Self>) {
+        if self.studio.is_some() {
+            return;
+        }
+        let folder = self.folder.clone();
+        let studio = cx.new(|cx| thumbnail::ThumbnailStudio::new(folder, window, cx));
+        let closed = cx.subscribe_in(
+            &studio,
+            window,
+            |this, _, _: &thumbnail::Closed, window, cx| {
+                this.studio = None;
+                this.focus.focus(window, cx);
+                this.reload(cx);
+                cx.notify();
+            },
+        );
+        self.studio = Some((studio, closed));
+        cx.notify();
     }
 
     /// Reads the cuts, the record, the diff and the OAuth client again, and checks every export
@@ -377,6 +408,12 @@ impl ShipScreen {
                 .cloned()
         });
         self.candidates = found;
+        // A thumbnail that is no candidate came from the studio. Read as bytes, so a new render
+        // under the same path shows.
+        self.designed = ship::thumbnail(dir)
+            .filter(|_| self.picked.is_none() && dir.join("thumbnail.kdl").exists())
+            .and_then(|path| std::fs::read(path).ok())
+            .map(|bytes| Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, bytes)));
     }
 
     /// Polls the event channel while there may be work in flight.
@@ -1400,7 +1437,10 @@ impl ShipScreen {
                 "Scores the camera frames of the main cut by expression and suggests four."
                     .to_owned(),
             ),
-            (None, false, None) => Some("Click one to make it the thumbnail.".to_owned()),
+            (None, false, None) if self.designed.is_none() => {
+                Some("Click one to make it the thumbnail.".to_owned())
+            }
+            (None, false, None) => None,
             (None, false, Some(_)) => None,
         };
         let header = div()
@@ -1447,6 +1487,18 @@ impl ShipScreen {
                     )
                     .child(
                         proposal_action(
+                            "ship-studio",
+                            "Design",
+                            Some("picture"),
+                            Some("D"),
+                            ActionLook::Plain,
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.open_studio(&OpenStudio, window, cx)
+                        })),
+                    )
+                    .child(
+                        proposal_action(
                             "ship-find",
                             if self.candidates.is_empty() {
                                 "Find candidates"
@@ -1483,6 +1535,38 @@ impl ShipScreen {
             .gap(px(8.))
             .child(header)
             .children(scoring)
+            .when_some(self.designed.clone(), |this, still| {
+                this.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(10.))
+                        .child(
+                            div()
+                                .w(px(128.))
+                                .h(px(72.))
+                                .flex_none()
+                                .rounded(px(7.))
+                                .overflow_hidden()
+                                .border_2()
+                                .border_color(ACCENT)
+                                .child(img(still).size_full().object_fit(ObjectFit::Cover)),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(TEXT_SM)
+                                .text_color(MUTED)
+                                .child(if self.candidates.is_empty() {
+                                    "Designed in the studio."
+                                } else {
+                                    "Designed in the studio. Click a candidate to use a plain \
+                                     frame instead."
+                                }),
+                        ),
+                )
+            })
             .when(!self.candidates.is_empty(), |this| {
                 this.child(div().flex().gap(px(8.)).children(tiles))
             })
@@ -1878,6 +1962,10 @@ impl CutState {
 
 impl Render for ShipScreen {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The studio takes the whole screen, outside its keys, so typing a headline stays text.
+        if let Some((studio, _)) = &self.studio {
+            return div().size_full().child(studio.clone()).into_any_element();
+        }
         let main = match self.cuts.get(self.selected).cloned() {
             Some(cut) => div()
                 .flex_1()
@@ -1912,6 +2000,7 @@ impl Render for ShipScreen {
             .on_action(cx.listener(Self::primary))
             .on_action(cx.listener(Self::export_selected))
             .on_action(cx.listener(Self::find_candidates))
+            .on_action(cx.listener(Self::open_studio))
             .on_action(cx.listener(Self::stop))
             .on_action(cx.listener(|this, _: &NextCut, _, cx| this.select(1, cx)))
             .on_action(cx.listener(|this, _: &PreviousCut, _, cx| this.select(-1, cx)))
@@ -1922,6 +2011,7 @@ impl Render for ShipScreen {
             .pt(px(0.))
             .child(self.cut_list(cx))
             .child(main)
+            .into_any_element()
     }
 }
 

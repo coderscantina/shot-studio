@@ -25,6 +25,12 @@ fn parse_id(text: &str) -> Result<Id, String> {
 }
 
 pub fn run(args: TranscribeArgs) -> Result<(), String> {
+    if shot_capture::take::not_recorded(&args.video, &args.take, "mic.mp4") {
+        return Err(format!(
+            "take {} was recorded without a mic, so it has no words to transcribe",
+            args.take
+        ));
+    }
     let mic = args
         .video
         .join("media")

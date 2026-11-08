@@ -146,6 +146,8 @@ pub fn analyze(
     let facts = Facts {
         transcript,
         speech,
+        // A take recorded with the mic off has no speech to find gaps between.
+        voice: !(media.is_dir() && !media.join("mic.mp4").exists()),
         duration,
         still: &still,
         markers: &read_markers(&events)?,
@@ -175,6 +177,8 @@ pub fn analyze(
 struct Facts<'a> {
     transcript: &'a Transcript,
     speech: &'a Speech,
+    /// Whether the take has a mic. Without one a stretch without words is no silence.
+    voice: bool,
     duration: Micros,
     /// Stretches of at least [`IDLE_MIN`] where the screen does not change.
     still: &'a [TimeRange],
@@ -254,7 +258,7 @@ fn local(facts: &Facts) -> Elements {
     for gap in Gaps::of(&take)
         .all()
         .iter()
-        .filter(|g| g.range.duration() >= GAP_MIN)
+        .filter(|g| facts.voice && g.range.duration() >= GAP_MIN)
     {
         let kind = if gap.mid_sentence {
             ElementKind::Pause
