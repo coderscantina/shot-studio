@@ -368,6 +368,10 @@ impl EditScreen {
                     .icon(gpui_component::Icon::empty().path(crate::theme::icon_path("export")))
                     .label("Export")
                     .disabled(running || empty)
+                    .when(empty, |button| button.tooltip("Record a take first"))
+                    .when(running && !empty, |button| {
+                        button.tooltip("An export is running")
+                    })
                     .on_click(cx.listener(|this, _, _, cx| this.start_export("main", cx))),
             )
     }

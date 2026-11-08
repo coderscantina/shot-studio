@@ -20,7 +20,7 @@ use std::path::PathBuf;
 
 use gpui::{
     AnyElement, App, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla,
-    KeyBinding, ScrollHandle, SharedString, Subscription, Window, actions, div, prelude::*, px,
+    ScrollHandle, SharedString, Subscription, Window, actions, div, prelude::*, px,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use shot_board::Board;
@@ -34,7 +34,7 @@ use crate::theme::*;
 use crate::ui::{ActionLook, Segment, icon, label, mono, pane, proposal_action, segmented};
 use proposal::{Change, Piece};
 
-const CONTEXT: &str = "ScriptScreen";
+pub(crate) const CONTEXT: &str = "ScriptScreen";
 /// Proposals with this name prefix are alternative hooks.
 const HOOK: &str = "hook-";
 
@@ -42,15 +42,6 @@ const HOOK: &str = "hook-";
 const OWN_EDIT: &str = "own-edit";
 
 actions!(script, [AcceptProposal, RejectProposal, ContinueToRecord]);
-
-pub fn bind_keys(cx: &mut App) {
-    let context = Some(CONTEXT);
-    cx.bind_keys([
-        KeyBinding::new("tab", AcceptProposal, context),
-        KeyBinding::new("escape", RejectProposal, context),
-        KeyBinding::new("cmd-enter", ContinueToRecord, context),
-    ]);
-}
 
 /// The script is ready and the person moves on to Record.
 pub struct ReadyToRecord;

@@ -7,9 +7,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use gpui::{
-    App, Bounds, Context, Div, FontWeight, Hsla, KeyBinding, PathPromptOptions, SharedString,
-    TitlebarOptions, Window, WindowBounds, WindowOptions, actions, div, linear_color_stop,
-    linear_gradient, point, prelude::*, px, size,
+    App, Bounds, Context, Div, FontWeight, Hsla, PathPromptOptions, SharedString, TitlebarOptions,
+    Window, WindowBounds, WindowOptions, actions, div, linear_color_stop, linear_gradient, point,
+    prelude::*, px, size,
 };
 use shot_core::{FormatKind, Status, Video};
 
@@ -25,12 +25,11 @@ const RECENT: usize = 8;
 const RECENT_VIDEOS: &str = "recent.json";
 const RECENT_CHANNELS: &str = "recent-channels.json";
 
-/// Registers the welcome actions and ⌘O. Call once at startup, with [`on_reopen`] on the app.
+/// Registers the welcome actions. Call once at startup, with [`on_reopen`] on the app.
 pub fn init(cx: &mut App) {
     cx.on_action(|_: &ShowWelcome, cx| open(cx));
     cx.on_action(|_: &OpenVideo, cx| pick_folder(None, cx));
     cx.on_action(|_: &NewChannel, cx| new_channel(&home(), welcome_done, cx));
-    cx.bind_keys([KeyBinding::new("cmd-o", OpenVideo, None)]);
 }
 
 /// Opens the welcome window when the Dock icon is clicked with no window open.

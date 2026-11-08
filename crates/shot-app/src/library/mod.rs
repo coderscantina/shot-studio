@@ -21,8 +21,8 @@ use std::time::Duration;
 
 use gpui::{
     AnyWindowHandle, App, AppContext, Bounds, ClipboardItem, Context, Entity, FocusHandle, Global,
-    KeyBinding, Pixels, ScrollHandle, Subscription, TitlebarOptions, WeakEntity, Window,
-    WindowBounds, WindowOptions, actions, point, px, size,
+    Pixels, ScrollHandle, Subscription, TitlebarOptions, WeakEntity, Window, WindowBounds,
+    WindowOptions, actions, point, px, size,
 };
 use gpui_component::Root;
 use gpui_component::input::{InputEvent, InputState};
@@ -65,35 +65,8 @@ actions!(
     ]
 );
 
-const WINDOW: &str = "Library";
-const LIST: &str = "LibraryList";
-
-pub fn bind_keys(cx: &mut App) {
-    let (window, list) = (Some(WINDOW), Some(LIST));
-    cx.bind_keys([
-        KeyBinding::new("cmd-f", FocusSearch, window),
-        KeyBinding::new("tab", ToggleOnline, window),
-        KeyBinding::new("cmd-0", ShowAll, window),
-        KeyBinding::new("cmd-1", ShowSounds, window),
-        KeyBinding::new("cmd-2", ShowMusic, window),
-        KeyBinding::new("cmd-3", ShowImages, window),
-        KeyBinding::new("cmd-4", ShowOverlays, window),
-        KeyBinding::new("cmd-5", ShowEffects, window),
-        KeyBinding::new("cmd-shift-c", CopyCredits, window),
-        KeyBinding::new("cmd-w", CloseLibrary, window),
-        KeyBinding::new("down", SelectNext, list),
-        KeyBinding::new("up", SelectPrevious, list),
-        KeyBinding::new("left", SelectLeft, list),
-        KeyBinding::new("right", SelectRight, list),
-        KeyBinding::new("space", Listen, list),
-        KeyBinding::new("enter", Primary, list),
-        KeyBinding::new("d", Download, list),
-        KeyBinding::new("p", Place, list),
-        KeyBinding::new("b", Cutaway, list),
-        KeyBinding::new("escape", FocusSearch, list),
-        KeyBinding::new("/", FocusSearch, list),
-    ]);
-}
+pub(crate) const WINDOW: &str = "Library";
+pub(crate) const LIST: &str = "LibraryList";
 
 /// The open Library windows, by channel repo or loose video folder.
 #[derive(Default)]

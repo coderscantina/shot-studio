@@ -6,20 +6,21 @@
 use std::path::{Path, PathBuf};
 
 use gpui::{
-    AnyWindowHandle, App, Bounds, Context, Entity, Focusable, FontWeight, Global, KeyBinding,
+    AnyWindowHandle, App, Bounds, Context, Entity, Focusable, FontWeight, Global,
     PathPromptOptions, SharedString, Subscription, TitlebarOptions, WeakEntity, Window,
     WindowBounds, WindowOptions, actions, div, point, prelude::*, px, size,
 };
 use gpui_component::Root;
+use gpui_component::tooltip::Tooltip;
 use shot_core::{Cut, Status};
 
 use crate::board::{self, BoardScreen, ShowCurrent, channel};
-use crate::cut::{self, CutScreen, GoTo};
-use crate::edit::{self, EditScreen};
+use crate::cut::{CutScreen, GoTo};
+use crate::edit::EditScreen;
 use crate::folder::VideoFolder;
-use crate::record::{self, RecordScreen, Recorded};
-use crate::script::{self, ReadyToRecord, ScriptScreen};
-use crate::ship::{self, ShipScreen};
+use crate::record::{RecordScreen, Recorded};
+use crate::script::{ReadyToRecord, ScriptScreen};
+use crate::ship::ShipScreen;
 use crate::theme::*;
 use crate::ui::{ActionLook, alert, icon, mono, pane, proposal_action};
 
@@ -136,7 +137,6 @@ pub fn key(dir: &Path) -> PathBuf {
 
 actions!(studio, [Undo, Redo, OpenLibrary]);
 
-/// Binds the keys of every screen. Call once at startup.
 /// Whether a take of the cut has no transcript yet.
 fn untranscribed(folder: &VideoFolder) -> bool {
     folder
@@ -148,23 +148,8 @@ fn untranscribed(folder: &VideoFolder) -> bool {
         .any(|edit| !folder.transcripts.contains_key(&edit.take))
 }
 
-pub fn bind_keys(cx: &mut App) {
-    // Text fields bind their own undo in their context, which wins over these.
-    cx.bind_keys([
-        KeyBinding::new("cmd-z", Undo, None),
-        KeyBinding::new("cmd-shift-z", Redo, None),
-        KeyBinding::new("cmd-l", OpenLibrary, None),
-    ]);
-    edit::bind_keys(cx);
-    record::bind_keys(cx);
-    cut::bind_keys(cx);
-    script::bind_keys(cx);
-    ship::bind_keys(cx);
-    board::bind_keys(cx);
-}
-
 /// Opens a window on the video folder at `dir` and adds it to the recent videos. Needs
-/// [`crate::theme::init`] and [`bind_keys`].
+/// [`crate::theme::init`] and [`crate::keymap::bind`].
 pub fn open(dir: &Path, cx: &mut App) -> Result<(), String> {
     open_at(dir, None, cx)
 }
@@ -681,6 +666,11 @@ impl Studio {
                     .text_color(color)
                     .when(on, |this| this.bg(RAISED))
                     .when(!on && !recording, |this| this.cursor_pointer())
+                    .when(!on && recording, |this| {
+                        this.tooltip(|window, cx| {
+                            Tooltip::new("Stop recording first").build(window, cx)
+                        })
+                    })
                     // Only a real move lights an entry: after the pointer left the window, gpui
                     // reports a hover again from where it was last seen.
                     .on_mouse_move(cx.listener(move |this, _, _, cx| {

@@ -19,9 +19,8 @@ use std::time::Duration;
 
 use gpui::{
     App, Bounds, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle, Focusable,
-    FontWeight, Hsla, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, ObjectFit, Pixels,
-    RenderImage, SharedString, Stateful, Subscription, Window, actions, div, img, prelude::*, px,
-    relative,
+    FontWeight, Hsla, MouseButton, MouseDownEvent, MouseMoveEvent, ObjectFit, Pixels, RenderImage,
+    SharedString, Stateful, Subscription, Window, actions, div, img, prelude::*, px, relative,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::slider::{Slider, SliderEvent, SliderState};
@@ -38,7 +37,7 @@ use crate::folder::VideoFolder;
 use crate::theme::*;
 use crate::ui::{self, ActionLook, Segment, icon, kbd, label, proposal_action, segmented};
 
-const CONTEXT: &str = "ThumbnailStudio";
+pub(crate) const CONTEXT: &str = "ThumbnailStudio";
 const FILE: &str = "thumbnail.kdl";
 /// The canvas size every variant is laid out on.
 const CANVAS: (f32, f32) = (1280., 720.);
@@ -70,21 +69,6 @@ actions!(
         PresetFour,
     ]
 );
-
-pub fn bind_keys(cx: &mut App) {
-    let context = Some(CONTEXT);
-    cx.bind_keys([
-        KeyBinding::new("escape", CloseStudio, context),
-        KeyBinding::new("cmd-z", UndoDesign, context),
-        KeyBinding::new("cmd-shift-z", RedoDesign, context),
-        KeyBinding::new("backspace", RemoveSticker, context),
-        KeyBinding::new("delete", RemoveSticker, context),
-        KeyBinding::new("alt-1", PresetOne, context),
-        KeyBinding::new("alt-2", PresetTwo, context),
-        KeyBinding::new("alt-3", PresetThree, context),
-        KeyBinding::new("alt-4", PresetFour, context),
-    ]);
-}
 
 /// The studio closed; the thumbnail may have changed.
 pub struct Closed;

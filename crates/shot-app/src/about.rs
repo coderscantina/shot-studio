@@ -4,8 +4,8 @@
 //! generates with the full texts in `THIRD-PARTY-LICENSES.md`.
 
 use gpui::{
-    App, Bounds, Context, FontWeight, KeyBinding, Menu, MenuItem, TitlebarOptions, Window,
-    WindowBounds, WindowOptions, actions, div, point, prelude::*, px, size,
+    App, Bounds, Context, FontWeight, Menu, MenuItem, TitlebarOptions, Window, WindowBounds,
+    WindowOptions, actions, div, point, prelude::*, px, size,
 };
 use serde::Deserialize;
 
@@ -68,9 +68,7 @@ fn credits() -> Credits {
 pub fn init(cx: &mut App) {
     cx.on_action(|_: &About, cx| open(cx));
     cx.on_action(|_: &Quit, cx| cx.quit());
-    cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
-    // Before the menus, so the menu shows the prompter's shortcut.
-    crate::prompter::bind_keys(cx);
+    crate::prompter::init(cx);
     cx.set_menus([
         Menu::new("Shot Studio").items([
             MenuItem::action("About Shot Studio", About),

@@ -20,8 +20,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    App, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, KeyBinding,
-    ObjectFit, ScrollHandle, Subscription, Window, actions, div, prelude::*, px, relative, surface,
+    App, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, ObjectFit,
+    ScrollHandle, Subscription, Window, actions, div, prelude::*, px, relative, surface,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::progress::Progress;
@@ -43,17 +43,13 @@ use crate::prompter::{Live, PrompterPane, TogglePrompter};
 use crate::theme::*;
 use crate::ui::{self, alert, hint, icon, label, mono};
 
-const CONTEXT: &str = "RecordScreen";
+pub(crate) const CONTEXT: &str = "RecordScreen";
 
 /// How long a started input may send nothing before the stage says so. The camera and the
 /// screen send their first frame well within it.
 const SILENT_AFTER: Duration = Duration::from_secs(4);
 
 actions!(record, [ToggleRecording]);
-
-pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys([KeyBinding::new("space", ToggleRecording, Some(CONTEXT))]);
-}
 
 /// A finished take, emitted once it is in `cut.kdl`.
 pub struct Recorded;
@@ -1270,6 +1266,9 @@ impl RecordScreen {
                             .small()
                             .checked(on)
                             .disabled(busy)
+                            .when(busy, |switch| {
+                                switch.tooltip("Tracks stay as they are while a take records")
+                            })
                             .accessibility_label(track.label())
                             .on_click(cx.listener(move |this, on: &bool, _, cx| {
                                 this.switch(track, *on, cx)
@@ -1581,6 +1580,9 @@ impl RecordScreen {
                                 Button::new("record-button")
                                     .danger()
                                     .disabled(blocked.is_some() && !recording)
+                                    .when_some(blocked.filter(|_| !recording), |button, reason| {
+                                        button.tooltip(reason)
+                                    })
                                     .accessibility_label(if recording {
                                         "Stop recording"
                                     } else {

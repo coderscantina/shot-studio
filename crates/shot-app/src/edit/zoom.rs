@@ -10,8 +10,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    App, Bounds, Context, DragMoveEvent, FontWeight, KeyBinding, MouseButton, MouseDownEvent,
-    Pixels, Point, Render, SharedString, Stateful, Window, actions, div, prelude::*, px, relative,
+    App, Bounds, Context, DragMoveEvent, FontWeight, MouseButton, MouseDownEvent, Pixels, Point,
+    Render, SharedString, Stateful, Window, actions, div, prelude::*, px, relative,
 };
 use gpui_component::tooltip::Tooltip;
 use shot_core::{Framing, Micros, TakeAt, Zoom};
@@ -24,7 +24,7 @@ use crate::ui::{self, label};
 
 actions!(knob, [StepDown, StepUp, StepDownMore, StepUpMore]);
 
-const KNOB_CONTEXT: &str = "Knob";
+pub(crate) const KNOB_CONTEXT: &str = "Knob";
 
 /// The longest ramp a slider sets. Ramps longer than the zoom share it.
 const MAX_RAMP: u64 = 2_000_000;
@@ -33,18 +33,6 @@ const HANDHELD_STEP: u64 = 5;
 /// How much of the picture plays before and after a ramp when it replays.
 const REPLAY_LEAD: Duration = Duration::from_millis(500);
 const REPLAY_TAIL: Duration = Duration::from_millis(600);
-
-pub fn bind_keys(cx: &mut App) {
-    let context = Some(KNOB_CONTEXT);
-    cx.bind_keys([
-        KeyBinding::new("left", StepDown, context),
-        KeyBinding::new("right", StepUp, context),
-        KeyBinding::new("down", StepDown, context),
-        KeyBinding::new("up", StepUp, context),
-        KeyBinding::new("shift-left", StepDownMore, context),
-        KeyBinding::new("shift-right", StepUpMore, context),
-    ]);
-}
 
 /// What a knob sets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

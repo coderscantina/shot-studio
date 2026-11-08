@@ -16,9 +16,9 @@ use std::time::Duration;
 
 use gpui::{
     AnyWindowHandle, App, Bounds, Context, Div, Entity, EventEmitter, FocusHandle, FontWeight,
-    Hsla, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, ObjectFit, Pixels, Point,
-    SharedString, Stateful, TitlebarOptions, Window, WindowBounds, WindowOptions, actions, div,
-    point, prelude::*, px, size, surface,
+    Hsla, MouseButton, MouseDownEvent, MouseMoveEvent, ObjectFit, Pixels, Point, SharedString,
+    Stateful, TitlebarOptions, Window, WindowBounds, WindowOptions, actions, div, point,
+    prelude::*, px, size, surface,
 };
 use gpui_component::Root;
 use gpui_component::input::{Input, InputState};
@@ -65,7 +65,7 @@ actions!(
     ]
 );
 
-const CONTEXT: &str = "LayoutBuilder";
+pub(crate) const CONTEXT: &str = "LayoutBuilder";
 /// The design frame slots are placed on.
 const W: f32 = 3840.0;
 const H: f32 = 2160.0;
@@ -84,37 +84,6 @@ const RENDER: Canvas = Canvas {
     height: 1080,
 };
 const CORNERS: [u16; 6] = [0, 16, 32, 48, 96, 160];
-
-pub fn bind_keys(cx: &mut App) {
-    let context = Some(CONTEXT);
-    cx.bind_keys([
-        KeyBinding::new("left", NudgeLeft, context),
-        KeyBinding::new("right", NudgeRight, context),
-        KeyBinding::new("up", NudgeUp, context),
-        KeyBinding::new("down", NudgeDown, context),
-        KeyBinding::new("shift-left", JumpLeft, context),
-        KeyBinding::new("shift-right", JumpRight, context),
-        KeyBinding::new("shift-up", JumpUp, context),
-        KeyBinding::new("shift-down", JumpDown, context),
-        KeyBinding::new("alt-left", Narrower, context),
-        KeyBinding::new("alt-right", Wider, context),
-        KeyBinding::new("alt-up", Shorter, context),
-        KeyBinding::new("alt-down", Taller, context),
-        KeyBinding::new("alt-shift-left", MuchNarrower, context),
-        KeyBinding::new("alt-shift-right", MuchWider, context),
-        KeyBinding::new("alt-shift-up", MuchShorter, context),
-        KeyBinding::new("alt-shift-down", MuchTaller, context),
-        KeyBinding::new("tab", NextSlot, context),
-        KeyBinding::new("]", BringForward, context),
-        KeyBinding::new("[", SendBack, context),
-        KeyBinding::new("backspace", RemoveSlot, context),
-        KeyBinding::new("delete", RemoveSlot, context),
-        KeyBinding::new("cmd-s", SaveLayout, context),
-        KeyBinding::new("cmd-enter", SaveLayout, context),
-        KeyBinding::new("escape", CloseBuilder, context),
-        KeyBinding::new("cmd-w", CloseBuilder, context),
-    ]);
-}
 
 /// What the builder opens with.
 pub struct BuilderInput {

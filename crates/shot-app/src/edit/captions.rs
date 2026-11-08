@@ -893,7 +893,7 @@ fn stepper(
     less: Option<impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static>,
     more: Option<impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static>,
 ) -> Div {
-    let button = |index: usize, text: &'static str, click: Option<Click>| {
+    let button = |index: usize, text: &'static str, limit: &'static str, click: Option<Click>| {
         let on = click.is_some();
         div()
             .id((id, index))
@@ -906,6 +906,11 @@ fn stepper(
             .when(on, |b| b.cursor_pointer().hover(|s| s.bg(FLOAT)))
             .child(text)
             .when_some(click, |b, click| b.on_click(click))
+            .when(!on, |b| {
+                b.tooltip(move |window, cx| {
+                    gpui_component::tooltip::Tooltip::new(limit).build(window, cx)
+                })
+            })
     };
     div()
         .flex()
@@ -914,7 +919,12 @@ fn stepper(
         .p(px(3.))
         .rounded(RADIUS_MD)
         .bg(WELL)
-        .child(button(0, "−", less.map(|f| Box::new(f) as Click)))
+        .child(button(
+            0,
+            "−",
+            "At the lowest",
+            less.map(|f| Box::new(f) as Click),
+        ))
         .child(
             div()
                 .flex_1()
@@ -923,7 +933,12 @@ fn stepper(
                 .font_weight(FontWeight::MEDIUM)
                 .child(value),
         )
-        .child(button(1, "+", more.map(|f| Box::new(f) as Click)))
+        .child(button(
+            1,
+            "+",
+            "At the highest",
+            more.map(|f| Box::new(f) as Click),
+        ))
 }
 
 /// The lines of the chapter on show, the one at the playhead lit; the picked line shows its
