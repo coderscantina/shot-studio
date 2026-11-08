@@ -63,9 +63,7 @@ Found by agents and waiting for a task. Remove a line when it's fixed.
 - `shot-app --bench` measures the milestone 02 player, not the editor engine, so preview frame drops with motion, glass and motion blur on are unmeasured.
 - Text slots and kinetic type use the system sans until brand fonts reach the renderer. A synthetic 4K test source dropped glyphs, possibly a vello buffer limit.
 - The feel-control mapping (tempo, bounce, density, stagger to spring values) lives in the m11 motion report, not yet in the contract.
-- `shot-analyze` has copies of shot-render's URL finder and on-screen text matcher (elements `mentions.rs`, `screen.rs`) to avoid a dependency cycle. Milestone 10 item 5 moves the rules out of shot-render and should delete one copy.
 - Element gaps: two `{name}` tags on one beat collide on (kind, t), cursor dwell has no element kind, M markers carry no label, `code` and `expression` have no detector, takes recorded without the prompter get no beat or chapter elements.
-- A channel-level rule proposal (brand or channel format) branches off and merges into one video's branch, so the change never reaches the default branch the other videos read. Channel proposals should branch off and merge into the default branch.
 - Brand imports are read from `styles/<id>.kdl` in the repo; nothing fetches or pins them from git yet (milestone 10 item 4).
 - The Edit screen writes `cut.kdl` on the checked-out branch while proposals merge into `video/<slug>`, so the two can drift.
 - The music bed detects the end of its file by 10 s of digital silence; `PcmReader::ended_before` now gives the real end.

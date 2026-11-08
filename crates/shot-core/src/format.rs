@@ -25,8 +25,22 @@ impl FormatKind {
         }
     }
 
+    /// The preset's settings. Its default rules are in [`FormatKind::preset_layer`].
     pub fn preset(self) -> Format {
-        Format::parse(self.preset_source()).expect("shipped presets parse")
+        let src = Source {
+            file: "format.kdl",
+            text: self.preset_source(),
+        };
+        let doc = src.parse().expect("shipped presets parse");
+        FormatLayer::read(src, &doc, true)
+            .and_then(|layer| layer.complete(src))
+            .expect("shipped presets parse")
+    }
+
+    /// The preset as a layer: every setting and the default rules its settings stand for, the
+    /// starting copy of a channel's `formats/<format>.kdl`.
+    pub fn preset_layer(self) -> FormatLayer {
+        FormatLayer::parse(self.preset_source()).expect("shipped presets parse")
     }
 }
 
@@ -44,6 +58,17 @@ keyword_enum! {
         Loose = "loose",
         Natural = "natural",
         Tight = "tight",
+    }
+}
+
+impl Pacing {
+    /// The silence kept on each side of a gap cut that borders material.
+    pub fn breath(self) -> Micros {
+        match self {
+            Self::Loose => Micros(500_000),
+            Self::Natural => Micros(250_000),
+            Self::Tight => Micros(50_000),
+        }
     }
 }
 

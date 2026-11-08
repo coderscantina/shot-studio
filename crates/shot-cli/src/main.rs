@@ -7,8 +7,10 @@ mod agent;
 mod analyze;
 mod autocut;
 mod caption_fix;
+mod migrate;
 mod models;
 mod record;
+mod restyle;
 mod style;
 mod transcribe;
 
@@ -89,6 +91,10 @@ enum Command {
     Derived(derived::DerivedArgs),
     /// Build a video's cut.lock, explain an instance, or measure a rule's scope.
     Style(style::StyleArgs),
+    /// Turn a video written before the lock into content, overrides and style rules, once.
+    Migrate(migrate::MigrateArgs),
+    /// Rebuild a shipped video's frozen lock on purpose, for a new release.
+    Restyle(restyle::RestyleArgs),
     /// Run the MCP server on stdio.
     Mcp(agent::McpArgs),
     /// Ask Claude through the local Claude Code CLI, with the MCP server attached.
@@ -166,6 +172,8 @@ fn run(cli: Cli) -> Result<(), String> {
         Command::Analyze(args) => return analyze::run(args),
         Command::CaptionFix(args) => return caption_fix::run(args),
         Command::Style(args) => return style::run(cli.repo, args),
+        Command::Migrate(args) => return migrate::run(args),
+        Command::Restyle(args) => return restyle::run(cli.repo, args),
         _ => {}
     }
     if let Command::Mcp(args) = cli.command {
@@ -268,6 +276,8 @@ fn run(cli: Cli) -> Result<(), String> {
         | Command::Transcribe(_)
         | Command::Autocut(_)
         | Command::Style(_)
+        | Command::Migrate(_)
+        | Command::Restyle(_)
         | Command::Analyze(_)
         | Command::CaptionFix(_) => {
             unreachable!("handled before opening the board")

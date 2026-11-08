@@ -9,7 +9,9 @@
 //!   so `git log video/<slug>` is that video's activity. An idea without a branch yet lives only
 //!   on the default branch (`main`, then `master`, then the checked out branch); the first move or
 //!   accepted proposal creates its branch off the default branch tip.
-//! - `proposal/<slug>/<name>`: an agent proposal off the video's branch ([0004]).
+//! - `proposal/<slug>/<name>`: an agent proposal off the video's branch ([0004]). A proposal
+//!   that changes only channel files (`brand/`, `formats/`, everything outside `videos/`)
+//!   branches off and merges into the default branch, where those files live.
 //! - `vYY.M.D`: annotated CalVer release tag on a shipped video's commit, for example `v26.11.7`.
 //!   A second release on the same day is `v26.11.7.2`.
 //!
@@ -174,17 +176,21 @@ impl Board {
     }
 
     fn default_tip(&self) -> Result<Commit<'_>> {
+        Ok(self.default_branch()?.1)
+    }
+
+    /// The default branch's name and tip: `main`, then `master`, then the checked out branch.
+    fn default_branch(&self) -> Result<(String, Commit<'_>)> {
         for name in ["main", "master"] {
             if let Ok(branch) = self.repo.find_branch(name, BranchType::Local) {
-                return Ok(branch.get().peel_to_commit()?);
+                return Ok((name.to_owned(), branch.get().peel_to_commit()?));
             }
         }
         let head = self.repo.head().map_err(|_| Error::NoDefaultBranch)?;
-        let managed = head
-            .name()
-            .is_ok_and(|n| n.contains("/video/") || n.contains("/proposal/"));
+        let name = head.shorthand().unwrap_or_default().to_owned();
+        let managed = name.starts_with(VIDEO_PREFIX) || name.starts_with("proposal/");
         match head.peel_to_commit() {
-            Ok(commit) if !managed => Ok(commit),
+            Ok(commit) if !managed && head.is_branch() => Ok((name, commit)),
             _ => Err(Error::NoDefaultBranch),
         }
     }
@@ -203,13 +209,18 @@ impl Board {
         Ok(Some(String::from_utf8_lossy(blob.content()).into_owned()))
     }
 
-    /// The bytes of `path` (relative to the repo root, for example `brand/brand.kdl`) in the
-    /// tree the video is read from, `None` if there is no such file.
+    /// The bytes of `path` (relative to the repo root, for example `brand/brand.kdl`) as video
+    /// `slug` sees them, `None` if there is no such file. The video's own files come from its
+    /// tip, channel files from the default branch, where they live.
     pub fn read_repo_file(&self, slug: &str, path: &str) -> Result<Option<Vec<u8>>> {
         if !proposals::is_inside(path) {
             return Err(Error::InvalidPath(path.to_owned()));
         }
-        let tip = self.tip(slug)?;
+        let tip = if proposals::is_channel_path(path) {
+            self.default_tip()?
+        } else {
+            self.tip(slug)?
+        };
         let Ok(entry) = tip.tree()?.get_path(Path::new(path)) else {
             return Ok(None);
         };

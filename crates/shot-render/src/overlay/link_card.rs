@@ -8,8 +8,9 @@
 //!
 //! The card's title and kind come from the URL alone, so it renders offline and the same every
 //! time: a GitHub pull request, repository or issue, a post on X, a Hacker News item, an npm
-//! package, or any other link by its host. [`find`] finds URLs said in a transcript, written
-//! (`github.com/owner/repo`) or spoken (`github dot com slash owner slash repo`).
+//! package, or any other link by its host. [`cards`] places one where a URL is said, as
+//! `shot_analyze::elements::urls` reads it, written (`github.com/owner/repo`) or spoken
+//! (`github dot com slash owner slash repo`).
 
 use shot_core::{Micros, Overlay, ParamValue, TimeRange, Word};
 
@@ -267,113 +268,12 @@ pub fn kind(url: &str) -> Option<LinkKind> {
     Some(kind)
 }
 
-/// A URL said in a transcript and the words that say it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SaidUrl {
-    pub url: String,
-    pub words: TimeRange,
-}
-
-/// Spoken punctuation in URLs and what it writes.
-const SPOKEN: [(&[&str], &str); 7] = [
-    (&["dot"], "."),
-    (&["slash"], "/"),
-    (&["dash"], "-"),
-    (&["hyphen"], "-"),
-    (&["question", "mark"], "?"),
-    (&["equals"], "="),
-    (&["colon"], ":"),
-];
-
-/// Hosts a spoken URL may start with, so "go dot dev" is not taken for a link.
-const HOSTS: [&str; 7] = [
-    "github.com",
-    "x.com",
-    "twitter.com",
-    "news.ycombinator.com",
-    "npmjs.com",
-    "www.npmjs.com",
-    "www.github.com",
-];
-
-/// Every URL said in `words`, written or spoken, in order. A written URL is any word that reads
-/// as a link with a dotted host; a spoken one must start with a known host.
-pub fn find(words: &[Word]) -> Vec<SaidUrl> {
-    let tokens: Vec<String> = words.iter().map(|w| token(&w.text)).collect();
-    let mut found = Vec::new();
-    let mut i = 0;
-    while i < words.len() {
-        let mut text = String::new();
-        let mut end = i;
-        let mut j = i;
-        // Joins words and spoken punctuation for as long as they read as one link.
-        while j < words.len() {
-            if let Some((len, symbol)) = spoken_at(&tokens, j) {
-                if text.is_empty() {
-                    break;
-                }
-                text.push_str(symbol);
-                j += len;
-                continue;
-            }
-            let word = tokens[j].as_str();
-            let joins = text.is_empty() || text.ends_with(['.', '/', '-', '?', '=', ':']);
-            if !joins || word.is_empty() {
-                break;
-            }
-            text.push_str(word);
-            j += 1;
-            end = j;
-        }
-        let text = text
-            .trim_end_matches(['.', '/', '-', '?', '=', ':'])
-            .to_owned();
-        let url = if text.starts_with("http") {
-            text.clone()
-        } else {
-            format!("https://{text}")
-        };
-        let spoken = end > i + 1;
-        let host = url
-            .trim_start_matches("https://")
-            .trim_start_matches("http://")
-            .split('/')
-            .next()
-            .unwrap_or("");
-        let known = HOSTS.contains(&host);
-        if end > i && (known || !spoken) && text.contains('.') && kind(&url).is_some() {
-            if let Some(range) = TimeRange::new(words[i].range.from(), words[end - 1].range.to()) {
-                found.push(SaidUrl { url, words: range });
-            }
-            i = end;
-        } else {
-            i += 1;
-        }
-    }
-    found
-}
-
-/// A word as it would be written in a URL: lowercase, without trailing sentence punctuation.
-fn token(text: &str) -> String {
-    text.trim_matches(|c: char| matches!(c, ',' | '"' | '\'' | '(' | ')' | '!'))
-        .trim_end_matches(['.', '?', ':', ';'])
-        .to_lowercase()
-}
-
-/// Spoken punctuation starting at word `i`: how many words it takes and what it writes.
-fn spoken_at(tokens: &[String], i: usize) -> Option<(usize, &'static str)> {
-    SPOKEN.iter().find_map(|(spoken, symbol)| {
-        let fits = tokens.len() >= i + spoken.len()
-            && spoken.iter().zip(&tokens[i..]).all(|(a, b)| a == b);
-        fits.then_some((spoken.len(), *symbol))
-    })
-}
-
 /// A `link-card` overlay for each URL said in `words` that no other card covers yet, from the
 /// first word of the URL for [`HOLD`].
 pub fn cards(words: &[Word], existing: &[Overlay]) -> Vec<Overlay> {
-    find(words)
+    shot_analyze::elements::urls(words)
         .into_iter()
+        .filter(|said| kind(&said.url).is_some())
         .filter_map(|said| {
             let range = TimeRange::new(said.words.from(), Micros(said.words.from().0 + HOLD.0))?;
             let taken = existing
@@ -442,25 +342,6 @@ mod tests {
             }
         );
         assert_eq!(kind("not a link"), None);
-    }
-
-    #[test]
-    fn finds_written_and_spoken_urls_at_their_first_word() {
-        let said = words(
-            "Look at github.com/coderscantina/shot-studio/pull/1, then open \
-             github dot com slash zed dash industries slash zed. Ship it dot today.",
-        );
-        let found = find(&said);
-        assert_eq!(
-            found.iter().map(|f| f.url.as_str()).collect::<Vec<_>>(),
-            [
-                "https://github.com/coderscantina/shot-studio/pull/1",
-                "https://github.com/zed-industries/zed",
-            ]
-        );
-        // "github" is the 6th word.
-        assert_eq!(found[1].words.from(), Micros(5 * 400_000));
-        assert_eq!(found[0].words.from(), Micros(2 * 400_000));
     }
 
     #[test]

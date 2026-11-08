@@ -4,8 +4,9 @@ use std::ops::Range;
 use crate::cut::{
     CaptionFix, DerivedCut, LayoutChange, Overlay, ParamValue, RangeEdit, TakeEdit, Zoom,
 };
+use crate::lock::{Applied, LockTake};
 use crate::{
-    CaptionStyle, DerivedKind, Effects, Id, Layout, Micros, Project, TimeRange, ZoomMotion,
+    CaptionStyle, DerivedKind, Effects, Id, Layout, Lock, Micros, Project, TimeRange, ZoomMotion,
 };
 
 /// Bumped whenever the renderer's output changes for the same input, so cached chunks expire.
@@ -135,7 +136,19 @@ impl fmt::Debug for ContentHash {
 }
 
 impl Timeline {
+    /// A video as `cut.kdl` writes it, before the lock.
     pub fn evaluate(project: &Project) -> Self {
+        Self::build(project, None)
+    }
+
+    /// A migrated video: the kept ranges less the union of the lock's cuts, with the lock's
+    /// zooms and overlays next to a person's. The segments, and so the chunk hashes, carry the
+    /// lock's resolved values; provenance stays out of them.
+    pub fn styled(project: &Project, lock: &Lock) -> Self {
+        Self::build(project, Some(lock))
+    }
+
+    fn build(project: &Project, lock: Option<&Lock>) -> Self {
         let captions = project.cut.captions.unwrap_or(project.format.captions);
         let default_layout = project.format.default_layout;
         let main = Output {
@@ -153,7 +166,10 @@ impl Timeline {
                     segments: chapter
                         .takes
                         .iter()
-                        .flat_map(|take| take_segments(take, default_layout))
+                        .flat_map(|take| {
+                            let styled = lock.and_then(|l| l.take(&take.take));
+                            take_segments(take, default_layout, styled)
+                        })
                         .collect(),
                 })
                 .collect(),
@@ -308,33 +324,94 @@ impl Segment {
     }
 }
 
-/// Kept ranges of one take, split wherever the layout changes.
-fn take_segments(take: &TakeEdit, default_layout: Layout) -> impl Iterator<Item = Segment> + '_ {
+/// Kept ranges of one take less the lock's cuts, split wherever the layout changes.
+fn take_segments(take: &TakeEdit, default_layout: Layout, lock: Option<&LockTake>) -> Vec<Segment> {
+    let mut zooms = take.zooms.clone();
+    let mut overlays = take.overlays.clone();
+    let mut cuts = Vec::new();
+    for instance in lock.iter().flat_map(|l| &l.instances) {
+        match &instance.applied {
+            Applied::Cut(range) => cuts.push(*range),
+            Applied::Zoom {
+                scale,
+                range,
+                center,
+            } => zooms.push(Zoom {
+                scale: *scale,
+                range: *range,
+                center: *center,
+                by: None,
+            }),
+            Applied::Overlay {
+                template,
+                range,
+                params,
+            } => overlays.push(Overlay {
+                template: template.clone(),
+                range: *range,
+                params: params.clone(),
+            }),
+            _ => {}
+        }
+    }
+    zooms.sort_by_key(|z| z.range.from());
+    let cuts = union(cuts);
     take.ranges
         .iter()
         .filter_map(|edit| match edit {
             RangeEdit::Keep(range) => Some(*range),
             RangeEdit::Remove { .. } => None,
         })
-        .flat_map(move |kept| {
-            let mut cuts: Vec<Micros> = take
+        .flat_map(|kept| subtract(kept, &cuts))
+        .flat_map(|kept| {
+            let mut edges: Vec<Micros> = take
                 .layouts
                 .iter()
                 .flat_map(|c| [c.range.from(), c.range.to()])
                 .filter(|&t| kept.from() < t && t < kept.to())
                 .collect();
-            cuts.push(kept.from());
-            cuts.push(kept.to());
-            cuts.sort_unstable();
-            cuts.dedup();
-            cuts.windows(2)
+            edges.push(kept.from());
+            edges.push(kept.to());
+            edges.sort_unstable();
+            edges.dedup();
+            edges
+                .windows(2)
                 .filter_map(|w| TimeRange::new(w[0], w[1]))
                 .map(|source| {
                     let layout = layout_at(&take.layouts, source.from()).unwrap_or(default_layout);
-                    Segment::new(&take.take, source, layout, &take.zooms, &take.overlays)
+                    Segment::new(&take.take, source, layout, &zooms, &overlays)
                 })
                 .collect::<Vec<_>>()
         })
+        .collect()
+}
+
+/// Ranges merged where they overlap or touch, in order.
+fn union(mut ranges: Vec<TimeRange>) -> Vec<TimeRange> {
+    ranges.sort_by_key(|r| r.from());
+    let mut out: Vec<TimeRange> = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        match out.last_mut() {
+            Some(last) if range.from() <= last.to() => {
+                *last = TimeRange::new(last.from(), last.to().max(range.to()))
+                    .expect("merged ranges are not empty");
+            }
+            _ => out.push(range),
+        }
+    }
+    out
+}
+
+/// The parts of `range` outside the sorted, disjoint `cuts`.
+fn subtract(range: TimeRange, cuts: &[TimeRange]) -> Vec<TimeRange> {
+    let mut out = Vec::new();
+    let mut from = range.from();
+    for cut in cuts.iter().filter(|c| c.overlaps(range)) {
+        out.extend(TimeRange::new(from, cut.from()));
+        from = from.max(cut.to());
+    }
+    out.extend(TimeRange::new(from, range.to()));
+    out
 }
 
 fn layout_at(changes: &[LayoutChange], at: Micros) -> Option<Layout> {

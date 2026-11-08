@@ -15,11 +15,15 @@ pub struct StyleArgs {
 
 #[derive(Subcommand)]
 enum StyleAction {
-    /// Build the video's lock from its files and write cut.lock.
+    /// Build the video's lock from its files and write cut.lock. A shipped video's lock is
+    /// frozen at its release; `shot restyle` rebuilds it.
     Build {
         /// The video folder, `videos/<slug>` of the channel repo.
-        #[arg(long, default_value = ".")]
+        #[arg(long, default_value = ".", conflicts_with = "all")]
         video: PathBuf,
+        /// Every migrated, unshipped video of the channel (`--repo`).
+        #[arg(long)]
+        all: bool,
     },
     /// List the instances at a time with the layer and rule or override behind each.
     Explain {
@@ -42,7 +46,8 @@ enum StyleAction {
 
 pub fn run(repo: PathBuf, args: StyleArgs) -> Result<(), String> {
     match args.action {
-        StyleAction::Build { video } => build(&video),
+        StyleAction::Build { all: true, .. } => build_all(repo),
+        StyleAction::Build { video, .. } => build(&video),
         StyleAction::Explain { video, at, take } => explain(&video, at, take.as_deref()),
         StyleAction::Scope { rule } => {
             let selector = Selector::parse(&rule).map_err(|e| e.to_string())?;
@@ -55,11 +60,36 @@ pub fn run(repo: PathBuf, args: StyleArgs) -> Result<(), String> {
 
 fn build(video: &std::path::Path) -> Result<(), String> {
     let (disk, slug) = Disk::locate(video)?;
-    let built = style::build_video(&disk, &slug)?;
-    let path = style::video_path(&slug, "cut.lock");
+    write(&disk, &slug)
+}
+
+/// Builds every video with a lock; a shipped or unmigrated one is listed and left alone.
+fn build_all(repo: PathBuf) -> Result<(), String> {
+    let disk = Disk::new(repo);
+    for slug in style::Repo::slugs(&disk)? {
+        let path = style::video_path(&slug, "cut.lock");
+        if style::Repo::read(&disk, &slug, &path)?.is_none() {
+            println!("videos/{slug}: no cut.lock, not migrated");
+            continue;
+        }
+        if let Err(e) = write(&disk, &slug) {
+            println!("videos/{slug}: {e}");
+        }
+    }
+    Ok(())
+}
+
+fn write(disk: &Disk, slug: &str) -> Result<(), String> {
+    let built = style::build_video(disk, slug)?;
+    if built.shipped() {
+        return Err(format!(
+            "shipped, its lock is frozen at the release: `shot restyle {slug}` rebuilds it"
+        ));
+    }
+    let path = style::video_path(slug, "cut.lock");
     let written = built.lock.to_kdl();
     let unchanged =
-        style::Repo::read(&disk, &slug, &path)?.is_some_and(|old| old == written.as_bytes());
+        style::Repo::read(disk, slug, &path)?.is_some_and(|old| old == written.as_bytes());
     let instances: usize = built.lock.takes.iter().map(|t| t.instances.len()).sum();
     let orphans: usize = built.lock.takes.iter().map(|t| t.orphans.len()).sum();
     if !unchanged {

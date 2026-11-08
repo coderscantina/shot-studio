@@ -178,8 +178,48 @@ impl Subject<'_> {
     }
 }
 
-/// The moments of the cut's structure in one take: chapter and video edges.
-fn structure_subjects(cut: &Cut, take: &Id) -> Vec<Subject<'static>> {
+#[derive(Clone, Copy)]
+enum Phase {
+    Elements,
+    Structure,
+}
+
+/// The ranges the instances cut, merged, in order.
+fn cut_union(instances: &[Instance]) -> Vec<TimeRange> {
+    let mut cuts: Vec<TimeRange> = instances
+        .iter()
+        .filter_map(|i| match i.applied {
+            Applied::Cut(range) => Some(range),
+            _ => None,
+        })
+        .collect();
+    cuts.sort_by_key(|r| r.from());
+    let mut out: Vec<TimeRange> = Vec::with_capacity(cuts.len());
+    for cut in cuts {
+        match out.last_mut() {
+            Some(last) if cut.from() <= last.to() => {
+                *last = TimeRange::new(last.from(), last.to().max(cut.to())).expect("not empty");
+            }
+            _ => out.push(cut),
+        }
+    }
+    out
+}
+
+/// The moments of the cut's structure in one take: chapter and video edges, moved off the
+/// pacing's `cuts` onto the first and last moments that play.
+fn structure_subjects(cut: &Cut, take: &Id, cuts: &[TimeRange]) -> Vec<Subject<'static>> {
+    // Only the edges in this take are kept below, so the take's own cuts are the ones to skip.
+    let start_of = |t: Micros| {
+        cuts.iter()
+            .find(|c| c.from() <= t && t < c.to())
+            .map_or(t, |c| c.to())
+    };
+    let end_of = |t: Micros| {
+        cuts.iter()
+            .find(|c| c.from() < t && t <= c.to())
+            .map_or(t, |c| c.from())
+    };
     let mut subjects = Vec::new();
     let edges: Vec<(&Id, Micros, &Id, Micros)> = cut
         .chapters
@@ -195,7 +235,7 @@ fn structure_subjects(cut: &Cut, take: &Id) -> Vec<Subject<'static>> {
                 RangeEdit::Keep(range) => Some(range.to()),
                 RangeEdit::Remove { .. } => None,
             })?;
-            Some((&first.take, start, &last.take, end))
+            Some((&first.take, start_of(start), &last.take, end_of(end)))
         })
         .collect();
     for (i, (start_take, start, end_take, end)) in edges.iter().enumerate() {
@@ -263,87 +303,95 @@ fn evaluate_take(
         }
     }
 
-    let element_subjects = elements
-        .into_iter()
-        .flat_map(Elements::iter)
-        .filter(|e| is_kept(&kept, e.t))
-        .map(Subject::of);
     let mut instances = Vec::new();
-    for subject in element_subjects.chain(structure_subjects(cut, take)) {
-        let mut winners: BTreeMap<EffectKey, (usize, usize, Winner<'_>)> = BTreeMap::new();
-        for (order, rule) in rules.iter().enumerate() {
-            if !subject.matches(&rule.selector) {
-                continue;
-            }
-            let rank = (rule.selector.specificity(), order);
-            for effect in &rule.effects {
-                let better = winners
-                    .get(&effect.key())
-                    .is_none_or(|(s, o, _)| rank > (*s, *o));
-                if better {
-                    let winner = Winner {
-                        effect,
-                        provenance: Provenance {
-                            layer: rule.layer,
-                            rule: Some(rule.selector.clone()),
-                            override_at: None,
-                        },
-                    };
-                    winners.insert(effect.key(), (rank.0, rank.1, winner));
-                }
-            }
-        }
-        let mut winners: BTreeMap<EffectKey, Winner<'_>> =
-            winners.into_iter().map(|(k, (_, _, w))| (k, w)).collect();
-
-        let overrides = match subject.target {
-            Target::Kind(kind) => bound.get(&(kind, subject.t)).map_or(&[][..], Vec::as_slice),
-            _ => &[],
+    // Elements first: the chapter and video edges then sit on the first and last moments the
+    // pacing's cuts leave.
+    for phase in [Phase::Elements, Phase::Structure] {
+        let subjects: Vec<Subject<'_>> = match phase {
+            Phase::Elements => elements
+                .into_iter()
+                .flat_map(Elements::iter)
+                .filter(|e| is_kept(&kept, e.t))
+                .map(Subject::of)
+                .collect(),
+            Phase::Structure => structure_subjects(cut, take, &cut_union(&instances)),
         };
-        let mut decision = None;
-        for o in overrides {
-            if o.decision.is_some() {
-                decision = o.decision.map(|d| (d, o.at));
-            }
-            for effect in &o.effects {
-                match effect {
-                    OverrideEffect::Set(effect) => {
+        for subject in subjects {
+            let mut winners: BTreeMap<EffectKey, (usize, usize, Winner<'_>)> = BTreeMap::new();
+            for (order, rule) in rules.iter().enumerate() {
+                if !subject.matches(&rule.selector) {
+                    continue;
+                }
+                let rank = (rule.selector.specificity(), order);
+                for effect in &rule.effects {
+                    let better = winners
+                        .get(&effect.key())
+                        .is_none_or(|(s, o, _)| rank > (*s, *o));
+                    if better {
                         let winner = Winner {
                             effect,
                             provenance: Provenance {
-                                layer: Layer::Override,
-                                rule: None,
-                                override_at: Some(o.at),
+                                layer: rule.layer,
+                                rule: Some(rule.selector.clone()),
+                                override_at: None,
                             },
                         };
-                        winners.insert(effect.key(), winner);
-                    }
-                    OverrideEffect::Off(key) => {
-                        winners.remove(key);
+                        winners.insert(effect.key(), (rank.0, rank.1, winner));
                     }
                 }
             }
-        }
+            let mut winners: BTreeMap<EffectKey, Winner<'_>> =
+                winners.into_iter().map(|(k, (_, _, w))| (k, w)).collect();
 
-        let element = ElementRef {
-            target: subject.target,
-            t: subject.t,
-        };
-        let cut_winner = winners.remove(&EffectKey::Cut);
-        if let Some((applied, provenance)) = apply_cut(&subject, cut_winner, decision) {
-            instances.push(Instance {
-                applied,
-                element,
-                provenance,
-            });
-        }
-        for winner in winners.into_values() {
-            if let Some(applied) = apply(winner.effect, &subject) {
+            let overrides = match subject.target {
+                Target::Kind(kind) => bound.get(&(kind, subject.t)).map_or(&[][..], Vec::as_slice),
+                _ => &[],
+            };
+            let mut decision = None;
+            for o in overrides {
+                if o.decision.is_some() {
+                    decision = o.decision.map(|d| (d, o.at));
+                }
+                for effect in &o.effects {
+                    match effect {
+                        OverrideEffect::Set(effect) => {
+                            let winner = Winner {
+                                effect,
+                                provenance: Provenance {
+                                    layer: Layer::Override,
+                                    rule: None,
+                                    override_at: Some(o.at),
+                                },
+                            };
+                            winners.insert(effect.key(), winner);
+                        }
+                        OverrideEffect::Off(key) => {
+                            winners.remove(key);
+                        }
+                    }
+                }
+            }
+
+            let element = ElementRef {
+                target: subject.target,
+                t: subject.t,
+            };
+            let cut_winner = winners.remove(&EffectKey::Cut);
+            if let Some((applied, provenance)) = apply_cut(&subject, cut_winner, decision, &kept) {
                 instances.push(Instance {
                     applied,
                     element,
-                    provenance: winner.provenance,
+                    provenance,
                 });
+            }
+            for winner in winners.into_values() {
+                if let Some(applied) = apply(winner.effect, &subject) {
+                    instances.push(Instance {
+                        applied,
+                        element,
+                        provenance: winner.provenance,
+                    });
+                }
             }
         }
     }
@@ -356,24 +404,26 @@ fn evaluate_take(
     }
 }
 
-/// The pacing's answer for one element: a cut, a review item or nothing.
+/// The pacing's answer for one element: a cut, a review item or nothing. Breath is kept only on
+/// a side that borders kept material, so a silence that opens or ends the take's material goes
+/// whole on that side.
 fn apply_cut(
     subject: &Subject<'_>,
     winner: Option<Winner<'_>>,
     decision: Option<(Decision, Micros)>,
+    kept: &[TimeRange],
 ) -> Option<(Applied, Provenance)> {
     let span = subject.span()?;
     let (breath, threshold) = match winner.as_ref().map(|w| w.effect) {
         Some(Effect::Cut { breath, confidence }) => (*breath, *confidence),
         _ => (Micros(0), 0),
     };
+    let before = kept.iter().any(|r| r.from() < span.from());
+    let after = kept.iter().any(|r| r.to() > span.to());
     let trimmed = || {
-        let from = if subject.t.0 == 0 {
-            0
-        } else {
-            span.from().0 + breath.0
-        };
-        TimeRange::new(Micros(from), Micros(span.to().0.saturating_sub(breath.0)))
+        let from = span.from().0 + if before { breath.0 } else { 0 };
+        let to = span.to().0.saturating_sub(if after { breath.0 } else { 0 });
+        TimeRange::new(Micros(from), Micros(to))
     };
     match decision {
         Some((Decision::Keep, _)) => None,

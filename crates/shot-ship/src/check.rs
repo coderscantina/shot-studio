@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use shot_audio::{CEILING_DBTP, TARGET_LUFS};
-use shot_core::{CaptionFix, CaptionStyle, Micros, Output, OutputKind};
+use shot_core::{CaptionFix, CaptionStyle, Lock, Micros, Output, OutputKind, Override};
 
 use crate::describe::LINK_CARD;
 use crate::spoken::{ChapterMark, SpokenWord, clock};
@@ -26,6 +26,27 @@ pub const FROZEN_MIN: Micros = Micros(3_000_000);
 /// A said link needs a link card starting within this distance.
 pub const LINK_CARD_WINDOW: Micros = Micros(10_000_000);
 
+/// Overrides the lock lists as orphans: after re-analysis no element of their kind starts within
+/// [`Override::TOLERANCE`] of their `at`, so they change nothing.
+pub fn orphans(lock: &Lock) -> Vec<Problem> {
+    let within = Override::TOLERANCE.0 as f64 / 1e6;
+    lock.takes
+        .iter()
+        .flat_map(|t| t.orphans.iter().map(move |o| (&t.take, o)))
+        .map(|(take, o)| {
+            problem(
+                CheckKind::Overrides,
+                format!(
+                    "override {take} {} at {:.1} s lost its element: no {} starts within {within} s, so it changes nothing. Move its `at` to the element or delete it",
+                    o.kind,
+                    o.at.0 as f64 / 1e6,
+                    o.kind
+                ),
+            )
+        })
+        .collect()
+}
+
 /// Endings that make a said word a web address.
 const TLDS: [&str; 12] = [
     "com", "dev", "io", "org", "net", "sh", "app", "rs", "ai", "co", "gg", "tv",
@@ -39,16 +60,19 @@ pub enum CheckKind {
     Links,
     Chapters,
     Thumbnail,
+    /// Overrides in `cut.kdl` whose element is gone.
+    Overrides,
 }
 
 impl CheckKind {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Loudness,
         Self::Captions,
         Self::Frames,
         Self::Links,
         Self::Chapters,
         Self::Thumbnail,
+        Self::Overrides,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -59,6 +83,7 @@ impl CheckKind {
             Self::Links => "links",
             Self::Chapters => "chapters",
             Self::Thumbnail => "thumbnail",
+            Self::Overrides => "overrides",
         }
     }
 }
@@ -541,5 +566,23 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    #[test]
+    fn an_override_that_lost_its_element_is_a_problem() {
+        let lock =
+            Lock::parse("lock 1\n\nbrand {\n}\n\ntake t01 {\n    orphan filler at=30_000_000\n}\n")
+                .unwrap();
+        let found = orphans(&lock);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].check, CheckKind::Overrides);
+        assert!(
+            found[0]
+                .message
+                .starts_with("override t01 filler at 30.0 s lost its element"),
+            "{}",
+            found[0].message
+        );
+        assert!(orphans(&Lock::default()).is_empty());
     }
 }

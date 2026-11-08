@@ -6,10 +6,10 @@
 //! | `text` | optional, the words the box was matched to, shown in the inspector |
 //!
 //! The box follows the layout and the zoom, like the cursor, and draws only where the layout
-//! shows the screen. [`matches`] finds the phrases you say that are on screen at that moment,
-//! from Vision's text lines of the screen track.
+//! shows the screen. [`highlights`] places one on each phrase you say while it is on screen.
 
-use shot_core::{Micros, Overlay, ParamValue, TimeRange, Word};
+use shot_analyze::elements::ReadOut;
+use shot_core::{Micros, Overlay, ParamValue, TimeRange};
 
 use super::{ParamKind, ParamSpec, Params, Stage, TemplateSpec, overlay};
 use crate::drawing::{Rgba, Shape};
@@ -34,8 +34,6 @@ pub const SPEC: TemplateSpec = TemplateSpec {
 const DRAW_ON: Micros = Micros(200_000);
 /// How long a highlight stays after the last matched word.
 pub const AFTER: Micros = Micros(1_500_000);
-/// The fewest words a spoken phrase needs to count as reading the screen.
-const MIN_WORDS: usize = 3;
 
 /// The box of a `highlight` overlay in screen pixels.
 pub fn rect(overlay: &Overlay) -> Option<Rect> {
@@ -126,76 +124,36 @@ fn normalize(text: &str) -> String {
     out.trim().to_owned()
 }
 
-/// Phrases of `words` read off the screen: the longest run of at least three consecutive words
-/// that appears in a line on screen while it is said. `screen` holds the lines seen at sample
-/// times, in time order; a word is matched against the latest sample at or before it.
-///
-/// Each match becomes a `highlight` from its first word until [`AFTER`] past its last word,
-/// skipping matches that overlap an existing highlight.
-pub fn matches(
-    words: &[Word],
-    screen: &[(Micros, Vec<ScreenLine>)],
-    existing: &[Overlay],
-) -> Vec<Overlay> {
-    let keys: Vec<String> = words.iter().map(|w| normalize(&w.text)).collect();
+/// A `highlight` for each phrase read off the screen, as `shot_analyze::elements::read_outs`
+/// finds them, from its first word until [`AFTER`] past its last. The box is in pixels of a
+/// screen track of `size`. A highlight that would overlap an existing one is left out.
+pub fn highlights(read: &[ReadOut], (w, h): (u32, u32), existing: &[Overlay]) -> Vec<Overlay> {
     let mut out: Vec<Overlay> = Vec::new();
-    let mut i = 0;
-    while i < words.len() {
-        let at = words[i].range.from();
-        let index = screen.partition_point(|(t, _)| *t <= at);
-        let Some((_, lines)) = index.checked_sub(1).map(|i| &screen[i]) else {
-            i += 1;
+    for found in read {
+        let Some(range) = TimeRange::new(found.said.from(), Micros(found.said.to().0 + AFTER.0))
+        else {
             continue;
         };
-        let normalized: Vec<String> = lines.iter().map(|l| normalize(&l.text)).collect();
-        let mut best: Option<(usize, usize, Rect)> = None;
-        for (line, text) in lines.iter().zip(&normalized) {
-            let mut n = 0;
-            loop {
-                let phrase = keys[i..(i + n + 1).min(keys.len())].join(" ");
-                if i + n >= keys.len() || keys[i + n].is_empty() || !contains_words(text, &phrase) {
-                    break;
-                }
-                n += 1;
-            }
-            if n >= MIN_WORDS && best.is_none_or(|(len, _, _)| n > len) {
-                let phrase = keys[i..i + n].join(" ");
-                let start = word_offset(text, &phrase).expect("matched above");
-                best = Some((n, start, span_in(line, text, start..start + phrase.len())));
-            }
+        let taken = existing
+            .iter()
+            .chain(&out)
+            .any(|o| o.template.as_str() == TEMPLATE && o.range.overlaps(range));
+        if taken {
+            continue;
         }
-        match best {
-            Some((n, _, rect)) => {
-                let last = &words[i + n - 1];
-                let range = TimeRange::new(at, Micros(last.range.to().0 + AFTER.0));
-                let taken = |r: TimeRange| {
-                    existing
-                        .iter()
-                        .chain(&out)
-                        .any(|o| o.template.as_str() == TEMPLATE && o.range.overlaps(r))
-                };
-                if let Some(range) = range.filter(|r| !taken(*r)) {
-                    let text = words[i..i + n]
-                        .iter()
-                        .map(|w| w.text.as_str())
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    out.push(overlay(
-                        TEMPLATE,
-                        range,
-                        vec![
-                            ("x", ParamValue::Integer(rect.left.round() as i64)),
-                            ("y", ParamValue::Integer(rect.top.round() as i64)),
-                            ("width", ParamValue::Integer(rect.width().round() as i64)),
-                            ("height", ParamValue::Integer(rect.height().round() as i64)),
-                            ("text", ParamValue::Text(text)),
-                        ],
-                    ));
-                }
-                i += n;
-            }
-            None => i += 1,
-        }
+        let px =
+            |fraction: f32, size: u32| ParamValue::Integer((fraction * size as f32).round() as i64);
+        out.push(overlay(
+            TEMPLATE,
+            range,
+            vec![
+                ("x", px(found.rect.x, w)),
+                ("y", px(found.rect.y, h)),
+                ("width", px(found.rect.w, w)),
+                ("height", px(found.rect.h, h)),
+                ("text", ParamValue::Text(found.text.clone())),
+            ],
+        ));
     }
     out
 }
@@ -221,10 +179,6 @@ fn word_offset(text: &str, phrase: &str) -> Option<usize> {
         let after = end == text.len() || text.as_bytes()[end] == b' ';
         before && after
     })
-}
-
-fn contains_words(text: &str, phrase: &str) -> bool {
-    word_offset(text, phrase).is_some()
 }
 
 /// The box of a byte range of `normalized`, the normalized text of `line`: the range's first
@@ -258,42 +212,35 @@ fn span_in(line: &ScreenLine, normalized: &str, range: std::ops::Range<usize>) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shot_analyze::vision::{NormRect, TextLine};
+    use shot_core::Word;
 
-    fn words(text: &str, start: u64) -> Vec<Word> {
-        text.split_whitespace()
+    #[test]
+    fn a_phrase_read_off_the_screen_gets_a_box_around_it() {
+        let said: Vec<Word> = "and here it says, never deploy on Fridays. Wow."
+            .split(' ')
             .enumerate()
             .map(|(i, w)| Word {
                 text: w.to_owned(),
                 range: TimeRange::new(
-                    Micros(start + i as u64 * 400_000),
-                    Micros(start + i as u64 * 400_000 + 300_000),
+                    Micros(10_000_000 + i as u64 * 400_000),
+                    Micros(10_000_000 + i as u64 * 400_000 + 300_000),
                 )
                 .unwrap(),
                 confidence: 90,
             })
-            .collect()
-    }
-
-    #[test]
-    fn a_phrase_read_off_the_screen_gets_a_box_around_it() {
-        let said = words(
-            "and here it says, never deploy on Fridays. Wow.",
-            10_000_000,
-        );
-        let screen = vec![(
-            Micros(9_000_000),
-            vec![
-                ScreenLine {
-                    text: "Title: Friday rules".into(),
-                    rect: Rect::new(100.0, 100.0, 900.0, 140.0),
-                },
-                ScreenLine {
-                    text: "Rule 1: Never deploy on Fridays!".into(),
-                    rect: Rect::new(100.0, 400.0, 1380.0, 440.0),
-                },
-            ],
-        )];
-        let found = matches(&said, &screen, &[]);
+            .collect();
+        let line = TextLine {
+            text: "Rule 1: Never deploy on Fridays!".into(),
+            rect: NormRect {
+                x: 0.1,
+                y: 0.4,
+                w: 0.32,
+                h: 0.04,
+            },
+        };
+        let read = shot_analyze::elements::read_outs(&said, &[(Micros(9_000_000), vec![line])]);
+        let found = highlights(&read, (4000, 1000), &[]);
         assert_eq!(found.len(), 1);
         let h = &found[0];
         // "never" is the 5th word.
@@ -301,24 +248,9 @@ mod tests {
         assert_eq!(Params(h).text("text"), Some("never deploy on Fridays."));
         let r = rect(h).unwrap();
         // "never deploy on fridays" starts at character 8 of 32 and runs to the "!".
-        assert!((r.left - 420.0).abs() <= 1.0, "{r:?}");
-        assert!((r.right - 1340.0).abs() <= 1.0, "{r:?}");
+        assert!((r.left - 720.0).abs() <= 1.0, "{r:?}");
+        assert!((r.right - 1640.0).abs() <= 1.0, "{r:?}");
         assert!(super::super::check(h).is_ok());
-        assert!(matches(&said, &screen, &found).is_empty());
-    }
-
-    #[test]
-    fn two_words_or_text_shown_later_do_not_count() {
-        let said = words("never deploy", 10_000_000);
-        let screen = vec![(
-            Micros(9_000_000),
-            vec![ScreenLine {
-                text: "never deploy on fridays".into(),
-                rect: Rect::new(0.0, 0.0, 10.0, 10.0),
-            }],
-        )];
-        assert!(matches(&said, &screen, &[]).is_empty());
-        let later = words("never deploy on fridays", 1_000_000);
-        assert!(matches(&later, &screen, &[]).is_empty());
+        assert!(highlights(&read, (4000, 1000), &found).is_empty());
     }
 }

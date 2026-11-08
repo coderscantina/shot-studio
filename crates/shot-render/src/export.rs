@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
-use shot_core::{ContentHash, Effects, Id, MediaId, Micros, OutputKind, Project, Timeline};
+use shot_core::{ContentHash, Effects, Id, MediaId, Micros, OutputKind, Project};
 use shot_media::audio::{AAC_PACKET_SAMPLES, AacEncoder, AacStream, AudioError, SAMPLE_RATE};
 use shot_media::encode::{EncodeError, EncodedFrame, EncoderSettings, HevcEncoder};
 use shot_media::mux::{self, AudioTrack, Chapter, FragmentedFile, Joiner, Movie, MuxError, Track};
@@ -41,7 +41,7 @@ use crate::graph::Renderer;
 use crate::layout::{Canvas, LayoutSpec, Source, Sources, UnsupportedLayout};
 use crate::plan::{ExportPlan, PlannedChunk, PlannedSegment, frame_time};
 use crate::surface::size;
-use crate::voice::{self, Bed};
+use crate::voice;
 
 /// Output frame rate.
 pub const FPS: u32 = 60;
@@ -134,10 +134,14 @@ pub enum ExportError {
     Transcript(shot_analyze::Error),
     #[error(transparent)]
     Mux(#[from] MuxError),
+    #[error(transparent)]
+    Lock(#[from] crate::lock::LockError),
     #[error("{path}: {source}")]
     Io { path: PathBuf, source: io::Error },
     #[error("the encoder did not start a chunk with a keyframe")]
     ChunkStart,
+    #[error("no sound `{0}` in the video's sounds/, brand/sounds/ or the bundled set")]
+    UnknownSound(Id),
     #[error("another chunk failed")]
     Cancelled,
 }
@@ -181,7 +185,11 @@ pub fn export_decorated(
     decoration: Option<Decoration>,
     progress: &(dyn Fn(Progress) + Sync),
 ) -> Result<ExportReport, ExportError> {
-    let timeline = Timeline::evaluate(project);
+    let lock = crate::lock::read(video_dir)?;
+    let timeline = match &lock {
+        Some(lock) => shot_core::Timeline::styled(project, lock),
+        None => shot_core::Timeline::evaluate(project),
+    };
     let output = timeline
         .outputs
         .iter()
@@ -196,6 +204,9 @@ pub fn export_decorated(
                 f32::from(m.duck),
             )
         }),
+        cues: lock.as_ref().map(Cues::of).unwrap_or_default(),
+        sounds: shot_audio::sound::Library::new(video_dir, channel_brand(video_dir).as_deref()),
+        dir: video_dir.to_owned(),
     };
     let main = timeline.main();
     let ids: HashMap<&Id, MediaId> = main
@@ -421,6 +432,134 @@ struct Media {
     root: PathBuf,
     /// The music bed's file and its gain and duck in dB.
     music: Option<(PathBuf, f32, f32)>,
+    /// The lock's music cues and sound effects, in take time.
+    cues: Cues,
+    sounds: shot_audio::sound::Library,
+    /// The video folder, which music files are relative to.
+    dir: PathBuf,
+}
+
+/// The lock's `music` and `sfx` instances by take, still in media time.
+#[derive(Debug, Default)]
+struct Cues {
+    music: Vec<(Id, Micros, String, i16, i16)>,
+    sfx: Vec<(Id, Micros, Id, i16)>,
+}
+
+impl Cues {
+    fn of(lock: &shot_core::Lock) -> Self {
+        let mut cues = Self::default();
+        for take in &lock.takes {
+            for instance in &take.instances {
+                match &instance.applied {
+                    shot_core::Applied::Music {
+                        file,
+                        at,
+                        gain,
+                        duck,
+                    } => cues
+                        .music
+                        .push((take.take.clone(), *at, file.clone(), *gain, *duck)),
+                    shot_core::Applied::Sfx { sound, at, gain } => {
+                        cues.sfx
+                            .push((take.take.clone(), *at, sound.clone(), *gain))
+                    }
+                    _ => {}
+                }
+            }
+        }
+        cues
+    }
+}
+
+/// The channel's `brand/` folder when the video is `<repo>/videos/<slug>`.
+fn channel_brand(video_dir: &Path) -> Option<PathBuf> {
+    let brand = video_dir.parent()?.parent()?.join("brand");
+    brand.is_dir().then_some(brand)
+}
+
+/// Where take time `at` of `take` plays in the output, in samples, once per segment showing it.
+fn output_samples(plan: &ExportPlan, take: &Id, at: Micros) -> Vec<u64> {
+    let per_frame = u64::from(SAMPLE_RATE) / u64::from(FPS);
+    let t = at.0 * u64::from(SAMPLE_RATE) / 1_000_000;
+    plan.segments
+        .iter()
+        .filter(|p| p.segment.take == *take)
+        .filter_map(|p| {
+            let start = p.source_frames.start * per_frame;
+            let end = p.source_frames.end * per_frame;
+            (start..end)
+                .contains(&t)
+                .then(|| p.output_frame * per_frame + t - start)
+        })
+        .collect()
+}
+
+/// The output's music and sound effects: the cut's music bed from the start, then the lock's
+/// cues and sounds where their moments play.
+fn score(plan: &ExportPlan, media: &Media) -> Result<voice::Score, ExportError> {
+    let read = |path: &Path| {
+        voice::read_samples(path).map_err(|source| TimelineAudioError {
+            path: path.to_owned(),
+            source,
+        })
+    };
+    let track = |samples: Vec<f32>| {
+        let beats = shot_audio::beats::detect(&samples);
+        shot_audio::Track::new(shot_audio::sound::Sound::new(samples), beats)
+    };
+    let mut music = Vec::new();
+    if let Some((path, gain, duck)) = &media.music {
+        music.push(shot_audio::MusicCue {
+            at: 0,
+            play: Some(shot_audio::Play {
+                track: track(read(path)?),
+                gain_db: *gain,
+                duck_db: *duck,
+            }),
+        });
+    }
+    for (take, at, file, gain, duck) in &media.cues.music {
+        let places = output_samples(plan, take, *at);
+        if places.is_empty() {
+            continue;
+        }
+        let played = track(read(&media.dir.join(file))?);
+        music.extend(places.into_iter().map(|at| shot_audio::MusicCue {
+            at,
+            play: Some(shot_audio::Play {
+                track: played.clone(),
+                gain_db: f32::from(*gain),
+                duck_db: f32::from(*duck),
+            }),
+        }));
+    }
+    let mut sfx = Vec::new();
+    for (take, at, name, gain) in &media.cues.sfx {
+        let places = output_samples(plan, take, *at);
+        if places.is_empty() {
+            continue;
+        }
+        let sound = match media.sounds.find(name) {
+            Some(shot_audio::sound::Source::File(path)) => {
+                shot_audio::sound::Sound::new(read(&path)?)
+            }
+            Some(shot_audio::sound::Source::Bundled(bundled)) => bundled.decode(),
+            None => return Err(ExportError::UnknownSound(name.clone())),
+        };
+        sfx.extend(places.into_iter().map(|at| {
+            shot_audio::SfxCue::new(
+                sound.clone(),
+                shot_audio::Anchor::Start(at),
+                f32::from(*gain),
+            )
+        }));
+    }
+    Ok(voice::Score {
+        music: shot_audio::Music::new(music, shot_audio::CROSSFADE),
+        sfx,
+        bumpers: Vec::new(),
+    })
 }
 
 impl Media {
@@ -1009,18 +1148,8 @@ fn encode_audio(
     bleeps.sort_by_key(|(take, range)| (take.to_string(), range.from()));
     bleeps.dedup();
     let mut audio = audio.with_bleeps(&bleeps);
-    let bed = match &media.music {
-        Some((path, gain, duck)) => {
-            Some(
-                Bed::read(path, *gain, *duck).map_err(|source| TimelineAudioError {
-                    path: path.clone(),
-                    source,
-                })?,
-            )
-        }
-        None => None,
-    };
-    voice::finish(&mut audio, bed.as_ref(), |samples| {
+    let score = score(plan, media)?;
+    voice::finish(&mut audio, &score, |samples| {
         encoder.push(samples).map_err(ExportError::AudioEncode)?;
         send(encoder.take())
     })?;

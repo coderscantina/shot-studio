@@ -44,6 +44,7 @@ pub struct CodeDiffArgs {
 }
 
 pub fn auto_zoom(args: AutoZoomArgs) -> Result<(), String> {
+    crate::migrate::refuse_if_migrated(&args.video, "zooms")?;
     let project = crate::export::load(&args.video)?;
     let cut = shot_render::rules::auto_zoom(&args.video, &project.cut, &project.format)
         .map_err(|e| e.to_string())?;

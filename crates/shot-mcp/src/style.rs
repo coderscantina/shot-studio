@@ -155,10 +155,51 @@ fn parsed<T, E: std::fmt::Display>(
         .transpose()
 }
 
+/// Everything a build of one video reads, parsed, with the hashes of the brand's assets.
+pub struct Inputs {
+    pub video: Video,
+    pub cut: Cut,
+    /// The video's `format.kdl`.
+    pub video_layer: FormatLayer,
+    /// The channel's `formats/<format>.kdl`.
+    pub format: FormatLayer,
+    pub brand: Brand,
+    pub imported: Vec<Brand>,
+    pub elements: Vec<Elements>,
+    pub assets: BTreeMap<String, ContentHash>,
+}
+
 /// Reads the files of video `slug`, hashes the assets the brand names and builds the lock. A
-/// missing `brand/brand.kdl`, channel format or `format.kdl` is an empty layer. Imports are read
-/// from `styles/<id>.kdl` of the repo, the checkout of the pinned commit.
+/// missing `brand/brand.kdl`, channel format or `format.kdl` is an empty layer. A video whose
+/// `cut.kdl` still holds what rules wrote is refused until `shot migrate` ran on it.
 pub fn build_video(repo: &dyn Repo, slug: &str) -> Result<Built, String> {
+    let inputs = inputs(repo, slug)?;
+    if shot_core::has_rule_nodes(&inputs.cut) {
+        return Err(format!(
+            "videos/{slug}/cut.kdl still holds rule removals, review items or rule zooms: run `shot migrate --video videos/{slug}` first"
+        ));
+    }
+    let lock = build(&StyleInput {
+        imported: &inputs.imported,
+        brand: &inputs.brand,
+        format: &inputs.format,
+        video: &inputs.video_layer,
+        cut: &inputs.cut,
+        elements: &inputs.elements,
+        assets: &inputs.assets,
+    })
+    .map_err(|e| format!("{slug}: {e}"))?;
+    Ok(Built {
+        video: inputs.video,
+        cut: inputs.cut,
+        elements: inputs.elements,
+        lock,
+    })
+}
+
+/// Reads what a build of video `slug` reads. Imports are read from `styles/<id>.kdl` of the
+/// repo, the checkout of the pinned commit.
+pub fn inputs(repo: &dyn Repo, slug: &str) -> Result<Inputs, String> {
     let read = |path: String| text(repo, slug, &path).map(|t| (path, t));
     let (path, video_text) = read(video_path(slug, "video.kdl"))?;
     let video =
@@ -205,21 +246,15 @@ pub fn build_video(repo: &dyn Repo, slug: &str) -> Result<Built, String> {
         }
     }
 
-    let lock = build(&StyleInput {
-        imported: &imported,
-        brand: &brand,
-        format: &format,
-        video: &video_layer,
-        cut: &cut,
-        elements: &elements,
-        assets: &assets,
-    })
-    .map_err(|e| format!("{slug}: {e}"))?;
-    Ok(Built {
+    Ok(Inputs {
         video,
         cut,
+        video_layer,
+        format,
+        brand,
+        imported,
         elements,
-        lock,
+        assets,
     })
 }
 

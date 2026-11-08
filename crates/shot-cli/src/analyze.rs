@@ -33,36 +33,43 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
         None => takes(&args.video)?,
     };
     for take in takes {
-        let (transcript, speech) = listened(&args.video, &take)?;
-        let start = Instant::now();
-        let mut found = elements::analyze(&args.video, &transcript, &speech, Depth::Full)
-            .map_err(|e| e.to_string())?;
-        let analyzed = start.elapsed();
-        let claude: Vec<Element> = if args.claude {
-            ask_claude(&args.video, &transcript)?
-        } else {
-            let old = elements::read(&args.video, &take).map_err(|e| e.to_string())?;
-            old.iter()
-                .flat_map(|old| old.iter())
-                .filter(|e| e.by == BY_CLAUDE)
-                .cloned()
-                .collect()
-        };
-        elements::add(&mut found, claude);
-        let path = elements::write(&args.video, &found).map_err(|e| e.to_string())?;
-        for kind in ElementKind::ALL {
-            let count = found.of_kind(*kind).count();
-            if count > 0 {
-                println!("{take} {:<13} {count:>6}", kind.as_str());
-            }
-        }
-        eprintln!(
-            "{} elements in {:.2} s, wrote {}",
-            found.len(),
-            analyzed.as_secs_f64(),
-            path.display()
-        );
+        analyze_take(&args.video, &take, args.claude)?;
     }
+    Ok(())
+}
+
+/// Analyses `take` again and rewrites its elements file, keeping Claude's elements unless
+/// `claude` asks again.
+pub(crate) fn analyze_take(video: &Path, take: &Id, claude: bool) -> Result<(), String> {
+    let (transcript, speech) = listened(video, take)?;
+    let start = Instant::now();
+    let mut found =
+        elements::analyze(video, &transcript, &speech, Depth::Full).map_err(|e| e.to_string())?;
+    let analyzed = start.elapsed();
+    let claude: Vec<Element> = if claude {
+        ask_claude(video, &transcript)?
+    } else {
+        let old = elements::read(video, take).map_err(|e| e.to_string())?;
+        old.iter()
+            .flat_map(|old| old.iter())
+            .filter(|e| e.by == BY_CLAUDE)
+            .cloned()
+            .collect()
+    };
+    elements::add(&mut found, claude);
+    let path = elements::write(video, &found).map_err(|e| e.to_string())?;
+    for kind in ElementKind::ALL {
+        let count = found.of_kind(*kind).count();
+        if count > 0 {
+            println!("{take} {:<13} {count:>6}", kind.as_str());
+        }
+    }
+    eprintln!(
+        "{} elements in {:.2} s, wrote {}",
+        found.len(),
+        analyzed.as_secs_f64(),
+        path.display()
+    );
     Ok(())
 }
 

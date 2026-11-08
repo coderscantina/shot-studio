@@ -1,5 +1,6 @@
-//! The finished voice of the generated speech clips, encoded to AAC like an export and decoded
-//! again, stays under the true-peak ceiling at the target loudness. Needs `$SHOT_FIXTURES`:
+//! The finished voice of the generated speech clips, alone and with a ducked bundled bed and a
+//! pop every 1.5 s, encoded to AAC like an export and decoded again, stays under the true-peak
+//! ceiling at the target loudness. Needs `$SHOT_FIXTURES`:
 //! `cargo test --release -p shot-render --test true_peak -- --ignored --nocapture`. Set
 //! `SHOT_TRUE_PEAK_OUT` to a folder to keep the encoded clips for other meters.
 #![cfg(target_os = "macos")]
@@ -11,7 +12,7 @@ use shot_audio::{CEILING_DBTP, Meter, TARGET_LUFS};
 use shot_core::Id;
 use shot_media::audio::{AacEncoder, AacStream, PcmReader, SAMPLE_RATE};
 use shot_render::audio::{AudioSegment, TimelineAudio, TimelineAudioError};
-use shot_render::voice;
+use shot_render::voice::{self, Score};
 
 const FPS: u32 = 60;
 const BITRATE: u32 = 128_000;
@@ -58,6 +59,32 @@ fn write_adts(path: &Path, stream: &AacStream) {
     }
 }
 
+/// A bundled bed under the whole clip and a pop at 0 dB every 1.5 s, as the lock places them.
+fn scored(samples: u64) -> Score {
+    use shot_audio::{Anchor, CROSSFADE, Music, MusicCue, Play, SfxCue, Track, beats, sound};
+    let bed = sound::bundled("bed-calm").unwrap().decode();
+    let beats = beats::detect(bed.samples());
+    let pop = sound::bundled("pop").unwrap().decode();
+    let step = u64::from(SAMPLE_RATE) * 3 / 2;
+    Score {
+        music: Music::new(
+            vec![MusicCue {
+                at: 0,
+                play: Some(Play {
+                    track: Track::new(bed, beats),
+                    gain_db: -18.0,
+                    duck_db: -12.0,
+                }),
+            }],
+            CROSSFADE,
+        ),
+        sfx: (0..samples / step)
+            .map(|i| SfxCue::new(pop.clone(), Anchor::Start(i * step), 0.0))
+            .collect(),
+        bumpers: Vec::new(),
+    }
+}
+
 #[test]
 #[ignore]
 fn encoded_speech_stays_under_the_ceiling_at_the_target() {
@@ -70,9 +97,19 @@ fn encoded_speech_stays_under_the_ceiling_at_the_target() {
         .collect();
     clips.sort();
     let mut failures = Vec::new();
-    for clip in clips {
-        let name = clip.file_stem().unwrap().to_string_lossy().into_owned();
-        let frames = read_all(&clip).len() as u64 / u64::from(SAMPLE_RATE / FPS);
+    for (clip, with_score) in clips.iter().flat_map(|c| [(c, false), (c, true)]) {
+        let stem = clip.file_stem().unwrap().to_string_lossy().into_owned();
+        let name = if with_score {
+            format!("{stem}-scored")
+        } else {
+            stem
+        };
+        let frames = read_all(clip).len() as u64 / u64::from(SAMPLE_RATE / FPS);
+        let score = if with_score {
+            scored(frames * u64::from(SAMPLE_RATE / FPS))
+        } else {
+            Score::default()
+        };
         let take = Id::new("t01").unwrap();
         let mut audio = TimelineAudio::new(
             [AudioSegment {
@@ -86,7 +123,7 @@ fn encoded_speech_stays_under_the_ceiling_at_the_target() {
             },
         );
         let mut encoder = AacEncoder::new(SAMPLE_RATE, BITRATE).unwrap();
-        let finished = voice::finish(&mut audio, None, |samples| {
+        let finished = voice::finish(&mut audio, &score, |samples| {
             encoder.push(samples).unwrap();
             Ok::<_, TimelineAudioError>(())
         })

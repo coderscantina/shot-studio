@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use shot_core::{
-    Cut, Format, Id, Layout, Micros, Pacing, RangeEdit, RemovedBy, RuleKind, TakeEdit, TimeRange,
+    Cut, Format, Id, Layout, Micros, RangeEdit, RemovedBy, RuleKind, TakeEdit, TimeRange,
     Transcript,
 };
 
@@ -69,15 +69,6 @@ pub struct Finding {
     pub confidence: u8,
 }
 
-/// The silence the pacing keeps on each voiced side of a silence or pause cut.
-pub fn breath(pacing: Pacing) -> Micros {
-    match pacing {
-        Pacing::Loose => Micros(500_000),
-        Pacing::Natural => Micros(250_000),
-        Pacing::Tight => Micros(50_000),
-    }
-}
-
 /// Runs the rules of `format` over every block of `facts.transcript.take()` in `cut` and returns
 /// the new cut. `transcripts` holds the cut's other takes, whose decisions teach which fillers
 /// belong to the voice.
@@ -89,7 +80,7 @@ pub fn rough_cut(
 ) -> Cut {
     let take = facts.transcript.take();
     let rules = &format.auto_cut;
-    let breath = breath(format.pacing);
+    let breath = format.pacing.breath();
     let voice = learn_voice(cut, facts.transcript, transcripts);
     let shows_screen = |t: Micros| {
         blocks_of(cut, take).any(|edit| layout_at(edit, t, format.default_layout).shows_screen())
@@ -262,7 +253,7 @@ fn learn_voice(cut: &Cut, this: &Transcript, others: &HashMap<Id, Transcript>) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shot_core::{Decision, FormatKind, TakeAt, Word};
+    use shot_core::{Decision, FormatKind, Pacing, TakeAt, Word};
 
     fn transcript(text: &str) -> Transcript {
         let mut transcript = Transcript::new(Id::new("t01").unwrap());

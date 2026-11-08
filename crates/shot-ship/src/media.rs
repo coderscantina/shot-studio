@@ -10,7 +10,7 @@ use objc2_core_video::{
     CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
 };
 use shot_audio::Meter;
-use shot_core::{Micros, Project, Timeline};
+use shot_core::{Micros, OutputKind, Project, Timeline};
 use shot_media::audio::{PcmReader, SAMPLE_RATE};
 use shot_media::videotoolbox::Decoder;
 
@@ -203,7 +203,11 @@ pub fn check_cut(
     cut: &str,
     export: &Path,
 ) -> Result<Vec<Problem>, MediaError> {
-    let timeline = Timeline::evaluate(project);
+    let lock = shot_render::lock::read(video_dir).map_err(|e| MediaError::Video(e.to_string()))?;
+    let timeline = match &lock {
+        Some(lock) => Timeline::styled(project, lock),
+        None => Timeline::evaluate(project),
+    };
     let output = timeline
         .outputs
         .iter()
@@ -258,6 +262,11 @@ pub fn check_cut(
         .iter()
         .any(|ext| export.with_extension(ext).exists());
     problems.extend(check::thumbnail(output.kind, thumbnail));
+    if output.kind == OutputKind::Main
+        && let Some(lock) = &lock
+    {
+        problems.extend(check::orphans(lock));
+    }
     problems.sort_by_key(|p| p.check);
     Ok(problems)
 }

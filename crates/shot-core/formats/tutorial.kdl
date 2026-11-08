@@ -10,3 +10,44 @@ auto-cut confidence=85 {
     filler on=#true
     idle-screen on=#true min=5_000_000
 }
+on silence min=600_000 {
+    cut breath=250_000 confidence=85
+}
+on pause min=1_000_000 {
+    cut breath=250_000 confidence=85
+}
+on idle min=5_000_000 {
+    cut breath=250_000 confidence=85
+}
+on filler {
+    cut confidence=85
+}
+on retake {
+    cut confidence=85
+}
+on misspoken {
+    cut confidence=85
+}
+on emphasis {
+    zoom 112 hold=1_000_000
+}
+on url {
+    overlay link-card for=6_000_000 {
+        url
+    }
+}
+on ocr {
+    overlay highlight {
+        text
+        x
+        y
+        width
+        height
+    }
+}
+on idle min=8_000_000 {
+    overlay b-roll
+}
+on marker label="B" {
+    overlay b-roll for=4_000_000
+}

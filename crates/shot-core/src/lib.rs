@@ -12,6 +12,7 @@ mod error;
 mod format;
 mod kdl_io;
 mod lock;
+mod migrate;
 mod script;
 mod style;
 mod timeline;
@@ -39,6 +40,11 @@ pub use format::{
 };
 pub use lock::{
     Applied, Asset, ElementRef, Instance, LOCK_VERSION, Lock, LockTake, Orphan, Provenance,
+};
+pub use migrate::{
+    B_ROLL_IDLE, B_ROLL_MARKER, EMPHASIS_HOLD, EMPHASIS_ZOOM, LINK_CARD_FOR, MigrateError,
+    MigrateInput, Migration, Report as MigrationReport, ZOOM_LEAD, has_rule_nodes, implied_rules,
+    migrate,
 };
 pub use script::{Beat, Script, ScriptChapter};
 pub use style::{

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use clap::Args;
-use shot_core::{Cut, Format, Project, Script, Video};
+use shot_core::{Cut, Project, Script, Video};
 use shot_render::export::{self, ExportOptions, Progress};
 
 #[derive(Args)]
@@ -25,6 +25,7 @@ pub struct ExportArgs {
 }
 
 pub fn run(args: ExportArgs) -> Result<(), String> {
+    crate::restyle::refresh(&args.video)?;
     let project = load(&args.video)?;
     let out = args.out.unwrap_or_else(|| {
         args.video
@@ -85,10 +86,11 @@ pub(crate) fn load(dir: &Path) -> Result<Project, String> {
             .map_err(|e| format!("{}: {e}", dir.join(name).display()))
     };
     let parse_error = |e: shot_core::ParseError| e.to_string();
+    let video = Video::parse(&read("video.kdl")?).map_err(parse_error)?;
     Ok(Project {
-        video: Video::parse(&read("video.kdl")?).map_err(parse_error)?,
         script: Script::parse(&read("script.md")?).map_err(parse_error)?,
-        format: Format::parse(&read("format.kdl")?).map_err(parse_error)?,
+        format: crate::migrate::video_format(dir, &video, &read("format.kdl")?)?,
         cut: Cut::parse(&read("cut.kdl")?).map_err(parse_error)?,
+        video,
     })
 }

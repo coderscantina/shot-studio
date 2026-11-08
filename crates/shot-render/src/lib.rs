@@ -7,6 +7,7 @@
 //! - [`autozoom`]: the auto-zoom rule, which writes zooms from the event log; [`rules`] runs it
 //!   over a video folder.
 //! - [`graph`]: draws a frame's scene from decoded IOSurface planes into an IOSurface target.
+//! - [`lock`]: a migrated video's `cut.lock`, which styles its timeline.
 //! - [`plan`]: an evaluated output snapped to the frame grid.
 //! - [`cursor`]: the frame of a video track on screen at a time, decoding forward.
 //! - [`audio`]: the mic audio of an output, cut and faded like its video.
@@ -28,6 +29,7 @@ pub mod events;
 pub mod frame;
 pub mod kinetic;
 pub mod layout;
+pub mod lock;
 pub mod lottie;
 pub mod materials;
 pub mod motion;
