@@ -13,6 +13,11 @@
 //!
 //! Both sides of a dissolve or mask wipe decode at once: the painter keeps two cursors per file,
 //! so two sides of one take each decode on instead of seeking back and forth.
+//!
+//! A scene switch inside a take draws the same moment in both layouts. A morph is one shot,
+//! drawn by [`compose`]; inside a `dissolve` the new layout fades in over the old one on a
+//! smoothstep, inside a `zoom-through` the old layout punches in to the middle of the window and
+//! the new one out of it, motion blurred like the chapter edge's.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -21,7 +26,9 @@ use std::time::Duration;
 
 use objc2_core_foundation::CFRetained;
 use objc2_core_video::CVPixelBuffer;
-use shot_core::{CameraShape, Effects, Id, Micros, TimeRange, TransitionKind};
+use shot_core::{
+    CameraShape, Effects, Id, Layout, Micros, SceneSwitch, SwitchKind, TimeRange, TransitionKind,
+};
 use shot_media::videotoolbox::{DecodeError, Decoder};
 
 use crate::RenderError;
@@ -31,9 +38,7 @@ use crate::drawing::{Drawing, Shape};
 use crate::frame::{Frame, Look, Shot, compose};
 use crate::graph::Renderer;
 use crate::join::{JoinFrame, Piece};
-use crate::layout::{
-    Border, Canvas, Layer, LayoutSpec, Rect, Scene, Source, Sources, UnsupportedLayout,
-};
+use crate::layout::{Border, Canvas, Layer, Rect, Scene, Source, Sources, UnsupportedLayout};
 use crate::lottie::{Filled, LottieError, LottieTemplate};
 use crate::motion::Part;
 use crate::plan::{ExportPlan, frame_time};
@@ -135,6 +140,9 @@ impl Painter {
         let canvas = Canvas { width, height };
         let piece = plan.piece_at(frame).ok_or(PaintError::Outside(frame))?;
         let Some(join) = plan.join_at(frame) else {
+            if let Some((switch, x)) = scene_switch(plan, piece, frame) {
+                return self.switch(plan, piece, frame, canvas, (switch, x), renderer, target);
+            }
             return Ok(self
                 .side(plan, piece, frame, canvas, true)?
                 .draw(renderer, target)?);
@@ -178,32 +186,16 @@ impl Painter {
                 let scratch = self.scratch(target)?;
                 self.side(plan, piece, frame, canvas, true)?
                     .draw(renderer, &scratch)?;
-                let crop = |at: f32| {
-                    let scale = 1.0 + (ZOOM_THROUGH - 1.0) * toward_edge(&join, at).powi(3);
-                    let half = 0.5 / scale;
-                    Rect::new(0.5 - half, 0.5 - half, 0.5 + half, 0.5 + half)
-                };
-                let [open, close] = [-SHUTTER_FRAMES / 2.0, SHUTTER_FRAMES / 2.0]
-                    .map(|d| crop(frame as f32 + 0.5 + d));
-                let middle = crop(frame as f32 + 0.5);
-                let layer = Layer {
-                    shutter: Rect::new(
-                        close.left - open.left,
-                        close.top - open.top,
-                        close.right - open.right,
-                        close.bottom - open.bottom,
-                    ),
-                    ..Layer::new(Source::Screen, full, middle, 0.0)
-                };
-                let zoomed = Frame {
-                    scene: Scene {
-                        background: background(&theme),
-                        layers: vec![layer],
-                    },
-                    drawing: Drawing::default(),
-                    cutaway: None,
-                };
-                renderer.draw(&zoomed, only_screen(&scratch), target)?;
+                let toward = |at: f32| toward_edge(&join, at);
+                zoom_through(
+                    &theme,
+                    canvas,
+                    frame as f32 + 0.5,
+                    toward,
+                    &scratch,
+                    renderer,
+                    target,
+                )?;
             }
             TransitionKind::Dissolve | TransitionKind::MaskWipe => {
                 let outgoing =
@@ -235,6 +227,57 @@ impl Painter {
         Ok(())
     }
 
+    /// A frame inside a dissolve's or zoom-through's scene switch, `x` through its window.
+    #[allow(clippy::too_many_arguments)]
+    fn switch(
+        &mut self,
+        plan: &ExportPlan,
+        piece: Piece,
+        frame: u64,
+        canvas: Canvas,
+        (switch, x): (SceneSwitch, f32),
+        renderer: &Renderer,
+        target: &CVPixelBuffer,
+    ) -> Result<(), PaintError> {
+        let theme = self.assets.theme()?;
+        let layout_side = |this: &mut Self, layout: Layout| {
+            let Piece::Segment(index) = piece else {
+                unreachable!("only segments switch scenes")
+            };
+            let position = plan.position(piece, frame);
+            this.segment(plan, index, position, canvas, Some(layout))
+        };
+        let scratch = self.scratch(target)?;
+        if switch.switch.kind == SwitchKind::Dissolve {
+            layout_side(self, switch.from)?.draw(renderer, target)?;
+            layout_side(self, switch.to)?.draw(renderer, &scratch)?;
+            let (width, height) = size(target);
+            let full = Rect::new(0.0, 0.0, width as f32, height as f32);
+            let over = Frame {
+                scene: Scene {
+                    background: background(&theme),
+                    layers: vec![Layer {
+                        opacity: ease(x),
+                        ..Layer::new(Source::Screen, full, Rect::UNIT, 0.0)
+                    }],
+                },
+                drawing: Drawing::default(),
+                cutaway: None,
+            };
+            return Ok(renderer.draw_over(&over, only_screen(&scratch), target)?);
+        }
+        let layout = if x < 0.5 { switch.from } else { switch.to };
+        layout_side(self, layout)?.draw(renderer, &scratch)?;
+        // Frames of the window, so the shutter is the chapter edge's half frame.
+        let fps = plan.fps as f32;
+        let length = switch.window.duration().0 as f32 / 1e6 * fps;
+        let at = x * length;
+        let toward = |at: f32| 1.0 - (2.0 * at / length - 1.0).abs();
+        Ok(zoom_through(
+            &theme, canvas, at, toward, &scratch, renderer, target,
+        )?)
+    }
+
     /// A buffer like `target` to draw one side into.
     fn scratch(
         &mut self,
@@ -260,7 +303,7 @@ impl Painter {
     ) -> Result<Drawn, PaintError> {
         let position = plan.position(piece, frame);
         let mut drawn = match piece {
-            Piece::Segment(i) => self.segment(plan, i, position, canvas)?,
+            Piece::Segment(i) => self.segment(plan, i, position, canvas, None)?,
             Piece::Bookend(i) => self.bookend(plan, i, position, canvas)?,
         };
         if own
@@ -278,22 +321,38 @@ impl Painter {
         Ok(drawn)
     }
 
+    /// Segment `index` at `source_frame`, in its own layout and switch, or in `layout` alone for
+    /// one side of a two-sided scene switch.
     fn segment(
         &mut self,
         plan: &ExportPlan,
         index: usize,
         source_frame: u64,
         canvas: Canvas,
+        layout: Option<Layout>,
     ) -> Result<Drawn, PaintError> {
         let segment = &plan.segments[index].segment;
-        let spec = LayoutSpec::styled(segment.layout, &self.effects.window)?;
-        let take = self.dir.join("media").join(segment.take.as_str());
+        let theme = self.assets.theme()?;
         let time = frame_time(source_frame, plan.fps);
+        let switch = match layout {
+            Some(_) => None,
+            None => segment.switch.as_ref().filter(|s| {
+                s.switch.kind == SwitchKind::Morph
+                    && s.window.from() <= time
+                    && time < s.window.to()
+            }),
+        };
+        let layout = layout.unwrap_or(segment.layout);
+        let mut specs = vec![theme.layout(layout, &self.effects.window)?];
+        if let Some(switch) = switch {
+            specs.push(theme.layout(switch.from, &self.effects.window)?);
+        }
+        let take = self.dir.join("media").join(segment.take.as_str());
         let mut decoded = Sources::<Option<Decoded>>::default();
         for (source, file) in [(Source::Screen, SCREEN_FILE), (Source::Camera, CAMERA_FILE)] {
             let path = take.join(file);
             // A take recorded without a camera draws its layouts without the camera slot.
-            if !spec.uses(source) || !path.exists() {
+            if !specs.iter().any(|s| s.uses(source)) || !path.exists() {
                 continue;
             }
             let frame = self.tracks.frame(&path, duration(time))?;
@@ -310,10 +369,11 @@ impl Painter {
             .assets
             .look(&segment.take, &segment.overlays, self.effects)?;
         let shot = Shot {
-            layout: segment.layout,
+            layout,
             zooms: &segment.zooms,
             overlays: &segment.overlays,
             time,
+            switch,
         };
         let mut frame = compose(&shot, &look, canvas, sizes)?;
         if let Some(decorate) = self.decoration {
@@ -566,6 +626,60 @@ fn toward_edge(join: &JoinFrame, at: f32) -> f32 {
         (t.window.end as f32 - at) / (t.window.end as f32 - edge)
     };
     value.clamp(0.0, 1.0)
+}
+
+/// The dissolve or zoom-through scene switch output frame `frame` of `piece` is inside, with how
+/// far through its window the frame is.
+fn scene_switch(plan: &ExportPlan, piece: Piece, frame: u64) -> Option<(SceneSwitch, f32)> {
+    let Piece::Segment(index) = piece else {
+        return None;
+    };
+    let switch = plan.segments[index].segment.switch.as_ref()?;
+    let time = frame_time(plan.position(piece, frame), plan.fps);
+    let two_sided = matches!(
+        switch.switch.kind,
+        SwitchKind::Dissolve | SwitchKind::ZoomThrough
+    );
+    (two_sided && switch.window.from() <= time && time < switch.window.to())
+        .then(|| (switch.clone(), switch.progress(time)))
+}
+
+/// Draws `scratch`, one side's frame, punched in towards its middle by how far `toward` says the
+/// frame position `at` is towards the switch, motion blurred over the shutter.
+fn zoom_through(
+    theme: &Theme,
+    canvas: Canvas,
+    at: f32,
+    toward: impl Fn(f32) -> f32,
+    scratch: &CVPixelBuffer,
+    renderer: &Renderer,
+    target: &CVPixelBuffer,
+) -> Result<(), RenderError> {
+    let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
+    let crop = |at: f32| {
+        let scale = 1.0 + (ZOOM_THROUGH - 1.0) * toward(at).powi(3);
+        let half = 0.5 / scale;
+        Rect::new(0.5 - half, 0.5 - half, 0.5 + half, 0.5 + half)
+    };
+    let [open, close] = [-SHUTTER_FRAMES / 2.0, SHUTTER_FRAMES / 2.0].map(|d| crop(at + d));
+    let layer = Layer {
+        shutter: Rect::new(
+            close.left - open.left,
+            close.top - open.top,
+            close.right - open.right,
+            close.bottom - open.bottom,
+        ),
+        ..Layer::new(Source::Screen, full, crop(at), 0.0)
+    };
+    let zoomed = Frame {
+        scene: Scene {
+            background: background(theme),
+            layers: vec![layer],
+        },
+        drawing: Drawing::default(),
+        cutaway: None,
+    };
+    renderer.draw(&zoomed, only_screen(scratch), target)
 }
 
 /// The incoming side inside the brand's shape opened `x` of the way from the middle.

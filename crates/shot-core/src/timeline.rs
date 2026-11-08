@@ -6,7 +6,8 @@ use crate::cut::{
 };
 use crate::lock::{Applied, LockTake};
 use crate::{
-    CaptionStyle, DerivedKind, Effects, Id, Layout, Lock, Micros, Project, TimeRange, ZoomMotion,
+    CaptionStyle, DerivedKind, Effects, Id, Layout, LayoutSwitch, Lock, Micros, Project,
+    SwitchKind, TimeRange, ZoomMotion,
 };
 
 /// Bumped whenever the renderer's output changes for the same input, so cached chunks expire.
@@ -69,6 +70,36 @@ pub struct Segment {
     /// Zooms and overlays that overlap the segment, with their full ranges.
     pub zooms: Vec<Zoom>,
     pub overlays: Vec<Overlay>,
+    /// The layout switch whose window overlaps the segment, at most one: windows start on
+    /// their edge and end before the next.
+    pub switch: Option<SceneSwitch>,
+}
+
+/// A layout switch inside a take block: where the layout changes in the take's media time,
+/// from what, and how it moves into the segment's layout.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SceneSwitch {
+    /// The edge, where the new layout starts.
+    pub at: Micros,
+    pub from: Layout,
+    pub to: Layout,
+    /// What `cut.kdl` writes on the edge, else the format's `layout-switch`.
+    pub switch: LayoutSwitch,
+    /// From the edge for the switch's length, cut short by the next edge.
+    pub window: TimeRange,
+}
+
+impl SceneSwitch {
+    /// How far through its window the switch is at media time `t`, from 0 to 1.
+    pub fn progress(&self, t: Micros) -> f32 {
+        let (from, to) = (self.window.from().0, self.window.to().0);
+        (t.0.clamp(from, to) - from) as f32 / (to - from) as f32
+    }
+
+    /// Whether the switch draws anything over `span`: a cut changes no pixels.
+    pub fn draws_over(&self, span: TimeRange) -> bool {
+        self.switch.kind != SwitchKind::Cut && self.window.overlaps(span)
+    }
 }
 
 /// Identifies the recorded files of a take. Take ids can be reused after the newest take is
@@ -151,6 +182,7 @@ impl Timeline {
     fn build(project: &Project, lock: Option<&Lock>) -> Self {
         let captions = project.cut.captions.unwrap_or(project.format.captions);
         let default_layout = project.format.default_layout;
+        let default_switch = project.format.layout_switch();
         let main = Output {
             kind: OutputKind::Main,
             name: "main".to_owned(),
@@ -168,7 +200,7 @@ impl Timeline {
                         .iter()
                         .flat_map(|take| {
                             let styled = lock.and_then(|l| l.take(&take.take));
-                            take_segments(take, default_layout, styled)
+                            take_segments(take, default_layout, &default_switch, styled)
                         })
                         .collect(),
                 })
@@ -194,10 +226,11 @@ impl Output {
     /// The cache key of `frames` of `segment`, counted at `fps` from the start of its take: a
     /// hash over everything those frames show. It covers the renderer version, the output
     /// aspect, the burned-in caption style with its caption fixes, the take and its media, the
-    /// frames, the layout, the cursor and keystroke settings when the layout shows the screen,
-    /// the window style in the `window` layout, the zooms and overlays. Instant zooms are cut
-    /// to the frames; smooth zooms ease, so every zoom of the segment counts whole. Overlays
-    /// count whole with their parameters. The output position is not part of it, so a chunk
+    /// frames, the layout, a layout switch drawing over the frames with its kind, the layout it
+    /// leaves, its edge and window, the cursor and keystroke settings when the layout shows the
+    /// screen, the window style in the `window` layout, the zooms and overlays. Instant zooms
+    /// are cut to the frames; smooth zooms ease, so every zoom of the segment counts whole.
+    /// Overlays count whole with their parameters. The output position is not part of it, so a chunk
     /// stays valid when an edit before it moves it.
     pub fn chunk_hash(
         &self,
@@ -231,6 +264,15 @@ impl Output {
         h.u64(frames.start);
         h.u64(frames.end);
         h.str(segment.layout.as_str());
+        // Only a chunk a switch draws over adds it, so every other chunk keeps its key.
+        if let Some(s) = &segment.switch
+            && span.is_some_and(|span| s.draws_over(span))
+        {
+            h.tagged(1, s.switch.kind.as_str().as_bytes());
+            h.str(s.from.as_str());
+            h.u64(s.at.0);
+            h.range(s.window);
+        }
         let effects = &self.effects;
         if segment.layout.shows_screen() {
             h.u64(effects.cursor.size.into());
@@ -305,11 +347,13 @@ impl Segment {
         layout: Layout,
         zooms: &[Zoom],
         overlays: &[Overlay],
+        switches: &[SceneSwitch],
     ) -> Self {
         Self {
             take: take.clone(),
             source,
             layout,
+            switch: switches.iter().find(|s| s.window.overlaps(source)).cloned(),
             zooms: zooms
                 .iter()
                 .filter(|z| z.range.overlaps(source))
@@ -325,7 +369,12 @@ impl Segment {
 }
 
 /// Kept ranges of one take less the lock's cuts, split wherever the layout changes.
-fn take_segments(take: &TakeEdit, default_layout: Layout, lock: Option<&LockTake>) -> Vec<Segment> {
+fn take_segments(
+    take: &TakeEdit,
+    default_layout: Layout,
+    default_switch: &LayoutSwitch,
+    lock: Option<&LockTake>,
+) -> Vec<Segment> {
     let mut zooms = take.zooms.clone();
     let mut overlays = take.overlays.clone();
     let mut cuts = Vec::new();
@@ -356,6 +405,7 @@ fn take_segments(take: &TakeEdit, default_layout: Layout, lock: Option<&LockTake
     }
     zooms.sort_by_key(|z| z.range.from());
     let cuts = union(cuts);
+    let switches = scene_switches(take, default_layout, default_switch);
     take.ranges
         .iter()
         .filter_map(|edit| match edit {
@@ -379,7 +429,7 @@ fn take_segments(take: &TakeEdit, default_layout: Layout, lock: Option<&LockTake
                 .filter_map(|w| TimeRange::new(w[0], w[1]))
                 .map(|source| {
                     let layout = layout_at(&take.layouts, source.from()).unwrap_or(default_layout);
-                    Segment::new(&take.take, source, layout, &zooms, &overlays)
+                    Segment::new(&take.take, source, layout, &zooms, &overlays, &switches)
                 })
                 .collect::<Vec<_>>()
         })
@@ -414,6 +464,65 @@ fn subtract(range: TimeRange, cuts: &[TimeRange]) -> Vec<TimeRange> {
     out
 }
 
+/// Every place inside the block's kept material where the layout changes, in order. A change
+/// at or before the first kept moment is where the block starts, not a switch.
+fn scene_switches(
+    take: &TakeEdit,
+    default_layout: Layout,
+    default_switch: &LayoutSwitch,
+) -> Vec<SceneSwitch> {
+    let first = take.ranges.iter().find_map(|r| match r {
+        RangeEdit::Keep(range) => Some(range.from()),
+        RangeEdit::Remove { .. } => None,
+    });
+    let Some(first) = first else {
+        return Vec::new();
+    };
+    let layout_of = |t: Micros| layout_at(&take.layouts, t).unwrap_or(default_layout);
+    let mut edges: Vec<Micros> = take
+        .layouts
+        .iter()
+        .flat_map(|c| [c.range.from(), c.range.to()])
+        .filter(|&t| t > first)
+        .collect();
+    edges.sort_unstable();
+    edges.dedup();
+    let edges: Vec<(Micros, Layout, Layout)> = edges
+        .into_iter()
+        .map(|t| (t, layout_of(Micros(t.0 - 1)), layout_of(t)))
+        .filter(|(_, from, to)| from != to)
+        .collect();
+    edges
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &(at, from, to))| {
+            let written = take
+                .layouts
+                .iter()
+                .find(|c| c.range.from() == at)
+                .and_then(|c| c.enter.as_ref())
+                .or_else(|| {
+                    take.layouts
+                        .iter()
+                        .find(|c| c.range.to() == at)
+                        .and_then(|c| c.exit.as_ref())
+                });
+            let switch = written.unwrap_or(default_switch).clone();
+            let mut end = Micros(at.0 + switch.length.0);
+            if let Some((next, ..)) = edges.get(i + 1) {
+                end = end.min(*next);
+            }
+            Some(SceneSwitch {
+                at,
+                from,
+                to,
+                window: TimeRange::new(at, end)?,
+                switch,
+            })
+        })
+        .collect()
+}
+
 fn layout_at(changes: &[LayoutChange], at: Micros) -> Option<Layout> {
     changes
         .iter()
@@ -441,6 +550,7 @@ fn derive(main: &Output, cut: &DerivedCut, main_captions: CaptionStyle) -> Outpu
                         s.layout,
                         &s.zooms,
                         &s.overlays,
+                        s.switch.as_slice(),
                     ))
                 })
         })

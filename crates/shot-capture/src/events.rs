@@ -93,10 +93,7 @@ mod layout_name {
 
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Layout, D::Error> {
         let name = String::deserialize(d)?;
-        Layout::ALL
-            .iter()
-            .copied()
-            .find(|l| l.as_str() == name)
+        Layout::parse(&name)
             .ok_or_else(|| serde::de::Error::custom(format!("unknown layout `{name}`")))
     }
 }

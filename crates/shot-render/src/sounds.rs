@@ -8,6 +8,10 @@
 //! ([`crate::zoom::phases`]), a click has all of them at once and plays only where a ripple
 //! draws: with `cursor ripple=#true` in a layout showing the screen.
 //!
+//! A layout switch with `sound=brand` plays the `transition` keys over its window, which is in
+//! take time: the bare key and `-travel` at its start, `-impact` and `-settle` at its end, when
+//! the slots land.
+//!
 //! Each phase lands on a frame: the first frame drawn at or after its time, the first that shows
 //! the move in that phase. Overlays, zooms and clicks are in take time, so that frame plays
 //! wherever the output shows it and nowhere the cut leaves it out. Transitions are in output
@@ -21,7 +25,7 @@ use std::collections::HashSet;
 
 use shot_audio::Anchor;
 use shot_audio::phases::{Move, move_sounds};
-use shot_core::{Effects, Id, Micros, SoundEffect, SoundKey};
+use shot_core::{Effects, Id, Micros, SoundEffect, SoundKey, SwitchSound};
 
 use crate::motion::Part;
 use crate::overlay::Params;
@@ -96,11 +100,27 @@ pub(crate) fn automatic<'a>(
         }
     };
     let (mut seen, mut zooms) = (HashSet::new(), HashSet::new());
+    let mut switches = HashSet::new();
     let mut takes = Vec::new();
     for planned in &plan.segments {
         let take = &planned.segment.take;
         if !takes.contains(take) {
             takes.push(take.clone());
+        }
+        if let Some(switch) = &planned.segment.switch
+            && switch.switch.sound == Some(SwitchSound::Brand)
+            && has(SoundEffect::Transition)
+            && switches.insert((take.clone(), switch.at))
+        {
+            let (start, end) = (frame(switch.window.from()), frame(switch.window.to()));
+            let mv = Move {
+                effect: SoundEffect::Transition,
+                start,
+                impact: end,
+                settle: end,
+                exit: None,
+            };
+            place(take, mv, false);
         }
         for overlay in &planned.segment.overlays {
             let Some(effect) = effect_of(overlay.template.as_str()) else {

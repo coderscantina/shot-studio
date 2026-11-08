@@ -21,7 +21,7 @@ use shot_core::{
 use vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
 
 use crate::drawing::{Font, Rgba};
-use crate::layout::CameraFrame;
+use crate::layout::{CameraFrame, LayoutSpec, Source, UnsupportedLayout};
 use crate::lottie::{Filled, LottieError, LottieTemplate, SlotDecl, SlotKind, SlotValue};
 use crate::motion::{Feel, Motion, Moves, Preset};
 use crate::overlay::{self, Params, TemplateError};
@@ -235,6 +235,8 @@ pub struct Theme {
     key: Vec<u8>,
     /// How the camera is framed beside the screen, `None` for the layouts' own corners.
     pub camera: Option<CameraFrame>,
+    /// The channel's layouts, sorted by name.
+    pub layouts: Vec<shot_core::CustomLayout>,
     pub stinger: Option<StingerAnimation>,
     pub logo: Option<Logo>,
 }
@@ -452,6 +454,7 @@ impl Theme {
             chapters,
             key: Vec::new(),
             camera,
+            layouts: brand.layouts.clone(),
             stinger,
             logo,
         };
@@ -482,11 +485,45 @@ impl Theme {
         &self.key
     }
 
+    /// Where `layout` puts the sources, a channel layout from the brand, with the camera framed
+    /// as the brand frames it beside the screen.
+    pub fn layout(
+        &self,
+        layout: Layout,
+        window: &shot_core::WindowStyle,
+    ) -> Result<LayoutSpec, UnsupportedLayout> {
+        let spec = LayoutSpec::resolve(layout, window, &self.layouts)?;
+        Ok(match self.camera {
+            Some(camera) => spec.with_camera(camera),
+            None => spec,
+        })
+    }
+
+    /// A channel layout's slots as bytes, for the chunks it draws; `None` for a built-in or a
+    /// name the brand does not define, which fails before anything renders.
+    pub fn layout_key(&self, layout: Layout) -> Option<Vec<u8>> {
+        let Layout::Custom(name) = layout else {
+            return None;
+        };
+        let custom = self.layouts.iter().find(|l| l.name == name)?;
+        let mut key = Vec::new();
+        for slot in &custom.slots {
+            key.extend_from_slice(slot.track.as_str().as_bytes());
+            for value in [slot.x, slot.y, slot.width, slot.height, slot.corners] {
+                key.extend_from_slice(&value.to_le_bytes());
+            }
+            key.extend_from_slice(&slot.focus);
+        }
+        Some(key)
+    }
+
     /// The camera's frame as bytes, for the chunks of a layout that shows the camera beside the
     /// screen; `None` where the brand frames no camera or the layout shows none to frame.
     pub fn camera_key(&self, layout: Layout) -> Option<Vec<u8>> {
         let camera = self.camera?;
-        if !matches!(layout, Layout::FaceContent | Layout::Split) {
+        let spec =
+            LayoutSpec::resolve(layout, &shot_core::Effects::default().window, &self.layouts);
+        if !spec.is_ok_and(|s| s.uses(Source::Camera) && s.uses(Source::Screen)) {
             return None;
         }
         let mut key = format!("{:?}{:?}", camera.shape, camera.shadow).into_bytes();
@@ -829,6 +866,26 @@ pub(crate) mod tests {
         Brand::parse(text).unwrap()
     }
 
+    #[test]
+    fn channel_layouts_key_their_slots_and_camera_frame() {
+        let text = "camera shape=circle corners=0 border=8 shadow=soft\nlayout duo {\n    screen x=0 y=0 width=1920 height=2160\n    camera x=1920 y=0 width=1920 height=2160\n}\nlayout solo {\n    camera x=0 y=0 width=3840 height=2160\n}\n";
+        let theme = theme(&brand(text)).unwrap();
+        let name = |n: &str| Layout::Custom(shot_core::LayoutName::new(n).unwrap());
+        let duo = theme.layout_key(name("duo")).unwrap();
+        assert_ne!(Some(duo.clone()), theme.layout_key(name("solo")));
+        assert_eq!(theme.layout_key(Layout::Split), None);
+        assert!(theme.camera_key(name("duo")).is_some(), "the camera sits beside the screen");
+        assert_eq!(theme.camera_key(name("solo")), None);
+        let moved = theme_of(&text.replace("width=1920 height=2160\n    camera", "width=1900 height=2160\n    camera"));
+        assert_ne!(moved.layout_key(name("duo")).unwrap(), duo);
+        assert!(theme.layout(name("solo"), &shot_core::Effects::default().window).is_ok());
+        assert!(theme.layout(name("none"), &shot_core::Effects::default().window).is_err());
+    }
+
+    fn theme_of(text: &str) -> Theme {
+        theme(&brand(text)).unwrap()
+    }
+
     fn theme(brand: &Brand) -> Result<Theme, ThemeError> {
         let inter = include_bytes!("../assets/fonts/Inter.ttf");
         Theme::new(brand, FormatKind::Opinion, None, &|file| {
@@ -1003,8 +1060,9 @@ pub(crate) mod tests {
         let changed: Vec<usize> = (0..plain.len())
             .filter(|&i| plain[i] != framed[i])
             .collect();
-        // The face-content segment's two chunks; the opinion format's face layout around it
-        // fills the canvas and has no frame.
-        assert_eq!(changed, [2, 3]);
+        // The face-content segment's two chunks, and the first half second after it, where
+        // the framed camera morphs back into the face; the opinion format's face layout
+        // around them fills the canvas and has no frame.
+        assert_eq!(changed, [2, 3, 4]);
     }
 }

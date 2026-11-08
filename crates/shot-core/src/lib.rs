@@ -21,8 +21,9 @@ mod values;
 mod video;
 
 pub use brand::{
-    Bookend, Brand, BundledFont, Camera, CameraShape, Colors, Font, Fonts, Import, LottieTemplate,
-    Motion, Phase, Preset, PresetName, Slot, SlotType, SoundEffect, SoundKey, Stinger,
+    Bookend, Brand, BundledFont, Camera, CameraShape, Colors, CustomLayout, Font, Fonts, Import,
+    LayoutSlot, LottieTemplate, Motion, Phase, Preset, PresetName, Slot, SlotType, SoundEffect,
+    SoundKey, Stinger, Track,
 };
 pub use cut::{
     CaptionFix, Chapter, Clip, Cut, DerivedCut, DerivedKind, LayoutChange, Music, Overlay,
@@ -35,8 +36,8 @@ pub use engine::{StyleError, StyleInput, build};
 pub use error::ParseError;
 pub use format::{
     AutoCut, AutoZoom, CaptionStyle, Color, CursorStyle, DeviceFrame, Effects, Format, FormatKind,
-    FormatLayer, Keystrokes, Layout, Pacing, PrompterMode, RuleKind, Shadow, TimedRule,
-    WindowStyle, ZoomMotion, ZoomTrigger,
+    FormatLayer, Keystrokes, Layout, LayoutName, LayoutSwitch, Pacing, PrompterMode, RuleKind,
+    Shadow, SwitchKind, SwitchSound, TimedRule, WindowStyle, ZoomMotion, ZoomTrigger,
 };
 pub use lock::{
     Applied, Asset, ElementRef, Instance, LOCK_VERSION, Lock, LockTake, Orphan, Provenance,
@@ -52,7 +53,8 @@ pub use style::{
     TRANSITION_LENGTH, Target, TransitionKind,
 };
 pub use timeline::{
-    ChapterSegments, ContentHash, MediaId, Output, OutputKind, RENDERER_VERSION, Segment, Timeline,
+    ChapterSegments, ContentHash, MediaId, Output, OutputKind, RENDERER_VERSION, SceneSwitch,
+    Segment, Timeline,
 };
 pub use transcript::{Transcript, Word};
 pub use values::{Id, Micros, TimeRange};

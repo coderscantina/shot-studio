@@ -111,6 +111,7 @@ impl Monitor {
             zooms: &segment.zooms,
             overlays: &segment.overlays,
             time: feed.time,
+            switch: None,
         };
         let sizes = Sources {
             screen: feed.screen_size,

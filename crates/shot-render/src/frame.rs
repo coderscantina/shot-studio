@@ -7,14 +7,18 @@
 //! - **Keystrokes**: the latest key press as a label at the bottom, or the typed run of text.
 //! - **Window**: the window layout's shadow and device frame under the window.
 //! - **Camera**: the brand's frame around the camera beside the screen, see
-//!   [`LayoutSpec::with_camera`].
+//!   [`crate::layout::LayoutSpec::with_camera`].
 //! - **Overlays**: the templates of [`crate::overlay`], in file order, later ones on top.
+//! - **Scene switch**: inside a morph's window the layout is the old one sprung into the new
+//!   ([`crate::layout::LayoutSpec::morph`]), its moving slots motion blurred like a smooth zoom. A dissolve or
+//!   zoom-through draws two shots, see [`crate::paint`].
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use shot_core::{
-    DeviceFrame, Effects, Id, Keystrokes, Layout, Micros, Overlay, Shadow, Zoom, ZoomMotion,
+    DeviceFrame, Effects, Id, Keystrokes, Layout, Micros, Overlay, SceneSwitch, Shadow, SwitchKind,
+    Zoom, ZoomMotion,
 };
 
 use vello::peniko::ImageData;
@@ -22,10 +26,9 @@ use vello::peniko::ImageData;
 use crate::code_diff::CodeDiff;
 use crate::drawing::{Drawing, Rgba, Shape};
 use crate::events::{EventLog, KeyPress, Modifier};
-use crate::layout::{
-    Canvas, Layer, LayoutSpec, Rect, Scene, Source, Sources, UnsupportedLayout, bezel,
-};
+use crate::layout::{Canvas, Layer, Rect, Scene, Source, Sources, UnsupportedLayout, bezel};
 use crate::materials;
+use crate::motion::Spring;
 use crate::overlay::{self, Cutaway, Stage};
 use crate::theme::Theme;
 use crate::zoom::punch_at;
@@ -63,6 +66,48 @@ pub struct Shot<'a> {
     pub overlays: &'a [Overlay],
     /// Media time of the take.
     pub time: Micros,
+    /// The layout switch into `layout` whose window may hold `time`. Only a morph draws here.
+    pub switch: Option<&'a SceneSwitch>,
+}
+
+impl Shot<'_> {
+    /// The morph `time` is inside, if any.
+    fn morph(&self) -> Option<&SceneSwitch> {
+        self.switch.filter(|s| {
+            s.switch.kind == SwitchKind::Morph
+                && s.window.from() <= self.time
+                && self.time < s.window.to()
+        })
+    }
+}
+
+/// How far a morph is at `t`: a spring that settles at the window's end, with a hint of
+/// overshoot.
+pub fn morph_at(switch: &SceneSwitch, t: Micros) -> f32 {
+    let spring = Spring::new(1.0, 0.82).settling_in(switch.window.duration());
+    spring.value(t.0.saturating_sub(switch.window.from().0) as f32 / 1e6)
+}
+
+/// The canvas motion of `close` against `open` as the crop motion of `drawn`'s frame that shows
+/// the same: content that moves with its frame blurs like content panning inside it.
+fn shutter_of(drawn: &Layer, open: &Layer, close: &Layer) -> Rect {
+    let at = |layer: &Layer| {
+        let u = |x: f32| {
+            layer.crop.left + (x - layer.frame.left) / layer.frame.width() * layer.crop.width()
+        };
+        let v = |y: f32| {
+            layer.crop.top + (y - layer.frame.top) / layer.frame.height() * layer.crop.height()
+        };
+        let f = drawn.frame;
+        Rect::new(u(f.left), v(f.top), u(f.right), v(f.bottom))
+    };
+    let (a, b) = (at(open), at(close));
+    Rect::new(
+        b.left - a.left,
+        b.top - a.top,
+        b.right - a.right,
+        b.bottom - a.bottom,
+    )
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -82,28 +127,35 @@ pub fn compose(
     sizes: Sources<(u32, u32)>,
 ) -> Result<Frame, UnsupportedLayout> {
     let effects = &look.effects;
-    let mut spec = LayoutSpec::styled(shot.layout, &effects.window)?;
-    if let Some(camera) = look.theme.camera {
-        spec = spec.with_camera(camera);
-    }
+    let spec = look.theme.layout(shot.layout, &effects.window)?;
+    let morph = match shot.morph() {
+        Some(switch) => Some((switch, look.theme.layout(switch.from, &effects.window)?)),
+        None => None,
+    };
+    let spec_at = |t| match &morph {
+        Some((switch, from)) => from.morph(&spec, morph_at(switch, t)),
+        None => spec.clone(),
+    };
     let scene_at = |t| {
         let punch = punch_at(shot.zooms, t, effects.zoom_motion, sizes.screen);
-        spec.scene(canvas, sizes, punch)
+        spec_at(t).scene(canvas, sizes, punch)
     };
+    let spec = spec_at(shot.time);
     let mut scene = scene_at(shot.time);
-    if effects.zoom_motion == ZoomMotion::Smooth && !shot.zooms.is_empty() {
+    let zooms_move = effects.zoom_motion == ZoomMotion::Smooth && !shot.zooms.is_empty();
+    if zooms_move || morph.is_some() {
         let [open, close] = materials::shutter(shot.time).map(scene_at);
-        for (layer, (a, b)) in scene
-            .layers
-            .iter_mut()
-            .zip(open.layers.iter().zip(&close.layers))
-        {
-            layer.shutter = Rect::new(
-                b.crop.left - a.crop.left,
-                b.crop.top - a.crop.top,
-                b.crop.right - a.crop.right,
-                b.crop.bottom - a.crop.bottom,
-            );
+        for layer in &mut scene.layers {
+            let find = |scene: &Scene| {
+                scene
+                    .layers
+                    .iter()
+                    .find(|l| l.source == layer.source)
+                    .copied()
+            };
+            if let (Some(a), Some(b)) = (find(&open), find(&close)) {
+                layer.shutter = shutter_of(layer, &a, &b);
+            }
         }
     }
     let s = canvas.width as f32 / 3840.0;
@@ -424,6 +476,7 @@ mod tests {
             zooms: &zooms,
             overlays: &[],
             time: Micros(500_000),
+            switch: None,
         };
         let plain = compose(&shot, &look(events, Effects::default()), Canvas::UHD, SIZES).unwrap();
         // Zoomed 2x on (1000, 500): centered across, the top edge clamps it down. The cursor
@@ -465,6 +518,7 @@ mod tests {
                 zooms: &[],
                 overlays: &[],
                 time: Micros(t),
+                switch: None,
             };
             let frame = compose(&shot, &look(events, effects), Canvas::UHD, SIZES).unwrap();
             format!("{:?}", frame.drawing).matches("Ring").count()

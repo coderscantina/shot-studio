@@ -4,8 +4,8 @@
 use std::fmt;
 
 use crate::{
-    Chapter, Cut, Id, Layout, LayoutChange, Micros, Music, RangeEdit, RemovedBy, Review, TakeEdit,
-    TimeRange, Transcript, Word, Zoom,
+    Chapter, Cut, Id, Layout, LayoutChange, LayoutSwitch, Micros, Music, RangeEdit, RemovedBy,
+    Review, TakeEdit, TimeRange, Transcript, Word, Zoom,
 };
 
 /// One take block of the main cut: the chapter and the take's position in that chapter. A take
@@ -28,6 +28,8 @@ pub enum EditError {
     NotInReview(TimeRange),
     /// No zoom or overlay at this index in the addressed take block.
     UnknownPlaced(TakeAt, Placed),
+    /// No `layout` range starts or ends at this media time in the addressed take block.
+    NoLayoutEdge(Micros),
 }
 
 /// A zoom or an overlay of a take block, by its index in the block's list.
@@ -56,6 +58,9 @@ impl fmt::Display for EditError {
                 range.from().0,
                 range.to().0
             ),
+            Self::NoLayoutEdge(t) => {
+                write!(f, "no layout change starts or ends at {} microseconds", t.0)
+            }
             Self::UnknownPlaced(at, placed) => {
                 let (what, index) = match placed {
                     Placed::Zoom(index) => ("zoom", index),
@@ -222,7 +227,8 @@ impl Cut {
     }
 
     /// Sets the layout over `range`, replacing and splitting the changes it overlaps and
-    /// merging it with equal neighbours.
+    /// merging it with equal neighbours. A switch written on an edge `range` shares with a
+    /// change it replaces stays on that edge.
     pub fn set_layout(
         &self,
         at: TakeAt,
@@ -231,12 +237,42 @@ impl Cut {
     ) -> Result<Cut, EditError> {
         self.take(at)?;
         Ok(self.with_take(at, |edit| {
+            let mut change = LayoutChange::new(layout, range);
+            for old in &edit.layouts {
+                if old.range.from() == range.from() {
+                    change.enter.clone_from(&old.enter);
+                }
+                if old.range.to() == range.to() {
+                    change.exit.clone_from(&old.exit);
+                }
+            }
             clear_layouts(&mut edit.layouts, range);
             let index = edit
                 .layouts
                 .partition_point(|c| c.range.to() <= range.from());
-            edit.layouts.insert(index, LayoutChange { layout, range });
+            edit.layouts.insert(index, change);
             merge_layouts(&mut edit.layouts);
+        }))
+    }
+
+    /// Writes how the layout switch at `edge` of the block at `at` moves, or with `None` gives
+    /// it back to the format's `layout-switch`. The switch belongs to the change starting at
+    /// `edge` (its `in`), else to the one ending there (its `out`).
+    pub fn set_switch(
+        &self,
+        at: TakeAt,
+        edge: Micros,
+        switch: Option<LayoutSwitch>,
+    ) -> Result<Cut, EditError> {
+        let layouts = &self.take(at)?.layouts;
+        let starts = layouts.iter().position(|c| c.range.from() == edge);
+        let ends = layouts.iter().position(|c| c.range.to() == edge);
+        if starts.is_none() && ends.is_none() {
+            return Err(EditError::NoLayoutEdge(edge));
+        }
+        Ok(self.with_take(at, |edit| match starts {
+            Some(i) => edit.layouts[i].enter = switch,
+            None => edit.layouts[ends.expect("checked above")].exit = switch,
         }))
     }
 
@@ -445,12 +481,20 @@ fn clear_layouts(layouts: &mut Vec<LayoutChange>, range: TimeRange) {
             out.push(change);
             continue;
         }
-        let before = TimeRange::new(change.range.from(), range.from());
-        let after = TimeRange::new(range.to(), change.range.to());
-        out.extend(before.into_iter().chain(after).map(|r| LayoutChange {
-            layout: change.layout,
-            range: r,
-        }));
+        if let Some(before) = TimeRange::new(change.range.from(), range.from()) {
+            out.push(LayoutChange {
+                range: before,
+                exit: None,
+                ..change.clone()
+            });
+        }
+        if let Some(after) = TimeRange::new(range.to(), change.range.to()) {
+            out.push(LayoutChange {
+                range: after,
+                enter: None,
+                ..change
+            });
+        }
     }
     *layouts = out;
 }
@@ -464,6 +508,7 @@ fn merge_layouts(layouts: &mut Vec<LayoutChange>) {
             {
                 last.range = TimeRange::new(last.range.from(), change.range.to())
                     .expect("adjacent ranges join into a non-empty range");
+                last.exit = change.exit;
             }
             _ => out.push(change),
         }
@@ -745,6 +790,46 @@ mod tests {
         assert_eq!(layouts(&d), [(Layout::Split, 10, 70)]);
         let e = d.set_layout(AT, range(0, 80), Layout::Content).unwrap();
         assert_eq!(layouts(&e), [(Layout::Content, 0, 80)]);
+    }
+
+    #[test]
+    fn a_switch_stays_on_its_edge_through_layout_edits() {
+        let dissolve = Some(LayoutSwitch {
+            kind: crate::SwitchKind::Dissolve,
+            ..LayoutSwitch::DEFAULT
+        });
+        let switches = |c: &Cut| -> Vec<(bool, bool)> {
+            c.chapters[0].takes[0]
+                .layouts
+                .iter()
+                .map(|l| (l.enter.is_some(), l.exit.is_some()))
+                .collect()
+        };
+        let split = cut(vec![keep(0, 100)])
+            .set_layout(AT, range(10, 50), Layout::Split)
+            .unwrap();
+        let both = split
+            .set_switch(AT, Micros(10), dissolve.clone())
+            .and_then(|c| c.set_switch(AT, Micros(50), dissolve.clone()))
+            .unwrap();
+        assert_eq!(switches(&both), [(true, true)]);
+        assert_eq!(
+            both.set_switch(AT, Micros(30), None),
+            Err(EditError::NoLayoutEdge(Micros(30)))
+        );
+        // A change in the middle leaves the outer edges their switches, and joins back.
+        let middle = both.set_layout(AT, range(20, 30), Layout::Face).unwrap();
+        assert_eq!(
+            switches(&middle),
+            [(true, false), (false, false), (false, true)]
+        );
+        let joined = middle.set_layout(AT, range(20, 30), Layout::Split).unwrap();
+        assert_eq!(joined, both);
+        // Another layout over the same range keeps the switches on its edges.
+        let content = both.set_layout(AT, range(10, 50), Layout::Content).unwrap();
+        assert_eq!(switches(&content), [(true, true)]);
+        let back = both.set_switch(AT, Micros(10), None).unwrap();
+        assert_eq!(switches(&back), [(false, true)]);
     }
 
     #[test]

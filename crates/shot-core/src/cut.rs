@@ -4,8 +4,8 @@ use kdl::KdlValue;
 
 use crate::kdl_io::{Bare, FromKdl, Node, Source, ToKdl, Writer, keyword_enum};
 use crate::{
-    CaptionStyle, Decision, Effect, EffectKey, ElementKind, Id, Layout, Micros, ParseError,
-    RuleKind, Target, TimeRange,
+    CaptionStyle, Decision, Effect, EffectKey, ElementKind, Id, Layout, LayoutSwitch, Micros,
+    ParseError, RuleKind, Target, TimeRange,
 };
 
 /// `cut.kdl`: the edit. Everything is addressed by take id and the take's media time.
@@ -165,10 +165,29 @@ pub enum RemovedBy {
     Manual,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// A layout over a range of a take, with how the switches on its edges move when they differ
+/// from the format's `layout-switch`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct LayoutChange {
     pub layout: Layout,
     pub range: TimeRange,
+    /// The switch into this layout at `from`, written as `in`.
+    pub enter: Option<LayoutSwitch>,
+    /// The switch out of it at `to`, written as `out`. A change starting at `to` has its own
+    /// `in`, which wins.
+    pub exit: Option<LayoutSwitch>,
+}
+
+impl LayoutChange {
+    /// A change with the format's switches on both edges.
+    pub fn new(layout: Layout, range: TimeRange) -> Self {
+        Self {
+            layout,
+            range,
+            enter: None,
+            exit: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -411,13 +430,19 @@ impl TakeEdit {
                     });
                 }
                 "layout" => {
-                    child.expect(1, &["from", "to"])?;
+                    child.expect_block(1, &["from", "to"])?;
                     let range = TimeRange::read(child)?;
                     layouts.push((range, child));
-                    edit.layouts.push(LayoutChange {
-                        layout: child.arg(0)?,
-                        range,
-                    });
+                    let mut change = LayoutChange::new(child.arg(0)?, range);
+                    for edge in child.children() {
+                        let slot = match edge.name() {
+                            "in" => &mut change.enter,
+                            "out" => &mut change.exit,
+                            _ => return Err(edge.unknown()),
+                        };
+                        edge.set_once(slot, LayoutSwitch::read(edge)?)?;
+                    }
+                    edit.layouts.push(change);
                 }
                 name @ ("review" | "ignore") => {
                     child.expect(0, &["from", "to", "by"])?;
@@ -496,7 +521,18 @@ impl TakeEdit {
                 .end();
         }
         for change in &self.layouts {
-            write_range(w.node("layout").arg(&change.layout), change.range).end();
+            write_range(w.node("layout").arg(&change.layout), change.range);
+            if change.enter.is_none() && change.exit.is_none() {
+                w.end();
+                continue;
+            }
+            w.open();
+            for (name, switch) in [("in", &change.enter), ("out", &change.exit)] {
+                if let Some(switch) = switch {
+                    switch.write(w.node(name));
+                }
+            }
+            w.close();
         }
         for zoom in &self.zooms {
             write_range(w.node("zoom").arg(&zoom.scale), zoom.range);
