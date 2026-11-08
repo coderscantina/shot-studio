@@ -121,6 +121,7 @@ pub fn segmented(id: &'static str, well: impl Into<Hsla>, segments: Vec<Segment>
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(color)
                 .cursor_pointer()
+                .map(keyboard_reachable)
                 .when(on, |this| this.bg(FLOAT).shadow_sm())
                 .when(!on, |this| this.hover(|s| s.text_color(TEXT)))
                 .when_some(segment.icon, |this, name| {
@@ -168,6 +169,31 @@ pub fn alert(message: impl Into<SharedString>) -> Div {
         .child(div().flex_1().min_w_0().child(message.into()))
 }
 
+/// Makes a clickable element a tab stop that Enter or Space clicks, with the accent ring while
+/// the keyboard focuses it. A mouse click leaves focus where it was, so the screen's keys keep
+/// working, and Tab or Shift-Tab moves on to the next stop.
+pub fn keyboard_reachable(element: Stateful<Div>) -> Stateful<Div> {
+    element
+        .tab_index(0)
+        .border_1()
+        .border_color(gpui::transparent_black())
+        .focus_visible(|s| s.border_color(ACCENT))
+        .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+            window.prevent_default()
+        })
+        .on_key_down(|event, window, cx| {
+            let stroke = &event.keystroke;
+            if stroke.key == "tab" && !stroke.modifiers.control && !stroke.modifiers.platform {
+                if stroke.modifiers.shift {
+                    window.focus_prev(cx);
+                } else {
+                    window.focus_next(cx);
+                }
+                cx.stop_propagation();
+            }
+        })
+}
+
 /// What a proposal action looks like: Accept in lime, Reject with its key, the rest quiet.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ActionLook {
@@ -202,6 +228,7 @@ pub fn proposal_action(
         .text_size(px(14.))
         .text_color(color)
         .cursor_pointer()
+        .map(keyboard_reachable)
         .when(accent, |this| this.bg(ACCENT))
         .when(look == ActionLook::Plain, |this| {
             this.bg(RAISED).hover(|s| s.bg(FLOAT))

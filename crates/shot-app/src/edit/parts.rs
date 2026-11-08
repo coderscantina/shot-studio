@@ -65,6 +65,16 @@ pub fn transport(this: &EditScreen, total: bool, cx: &mut Context<EditScreen>) -
                     row.child(mono(format!("/ {}", timecode(this.map.frames))).text_color(MUTED))
                 }),
         )
+        .children(this.saved.map(|_| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(5.))
+                .text_size(TEXT_SM)
+                .text_color(MUTED)
+                .child(ui::icon("check", ICON_SM, MUTED))
+                .child("Saved")
+        }))
         .child(div().flex_1())
         .child(segmented(
             "view",

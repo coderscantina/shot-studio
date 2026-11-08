@@ -499,10 +499,13 @@ fn overlay_row(
             .text_size(TEXT_XS)
             .child(div().w(px(84.)).text_color(MUTED).child(name.to_string()))
             .child(
-                mono(shown)
+                div()
+                    // Geist Mono is for file names; labels and values stay in Geist.
+                    .when(name.as_str() == "file", |value| value.font_family(MONO))
                     .text_color(BODY)
                     .overflow_hidden()
-                    .whitespace_nowrap(),
+                    .whitespace_nowrap()
+                    .child(shown),
             );
         if let (ParamValue::Bool(on), true) = (value, yours) {
             let name = name.clone();
@@ -610,7 +613,7 @@ fn overlay_row(
                 .text_size(TEXT_XS)
                 .text_color(MUTED)
                 .child(match made {
-                    Made::Yours => "Yours, in cut.kdl".to_owned(),
+                    Made::Yours => "Added by you".to_owned(),
                     Made::Lock(provenance) => provenance.clone(),
                 }),
         )

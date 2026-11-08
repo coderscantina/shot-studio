@@ -127,8 +127,7 @@ impl EditScreen {
             cx.notify();
             Ok::<_, String>(())
         });
-        self.error = result.err();
-        cx.notify();
+        self.wrote(result, cx);
     }
 }
 

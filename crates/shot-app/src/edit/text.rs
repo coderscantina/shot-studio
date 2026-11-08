@@ -2,14 +2,15 @@
 //! inspector, and the overview bar. The outline and the preview column resize by their edges.
 
 use gpui::{
-    AnyElement, Context, Div, Entity, FontWeight, Hsla, MouseButton, MouseDownEvent,
+    AnyElement, App, Context, Div, Entity, FontWeight, Hsla, MouseButton, MouseDownEvent,
     MouseMoveEvent, Stateful, Window, div, prelude::*, px,
 };
-use shot_core::{TakeAt, WordState};
+use shot_core::{Placed, TakeAt, TimeRange, WordState, Zoom};
 
 use super::EditScreen;
 use super::parts::{self, layout_name, row};
 use super::proposals::{self, Card};
+use super::timeline::{Pick, zoom_scales};
 use crate::layout_store;
 use crate::model::{BlockDoc, CutRun, Item, LAYOUT_KEYS, Paragraph, seconds, timecode};
 use crate::theme::*;
@@ -90,6 +91,7 @@ fn outline(
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.chapter = index;
                     this.selection = None;
+                    this.lanes.picked = None;
                     if let Some(start) = start {
                         this.seek(start);
                     }
@@ -213,12 +215,15 @@ fn document(this: &mut EditScreen, follow: &Entity<bool>, cx: &mut Context<EditS
         .iter()
         .filter(|b| b.at.chapter == this.chapter)
         .collect();
+    let columns = Columns::for_width(f32::from(this.document_bounds.get().size.width));
+    let doc_row = |rail: Div, content: AnyElement| doc_row(columns, rail, content);
+    let rail = |start, layout| rail(columns, start, layout);
     let mut rows: Vec<Div> = Vec::new();
     let mut scroll_to = None;
     let following = *follow.read(cx);
     let playing_in = current_paragraph(this);
     if let Some(note) = proposals::agent_note(this) {
-        rows.push(doc_row(rail(None, None), note));
+        rows.push(doc_row(rail(None, None), note.into_any_element()));
     }
     for block in blocks {
         if !block.transcribed {
@@ -227,7 +232,7 @@ fn document(this: &mut EditScreen, follow: &Entity<bool>, cx: &mut Context<EditS
                 div().text_color(MUTED).child(format!(
                     "Take {} has no transcript yet. Run shot transcribe --video <folder> --take {} to make one.",
                     block.take, block.take
-                )),
+                )).into_any_element(),
             ));
             continue;
         }
@@ -248,7 +253,7 @@ fn document(this: &mut EditScreen, follow: &Entity<bool>, cx: &mut Context<EditS
                     }
                     rows.push(doc_row(
                         rail(paragraph.start, Some(layout_name(paragraph.layout))),
-                        proposals::card_element(this, card, false, cx),
+                        proposals::card_element(this, card, false, cx).into_any_element(),
                     ));
                 }
                 index = end;
@@ -266,7 +271,7 @@ fn document(this: &mut EditScreen, follow: &Entity<bool>, cx: &mut Context<EditS
             rows.push(doc_row(
                 rail(paragraph.start, Some(layout_name(paragraph.layout)))
                     .when(current, |rail| rail.text_color(MUTED)),
-                paragraph_element(this, block, paragraph, cx),
+                paragraph_element(this, block, paragraph, cx).into_any_element(),
             ));
             index += 1;
         }
@@ -279,15 +284,21 @@ fn document(this: &mut EditScreen, follow: &Entity<bool>, cx: &mut Context<EditS
         follow.update(cx, |follow, _| *follow = false);
     }
     ui::pane()
+        .relative()
         .flex_1()
         .flex()
         .flex_col()
+        .child(
+            ui::measure(this.document_bounds.clone())
+                .absolute()
+                .size_full(),
+        )
         .child(
             div()
                 .flex()
                 .items_center()
                 .gap(px(14.))
-                .px(px(28.))
+                .px(px(columns.pad))
                 .pt(px(18.))
                 .child(
                     div()
@@ -304,7 +315,7 @@ fn document(this: &mut EditScreen, follow: &Entity<bool>, cx: &mut Context<EditS
                 .min_h_0()
                 .overflow_y_scroll()
                 .track_scroll(&this.scroll)
-                .px(px(28.))
+                .px(px(columns.pad))
                 .py(px(26.))
                 .flex()
                 .flex_col()
@@ -313,31 +324,77 @@ fn document(this: &mut EditScreen, follow: &Entity<bool>, cx: &mut Context<EditS
         )
 }
 
+/// The transcript's widest reading column.
+const READING: f32 = 680.;
+
+/// The rail, gap and side padding of the transcript for the document pane's width. They
+/// narrow before the reading column does; below [`STACK_BELOW`] the rail moves above each
+/// paragraph, so lines stay long down to the 1280x800 minimum.
+#[derive(Clone, Copy)]
+struct Columns {
+    /// The rail's width, 0 when it sits above the paragraph.
+    rail: f32,
+    gap: f32,
+    pad: f32,
+}
+
+/// The document pane's width below which the rail sits above each paragraph.
+const STACK_BELOW: f32 = 560.;
+
+impl Columns {
+    fn for_width(width: f32) -> Self {
+        let (rail, gap, pad) = if width >= 900. {
+            (132., 24., 28.)
+        } else if width >= 680. {
+            (96., 18., 22.)
+        } else if width >= STACK_BELOW {
+            (76., 14., 16.)
+        } else {
+            (0., 4., 18.)
+        };
+        Self { rail, gap, pad }
+    }
+
+    fn stacked(self) -> bool {
+        self.rail == 0.
+    }
+}
+
 /// A row of the transcript: the rail and its content, centered at the document's width.
-fn doc_row(rail: Div, content: impl IntoElement) -> Div {
+fn doc_row(columns: Columns, rail: Div, content: AnyElement) -> Div {
     div()
         .mx_auto()
         .w_full()
-        .max_w(px(132. + 24. + 680.))
+        .max_w(px(columns.rail + columns.gap + READING))
         .flex()
+        .when(columns.stacked(), |row| row.flex_col())
         .flex_none()
-        .gap(px(24.))
+        .gap(px(columns.gap))
         .child(rail)
-        .child(div().flex_1().min_w_0().max_w(px(680.)).child(content))
+        .child(div().flex_1().min_w_0().max_w(px(READING)).child(content))
 }
 
-/// The paragraph's timecode and layout, right-aligned beside it.
-fn rail(start: Option<u64>, layout: Option<&'static str>) -> Div {
-    div()
-        .w(px(132.))
-        .pt(px(6.))
+/// The paragraph's timecode and layout, right-aligned beside it or in a line above it.
+fn rail(columns: Columns, start: Option<u64>, layout: Option<&'static str>) -> Div {
+    let rail = div()
         .flex()
+        .flex_none()
+        .text_size(TEXT_SM)
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(FAINT);
+    if columns.stacked() {
+        return rail
+            .items_baseline()
+            .gap(px(8.))
+            .children(start.map(|s| mono(timecode(s)).text_color(MUTED)))
+            .children(layout);
+    }
+    rail.w(px(columns.rail))
+        .text_right()
+        .pt(px(6.))
         .flex_col()
         .items_end()
         .gap(px(4.))
-        .text_size(TEXT_SM)
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(FAINT)
         .children(start.map(|s| mono(timecode(s)).text_color(MUTED)))
         .children(layout)
 }
@@ -350,13 +407,14 @@ fn paragraph_element(
 ) -> Div {
     let at = block.at;
     let selection = this.selection.filter(|s| s.at == at).map(|s| s.words());
+    let zooms = block_zooms(this, at, cx);
     let mut children: Vec<gpui::AnyElement> = Vec::new();
     let mut ends_selection = false;
     for item in &paragraph.items {
         match item {
             Item::Word(i) => {
                 ends_selection |= selection.as_ref().is_some_and(|s| *s.end() == *i);
-                children.push(word(this, block, *i, cx).into_any_element());
+                children.push(word(this, block, *i, &zooms, cx).into_any_element());
             }
             Item::Cut(run) => {
                 let open = this
@@ -366,7 +424,7 @@ fn paragraph_element(
                 if open {
                     for i in run.words.clone() {
                         ends_selection |= selection.as_ref().is_some_and(|s| *s.end() == i);
-                        children.push(word(this, block, i, cx).into_any_element());
+                        children.push(word(this, block, i, &zooms, cx).into_any_element());
                     }
                 }
             }
@@ -391,14 +449,50 @@ fn paragraph_element(
         })
 }
 
+/// The zooms on show in the block at `at`, each with whether it is the picked one.
+fn block_zooms(this: &EditScreen, at: TakeAt, cx: &App) -> Vec<(TimeRange, bool)> {
+    let folder = this.folder.read(cx);
+    let picked = match this.lanes.picked {
+        Some(Pick::Placed(p, Placed::Zoom(index))) if p == at => folder
+            .project
+            .cut
+            .chapters
+            .get(at.chapter)
+            .and_then(|c| c.takes.get(at.take))
+            .and_then(|b| b.zooms.get(index))
+            .map(|z| z.range),
+        _ => None,
+    };
+    folder
+        .shown
+        .cut
+        .chapters
+        .get(at.chapter)
+        .and_then(|c| c.takes.get(at.take))
+        .map(|b| {
+            b.zooms
+                .iter()
+                .map(|z| (z.range, picked == Some(z.range)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn word(
     this: &EditScreen,
     block: &BlockDoc,
     index: usize,
+    zooms: &[(TimeRange, bool)],
     cx: &mut Context<EditScreen>,
 ) -> impl IntoElement {
     let at = block.at;
     let word = &block.words[index];
+    // A word is zoomed when its middle is inside a zoom; the picked zoom is tinted stronger.
+    let middle = shot_core::Micros((word.range.from().0 + word.range.to().0) / 2);
+    let zoom = zooms
+        .iter()
+        .find(|(range, _)| range.from() <= middle && middle < range.to())
+        .map(|(_, picked)| *picked);
     let selected = this
         .selection
         .is_some_and(|s| s.at == at && s.words().contains(&index));
@@ -413,6 +507,13 @@ fn word(
         .pr(px(5.))
         .cursor_text()
         .rounded(px(3.))
+        .when_some(zoom.filter(|_| !removed), |w, picked| {
+            w.bg(if picked {
+                Hsla::from(ZOOM_TINT)
+            } else {
+                Hsla::from(ZOOM).opacity(0.14)
+            })
+        })
         .when(removed, |w| {
             w.text_color(gpui::rgb(0xb98b87))
                 .line_through()
@@ -425,7 +526,9 @@ fn word(
                 .text_decoration_2()
                 .text_decoration_color(ACCENT)
         })
-        .when(selected, |w| w.bg(SELECTION).text_color(STRONG))
+        .when(selected, |w| {
+            w.bg(super::word_selection()).text_color(STRONG)
+        })
         .child(word.text.clone())
         .on_mouse_down(
             MouseButton::Left,
@@ -507,8 +610,11 @@ fn selection_toolbar(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl In
         .items_start()
         .gap(px(8.))
         .child(
+            // Wraps inside the paragraph's column when the pane is too narrow for one row.
             div()
+                .max_w_full()
                 .flex()
+                .flex_wrap()
                 .items_center()
                 .gap(px(2.))
                 .p(px(4.))
@@ -518,8 +624,10 @@ fn selection_toolbar(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl In
                 .text_size(TEXT_SM)
                 .child(
                     div()
+                        .flex_none()
                         .px(px(10.))
                         .pl(px(8.))
+                        .whitespace_nowrap()
                         .child(format!("{count} {words}, {}", seconds(range.duration()))),
                 )
                 .when(kept, |bar| {
@@ -566,6 +674,7 @@ fn selection_toolbar(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl In
                 .child(
                     div()
                         .flex()
+                        .flex_none()
                         .items_center()
                         .gap(px(2.))
                         .h(px(28.))
@@ -594,13 +703,18 @@ fn selection_toolbar(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl In
                 ),
         )
         .when(sound_open, |bar| {
-            bar.child(super::place::sound_picker(this, cx).max_w(px(560.)))
+            bar.child(
+                super::place::sound_picker(this, cx)
+                    .w_full()
+                    .max_w(px(560.)),
+            )
         })
 }
 
 fn tool(name: &'static str, text: &'static str, keys: &'static str) -> Div {
     div()
         .flex()
+        .flex_none()
         .items_center()
         .gap(px(8.))
         .h(px(28.))
@@ -642,6 +756,8 @@ fn inspector(this: &EditScreen, cx: &mut Context<EditScreen>) -> Stateful<Div> {
                 block.words[*s.words().start()].output,
             ))
         });
+    let zoom = inspected_zoom(this, cx);
+    let picked_zoom = matches!(this.lanes.picked, Some(Pick::Placed(_, Placed::Zoom(_))));
     ui::pane()
         .id("inspector")
         .flex_1()
@@ -652,6 +768,7 @@ fn inspector(this: &EditScreen, cx: &mut Context<EditScreen>) -> Stateful<Div> {
         .py(px(16.))
         .overflow_y_scroll()
         .map(|pane| match &selection {
+            _ if picked_zoom => pane.children(zoom.map(|zoom| zoom_section(this, zoom, true, cx))),
             Some((text, count, range, start)) => pane
                 .child(
                     div()
@@ -678,7 +795,8 @@ fn inspector(this: &EditScreen, cx: &mut Context<EditScreen>) -> Stateful<Div> {
                 .child(row(
                     "Length",
                     div().text_color(TEXT).child(seconds(range.duration())),
-                )),
+                ))
+                .children(zoom.map(|zoom| zoom_section(this, zoom, false, cx))),
             None => pane.child(chapter_summary(this)).child(
                 div()
                     .flex()
@@ -735,6 +853,83 @@ fn inspector(this: &EditScreen, cx: &mut Context<EditScreen>) -> Stateful<Div> {
                     }),
                 )),
         )
+}
+
+/// The zoom the inspector shows: the picked one, else a person's zoom the selection overlaps.
+fn inspected_zoom(this: &EditScreen, cx: &App) -> Option<(TakeAt, usize, Zoom)> {
+    let cut = &this.folder.read(cx).project.cut;
+    let block = |at: TakeAt| cut.chapters.get(at.chapter)?.takes.get(at.take);
+    if let Some(Pick::Placed(at, Placed::Zoom(index))) = this.lanes.picked {
+        return block(at)?.zooms.get(index).map(|z| (at, index, *z));
+    }
+    let (at, range, ..) = this.selected()?;
+    block(at)?
+        .zooms
+        .iter()
+        .enumerate()
+        .find(|(_, z)| z.range.overlaps(range))
+        .map(|(index, z)| (at, index, *z))
+}
+
+/// A zoom's scale, where it starts and Remove, with the same choices as the Timeline's
+/// toolbar. `picked` when it is the inspector's subject rather than under a selection.
+fn zoom_section(
+    this: &EditScreen,
+    (at, index, zoom): (TakeAt, usize, Zoom),
+    picked: bool,
+    cx: &mut Context<EditScreen>,
+) -> Div {
+    let start = this.map.output_range(at, zoom.range).map(|f| f.start);
+    let title = div()
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .child(icon("zoom", ICON_SM, ZOOM))
+        .child(div().font_weight(FontWeight::SEMIBOLD).child(if picked {
+            "Zoom"
+        } else {
+            "In a zoom"
+        }))
+        .child(div().flex_1())
+        .child(label(format!("{}%", zoom.scale)));
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(10.))
+        .when(!picked, |section| section.pt(px(6.)))
+        .child(title)
+        .child(
+            div()
+                .flex()
+                .flex_wrap()
+                .gap(px(4.))
+                .children(zoom_scales(at, index, zoom.scale, cx)),
+        )
+        .when(picked, |section| {
+            section
+                .child(row(
+                    "Starts at",
+                    mono(start.map_or("removed".into(), timecode)).text_color(TEXT),
+                ))
+                .child(row(
+                    "Length",
+                    div().text_color(TEXT).child(seconds(zoom.range.duration())),
+                ))
+        })
+        .child(
+            div().flex().items_center().gap(px(10.)).child(
+                tool("close", "Remove", "⌫")
+                    .id("text-zoom-remove")
+                    .bg(RAISED)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(FLOAT))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.lanes.picked = Some(Pick::Placed(at, Placed::Zoom(index)));
+                        this.remove_picked(cx);
+                    })),
+            ),
+        )
+        .child(label("Move or trim it by its edges in the Timeline"))
 }
 
 /// Words of a long selection the inspector quotes.
