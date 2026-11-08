@@ -419,6 +419,12 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_connection_reads_as_offline() {
+        let refused = Client::new().fetch("https://127.0.0.1:9/", 1 << 10, |_, _| true);
+        assert!(matches!(refused, Err(Error::Offline)), "{refused:?}");
+    }
+
+    #[test]
     #[ignore = "searches Openverse online"]
     fn a_live_search_returns_usable_sounds_and_images() {
         let client = Client::new();

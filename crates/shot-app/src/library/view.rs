@@ -300,9 +300,13 @@ impl LibraryWindow {
                     }
                 },
             ),
-            (Some(_), Online::Searching | Online::Idle) => {
-                ui::empty_state("search", "Searching Openverse", quoted)
-            }
+            (Some(_), Online::Searching | Online::Idle) => ui::empty_state(
+                "search",
+                "Searching Openverse",
+                format!(
+                    "{quoted}. A search nobody asked for lately can take Openverse half a minute."
+                ),
+            ),
             (Some(_), Online::Failed { offline: true, .. }) => ui::empty_state(
                 "offline",
                 "You're offline",
@@ -464,28 +468,32 @@ impl LibraryWindow {
                             ),
                     )
                     .child(
-                        div()
-                            .flex_shrink(1.)
-                            .min_w_0()
-                            .max_w(px(200.))
-                            .overflow_hidden()
-                            .flex()
-                            .gap(px(4.))
-                            .children(item.tags().into_iter().take(2).map(chip)),
+                        div().w(px(130.)).flex_none().flex().justify_end().children(
+                            item.tags()
+                                .into_iter()
+                                .next()
+                                .map(|tag| chip(tag).max_w(px(130.)).truncate()),
+                        ),
                     )
-                    .when_some(item.duration(), |this, d| {
-                        this.child(
-                            mono(seconds(d))
-                                .w(px(52.))
-                                .text_right()
-                                .text_size(TEXT_XS)
-                                .text_color(MUTED),
-                        )
-                    })
-                    .child(chip(item.license()).bg(RAISED).text_color(BODY))
+                    .child(
+                        mono(item.duration().map(seconds).unwrap_or_default())
+                            .w(px(56.))
+                            .flex_none()
+                            .text_right()
+                            .text_size(TEXT_XS)
+                            .text_color(MUTED),
+                    )
                     .child(
                         div()
-                            .w(px(92.))
+                            .w(px(84.))
+                            .flex_none()
+                            .flex()
+                            .child(chip(item.license()).bg(RAISED).text_color(BODY)),
+                    )
+                    .child(
+                        div()
+                            .w(px(88.))
+                            .flex_none()
                             .truncate()
                             .text_size(TEXT_XS)
                             .text_color(MUTED)
