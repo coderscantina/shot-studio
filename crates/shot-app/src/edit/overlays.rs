@@ -1,6 +1,6 @@
 //! Overlays and derived cuts in the Timeline workspace: the Overlays and Highlight lanes, and a
-//! pane listing the overlays around the playhead with their template parameters, the overlay
-//! rules, and the Shorts and X clips with their export.
+//! pane listing every overlay with its template parameters, the one at the playhead lit, the
+//! overlay rules, and the Shorts and X clips with their export.
 //!
 //! The lanes and the pane show a person's overlays and the lock's alike. A person's can be
 //! changed: every action writes `cut.kdl`. Find runs [`overlay_rules::run`], picking b-roll
@@ -14,10 +14,9 @@ use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use shot_core::{Applied, Cut, DerivedKind, Overlay, ParamValue, TakeAt};
 use shot_render::overlay::{self, Params, broll, highlight, link_card};
 use shot_render::overlay_rules;
-use shot_render::plan::snap;
 
 use super::EditScreen;
-use crate::model::{FPS, timecode};
+use crate::model::timecode;
 use crate::theme::*;
 use crate::ui::{self, icon, label, mono};
 
@@ -27,40 +26,28 @@ const BROLL: u32 = 0xB69CFF;
 pub const PANE_WIDTH: f32 = 400.;
 
 /// Where an overlay sits: its block in the cut, its index there, and its output frames.
-struct Placed<'a> {
+struct Placed {
     at: TakeAt,
     index: usize,
-    overlay: &'a Overlay,
+    overlay: Overlay,
     frames: std::ops::Range<u64>,
 }
 
-/// Every overlay the edit shows, in output order, once per block.
-fn placed(this: &EditScreen) -> Vec<Placed<'_>> {
-    let mut out: Vec<Placed> = Vec::new();
-    for span in &this.map.spans {
-        for overlay in &span.overlays {
-            let snapped = snap(overlay.range, FPS);
-            let from = snapped.start.max(span.source_frames.start);
-            let to = snapped.end.min(span.source_frames.end);
-            if from >= to {
-                continue;
-            }
-            let out_frame = |f: u64| span.output_frame + (f - span.source_frames.start);
-            let frames = out_frame(from)..out_frame(to);
-            match out
-                .iter_mut()
-                .find(|p| p.at == span.at && p.overlay == overlay)
-            {
-                Some(p) => p.frames.end = p.frames.end.max(frames.end),
-                None => out.push(Placed {
-                    at: span.at,
+/// Every overlay the edit shows, the lock's folded in as on the lanes, in output order.
+fn placed(this: &EditScreen, cx: &App) -> Vec<Placed> {
+    let mut out: Vec<Placed> = crate::model::blocks(&this.folder.read(cx).shown.cut)
+        .flat_map(|(at, block)| {
+            block.overlays.iter().filter_map(move |overlay| {
+                Some(Placed {
+                    at,
                     index: 0,
-                    overlay,
-                    frames,
-                }),
-            }
-        }
-    }
+                    overlay: overlay.clone(),
+                    frames: this.map.output_range(at, overlay.range)?,
+                })
+            })
+        })
+        .collect();
+    out.sort_by_key(|p| p.frames.start);
     out
 }
 
@@ -345,19 +332,16 @@ fn overlay_at(
     Some((overlay, folder.dir.clone()))
 }
 
-/// The Overlays pane: rules, the overlays around the playhead, and the derived cuts.
+/// The Overlays pane: rules, every overlay with the one at the playhead lit, and the derived
+/// cuts.
 pub fn pane(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement {
+    let placed = placed(this, cx);
     let folder = this.folder.read(cx);
     let dir = folder.dir.clone();
     let cut = folder.project.cut.clone();
-    let window =
-        this.playhead.saturating_sub(u64::from(FPS) * 5)..this.playhead + u64::from(FPS) * 20;
     let lock = folder.lock();
     let mut entries = Vec::new();
-    for mut p in placed(this) {
-        if p.frames.end <= window.start || p.frames.start >= window.end {
-            continue;
-        }
+    for mut p in placed {
         let Some(block) = cut
             .chapters
             .get(p.at.chapter)
@@ -365,7 +349,7 @@ pub fn pane(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement
         else {
             continue;
         };
-        let made = match block.overlays.iter().position(|o| o == p.overlay) {
+        let made = match block.overlays.iter().position(|o| *o == p.overlay) {
             Some(index) => {
                 p.index = index;
                 Made::Yours
@@ -388,19 +372,32 @@ pub fn pane(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement
         };
         let checked = match &folder.theme {
             Ok(theme) => theme
-                .check(p.overlay, &block.take)
-                .map(|()| about(p.overlay))
+                .check(&p.overlay, &block.take)
+                .map(|()| about(&p.overlay))
                 .map_err(|e| e.to_string()),
             Err(error) => Err(error.clone()),
         };
         entries.push((p, made, checked));
     }
     let files = candidates(&dir);
+    let migrated = folder.is_migrated();
+    let playhead = this.playhead;
     let rows: Vec<_> = entries
         .into_iter()
         .enumerate()
-        .map(|(key, (p, made, checked))| overlay_row(&p, key, &files, &made, checked, cx))
+        .map(|(key, (p, made, checked))| {
+            let now = p.frames.contains(&playhead);
+            overlay_row(&p, key, now, &files, &made, checked, cx)
+        })
         .collect();
+    let empty = rows.is_empty().then(|| {
+        label(if migrated {
+            "No overlays yet. This video's link cards, highlights and b-roll come from its style rules."
+        } else {
+            "No overlays yet. Find looks for links, idle screen and text on screen, and adds link cards, highlights and b-roll slots for them."
+        })
+        .px(px(10.))
+    });
     ui::pane()
         .w(px(PANE_WIDTH))
         .flex_none()
@@ -442,6 +439,7 @@ pub fn pane(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement
                 .clone()
                 .map(|note| label(note).px(px(10.))),
         )
+        .children(empty)
         .child(ui::scrolling_list(
             "overlay-list",
             &this.overlays_scroll,
@@ -463,15 +461,17 @@ fn about(overlay: &Overlay) -> &'static str {
     overlay::spec(overlay.template.as_str()).map_or("a Lottie template of the brand", |s| s.about)
 }
 
+/// One overlay of the pane, lit when `now`, at the playhead.
 fn overlay_row(
     p: &Placed,
     key: usize,
+    now: bool,
     files: &[String],
     made: &Made,
     checked: Result<&'static str, String>,
     cx: &mut Context<EditScreen>,
 ) -> gpui::AnyElement {
-    let overlay = p.overlay;
+    let overlay = &p.overlay;
     let template = overlay.template.as_str();
     let color = match template {
         highlight::TEMPLATE => ACCENT,
@@ -530,7 +530,13 @@ fn overlay_row(
         .px(px(10.))
         .py(px(8.))
         .rounded(RADIUS_SM)
-        .bg(CARD)
+        .border_1()
+        .border_color(if now {
+            Hsla::from(color)
+        } else {
+            Hsla::from(CARD)
+        })
+        .bg(if now { FLOAT } else { CARD })
         .child(
             div()
                 .flex()
