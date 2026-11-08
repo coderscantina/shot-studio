@@ -66,6 +66,7 @@ pub fn thumbnails(args: ThumbnailsArgs) -> Result<(), String> {
         println!("thumbnail is {}", to.display());
         return Ok(());
     }
+    crate::restyle::refresh(&args.video)?;
     let project = load(&args.video)?;
     let found = shot_ship::thumbnails::find(&args.video, &project, args.count)
         .map_err(|e| e.to_string())?;
@@ -98,9 +99,11 @@ pub struct DescribeArgs {
 }
 
 pub fn describe(args: DescribeArgs) -> Result<(), String> {
+    crate::restyle::refresh(&args.video)?;
     let project = load(&args.video)?;
     let transcripts = transcripts(&args.video, &project)?;
-    let description = shot_ship::describe::describe(&project, &transcripts);
+    let timeline = shot_ship::lock::timeline(&args.video, &project).map_err(|e| e.to_string())?;
+    let description = shot_ship::describe::describe(&project, timeline.main(), &transcripts);
     println!("{}\n\n{}", description.title, description.text.trim_end());
     Ok(())
 }
@@ -141,6 +144,7 @@ fn parse_privacy(value: &str) -> Result<Privacy, String> {
 /// Renders and checks every cut, refuses on problems unless `--force`, then uploads the main cut
 /// and the Shorts, keeps X clips as files, moves the card to shipped and tags the release.
 pub fn run_ship(args: ShipArgs) -> Result<(), String> {
+    crate::restyle::refresh(&args.video)?;
     let project = load(&args.video)?;
     let transcripts = transcripts(&args.video, &project)?;
     // Everything a real ship needs besides the renders is checked before the minutes of

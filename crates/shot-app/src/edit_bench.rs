@@ -59,7 +59,7 @@ struct Seeks {
 /// Runs the bench on `dir` and returns whether it passed.
 pub fn run(dir: &std::path::Path, options: &BenchOptions) -> Result<bool, String> {
     let folder = VideoFolder::open(dir)?;
-    let project = &folder.project;
+    let project = &folder.shown;
     let map = EditMap::of(project, View::Edited);
     if map.frames == 0 {
         return Err("the edit has no frames".into());
@@ -107,7 +107,7 @@ pub fn run(dir: &std::path::Path, options: &BenchOptions) -> Result<bool, String
 
 fn engine_spans(folder: &VideoFolder) -> String {
     let overlays: usize = folder
-        .project
+        .shown
         .cut
         .chapters
         .iter()
@@ -115,7 +115,7 @@ fn engine_spans(folder: &VideoFolder) -> String {
         .map(|t| t.overlays.len())
         .sum();
     let zooms: usize = folder
-        .project
+        .shown
         .cut
         .chapters
         .iter()

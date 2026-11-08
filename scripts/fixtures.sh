@@ -376,11 +376,13 @@ demo_stage() {
   mkdir -p "$dir"
   sed -E "s/^status .*/status $status/" "$src/video.kdl" >"$dir/video.kdl"
   if ((at >= 1)); then cp "$src/script.md" "$dir/script.md"; fi
+  # Videos start migrated: format.kdl holds only what differs from the channel's format (here
+  # nothing), and the lock is what `shot style build` writes for the files of that stage.
   if ((at >= 2)); then
-    format=$(awk '$1 == "format" { print $2 }' "$src/video.kdl")
-    cp "$ROOT/crates/shot-core/formats/$format.kdl" "$dir/format.kdl"
+    : >"$dir/format.kdl"
+    cp "$DEMO_SRC/empty-cut.lock" "$dir/cut.lock"
   fi
-  if ((at >= 4)); then cp "$src/cut.kdl" "$dir/cut.kdl"; fi
+  if ((at >= 4)); then cp "$src/cut.kdl" "$src/cut.lock" "$dir/"; fi
 }
 
 gen_demo() {

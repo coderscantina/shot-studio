@@ -111,7 +111,9 @@ impl EditScreen {
         let result = self.folder.update(cx, |folder, cx| {
             let mut format = folder.project.format.clone();
             change(&mut format);
-            let rerun = format.auto_zoom != folder.project.format.auto_zoom;
+            // A migrated video's zooms come from the style rules, not the auto-zoom settings.
+            let rerun =
+                format.auto_zoom != folder.project.format.auto_zoom && !folder.is_migrated();
             folder.write_format(format)?;
             if rerun {
                 let cut = shot_render::rules::auto_zoom(

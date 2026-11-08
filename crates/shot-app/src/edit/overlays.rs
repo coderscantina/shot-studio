@@ -176,6 +176,13 @@ impl EditScreen {
     /// cut they return unless it changed meanwhile.
     fn find_overlays(&mut self, cx: &mut Context<Self>) {
         let folder = self.folder.read(cx);
+        if folder.is_migrated() {
+            self.overlay_note = Some(
+                "This video's link cards, highlights and b-roll come from its style rules".into(),
+            );
+            cx.notify();
+            return;
+        }
         let (dir, before) = (folder.dir.clone(), folder.project.cut.clone());
         self.overlay_note = Some("Looking for links, idle screen and text on screen".into());
         cx.notify();

@@ -11,9 +11,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use shot_board::Board;
-use shot_core::{Date, DerivedKind, Id, Micros, OutputKind, Project, Status, Timeline, Transcript};
+use shot_core::{Date, DerivedKind, Id, Micros, OutputKind, Project, Status, Transcript};
 
 use crate::describe::describe;
+use crate::lock::LockError;
 use crate::record::Record;
 use crate::spoken::duration;
 use crate::youtube::{self, Metadata, Privacy, Sent, YouTube, YouTubeError};
@@ -74,14 +75,16 @@ pub struct Options {
     pub made_for_kids: bool,
 }
 
-/// Every cut of the project in timeline order: main first, then the derived cuts.
+/// Every cut of the project in timeline order: main first, then the derived cuts, timed as
+/// export renders them.
 pub fn plan(
     video_dir: &Path,
     project: &Project,
     transcripts: &HashMap<Id, Transcript>,
     options: Options,
-) -> Vec<PlannedCut> {
-    let description = describe(project, transcripts);
+) -> Result<Vec<PlannedCut>, LockError> {
+    let timeline = crate::lock::timeline(video_dir, project)?;
+    let description = describe(project, timeline.main(), transcripts);
     let hook = project
         .script
         .chapters
@@ -89,7 +92,7 @@ pub fn plan(
         .and_then(|c| c.beats.first())
         .map(|b| b.text.trim().to_owned())
         .unwrap_or_default();
-    Timeline::evaluate(project)
+    let cuts = timeline
         .outputs
         .iter()
         .map(|output| {
@@ -118,7 +121,8 @@ pub fn plan(
                     .flatten(),
             }
         })
-        .collect()
+        .collect();
+    Ok(cuts)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -139,6 +143,8 @@ pub enum ShipError {
     Io { path: PathBuf, source: io::Error },
     #[error("{0}")]
     Render(String),
+    #[error(transparent)]
+    Lock(#[from] LockError),
 }
 
 fn io_error(path: &Path) -> impl FnOnce(io::Error) -> ShipError + '_ {
@@ -438,7 +444,7 @@ pub fn prepare(
     step: &(dyn Fn(Step) + Sync),
 ) -> Result<Prepared, ShipError> {
     use shot_render::export::{ExportOptions, export};
-    let cuts = plan(video_dir, project, transcripts, options);
+    let cuts = plan(video_dir, project, transcripts, options)?;
     let mut problems = Vec::new();
     for cut in &cuts {
         let progress = |p: shot_render::export::Progress| {

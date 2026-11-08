@@ -36,6 +36,7 @@ raw-window-handle = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 shot-render = { path = "../shot-render" }
+shot-audio = { path = "../shot-audio" }
 
 [dev-dependencies]
 tempfile = { workspace = true }

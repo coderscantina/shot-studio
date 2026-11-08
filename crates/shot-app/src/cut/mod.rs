@@ -1,8 +1,10 @@
 //! The Cut screen: the auto-cut rules with their switches and counts, the pacing, and the review
 //! queue with Keep (K) and Cut (C).
 //!
-//! The queue is the `review` nodes of `cut.kdl`, read through [`Cut::review_queue`]; every
-//! answer is [`Cut::decide`] written back. The screen keeps only which item is on show and the
+//! The queue is the `review` nodes of `cut.kdl`, or a migrated video's `review` instances of
+//! its lock, read through [`Cut::review_queue`] of the shown cut; every answer goes through
+//! [`VideoFolder::decide`], which writes `ignore` or a rule removal before migration and an
+//! `override { keep }` or `{ cut }` after. The screen keeps only which item is on show and the
 //! answers given since it opened, so the list can show them dimmed like the mockup.
 
 pub mod run;
@@ -94,7 +96,7 @@ impl CutScreen {
     }
 
     fn queue(&self, cx: &App) -> Vec<(TakeAt, Review)> {
-        self.folder.read(cx).project.cut.review_queue().collect()
+        self.folder.read(cx).shown.cut.review_queue().collect()
     }
 
     /// The open item on show: the one picked, else the first.
@@ -114,12 +116,7 @@ impl CutScreen {
             let take = folder.project.cut.chapters[at.chapter].takes[at.take]
                 .take
                 .clone();
-            let cut = folder
-                .project
-                .cut
-                .decide(at, review.range, decision)
-                .map_err(|e| e.to_string())?;
-            folder.write_cut(cut)?;
+            folder.decide(at, review.range, decision)?;
             cx.notify();
             Ok::<_, String>(take)
         });
@@ -326,6 +323,9 @@ fn button(
 impl CutScreen {
     fn rules_pane(&self, counts: &[RuleCount], cx: &mut Context<Self>) -> Div {
         let folder = self.folder.read(cx);
+        // A migrated video's cuts come from the style rules of its layers, which the rule
+        // editor (milestone 10 item 7) will change; until then the switches only show.
+        let editable = !folder.is_migrated();
         let format = &folder.project.format;
         let pacing = format.pacing;
         let rows = counts.iter().map(|count| {
@@ -350,7 +350,6 @@ impl CutScreen {
                 .py(px(10.))
                 .rounded(RADIUS_MD)
                 .bg(RAISED)
-                .cursor_pointer()
                 .child(
                     div()
                         .flex_1()
@@ -360,10 +359,13 @@ impl CutScreen {
                         .child(div().font_weight(FontWeight::MEDIUM).child(rule_name(rule)))
                         .child(mono(numbers).text_size(TEXT_SM).text_color(MUTED)),
                 )
-                .child(switch(on))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.change(cx, |folder| run::set_rule(folder, rule, !on));
-                }))
+                .when(editable, |this| {
+                    this.cursor_pointer()
+                        .child(switch(on))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.change(cx, |folder| run::set_rule(folder, rule, !on));
+                        }))
+                })
         });
         let pacing_note = match pacing {
             Pacing::Loose => "Loose keeps 0.5 s of breath around each cut.",
@@ -404,39 +406,45 @@ impl CutScreen {
                         div()
                             .text_size(px(14.))
                             .text_color(MUTED)
-                            .child("Applied when confident. The rest waits for you."),
+                            .child(if editable {
+                                "Applied when confident. The rest waits for you."
+                            } else {
+                                "From the format's style rules. The rest waits for you."
+                            }),
                     ),
             )
             .children(rows)
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.))
-                    .px(px(4.))
-                    .pt(px(14.))
-                    .child(label("Pacing"))
-                    .child(segmented(
-                        "pacing",
-                        WELL,
-                        vec![
-                            segment("Loose", Pacing::Loose, cx),
-                            segment("Natural", Pacing::Natural, cx),
-                            segment("Tight", Pacing::Tight, cx),
-                        ],
-                    ))
-                    .child(
-                        div()
-                            .text_size(TEXT_SM)
-                            .text_color(MUTED)
-                            .child(pacing_note),
-                    ),
-            )
+            .when(editable, |this| {
+                this.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.))
+                        .px(px(4.))
+                        .pt(px(14.))
+                        .child(label("Pacing"))
+                        .child(segmented(
+                            "pacing",
+                            WELL,
+                            vec![
+                                segment("Loose", Pacing::Loose, cx),
+                                segment("Natural", Pacing::Natural, cx),
+                                segment("Tight", Pacing::Tight, cx),
+                            ],
+                        ))
+                        .child(
+                            div()
+                                .text_size(TEXT_SM)
+                                .text_color(MUTED)
+                                .child(pacing_note),
+                        ),
+                )
+            })
     }
 
     fn finding_pane(&mut self, queue: &[(TakeAt, Review)], cx: &mut Context<Self>) -> Div {
         let folder = self.folder.read(cx);
-        let cut = folder.project.cut.clone();
+        let cut = folder.shown.cut.clone();
         let dir = folder.dir.clone();
         let stat = |value: String, name: &'static str, color: Hsla| {
             div()
@@ -672,7 +680,7 @@ impl CutScreen {
 
     fn queue_pane(&self, queue: &[(TakeAt, Review)], cx: &mut Context<Self>) -> Div {
         let folder = self.folder.read(cx);
-        let cut = &folder.project.cut;
+        let cut = &folder.shown.cut;
         let shown = self.shown(queue);
         let mut rows: Vec<(Row, Micros)> = queue
             .iter()
@@ -822,7 +830,7 @@ impl CutScreen {
 impl Render for CutScreen {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let queue = self.queue(cx);
-        let counts = autocut::rule_counts(&self.folder.read(cx).project.cut);
+        let counts = autocut::rule_counts(&self.folder.read(cx).shown.cut);
         let rules = self.rules_pane(&counts, cx);
         let finding = self.finding_pane(&queue, cx);
         let list = self.queue_pane(&queue, cx);

@@ -1,7 +1,8 @@
 //! Running the auto-cut rules from the app: after a take is appended, and again whenever a rule
 //! switch or the pacing changes. Reads the cached transcript and speech of each take and the
 //! take folder's screen and markers, and writes `format.kdl` and `cut.kdl` through
-//! [`VideoFolder`].
+//! [`VideoFolder`]. Only for a video before migration: a migrated video's rough cut is its lock,
+//! built from the elements by the style rules.
 
 use std::fs;
 
@@ -13,6 +14,9 @@ use crate::folder::VideoFolder;
 
 /// Runs the rules over every block of `take` and writes the rough cut.
 pub fn rough_cut(folder: &mut VideoFolder, take: &Id) -> Result<(), String> {
+    if folder.is_migrated() {
+        return Ok(());
+    }
     let cut = rough_cut_of(folder, &folder.project.cut, take)?;
     folder.write_cut(cut)
 }
@@ -52,6 +56,9 @@ pub fn rule_on(format: &Format, rule: RuleKind) -> bool {
 }
 
 fn rerun(folder: &mut VideoFolder, format: Format) -> Result<(), String> {
+    if folder.is_migrated() {
+        return Err("this video's cuts come from the style rules of its format".into());
+    }
     let path = folder.dir.join("format.kdl");
     fs::write(&path, format.to_kdl()).map_err(|e| format!("{}: {e}", path.display()))?;
     folder.project.format = format;

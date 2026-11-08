@@ -519,7 +519,8 @@ impl ShotServer {
         let cut = self.cut(&args.slug)?;
         let transcripts = self.transcripts(&args.slug, &cut)?;
         let project = self.project(&args.slug, cut)?;
-        let description = shot_ship::describe::describe(&project, &transcripts);
+        let timeline = shot_core::Timeline::evaluate(&project);
+        let description = shot_ship::describe::describe(&project, timeline.main(), &transcripts);
         Ok(format!(
             "title: {}\n\n{}",
             description.title, description.text

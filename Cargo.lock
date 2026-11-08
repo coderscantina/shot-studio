@@ -6309,6 +6309,7 @@ dependencies = [
  "serde",
  "serde_json",
  "shot-analyze",
+ "shot-audio",
  "shot-board",
  "shot-capture",
  "shot-core",

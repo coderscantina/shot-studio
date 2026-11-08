@@ -1,20 +1,24 @@
-//! The Edit screen's sound: the edit's mic audio, cut and faded like the export, played on the
-//! default output from a feeder thread. While it plays, it is the preview's clock: the screen
-//! asks which output frame is heard and shows that one.
+//! The Edit screen's sound: the edit's finished audio as export makes it ([`crate::score`]),
+//! voice chain, music, sound effects and loudness, played on the default output from a feeder
+//! thread. While it plays, it is the preview's clock: the screen asks which output frame is
+//! heard and shows that one.
 //!
 //! A seek or a new plan stops the device and drops what is queued, so the next sound heard is
-//! the new position's. Starting after a seek fades in over 5 ms instead of clicking.
+//! the new position's. Starting after a seek fades in over 5 ms instead of clicking. Each plan
+//! measures its loudness gain on a thread of its own; until it lands the last plan's gain plays.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
 use shot_media::audio::SAMPLE_RATE;
 use shot_media::speaker::{Speaker, SpeakerClock};
-use shot_render::audio::{AudioSegment, FADE_SAMPLES, TimelineAudio};
+use shot_render::audio::{FADE_SAMPLES, TimelineAudio};
 
 use crate::model::{EditMap, FPS};
+use crate::score::{self, Cues, Finished, Score, Sounds};
 
 const SAMPLES_PER_FRAME: u64 = (SAMPLE_RATE / FPS) as u64;
 /// Samples decoded per read, about 21 ms.
@@ -28,8 +32,11 @@ const FEED_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Default)]
 struct State {
-    /// The edit's segments and where its takes live; `None` before the first plan.
-    plan: Option<(Vec<AudioSegment>, PathBuf)>,
+    /// The edit, where its takes live and what plays with the voice; `None` before the first
+    /// plan.
+    plan: Option<(EditMap, PathBuf, Cues)>,
+    /// The loudness gain of the last measured plan, in dB.
+    gain: Option<f64>,
     /// Counts plan changes, so the feeder rebuilds its reader.
     plan_generation: u64,
     /// Counts seeks and plan changes; the clock is only read for the one the feeder applied.
@@ -69,7 +76,7 @@ impl Sound {
             .name("shot-sound".into())
             .spawn({
                 let shared = shared.clone();
-                move || feed(&shared)
+                move || feed(shared)
             })
             .expect("spawning the sound thread");
         Self {
@@ -78,18 +85,11 @@ impl Sound {
         }
     }
 
-    /// Plays `map`'s audio, with takes in `media`, from output frame `frame`.
-    pub fn set_plan(&self, map: &EditMap, media: PathBuf, frame: u64) {
-        let segments = map
-            .spans
-            .iter()
-            .map(|span| AudioSegment {
-                take: span.take.clone(),
-                source_frames: span.source_frames.clone(),
-            })
-            .collect();
+    /// Plays `map`'s audio, with takes in `media` and `cues` with the voice, from output frame
+    /// `frame`.
+    pub fn set_plan(&self, map: &EditMap, media: PathBuf, cues: Cues, frame: u64) {
         let mut state = self.shared.lock();
-        state.plan = Some((segments, media));
+        state.plan = Some((map.clone(), media, cues));
         state.plan_generation += 1;
         state.error = None;
         Self::restart(&mut state, frame);
@@ -145,7 +145,7 @@ impl Drop for Sound {
 }
 
 /// The feeder thread: owns the device and the mic readers, keeps [`QUEUED`] samples ahead.
-fn feed(shared: &Shared) {
+fn feed(shared: Arc<Shared>) {
     let mut speaker = match Speaker::open() {
         Ok(speaker) => speaker,
         Err(error) => {
@@ -154,34 +154,52 @@ fn feed(shared: &Shared) {
         }
     };
     shared.lock().clock = Some(speaker.clock());
-    let mut audio: Option<TimelineAudio> = None;
+    let mut sounds = Sounds::default();
+    let mut audio: Option<(TimelineAudio, Score)> = None;
+    let mut finished: Option<Finished> = None;
+    let measuring = Arc::new(AtomicU64::new(0));
     let mut plan_generation = 0;
     let mut generation = 0;
-    // The next output sample to read, and how far into the fade-in after a restart it is.
-    let mut next = 0;
+    // How far into the fade-in after a restart the sound is.
     let mut faded = FADE_SAMPLES;
     let mut block = Vec::with_capacity(BLOCK);
     loop {
         {
             let mut state = shared.lock();
             if state.quit {
+                measuring.fetch_add(1, Ordering::Relaxed);
                 return;
             }
             if state.plan_generation != plan_generation {
                 plan_generation = state.plan_generation;
-                audio = state.plan.clone().map(|(segments, media)| {
-                    TimelineAudio::new(segments, FPS, move |take| {
-                        media.join(take.as_str()).join("mic.mp4")
-                    })
+                let plan = state.plan.clone();
+                drop(state);
+                let placed = plan.map(|(map, media, cues)| {
+                    let score = Score::place(&map, &cues, &mut sounds)?;
+                    measure(&shared, &measuring, plan_generation, &map, &media, &score);
+                    Ok::<_, String>((score::timeline_audio(&map, media, &score), score))
                 });
+                state = shared.lock();
+                audio = match placed.transpose() {
+                    Ok(audio) => audio,
+                    Err(error) => {
+                        state.error = Some(error);
+                        None
+                    }
+                };
+                // The new plan plays from the position the next seek sets.
+                finished = None;
             }
-            if state.generation != generation {
+            if state.generation != generation || finished.is_none() {
                 speaker.clear();
                 generation = state.generation;
-                next = state.position;
+                let next = state.position;
                 faded = 0;
                 state.origin = next;
                 state.applied = generation;
+                finished = audio.as_ref().map(|(timeline, score)| {
+                    Finished::new(timeline, score, state.gain.unwrap_or(0.0), next)
+                });
             }
             if !state.playing || state.error.is_some() || audio.is_none() {
                 speaker.stop();
@@ -189,10 +207,11 @@ fn feed(shared: &Shared) {
                 continue;
             }
         }
-        let timeline = audio.as_mut().expect("checked above");
+        let (timeline, _) = audio.as_mut().expect("checked above");
+        let finished = finished.as_mut().expect("made with the audio");
         while speaker.queued() < QUEUED {
             block.clear();
-            if let Err(error) = timeline.read(next..next + BLOCK as u64, &mut block) {
+            if let Err(error) = finished.read(timeline, BLOCK, &mut block) {
                 shared.lock().error = Some(error.to_string());
                 break;
             }
@@ -204,7 +223,6 @@ fn feed(shared: &Shared) {
                 faded += 1;
             }
             speaker.push(&block);
-            next += BLOCK as u64;
         }
         if speaker.queued() >= PREFILL
             && let Err(error) = speaker.play()
@@ -219,4 +237,29 @@ fn feed(shared: &Shared) {
                 .expect("sound state poisoned");
         }
     }
+}
+
+/// Measures the plan's loudness gain on a thread of its own, with readers of its own. A newer
+/// plan cancels it.
+fn measure(
+    shared: &Arc<Shared>,
+    measuring: &Arc<AtomicU64>,
+    generation: u64,
+    map: &EditMap,
+    media: &std::path::Path,
+    score: &Score,
+) {
+    measuring.store(generation, Ordering::Relaxed);
+    let (shared, measuring, score) = (shared.clone(), measuring.clone(), score.clone());
+    let (map, media) = (map.clone(), media.to_owned());
+    let spawned = std::thread::Builder::new()
+        .name("shot-loudness".into())
+        .spawn(move || {
+            let mut audio = score::timeline_audio(&map, media, &score);
+            if let Ok(Some(gain)) = score::gain(&mut audio, &score, &measuring, generation) {
+                shared.lock().gain = Some(gain);
+            }
+        });
+    // Without the thread the last plan's gain plays on.
+    drop(spawned);
 }

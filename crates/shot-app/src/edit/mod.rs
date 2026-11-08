@@ -35,6 +35,7 @@ use crate::model::{
     self, BlockDoc, EditMap, FPS, LAYOUT_KEYS, Selection, View, apply_layout, document,
 };
 use crate::peaks::Peaks;
+use crate::score::Cues;
 use crate::sound::Sound;
 use crate::theme::*;
 
@@ -226,7 +227,7 @@ impl EditScreen {
     fn rebuild(&mut self, cx: &mut Context<Self>) {
         let keep = self.map.source_at(self.playhead);
         let folder = self.folder.read(cx);
-        let project = &folder.project;
+        let project = &folder.shown;
         self.map = EditMap::of(project, self.view);
         self.doc = document(
             &project.cut,
@@ -244,7 +245,8 @@ impl EditScreen {
             .min(self.map.frames.saturating_sub(1));
         self.playhead = frame;
         let media = folder.dir.join("media");
-        self.sound.set_plan(&self.map, media.clone(), frame);
+        let cues = Cues::of(&folder.dir, project.cut.music.as_ref(), folder.lock());
+        self.sound.set_plan(&self.map, media.clone(), cues, frame);
         self.engine.set_plan(
             Plan {
                 map: self.map.clone(),
@@ -488,7 +490,13 @@ impl EditScreen {
             return;
         };
         self.selection = None;
-        self.edit(cx, |cut| cut.restore(at, range));
+        let result = self.folder.update(cx, |folder, cx| {
+            let result = folder.restore(at, range);
+            cx.notify();
+            result
+        });
+        self.error = result.err();
+        cx.notify();
     }
 
     fn set_layout(&mut self, key: usize, cx: &mut Context<Self>) {
