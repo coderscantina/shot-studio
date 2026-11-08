@@ -11,14 +11,14 @@ use gpui::{
     WindowBounds, WindowOptions, actions, div, point, prelude::*, px, size,
 };
 use gpui_component::Root;
-use shot_core::Status;
+use shot_core::{Cut, Status};
 
 use crate::board::{self, BoardScreen, ShowCurrent, channel};
 use crate::cut::{self, ContinueToEdit, CutScreen};
 use crate::edit::{self, EditScreen};
 use crate::folder::VideoFolder;
 use crate::record::{self, RecordScreen, Recorded};
-use crate::script::{self, ScriptScreen};
+use crate::script::{self, ReadyToRecord, ScriptScreen};
 use crate::ship::{self, ShipScreen};
 use crate::theme::*;
 use crate::ui::{ActionLook, alert, icon, mono, pane, proposal_action};
@@ -45,6 +45,51 @@ impl Screen {
             Status::Shipped => Self::Ship,
         }
     }
+
+    /// The step a video in `status` is on, `None` once it shipped.
+    fn step_of(status: Status) -> Option<Self> {
+        (status != Status::Shipped).then(|| Self::for_status(status))
+    }
+
+    /// The step of a video outside a channel, from its folder: Record until it has takes, then
+    /// Cut while cuts wait for review, then Edit.
+    fn step_of_loose(cut: &Cut) -> Self {
+        if cut.chapters.iter().all(|chapter| chapter.takes.is_empty()) {
+            Self::Record
+        } else if cut.review_queue().next().is_some() {
+            Self::Cut
+        } else {
+            Self::Edit
+        }
+    }
+
+    /// How the nav marks this screen for a video on step `next`: steps before it are done.
+    /// Board is no step.
+    fn mark(self, next: Option<Self>) -> Option<Mark> {
+        const STEPS: [Screen; 5] = [
+            Screen::Script,
+            Screen::Record,
+            Screen::Cut,
+            Screen::Edit,
+            Screen::Ship,
+        ];
+        let at = STEPS.iter().position(|&s| s == self)?;
+        let next = next.map_or(STEPS.len(), |next| {
+            STEPS.iter().position(|&s| s == next).unwrap_or(0)
+        });
+        match at.cmp(&next) {
+            std::cmp::Ordering::Less => Some(Mark::Done),
+            std::cmp::Ordering::Equal => Some(Mark::Next),
+            std::cmp::Ordering::Greater => None,
+        }
+    }
+}
+
+/// The quiet state of a step in the nav.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Mark {
+    Done,
+    Next,
 }
 
 pub struct Studio {
@@ -56,13 +101,21 @@ pub struct Studio {
     ship: Entity<ShipScreen>,
     /// Present when the video folder sits in a channel repo, `<repo>/videos/<slug>`.
     planning: Option<Planning>,
+    /// The status of the video's card, read again on every screen switch and when the window
+    /// comes back. `None` outside a channel or when the board cannot be read.
+    status: Option<Status>,
     /// Why the last attempt to move the video into a channel or open one failed.
     channel_error: Option<SharedString>,
+    /// The nav entry under the pointer. Kept here because a hover style stays lit when the
+    /// pointer leaves the window over it.
+    hovered: Option<Screen>,
     _subscriptions: Vec<Subscription>,
 }
 
 /// The Board and Script screens of a video in a channel.
 struct Planning {
+    repo: PathBuf,
+    slug: String,
     board: Entity<BoardScreen>,
     script: Entity<ScriptScreen>,
 }
@@ -104,7 +157,7 @@ pub fn open(dir: &Path, cx: &mut App) -> Result<(), String> {
     open_at(dir, None, cx)
 }
 
-/// Like [`open`], on `screen` instead of Edit. A folder that is open already comes to the front
+/// Like [`open`], on `screen` instead of the screen of the video's next step. A folder that is open already comes to the front
 /// and shows `screen`. A video of a channel gets the files it lacks from its branch first (see
 /// [`channel::prepare`]).
 pub fn open_at(dir: &Path, screen: Option<Screen>, cx: &mut App) -> Result<(), String> {
@@ -153,9 +206,8 @@ pub fn open_at(dir: &Path, screen: Option<Screen>, cx: &mut App) -> Result<(), S
             |window, cx| {
                 let folder = cx.new(|_| folder);
                 let studio = cx.new(|cx| Studio::new(folder, window, cx));
-                if let Some(screen) = screen {
-                    studio.update(cx, |studio, cx| studio.show(screen, window, cx));
-                }
+                let screen = screen.unwrap_or_else(|| studio.read(cx).first_screen(cx));
+                studio.update(cx, |studio, cx| studio.show(screen, window, cx));
                 opened = Some(studio.downgrade());
                 cx.new(|cx| Root::new(studio, window, cx))
             },
@@ -189,6 +241,13 @@ impl Studio {
             });
         window.focus(&edit.focus_handle(cx), cx);
         let mut subscriptions = vec![recorded, continue_to_edit];
+        // Cards move on the board and in other windows: the nav catches up when this comes back.
+        subscriptions.push(cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active() {
+                this.refresh_status();
+                cx.notify();
+            }
+        }));
         let planning = channel::locate(&folder.read(cx).dir).map(|(repo, slug)| {
             let full_script =
                 folder.read(cx).project.format.prompter == shot_core::PrompterMode::FullScript;
@@ -198,12 +257,24 @@ impl Studio {
                 window,
                 |this, _, ShowCurrent(screen), window, cx| this.show(*screen, window, cx),
             ));
+            let script =
+                cx.new(|cx| ScriptScreen::new(repo.clone(), slug.clone(), full_script, window, cx));
+            subscriptions.push(cx.subscribe_in(
+                &script,
+                window,
+                |this, _, _: &ReadyToRecord, window, cx| {
+                    this.take_script(cx);
+                    this.show(Screen::Record, window, cx);
+                },
+            ));
             Planning {
+                repo,
+                slug,
                 board,
-                script: cx.new(|cx| ScriptScreen::new(repo, slug, full_script, window, cx)),
+                script,
             }
         });
-        Self {
+        let mut studio = Self {
             folder,
             screen: Screen::Edit,
             record,
@@ -211,8 +282,70 @@ impl Studio {
             edit,
             ship,
             planning,
+            status: None,
             channel_error: None,
+            hovered: None,
             _subscriptions: subscriptions,
+        };
+        studio.refresh_status();
+        studio
+    }
+
+    /// Puts the script as the board has it into the folder, so Record prompts what the Script
+    /// screen showed. Script accepts its changes on the video's branch only.
+    fn take_script(&mut self, cx: &mut Context<Self>) {
+        let Some(planning) = &self.planning else {
+            return;
+        };
+        let Some(text) = shot_board::Board::open(&planning.repo)
+            .ok()
+            .and_then(|board| board.read_file(&planning.slug, "script.md").ok().flatten())
+        else {
+            return;
+        };
+        let Ok(script) = shot_core::Script::parse(&text) else {
+            return;
+        };
+        let path = self.folder.read(cx).dir.join("script.md");
+        // A folder that cannot be written keeps prompting its own copy.
+        if std::fs::read_to_string(&path).ok().as_deref() != Some(text.as_str())
+            && std::fs::write(&path, &text).is_err()
+        {
+            return;
+        }
+        self.folder.update(cx, |folder, cx| {
+            folder.project.script = script.clone();
+            folder.shown.script = script;
+            cx.notify();
+        });
+        self.record
+            .update(cx, |record, cx| record.reload_script(cx));
+    }
+
+    fn refresh_status(&mut self) {
+        if let Some(planning) = &self.planning {
+            self.status = channel::status(&planning.repo, &planning.slug);
+        }
+    }
+
+    /// The step this video is on, `None` once it shipped: from its card for a video of a
+    /// channel, else from what its folder holds.
+    fn step(&self, cx: &App) -> Option<Screen> {
+        let project = &self.folder.read(cx).project;
+        match &self.planning {
+            Some(_) => Screen::step_of(self.status.unwrap_or(project.video.status)),
+            None => Some(Screen::step_of_loose(&project.cut)),
+        }
+    }
+
+    /// The screen a new window opens on: the video's next step. A video outside a channel has
+    /// no status, so it opens on Record until it has takes and on Edit after.
+    fn first_screen(&self, cx: &App) -> Screen {
+        match self.step(cx) {
+            None => Screen::Ship,
+            Some(Screen::Record) => Screen::Record,
+            Some(_) if self.planning.is_none() => Screen::Edit,
+            Some(step) => step,
         }
     }
 
@@ -226,6 +359,7 @@ impl Studio {
             _ => screen,
         };
         self.screen = screen;
+        self.refresh_status();
         match screen {
             Screen::Board | Screen::Script => {
                 if let Some(Planning { board, script, .. }) = &self.planning {
@@ -478,15 +612,19 @@ impl Studio {
                 .into_any_element(),
             Screen::Cut | Screen::Board | Screen::Script | Screen::Ship => div().into_any_element(),
         };
+        let step = self.step(cx);
         let nav =
             |id: &'static str, name: &'static str, icon_name: &'static str, screen: Screen| {
                 let on = self.screen == screen;
+                let mark = screen.mark(step);
                 // Without a channel the Board entry stays quiet: it only explains.
                 let quiet = screen == Screen::Board && self.planning.is_none();
-                let color = match (on, quiet) {
-                    (true, _) => STRONG,
-                    (false, true) => FAINT,
-                    (false, false) => MUTED,
+                let hovered = !on && !recording && self.hovered == Some(screen);
+                let color = match (on, quiet, hovered) {
+                    (true, ..) => STRONG,
+                    (false, _, true) => TEXT,
+                    (false, true, false) => FAINT,
+                    (false, false, false) => MUTED,
                 };
                 div()
                     .id(id)
@@ -500,11 +638,29 @@ impl Studio {
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(color)
                     .when(on, |this| this.bg(RAISED))
-                    .when(!on && !recording, |this| {
-                        this.cursor_pointer().hover(|s| s.text_color(TEXT))
-                    })
+                    .when(!on && !recording, |this| this.cursor_pointer())
+                    // Only a real move lights an entry: after the pointer left the window, gpui
+                    // reports a hover again from where it was last seen.
+                    .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                        if this.hovered != Some(screen) {
+                            this.hovered = Some(screen);
+                            cx.notify();
+                        }
+                    }))
+                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                        if !hovered && this.hovered == Some(screen) {
+                            this.hovered = None;
+                            cx.notify();
+                        }
+                    }))
                     .child(icon(icon_name, ICON, color))
                     .child(name)
+                    .when(mark == Some(Mark::Done), |this| {
+                        this.child(icon("check", ICON_SM, color))
+                    })
+                    .when(mark == Some(Mark::Next), |this| {
+                        this.child(div().size(px(6.)).rounded_full().bg(ACCENT))
+                    })
                     .when(!recording, |this| {
                         this.on_click(
                             cx.listener(move |this, _, window, cx| this.show(screen, window, cx)),
@@ -592,4 +748,28 @@ impl Render for Studio {
 /// a board.
 pub(crate) fn channel(dir: &Path) -> Option<(PathBuf, String)> {
     channel::locate(dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_nav_marks_steps_before_the_next_one_done() {
+        let next = Some(Screen::Cut);
+        assert_eq!(Screen::Script.mark(next), Some(Mark::Done));
+        assert_eq!(Screen::Record.mark(next), Some(Mark::Done));
+        assert_eq!(Screen::Cut.mark(next), Some(Mark::Next));
+        assert_eq!(Screen::Edit.mark(next), None);
+        assert_eq!(Screen::Board.mark(next), None);
+        assert_eq!(
+            Screen::Ship.mark(Screen::step_of(Status::Shipped)),
+            Some(Mark::Done)
+        );
+    }
+
+    #[test]
+    fn a_loose_video_is_on_record_until_it_has_takes() {
+        assert_eq!(Screen::step_of_loose(&Cut::default()), Screen::Record);
+    }
 }
