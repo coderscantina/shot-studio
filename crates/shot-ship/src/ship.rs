@@ -146,6 +146,8 @@ pub enum ShipError {
     Render(String),
     #[error(transparent)]
     Lock(#[from] LockError),
+    #[error("stopped")]
+    Cancelled,
 }
 
 fn io_error(path: &Path) -> impl FnOnce(io::Error) -> ShipError + '_ {
@@ -444,32 +446,76 @@ pub fn prepare(
     jobs: usize,
     step: &(dyn Fn(Step) + Sync),
 ) -> Result<Prepared, ShipError> {
-    use shot_render::export::{ExportOptions, export};
     let cuts = plan(video_dir, project, transcripts, options)?;
     let mut problems = Vec::new();
     for cut in &cuts {
-        let progress = |p: shot_render::export::Progress| {
-            step(Step::Rendering {
-                cut: cut.name.clone(),
-                rendered: p.rendered,
-                to_render: p.to_render,
-            })
-        };
-        export(
-            video_dir,
-            project,
-            &cut.name,
-            &cut.export,
-            ExportOptions { jobs },
-            &progress,
-        )
-        .map_err(|e| ShipError::Render(format!("{}: {e}", cut.name)))?;
-        step(Step::Checking {
-            cut: cut.name.clone(),
-        });
-        let found = crate::media::check_cut(video_dir, project, &cut.name, &cut.export)
-            .map_err(|e| ShipError::Render(format!("{}: {e}", cut.name)))?;
+        let found = export_cut(video_dir, project, cut, jobs, step, &|| false)?;
         problems.extend(found.into_iter().map(|p| (cut.name.clone(), p)));
     }
     Ok(Prepared { cuts, problems })
+}
+
+/// Renders one cut to its export path, reusing cached chunks, then runs `shot check` on it.
+/// Stops with [`ShipError::Cancelled`] before the render or during the checks once `cancelled`
+/// returns true.
+#[cfg(target_os = "macos")]
+pub fn export_cut(
+    video_dir: &Path,
+    project: &Project,
+    cut: &PlannedCut,
+    jobs: usize,
+    step: &(dyn Fn(Step) + Sync),
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<Vec<crate::check::Problem>, ShipError> {
+    use shot_render::export::{ExportOptions, export};
+    if cancelled() {
+        return Err(ShipError::Cancelled);
+    }
+    let progress = |p: shot_render::export::Progress| {
+        step(Step::Rendering {
+            cut: cut.name.clone(),
+            rendered: p.rendered,
+            to_render: p.to_render,
+        })
+    };
+    export(
+        video_dir,
+        project,
+        &cut.name,
+        &cut.export,
+        ExportOptions { jobs },
+        &progress,
+    )
+    .map_err(|e| ShipError::Render(format!("{}: {e}", cut.name)))?;
+    step(Step::Checking {
+        cut: cut.name.clone(),
+    });
+    match crate::media::check_cut_until(video_dir, project, &cut.name, &cut.export, cancelled) {
+        Ok(problems) => Ok(problems),
+        Err(crate::media::MediaError::Cancelled) => Err(ShipError::Cancelled),
+        Err(e) => Err(ShipError::Render(format!("{}: {e}", cut.name))),
+    }
+}
+
+/// Bytes free for this user on the volume that holds `path`.
+pub fn free_space(path: &Path) -> io::Result<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    // SAFETY: `path` is a NUL-terminated string and `statvfs` only writes the struct it is given.
+    let stat = unsafe {
+        let mut stat = std::mem::zeroed::<libc::statvfs>();
+        if libc::statvfs(path.as_ptr(), &mut stat) != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        stat
+    };
+    Ok(u64::from(stat.f_bavail) * stat.f_frsize as u64)
+}
+
+/// Disk an export of `length` takes, the file and its cached chunks: a 4K60 master runs at
+/// about 50 Mbit/s (docs/evidence/m03/export.md), and the chunk cache holds as much again.
+pub fn export_room(length: Micros) -> u64 {
+    const BYTES_PER_SECOND: u64 = 2 * 50_000_000 / 8;
+    length.0.div_ceil(1_000_000) * BYTES_PER_SECOND
 }

@@ -51,6 +51,8 @@ pub enum ThumbnailError {
     },
     #[error(transparent)]
     Lock(#[from] crate::lock::LockError),
+    #[error("stopped")]
+    Cancelled,
 }
 
 /// Scores the camera frames the main cut shows and writes the best `count` as PNG under
@@ -60,50 +62,83 @@ pub fn find(
     project: &Project,
     count: usize,
 ) -> Result<Vec<Candidate>, ThumbnailError> {
+    find_with(video_dir, project, count, &|_| {}, &|| false)
+}
+
+/// How far [`find_with`] got: frames scored of the frames to score.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Scored {
+    pub done: usize,
+    pub total: usize,
+}
+
+/// [`find`], reporting each scored frame to `progress` and stopping with
+/// [`ThumbnailError::Cancelled`] once `cancelled` returns true. The stills of an earlier search
+/// are replaced, named by rank so the best sorts first.
+pub fn find_with(
+    video_dir: &Path,
+    project: &Project,
+    count: usize,
+    progress: &dyn Fn(Scored),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<Candidate>, ThumbnailError> {
     let timeline = crate::lock::timeline(video_dir, project)?;
-    let main = timeline.main();
-    let mut scored = Vec::new();
+    // Every frame to score: its take, media time and time in the cut.
+    let mut frames: Vec<(&Id, Micros, Micros)> = Vec::new();
     let mut offset = 0;
-    let mut decoders: Vec<(Id, Option<Decoder>)> = Vec::new();
-    for segment in main.chapters.iter().flat_map(|c| &c.segments) {
+    for segment in timeline.main().chapters.iter().flat_map(|c| &c.segments) {
         let source = segment.source;
-        if shows_face(segment.layout) {
-            let decoder = match decoders.iter().position(|(take, _)| *take == segment.take) {
-                Some(index) => &mut decoders[index].1,
-                None => {
-                    let path = camera(video_dir, &segment.take);
-                    let opened = path.exists().then(|| Decoder::open(&path)).transpose();
-                    let opened = opened.map_err(|e| ThumbnailError::Decode {
-                        path: path.clone(),
-                        message: e.to_string(),
-                    })?;
-                    decoders.push((segment.take.clone(), opened));
-                    &mut decoders.last_mut().expect("just pushed").1
-                }
-            };
-            if let Some(decoder) = decoder {
-                let mut t = source.from().0.div_ceil(STEP.0) * STEP.0;
-                while t < source.to().0 {
-                    let frame = decoder
-                        .seek(Duration::from_micros(t), || false)
-                        .map_err(|e| ThumbnailError::Decode {
-                            path: camera(video_dir, &segment.take),
-                            message: e.to_string(),
-                        })?;
-                    if let Some(score) = frame.as_ref().and_then(|f| expression(&f.buffer)) {
-                        scored.push(Candidate {
-                            take: segment.take.clone(),
-                            source: Micros(t),
-                            at: Micros(offset + t - source.from().0),
-                            score,
-                            path: None,
-                        });
-                    }
-                    t += STEP.0;
-                }
+        if shows_face(segment.layout) && camera(video_dir, &segment.take).exists() {
+            let mut t = source.from().0.div_ceil(STEP.0) * STEP.0;
+            while t < source.to().0 {
+                frames.push((
+                    &segment.take,
+                    Micros(t),
+                    Micros(offset + t - source.from().0),
+                ));
+                t += STEP.0;
             }
         }
         offset += source.duration().0;
+    }
+    let total = frames.len();
+    let mut scored = Vec::new();
+    let mut decoders: Vec<(&Id, Decoder)> = Vec::new();
+    for (done, (take, source, at)) in frames.into_iter().enumerate() {
+        if cancelled() {
+            return Err(ThumbnailError::Cancelled);
+        }
+        let decoder = match decoders.iter().position(|(t, _)| *t == take) {
+            Some(index) => &mut decoders[index].1,
+            None => {
+                let path = camera(video_dir, take);
+                let opened = Decoder::open(&path).map_err(|e| ThumbnailError::Decode {
+                    path: path.clone(),
+                    message: e.to_string(),
+                })?;
+                decoders.push((take, opened));
+                &mut decoders.last_mut().expect("just pushed").1
+            }
+        };
+        let frame = decoder
+            .seek(Duration::from_micros(source.0), || false)
+            .map_err(|e| ThumbnailError::Decode {
+                path: camera(video_dir, take),
+                message: e.to_string(),
+            })?;
+        if let Some(score) = frame.as_ref().and_then(|f| expression(&f.buffer)) {
+            scored.push(Candidate {
+                take: take.clone(),
+                source,
+                at,
+                score,
+                path: None,
+            });
+        }
+        progress(Scored {
+            done: done + 1,
+            total,
+        });
     }
     let mut best = rank(scored, count);
     let dir = video_dir.join(".shot/cache/thumbnails");
@@ -112,9 +147,16 @@ pub fn find(
         move |source| ThumbnailError::Io { path, source }
     };
     fs::create_dir_all(&dir).map_err(io(&dir))?;
-    for candidate in &mut best {
+    for entry in fs::read_dir(&dir).map_err(io(&dir))? {
+        let path = entry.map_err(io(&dir))?.path();
+        if path.extension().is_some_and(|e| e == "png") {
+            fs::remove_file(&path).map_err(io(&path))?;
+        }
+    }
+    for (rank, candidate) in best.iter_mut().enumerate() {
         let path = dir.join(format!(
-            "{}-{}.png",
+            "{}-{}-{}.png",
+            rank + 1,
             candidate.take.as_str(),
             candidate.source.0 / 1_000
         ));

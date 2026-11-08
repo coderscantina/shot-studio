@@ -10,7 +10,7 @@ use objc2_core_video::{
     CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
 };
 use shot_audio::Meter;
-use shot_core::{Micros, OutputKind, Project, Timeline};
+use shot_core::{Lock, Micros, Output, OutputKind, Project, Timeline};
 use shot_media::audio::{PcmReader, SAMPLE_RATE};
 use shot_media::videotoolbox::Decoder;
 
@@ -44,8 +44,13 @@ fn loudness_until(
     path: &Path,
     cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<(Option<f64>, f64), MediaError> {
-    let audio =
-        |e: shot_media::audio::AudioError| MediaError::Audio(format!("{}: {e}", path.display()));
+    let audio = |e: shot_media::audio::AudioError| {
+        MediaError::Audio(match e {
+            // It names the file already.
+            shot_media::audio::AudioError::NoAudioTrack(_) => e.to_string(),
+            e => format!("{}: {e}", path.display()),
+        })
+    };
     let mut reader = PcmReader::open(path).map_err(audio)?;
     let mut meter = Meter::new();
     let block = u64::from(SAMPLE_RATE);
@@ -272,16 +277,54 @@ pub fn check_cut_until(
     export: &Path,
     cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<Vec<Problem>, MediaError> {
-    let lock = shot_render::lock::read(video_dir).map_err(|e| MediaError::Video(e.to_string()))?;
-    let timeline = match &lock {
-        Some(lock) => Timeline::styled(project, lock),
-        None => Timeline::evaluate(project),
-    };
-    let output = timeline
-        .outputs
-        .iter()
-        .find(|o| o.name == cut)
-        .ok_or_else(|| MediaError::Video(format!("there is no cut named {cut}")))?;
+    let mut problems = measure_until(video_dir, project, cut, export, cancelled)?;
+    problems.extend(check_files(video_dir, project, cut, export)?);
+    problems.sort_by_key(|p| p.check);
+    Ok(problems)
+}
+
+/// The checks that read the export itself: loudness and black or frozen frames. They depend on
+/// the file alone, so a caller can keep their result while the file is unchanged.
+pub fn measure_until(
+    video_dir: &Path,
+    project: &Project,
+    cut: &str,
+    export: &Path,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<Vec<Problem>, MediaError> {
+    if !export.exists() {
+        return Ok(vec![Problem {
+            check: CheckKind::Loudness,
+            message: format!(
+                "no export at {}, so loudness and frames are unchecked: run `shot export --cut {cut}`",
+                export.display()
+            ),
+        }]);
+    }
+    let (timeline, _) = timeline(video_dir, project)?;
+    let length = duration(output(&timeline, cut)?);
+    // The audio and the frames are read side by side.
+    let (loudness, frames) = std::thread::scope(|scope| {
+        let loudness = scope.spawn(|| loudness_until(export, cancelled));
+        let frames = sample_frames(export, length, cancelled);
+        (loudness.join().expect("loudness reader panicked"), frames)
+    });
+    let (lufs, peak) = loudness?;
+    let mut problems = check::loudness(lufs, peak);
+    problems.extend(check::frames(&frames?));
+    Ok(problems)
+}
+
+/// The checks over the files next to the export and the project: captions, links, chapters,
+/// the thumbnail and, on the main cut of a migrated video, overrides whose element is gone.
+pub fn check_files(
+    video_dir: &Path,
+    project: &Project,
+    cut: &str,
+    export: &Path,
+) -> Result<Vec<Problem>, MediaError> {
+    let (timeline, lock) = timeline(video_dir, project)?;
+    let output = output(&timeline, cut)?;
     let mut transcripts = HashMap::new();
     for segment in output.chapters.iter().flat_map(|c| &c.segments) {
         if transcripts.contains_key(&segment.take) {
@@ -295,35 +338,15 @@ pub fn check_cut_until(
     }
     let words = spoken_words(output, &transcripts);
     let length = duration(output);
-    let mut problems = Vec::new();
-    if export.exists() {
-        // The audio and the frames are read side by side.
-        let (loudness, frames) = std::thread::scope(|scope| {
-            let loudness = scope.spawn(|| loudness_until(export, cancelled));
-            let frames = sample_frames(export, length, cancelled);
-            (loudness.join().expect("loudness reader panicked"), frames)
-        });
-        let (lufs, peak) = loudness?;
-        problems.extend(check::loudness(lufs, peak));
-        problems.extend(check::frames(&frames?));
-    } else {
-        problems.push(Problem {
-            check: CheckKind::Loudness,
-            message: format!(
-                "no export at {}, so loudness and frames are unchecked: run `shot export --cut {cut}`",
-                export.display()
-            ),
-        });
-    }
     let sidecar = std::fs::read_to_string(export.with_extension("vtt")).ok();
-    problems.extend(check::captions(
+    let mut problems = check::captions(
         output.captions,
         output.kind.burns_captions(),
         sidecar.as_deref(),
         &output.caption_fixes,
         &words,
         &check::takes_without_transcript(output, &transcripts),
-    ));
+    );
     problems.extend(check::links(
         &check::said_links(&words),
         &check::link_cards(output),
@@ -344,4 +367,22 @@ pub fn check_cut_until(
     }
     problems.sort_by_key(|p| p.check);
     Ok(problems)
+}
+
+/// The timeline export renders, from the video's lock when it has one, and that lock.
+fn timeline(video_dir: &Path, project: &Project) -> Result<(Timeline, Option<Lock>), MediaError> {
+    let lock = shot_render::lock::read(video_dir).map_err(|e| MediaError::Video(e.to_string()))?;
+    let timeline = match &lock {
+        Some(lock) => Timeline::styled(project, lock),
+        None => Timeline::evaluate(project),
+    };
+    Ok((timeline, lock))
+}
+
+fn output<'a>(timeline: &'a Timeline, cut: &str) -> Result<&'a Output, MediaError> {
+    timeline
+        .outputs
+        .iter()
+        .find(|o| o.name == cut)
+        .ok_or_else(|| MediaError::Video(format!("there is no cut named {cut}")))
 }
