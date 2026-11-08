@@ -187,11 +187,7 @@ fn callout_target(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoE
         .id("picture-preview")
         .relative()
         .child(parts::preview(this))
-        .child(
-            canvas(move |b, _, _| bounds.set(b), |_, _, _, _| {})
-                .absolute()
-                .size_full(),
-        )
+        .child(crate::ui::measure(bounds).absolute().size_full())
         .when(on, |preview| {
             preview.cursor_crosshair().on_mouse_down(
                 MouseButton::Left,

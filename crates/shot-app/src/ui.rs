@@ -223,3 +223,18 @@ pub fn proposal_action(
             })
         })
 }
+
+/// An invisible canvas filling its parent that records where the parent was painted. A new
+/// size draws one more frame, so layout that depends on it is never a frame stale.
+pub fn measure(bounds: std::rc::Rc<std::cell::Cell<gpui::Bounds<Pixels>>>) -> gpui::Canvas<()> {
+    gpui::canvas(
+        move |b, window, _| {
+            if bounds.get().size != b.size {
+                // A refresh during this frame's paint is dropped, so ask for the next one.
+                window.on_next_frame(|window, _| window.refresh());
+            }
+            bounds.set(b);
+        },
+        |_, _, _, _| {},
+    )
+}

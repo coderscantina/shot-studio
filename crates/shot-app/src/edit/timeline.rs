@@ -1088,7 +1088,7 @@ fn lanes(this: &EditScreen, window: Range<u64>, cx: &mut Context<EditScreen>) ->
                     cx.listener(|this, event: &PinchEvent, _, cx| this.pinch_lanes(event, cx)),
                 )
                 .child(
-                    canvas(move |b, _, _| bounds.set(b), |_, _, _, _| {})
+                    crate::ui::measure(bounds)
                         .absolute()
                         .top_0()
                         .bottom_0()
@@ -1248,11 +1248,7 @@ fn zoom_controls(this: &EditScreen, length: u64, cx: &mut Context<EditScreen>) -
                 .h(px(24.))
                 .mx(px(8.))
                 .cursor_pointer()
-                .child(
-                    canvas(move |b, _, _| bounds.set(b), |_, _, _, _| {})
-                        .absolute()
-                        .size_full(),
-                )
+                .child(crate::ui::measure(bounds).absolute().size_full())
                 .child(
                     div()
                         .absolute()
@@ -2286,11 +2282,7 @@ fn words_lane(
     let bounds = this.lanes.words.clone();
     div()
         .size_full()
-        .child(
-            canvas(move |b, _, _| bounds.set(b), |_, _, _, _| {})
-                .absolute()
-                .size_full(),
-        )
+        .child(crate::ui::measure(bounds).absolute().size_full())
         .children(seams.into_iter().enumerate().map(|(key, seam)| {
             let picked = this.lanes.picked == Some(Pick::Cut(seam.at, seam.range));
             let (at, range, frame) = (seam.at, seam.range, seam.frame);
