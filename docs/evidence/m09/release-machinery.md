@@ -4,11 +4,7 @@ Date 2026-11-08, branch `task/m09-release`. Everything a release needs except Mi
 
 ## What Mike adds
 
-1. Repository secrets on `coderscantina/shot-studio`:
-   - `APPLE_DEVELOPER_ID_CERT`: the "Developer ID Application" certificate with its private key, exported as .p12, base64 encoded (`base64 -i cert.p12 | pbcopy`).
-   - `APPLE_DEVELOPER_ID_PASSWORD`: the .p12 password.
-   - `APPLE_TEAM_ID`: the 10 character team id in the certificate's name.
-   - `APPLE_NOTARY_API_KEY`, `APPLE_NOTARY_API_KEY_ID`, `APPLE_NOTARY_API_ISSUER`: an App Store Connect API key (Users and Access, Integrations, role Developer), the .p8 base64 encoded, its key id and the issuer id.
+1. Signing secrets: on 2026-11-08 the workflow switched to the coderscantina secrets Kessel already signs with (`MACOS_CERTIFICATE`, `MACOS_CERTIFICATE_PASSWORD`, `MACOS_SIGN_IDENTITY`, `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_PASSWORD`), notarizing with the Apple ID and app-specific password. Nothing new is needed if the org shares them with `shot-studio`.
 2. The `coderscantina/homebrew-tap` repo with `packaging/homebrew/shot-studio.rb` copied to `Casks/shot-studio.rb`. After each release, paste `version` and `sha256` from the release run's summary.
 3. An `origin` remote: this clone has none yet. `release.sh` says so and prints the push command.
 

@@ -3,6 +3,3 @@ contact_links:
   - name: Report a security vulnerability
     url: https://github.com/coderscantina/shot-studio/security/advisories/new
     about: Report vulnerabilities privately. Do not open a public issue for them.
-  - name: Shot Studio website
-    url: https://shot.app
-    about: Product overview and news.

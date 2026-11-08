@@ -8,8 +8,8 @@ This document owns the product scope and architecture. File formats live in [the
 
 Shot Studio is a macOS desktop app for recording and editing developer videos: reactions and opinions in the style of Theo or ThePrimeagen, plus product tours, feature showcases and tutorials. It defines a category, **semantic video: record what you mean, style how it looks.** A recording becomes a document of meaning (what you said, clicked, showed and marked), and cascading style rules render it into every cut, the way CSS renders HTML. It works like a software project. The plan lives on a Kanban board backed by git, the script is the spec, auto cut works like a linter, review works like a PR, rendering is an incremental build, and shipping is a tagged release.
 
-- Website: shot.app
-- macOS app: `shot.app`, one bundle that also carries the CLI
+- Website: not decided yet (`shot-studio.app` or `shot.coderscantina.com`)
+- macOS app: `Shot Studio.app`, one bundle that also carries the CLI
 - CLI: `shot`. MCP server: `shot` (stdio)
 - Repo: `github.com/coderscantina/shot-studio`
 - Bundle id: `com.coderscantina.shotstudio`
@@ -147,7 +147,7 @@ crates/
   shot-prompter/  Elgato Prompter output, voice-follow scrolling
   shot-board/     git-backed board: video.kdl, status commits, tags, proposals
   shot-ship/      shot check rules, YouTube upload, release tags
-  shot-app/       gpui UI, bundled as shot.app
+  shot-app/       gpui UI, bundled as Shot Studio.app
   shot-cli/       binary `shot`
   shot-mcp/       stdio MCP server `shot`
 ```

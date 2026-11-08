@@ -26,8 +26,7 @@ Include as much of the following as you can:
 
 ## Response expectations
 
-- We acknowledge a report within **72 hours**.
-- We send a status update within **14 days** if a fix is not ready.
+- Shot Studio is maintained by a small team, so responses are best effort. We read every report and reply as soon as we can.
 - We agree on a disclosure date with you once a fix is ready.
 - We credit reporters in the advisory and release notes, if you want credit.
 

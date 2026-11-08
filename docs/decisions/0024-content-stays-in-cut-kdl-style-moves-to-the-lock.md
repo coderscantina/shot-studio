@@ -1,6 +1,6 @@
 # 0024: `keep` ranges stay in `cut.kdl`, rule-made removals move to the lock
 
-Status: Proposed. Settles an open point of [0019](0019-semantic-video-elements-and-style.md) in milestone 10.
+Status: Adopted by Mike on 2026-11-08. Settles an open point of [0019](0019-semantic-video-elements-and-style.md) in milestone 10.
 
 ## Problem
 

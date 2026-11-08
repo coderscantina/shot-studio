@@ -17,7 +17,7 @@ Requires 10, and 11 for the full look. App owns the Record screen, Media the liv
 
 ## Acceptance criteria
 
-- Recording the screen fixture with the styled monitor on drops at most one frame per 5 minutes in the recorded tracks, and a URL said shows its card within 500 ms on the monitor.
+- Recording the screen fixture with the styled monitor on drops at most one frame per 5 minutes in the recorded tracks, and a URL said shows its card within 1.5 s on the monitor (relaxed from 500 ms by Mike on 2026-11-08: whisper's decode step sets the floor).
 - `shot build --watch` re-exports one changed chapter of the 17 min fixture in under 20 s after a save.
 - A proposal preview plays without changing the video branch's lock or cache.
 

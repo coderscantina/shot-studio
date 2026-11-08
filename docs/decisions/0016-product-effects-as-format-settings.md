@@ -1,6 +1,6 @@
 # 0016: Product video effects are format settings
 
-Status: Proposed. [0019](0019-semantic-video-elements-and-style.md) moves these settings into style rules once adopted; the effects stay
+Status: Adopted by Mike on 2026-11-08. [0019](0019-semantic-video-elements-and-style.md) moves these settings into style rules; the effects stay.
 
 ## Problem
 

@@ -15,7 +15,7 @@ Requires 01 to 08 and 10 to 12. Core owns `release.sh`, `.github/workflows/relea
 3. Homebrew cask in `coderscantina/homebrew-tap`.
 4. Measure every [target](../technical-briefing.md#targets) on the reference machine with the generated 17 min 4K60 project.
 5. Run one full video on the fixture project: board card, script, record, auto cut, edit, derived cuts, check, ship to a private upload.
-6. Public README, website link to shot.app, community files reviewed.
+6. Public README, website link once the domain is decided, community files reviewed.
 
 ## Acceptance criteria
 

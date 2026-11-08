@@ -1,6 +1,6 @@
 # 0022: Ship artifacts live in `.shot/`, the release tag is what git keeps
 
-Status: Proposed
+Status: Adopted by Mike on 2026-11-08.
 
 ## Problem
 

@@ -1,6 +1,6 @@
 # 0018: Overlay templates are typed specs in the renderer
 
-Status: Proposed. Amended by [0023](0023-motion-system-and-lottie-templates.md) once adopted: motion moves to springs (`enter` and `exit` stay as duration hints), and a brand may declare Lottie templates with typed slots, hashed by content.
+Status: Adopted by Mike on 2026-11-08. Amended by [0023](0023-motion-system-and-lottie-templates.md): motion moves to springs (`enter` and `exit` stay as duration hints), and a brand may declare Lottie templates with typed slots, hashed by content.
 
 ## Problem
 

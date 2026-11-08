@@ -1,6 +1,6 @@
 # 0019: Semantic video, elements and style rules
 
-Status: Proposed. Settled with Mike in the effects grill on 2026-11-07. Supersedes [0013](0013-review-queue-in-cut-kdl.md) and [0014](0014-auto-edits-as-written-nodes.md), and moves [0016](0016-product-effects-as-format-settings.md)'s settings into style rules.
+Status: Adopted by Mike on 2026-11-08. Settled with Mike in the effects grill on 2026-11-07. Supersedes [0013](0013-review-queue-in-cut-kdl.md) and [0014](0014-auto-edits-as-written-nodes.md), and moves [0016](0016-product-effects-as-format-settings.md)'s settings into style rules.
 
 ## Problem
 

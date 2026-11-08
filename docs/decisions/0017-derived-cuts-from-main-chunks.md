@@ -1,6 +1,6 @@
 # 0017: Derived cuts are drawn from the main cut's chunks
 
-Status: Proposed
+Status: Adopted by Mike on 2026-11-08.
 
 ## Problem
 

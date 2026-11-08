@@ -1,6 +1,6 @@
 # 0020: A channel brand, overridable per video, importable from git
 
-Status: Proposed. Settled with Mike in the effects grill on 2026-11-07.
+Status: Adopted by Mike on 2026-11-08. Settled with Mike in the effects grill on 2026-11-07.
 
 ## Problem
 

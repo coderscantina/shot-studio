@@ -1,6 +1,6 @@
 # 0023: A motion system with springs, materials and Lottie templates
 
-Status: Proposed. Settled with Mike in the production grill on 2026-11-07. Amends [0018](0018-overlay-templates-as-typed-specs.md) and [0021](0021-sound-transitions-and-bookends.md).
+Status: Adopted by Mike on 2026-11-08. Settled with Mike in the production grill on 2026-11-07. Amends [0018](0018-overlay-templates-as-typed-specs.md) and [0021](0021-sound-transitions-and-bookends.md).
 
 ## Problem
 

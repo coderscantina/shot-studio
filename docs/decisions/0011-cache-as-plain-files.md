@@ -1,6 +1,6 @@
 # 0011: The cache as plain files instead of SQLite
 
-Status: Proposed
+Status: Adopted by Mike on 2026-11-08.
 
 ## Problem
 

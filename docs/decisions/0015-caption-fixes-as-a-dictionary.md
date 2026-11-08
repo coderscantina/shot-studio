@@ -1,6 +1,6 @@
 # 0015: Caption fixes are a per-video dictionary
 
-Status: Proposed
+Status: Adopted by Mike on 2026-11-08.
 
 ## Problem
 

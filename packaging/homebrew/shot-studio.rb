@@ -7,7 +7,7 @@ cask "shot-studio" do
   url "https://github.com/coderscantina/shot-studio/releases/download/v#{version.csv.first}-#{version.csv.second}/Shot-Studio-#{version.csv.first}.dmg"
   name "Shot Studio"
   desc "Record and edit developer videos, with the edit as a text file in git"
-  homepage "https://shot.app/"
+  homepage "https://github.com/coderscantina/shot-studio"
 
   livecheck do
     url :url

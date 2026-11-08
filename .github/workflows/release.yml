@@ -3,17 +3,17 @@ name: Release
 # Runs on release tags that `release.sh` creates: vYY.M.D-<short commit>, e.g.
 # v26.11.8-1a2b3c4, or vYY.M.D.N-<short commit> for the Nth release of a day. Waits for CI on
 # the release commit, builds "Shot Studio.app" and its DMG on Apple Silicon, signs and
-# notarizes them when the Apple secrets are set, and creates a GitHub release whose notes are
+# notarizes them when the Apple secrets are set (the same coderscantina secrets Kessel uses), and creates a GitHub release whose notes are
 # the version's CHANGELOG.md section. Without the secrets the DMG is unsigned and the release
 # stays a draft, so the cask never points at a build Gatekeeper rejects.
 #
 # Secrets:
-#   APPLE_DEVELOPER_ID_CERT       the Developer ID Application certificate and key, .p12 in base64
-#   APPLE_DEVELOPER_ID_PASSWORD   the .p12 password
-#   APPLE_TEAM_ID                 the team id in the certificate's name
-#   APPLE_NOTARY_API_KEY          an App Store Connect API key, .p8 in base64
-#   APPLE_NOTARY_API_KEY_ID       its key id
-#   APPLE_NOTARY_API_ISSUER       its issuer id
+#   MACOS_CERTIFICATE            the Developer ID Application certificate and key, .p12 in base64
+#   MACOS_CERTIFICATE_PASSWORD   the .p12 password
+#   MACOS_SIGN_IDENTITY          the identity's name, optional (found by team id otherwise)
+#   APPLE_ID                     the Apple ID notarytool signs in with
+#   APPLE_TEAM_ID                the team id in the certificate's name
+#   APPLE_APP_PASSWORD           an app-specific password for that Apple ID
 on:
   push:
     tags:
@@ -101,12 +101,12 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 90
     env:
-      APPLE_DEVELOPER_ID_CERT: ${{ secrets.APPLE_DEVELOPER_ID_CERT }}
-      APPLE_DEVELOPER_ID_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_PASSWORD }}
+      MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-      APPLE_NOTARY_API_KEY: ${{ secrets.APPLE_NOTARY_API_KEY }}
-      APPLE_NOTARY_API_KEY_ID: ${{ secrets.APPLE_NOTARY_API_KEY_ID }}
-      APPLE_NOTARY_API_ISSUER: ${{ secrets.APPLE_NOTARY_API_ISSUER }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
 
     steps:
       - name: Checkout code
@@ -123,42 +123,39 @@ jobs:
           shared-key: release
 
       - name: Import the Developer ID certificate
-        if: env.APPLE_DEVELOPER_ID_CERT != '' && env.APPLE_TEAM_ID != ''
+        if: env.MACOS_CERTIFICATE != '' && env.APPLE_TEAM_ID != ''
         run: |
           keychain="$RUNNER_TEMP/signing.keychain-db"
           password=$(openssl rand -hex 16)
           security create-keychain -p "$password" "$keychain"
           security set-keychain-settings -lut 21600 "$keychain"
           security unlock-keychain -p "$password" "$keychain"
-          printf '%s' "$APPLE_DEVELOPER_ID_CERT" | base64 --decode > "$RUNNER_TEMP/developer-id.p12"
+          printf '%s' "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/developer-id.p12"
           security import "$RUNNER_TEMP/developer-id.p12" -k "$keychain" \
-            -P "$APPLE_DEVELOPER_ID_PASSWORD" -T /usr/bin/codesign
+            -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
           rm "$RUNNER_TEMP/developer-id.p12"
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain" > /dev/null
           # shellcheck disable=SC2046
           security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
-          identity=$(security find-identity -v -p codesigning "$keychain" |
-            awk -v team="($APPLE_TEAM_ID)" '/Developer ID Application/ && index($0, team) { print $2; exit }')
+          identity=$MACOS_SIGN_IDENTITY
+          if [ -z "$identity" ]; then
+            identity=$(security find-identity -v -p codesigning "$keychain" |
+              awk -v team="($APPLE_TEAM_ID)" '/Developer ID Application/ && index($0, team) { print $2; exit }')
+          fi
           if [ -z "$identity" ]; then
             echo "::error::no Developer ID Application identity for team $APPLE_TEAM_ID in the certificate"
             exit 1
           fi
           echo "SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
 
-      - name: Write the notary API key
-        if: env.SIGN_IDENTITY != '' && env.APPLE_NOTARY_API_KEY != '' && env.APPLE_NOTARY_API_KEY_ID != '' && env.APPLE_NOTARY_API_ISSUER != ''
-        run: |
-          printf '%s' "$APPLE_NOTARY_API_KEY" | base64 --decode > "$RUNNER_TEMP/notary.p8"
-          {
-            echo "NOTARY_KEY=$RUNNER_TEMP/notary.p8"
-            echo "NOTARY_KEY_ID=$APPLE_NOTARY_API_KEY_ID"
-            echo "NOTARY_ISSUER=$APPLE_NOTARY_API_ISSUER"
-          } >> "$GITHUB_ENV"
+      - name: Enable notarization
+        if: env.SIGN_IDENTITY != '' && env.APPLE_ID != '' && env.APPLE_APP_PASSWORD != ''
+        run: echo "NOTARIZE=1" >> "$GITHUB_ENV"
 
       - name: Warn about missing Apple secrets
-        if: env.SIGN_IDENTITY == '' || env.NOTARY_KEY == ''
+        if: env.SIGN_IDENTITY == '' || env.NOTARIZE == ''
         run: |
-          echo "::warning::APPLE_DEVELOPER_ID_CERT, APPLE_TEAM_ID or the APPLE_NOTARY_API_* secrets are missing. The DMG is not signed or not notarized, and the release stays a draft."
+          echo "::warning::MACOS_CERTIFICATE, APPLE_TEAM_ID, APPLE_ID or APPLE_APP_PASSWORD is missing. The DMG is not signed or not notarized, and the release stays a draft."
 
       - name: Build the app and DMG
         run: scripts/bundle.sh
@@ -191,10 +188,10 @@ jobs:
           name: ${{ github.ref_name }}
           body_path: release-notes.md
           files: dist/Shot-Studio-${{ needs.check.outputs.version }}.dmg
-          draft: ${{ env.NOTARY_KEY == '' }}
+          draft: ${{ env.NOTARIZE == '' }}
 
       - name: Remove the signing keychain and key
         if: always()
         run: |
           [ ! -f "$RUNNER_TEMP/signing.keychain-db" ] || security delete-keychain "$RUNNER_TEMP/signing.keychain-db"
-          rm -f "$RUNNER_TEMP/notary.p8"
+          true

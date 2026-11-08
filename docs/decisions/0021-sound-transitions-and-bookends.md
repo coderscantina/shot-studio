@@ -1,6 +1,6 @@
 # 0021: Sound effects, music cues, chapter transitions and bookends
 
-Status: Proposed. Settled with Mike in the effects grill on 2026-11-07. Amended by [0023](0023-motion-system-and-lottie-templates.md): sounds per motion phase instead of one per effect kind, and the stinger, mask wipe and zoom-through join the chapter-edge transitions.
+Status: Adopted by Mike on 2026-11-08. Settled with Mike in the effects grill on 2026-11-07. Amended by [0023](0023-motion-system-and-lottie-templates.md): sounds per motion phase instead of one per effect kind, and the stinger, mask wipe and zoom-through join the chapter-edge transitions.
 
 ## Problem
 

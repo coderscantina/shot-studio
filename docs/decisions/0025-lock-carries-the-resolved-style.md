@@ -1,6 +1,6 @@
 # 0025: The lock carries the resolved brand and the hashes of the files it draws from
 
-Status: Proposed. Settles the shape of `cut.lock` from [0019](0019-semantic-video-elements-and-style.md) and [0020](0020-channel-brand-and-shared-styles.md) in milestone 10.
+Status: Adopted by Mike on 2026-11-08. Settles the shape of `cut.lock` from [0019](0019-semantic-video-elements-and-style.md) and [0020](0020-channel-brand-and-shared-styles.md) in milestone 10.
 
 ## Problem
 

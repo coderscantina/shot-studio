@@ -29,25 +29,11 @@ Milestones 10 to 12 make Shot Studio a semantic video editor ([0019](../decision
 
 Waiting for Mike. One line each with a recommendation and a link to its record. Remove the line once the record says Adopted.
 
-- Cache as plain files named by key under `.shot/cache/` instead of SQLite. Recommend adopting: lookups are by one key and segments are files anyway. Milestone 03 already builds on it. [0011](../decisions/0011-cache-as-plain-files.md)
-- Review queue as `review` and `ignore` nodes in `cut.kdl`. Superseded by 0019 once adopted; 04 to 08 build on it until milestone 10 migrates. [0013](../decisions/0013-review-queue-in-cut-kdl.md)
-- Auto edits written as ordinary nodes with provenance, markers as `events.jsonl` events. Superseded by 0019 once adopted, markers stay. [0014](../decisions/0014-auto-edits-as-written-nodes.md)
-- Caption fixes as a "heard, said" dictionary in `cut.kdl`. Recommend adopting: survives re-transcription. [0015](../decisions/0015-caption-fixes-as-a-dictionary.md)
-- Product video effects as optional `format.kdl` settings, code from git as an overlay template. Recommend adopting: existing files stay valid. [0016](../decisions/0016-product-effects-as-format-settings.md)
-- Derived cuts as windows of main's frames that reuse its cached chunks. Recommend adopting: a Short costs seconds once main is exported. [0017](../decisions/0017-derived-cuts-from-main-chunks.md)
-- Overlay templates as typed specs checked at export, unknown templates refused. Recommend adopting: agents fill parameters instead of writing code. [0018](../decisions/0018-overlay-templates-as-typed-specs.md)
-- Ship artifacts (thumbnail, upload record with the YouTube video ids) stay in git-ignored `.shot/`; git gets the card move and the tag. Recommend adopting now and adding a committed `ship.kdl` once the board should link to YouTube. [0022](../decisions/0022-ship-artifacts-outside-git.md)
-- Keep ranges stay as content in `cut.kdl`, rule cuts live in the lock, overrides are top-level nodes. Recommend adopting: content and style stay apart. [0024](../decisions/0024-content-stays-in-cut-kdl-style-moves-to-the-lock.md)
-- The lock carries the resolved brand and asset hashes behind a versioned header. Recommend adopting: a lock alone renders the same frames. [0025](../decisions/0025-lock-carries-the-resolved-style.md)
-- Pacing is now the cut rules' breath; the `pacing` keyword is read once by migration. Jump-cut punch-ins on every other cut have no rule form (selectors cannot count cuts), so new videos get none and migrated ones keep theirs as overrides. Recommend accepting both for now and adding an `every=2` selector filter if you miss the punch-ins. [Evidence](../evidence/m10/migrate.md)
-- Golden-frame tests: allow ±1 code value on a handful of pixels. vello's partial coverage flips one chroma sample on a letter edge in 3 of 8 reel runs. Recommend allowing it; the per-area golden tests stay strict and pass. [Evidence](../evidence/m11-effects-as-styles.md)
-- URL card latency on the live monitor: measured median 1.31 s against 500 ms; the wait is whisper's 1 s decode step. Recommend relaxing the target to 1.5 s; meeting 500 ms needs a second fast decode of the last seconds every 250 ms while recording, at extra GPU cost. [Evidence](../evidence/m12-styled-monitor-and-watch-builds.md)
-- Codec headroom raised from 1.0 to 1.5 dB, so the limiter holds -2.5 dBTP before AAC and sound-effect-heavy exports encode once instead of twice. Loudness stays -14 LUFS; the loudest moments come out 0.3 to 0.5 dB lower, unheard. Recommend keeping it; reverting is one constant in `shot-audio/src/loudness.rs`. [Evidence](../evidence/m12/audio-speed.md)
 - Score the four reels (`docs/evidence/m11/reel-*.mp4`, 81 s each, timecoded list in the report); milestone 11 needs 8 or higher per preset.
-- Semantic video: committed elements per take, cascading style rules, a generated `cut.lock`, pacing as style, review decisions as overrides, shipped videos pinned at their tag. Settled in the effects grill on 2026-11-07; adopt once milestone 10 settles the grammar. [0019](../decisions/0019-semantic-video-elements-and-style.md)
-- A channel `brand/brand.kdl` with partial overrides per video, bundled and repo fonts, bumpers git-ignored, styles imported from git. Settled in the effects grill. [0020](../decisions/0020-channel-brand-and-shared-styles.md)
-- Chapter-edge transitions, automatic and placed SFX, music cues, intro, outro, chapter bands and the end card. Settled in the effects grill. [0021](../decisions/0021-sound-transitions-and-bookends.md)
-- A motion system of springs, glass, depth, motion blur and kinetic type in four presets, Lottie templates declared with typed slots, sound per motion phase, beat sync, stinger, wipe and zoom-through transitions, a scored reel as the gate. Settled in the production grill on 2026-11-07. Amends 0018 and 0021. [0023](../decisions/0023-motion-system-and-lottie-templates.md)
+- Website and domain: `shot-studio.app` or `shot.coderscantina.com`, postponed by Mike on 2026-11-08. No website is linked until then.
+- Milestone 10 item 7: a design-variants round for provenance, the scope choice and the rule editor, plus the transition mark style and Picture's placement buttons.
+
+Settled on 2026-11-08: every Proposed record (0011, 0013 to 0025) adopted, the live URL card target relaxed to 1.5 s, golden frames allow 1 code value on up to 16 pixels, codec headroom stays 1.5 dB, presets get jump-cut punch-ins back through an `every=<n>` selector filter, the release workflow reuses Kessel's coderscantina signing secrets, the repo goes public now, SECURITY.md promises best effort, Discussions stay off, the Homebrew tap waits for the first release.
 
 ## Prerequisites from Mike
 
@@ -55,7 +41,7 @@ Waiting for Mike. One line each with a recommendation and a link to its record. 
 - Before 01 can close: create `github.com/coderscantina/shot-studio` and push, so CI runs once.
 
 - Before 08 ships to YouTube: a Google Cloud project with the YouTube Data API enabled and an OAuth client for a desktop app.
-- Before 09: the secrets `APPLE_DEVELOPER_ID_CERT`, `APPLE_DEVELOPER_ID_PASSWORD`, `APPLE_TEAM_ID`, `APPLE_NOTARY_API_KEY`, `APPLE_NOTARY_API_KEY_ID`, `APPLE_NOTARY_API_ISSUER` in the GitHub repo, and a `coderscantina/homebrew-tap` repo with `packaging/homebrew/shot-studio.rb` copied to `Casks/`.
+- Before 09: the coderscantina org secrets Kessel signs with (`MACOS_CERTIFICATE`, `MACOS_CERTIFICATE_PASSWORD`, `MACOS_SIGN_IDENTITY`, `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_PASSWORD`) shared with `shot-studio`, and at the first release a `coderscantina/homebrew-tap` repo with `packaging/homebrew/shot-studio.rb` copied to `Casks/`.
 
 ## Known gaps
 

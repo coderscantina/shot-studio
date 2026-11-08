@@ -10,9 +10,10 @@
 # app is signed ad hoc and the DMG stays unsigned:
 #
 #   SIGN_IDENTITY     a "Developer ID Application" identity in the keychain
-#   NOTARY_KEY        path to an App Store Connect API key (.p8) for notarytool
-#   NOTARY_KEY_ID     its key id
-#   NOTARY_ISSUER     its issuer id
+#   NOTARIZE          set to 1 to notarize, signing in to notarytool with:
+#   APPLE_ID          the Apple ID
+#   APPLE_TEAM_ID     the team id
+#   APPLE_APP_PASSWORD  an app-specific password for that Apple ID
 #
 # The app runs with the hardened runtime and without the App Sandbox: it records the screen
 # through ScreenCaptureKit, opens video folders and git repos anywhere on disk, and starts the
@@ -84,15 +85,15 @@ done
 codesign --verify --strict --deep "$app"
 
 notarize=false
-if $signed && [ -n "${NOTARY_KEY:-}" ] && [ -n "${NOTARY_KEY_ID:-}" ] && [ -n "${NOTARY_ISSUER:-}" ]; then
+if $signed && [ -n "${NOTARIZE:-}" ] && [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ] && [ -n "${APPLE_APP_PASSWORD:-}" ]; then
   notarize=true
 elif $signed; then
-  echo "bundle: NOTARY_KEY, NOTARY_KEY_ID or NOTARY_ISSUER is not set, skipping notarization" >&2
+  echo "bundle: NOTARIZE, APPLE_ID, APPLE_TEAM_ID or APPLE_APP_PASSWORD is not set, skipping notarization" >&2
 fi
 
 # Submits a file to the notary service and waits; the log names any rejected binary.
 notarize() {
-  local auth=(--key "$NOTARY_KEY" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER")
+  local auth=(--apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD")
   local result
   result=$(xcrun notarytool submit "$1" "${auth[@]}" --wait --output-format json)
   xcrun notarytool log "$(jq -r .id <<<"$result")" "${auth[@]}" >&2
