@@ -28,6 +28,9 @@ on misspoken {
 on emphasis {
     zoom 112 hold=1_000_000
 }
+on silence min=600_000 every=2 {
+    zoom 112 hold=3_000_000
+}
 on url {
     overlay link-card for=6_000_000 {
         url

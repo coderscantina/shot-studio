@@ -165,10 +165,13 @@ impl Subject<'_> {
         self.element.and_then(|e| e.confidence).unwrap_or(100)
     }
 
+    /// Whether the selector picks this subject, leaving out `every`, which counts among the
+    /// subjects this passes.
     fn matches(&self, selector: &Selector) -> bool {
         use crate::Filter;
         selector.target == self.target
             && selector.filters.iter().all(|filter| match filter {
+                Filter::Every(_) => true,
                 Filter::Attr(attr, value) => {
                     self.element.and_then(|e| e.attr(*attr)) == Some(value)
                 }
@@ -176,6 +179,32 @@ impl Subject<'_> {
                 Filter::Confidence(c) => self.confidence() >= *c,
             })
     }
+}
+
+/// For each rule, which of the subjects (sorted by time) it selects: the ones matching its
+/// selector, thinned to every n-th when it has `every`.
+fn select(rules: &[ActiveRule], subjects: &[Subject<'_>]) -> Vec<Vec<bool>> {
+    use crate::Filter;
+    rules
+        .iter()
+        .map(|rule| {
+            let every = rule.selector.filters.iter().find_map(|f| match f {
+                Filter::Every(n) => Some(*n as usize),
+                _ => None,
+            });
+            let mut count = 0;
+            subjects
+                .iter()
+                .map(|subject| {
+                    if !subject.matches(&rule.selector) {
+                        return false;
+                    }
+                    count += 1;
+                    every.is_none_or(|n| (count - 1) % n == 0)
+                })
+                .collect()
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy)]
@@ -316,10 +345,11 @@ fn evaluate_take(
                 .collect(),
             Phase::Structure => structure_subjects(cut, take, &cut_union(&instances)),
         };
-        for subject in subjects {
+        let selected = select(rules, &subjects);
+        for (i, subject) in subjects.into_iter().enumerate() {
             let mut winners: BTreeMap<EffectKey, (usize, usize, Winner<'_>)> = BTreeMap::new();
             for (order, rule) in rules.iter().enumerate() {
-                if !subject.matches(&rule.selector) {
+                if !selected[order][i] {
                     continue;
                 }
                 let rank = (rule.selector.specificity(), order);

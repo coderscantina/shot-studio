@@ -322,10 +322,6 @@ mod tests {
         read_rgb(&target).unwrap()
     }
 
-    fn digest(pixels: &[[u8; 3]]) -> blake3::Hash {
-        blake3::hash(pixels.as_flattened())
-    }
-
     #[test]
     #[ignore = "needs the GPU"]
     fn every_template_frame_is_the_same_reached_by_playing_or_by_seeking() {
@@ -338,24 +334,31 @@ mod tests {
             let look = look(preset, smooth());
             let time = |frame: u64| Micros(frame * 1_000_000 / fps);
             let at = |on: &Renderer, f| {
-                digest(&render(
+                render(
                     on,
                     &source,
                     &frame_at(&look, &overlays, time(f), PREVIEW),
                     PREVIEW,
-                ))
+                )
             };
-            let played: Vec<blake3::Hash> = (0..frames).map(|f| at(&renderer, f)).collect();
             // Seeks in a fixed pseudo-random order, on the same renderer and on a fresh one.
-            let fresh = Renderer::new().unwrap();
             let mut state: u64 = 0x2545_F491_4F6C_DD1D;
-            for seek in 0..60 {
-                state ^= state << 13;
-                state ^= state >> 7;
-                state ^= state << 17;
-                let f = state % frames;
+            let seeks: Vec<u64> = (0..60)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    state % frames
+                })
+                .collect();
+            let mut played = crate::golden::Played::new(frames, seeks.iter().copied());
+            for f in 0..frames {
+                played.push(&at(&renderer, f));
+            }
+            let fresh = Renderer::new().unwrap();
+            for (seek, &f) in seeks.iter().enumerate() {
                 let on = if seek % 2 == 0 { &renderer } else { &fresh };
-                assert_eq!(at(on, f), played[f as usize], "{preset:?} frame {f}");
+                played.assert_same(&format!("{preset:?}"), f, &at(on, f));
             }
         }
     }

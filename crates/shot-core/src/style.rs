@@ -105,7 +105,7 @@ impl ToKdl for Target {
 }
 
 /// Narrows a selector. Written as properties of the `on` node, in this order: attributes in
-/// their canonical order, then `min`, then `confidence`.
+/// their canonical order, then `min`, `confidence` and `every`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Filter {
     /// The element's attribute equals the value.
@@ -114,6 +114,9 @@ pub enum Filter {
     Min(Micros),
     /// The element's confidence is at least this percent. Facts without one always pass.
     Confidence(u8),
+    /// Every n-th instance of the target in a take, counted in time order among those that pass
+    /// the other filters, starting with the first. At least 1.
+    Every(u32),
 }
 
 /// `on <target> <filters>`: which elements a rule is about.
@@ -162,7 +165,7 @@ impl Selector {
         let props: Vec<&str> = Attr::ALL
             .iter()
             .map(|a| a.as_str())
-            .chain(["min", "confidence"])
+            .chain(["min", "confidence", "every"])
             .collect();
         node.expect_any_block(&props)?;
         let args: Vec<String> = node.args()?;
@@ -205,6 +208,12 @@ impl Selector {
             }
             filters.push(Filter::Confidence(confidence));
         }
+        if let Some(every) = node.opt_prop::<u32>("every")? {
+            if every == 0 {
+                return Err(node.error("`every` counts from 1"));
+            }
+            filters.push(Filter::Every(every));
+        }
         Ok((Self { target, filters }, off))
     }
 
@@ -221,6 +230,7 @@ impl Selector {
                 Filter::Attr(attr, AttrValue::Integer(n)) => w.prop(attr.as_str(), n),
                 Filter::Min(min) => w.prop("min", min),
                 Filter::Confidence(c) => w.prop("confidence", c),
+                Filter::Every(n) => w.prop("every", n),
             };
         }
         if off {

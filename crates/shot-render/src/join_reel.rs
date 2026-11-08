@@ -228,35 +228,39 @@ fn transitions_bookends_and_the_camera_frame_the_same_reached_by_playing_or_by_s
     assert_eq!(plan.transitions.len(), 7);
     let pool = BufferPool::new(CANVAS.0, CANVAS.1, Range::Full, Matrix::Bt601).unwrap();
     let renderer = Renderer::new().unwrap();
-    let mut played_on = painter(&reel);
-    let played: Vec<blake3::Hash> = (0..plan.frames)
-        .map(|f| blake3::hash(pixels(&mut played_on, &renderer, plan, &pool, f).as_flattened()))
-        .collect();
     let windows: Vec<u64> = plan
         .transitions
         .iter()
         .flat_map(|t| t.window.clone())
         .collect();
+    let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+    let seeks: Vec<u64> = (0..80)
+        .map(|seek| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            // Every other seek lands inside a transition, where both sides draw.
+            if seek % 2 == 0 {
+                windows[(state % windows.len() as u64) as usize]
+            } else {
+                state % plan.frames
+            }
+        })
+        .collect();
+    let mut played_on = painter(&reel);
+    let mut played = crate::golden::Played::new(plan.frames, seeks.iter().copied());
+    for f in 0..plan.frames {
+        played.push(&pixels(&mut played_on, &renderer, plan, &pool, f));
+    }
     let fresh = Renderer::new().unwrap();
     let mut fresh_painter = painter(&reel);
-    let mut state: u64 = 0x2545_F491_4F6C_DD1D;
-    for seek in 0..80 {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        // Every other seek lands inside a transition, where both sides draw.
-        let f = if seek % 2 == 0 {
-            windows[(state % windows.len() as u64) as usize]
-        } else {
-            state % plan.frames
-        };
+    for (seek, &f) in seeks.iter().enumerate() {
         let (on, with) = if seek % 4 < 2 {
             (&renderer, &mut played_on)
         } else {
             (&fresh, &mut fresh_painter)
         };
-        let digest = blake3::hash(pixels(with, on, plan, &pool, f).as_flattened());
-        assert_eq!(digest, played[f as usize], "frame {f}");
+        played.assert_same("seek", f, &pixels(with, on, plan, &pool, f));
     }
 }
 

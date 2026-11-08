@@ -35,6 +35,7 @@ pub mod code_diff;
 pub mod drawing;
 pub mod events;
 pub mod frame;
+pub mod golden;
 pub mod join;
 pub mod kinetic;
 pub mod layout;

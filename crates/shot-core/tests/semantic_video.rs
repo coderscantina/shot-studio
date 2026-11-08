@@ -433,3 +433,106 @@ fn evaluating_seventeen_minutes_of_elements_is_fast() {
     assert!(count > 5_000);
     assert!(written.as_millis() < 500, "{written:?}");
 }
+
+/// Elements of take `t01` in the first chapter's kept 0 to 12 s, one JSON line each.
+fn t01_elements(lines: &[String]) -> Vec<Elements> {
+    vec![Elements::parse(id("t01"), &format!("{}\n", lines.join("\n"))).unwrap()]
+}
+
+fn click(t: u64) -> String {
+    format!(r#"{{"kind":"click","t":{t},"by":"events","x":100,"y":100}}"#)
+}
+
+fn silence(t: u64, length: u64) -> String {
+    format!(
+        r#"{{"kind":"silence","t":{t},"to":{},"by":"vad@silero-5"}}"#,
+        t + length
+    )
+}
+
+/// The starts of the instances an effect named `node` has in take `t01`.
+fn starts(channel: &Channel, node: fn(&Applied) -> Option<u64>) -> Vec<u64> {
+    let lock = channel.lock();
+    lock.take(&id("t01"))
+        .unwrap()
+        .instances
+        .iter()
+        .filter_map(|i| node(&i.applied))
+        .collect()
+}
+
+fn sfx_at(applied: &Applied) -> Option<u64> {
+    match applied {
+        Applied::Sfx { at, .. } if at.0 < 12_000_000 && at.0 != 0 => Some(at.0),
+        _ => None,
+    }
+}
+
+fn zoom_from(applied: &Applied) -> Option<u64> {
+    match applied {
+        Applied::Zoom { range, .. } => Some(range.from().0),
+        _ => None,
+    }
+}
+
+#[test]
+fn every_selects_the_first_and_each_nth_instance_in_time_order() {
+    let mut channel = Channel::example();
+    channel.elements = t01_elements(&[
+        click(1_000_000),
+        click(2_000_000),
+        click(3_000_000),
+        click(4_000_000),
+        click(5_000_000),
+    ]);
+    for (every, expected) in [
+        (1, vec![1, 2, 3, 4, 5]),
+        (2, vec![1, 3, 5]),
+        (3, vec![1, 4]),
+        (9, vec![1]),
+    ] {
+        channel.video =
+            FormatLayer::parse(&format!("on click every={every} {{\n    sfx pop\n}}\n")).unwrap();
+        let seconds: Vec<u64> = starts(&channel, sfx_at)
+            .iter()
+            .map(|t| t / 1_000_000)
+            .collect();
+        assert_eq!(seconds, expected, "every={every}");
+    }
+}
+
+#[test]
+fn every_counts_after_the_other_filters() {
+    let mut channel = Channel::example();
+    // The 0.3 s silence fails `min`, so it is not counted: the 1st, 3rd of the three left.
+    channel.elements = t01_elements(&[
+        silence(1_000_000, 900_000),
+        silence(3_000_000, 300_000),
+        silence(5_000_000, 800_000),
+        silence(7_000_000, 900_000),
+    ]);
+    channel.video =
+        FormatLayer::parse("on silence min=500_000 every=2 {\n    sfx pop\n}\n").unwrap();
+    assert_eq!(starts(&channel, sfx_at), [1_000_000, 7_000_000]);
+}
+
+#[test]
+fn the_talking_presets_punch_in_on_every_other_silence() {
+    let mut channel = Channel::example();
+    channel.elements = t01_elements(&[
+        silence(1_000_000, 900_000),
+        silence(3_000_000, 300_000),
+        silence(5_000_000, 700_000),
+        silence(7_000_000, 900_000),
+    ]);
+    channel.video = FormatLayer::default();
+    for kind in FormatKind::ALL {
+        channel.format = kind.preset_layer();
+        let expected: &[u64] = match kind {
+            FormatKind::Reaction | FormatKind::Opinion => &[1_000_000, 7_000_000],
+            FormatKind::ProductTour | FormatKind::Tutorial => &[],
+        };
+        assert_eq!(starts(&channel, zoom_from), expected, "{kind}");
+        assert_eq!(channel.lock().to_kdl(), channel.lock().to_kdl());
+    }
+}

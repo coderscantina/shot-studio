@@ -522,6 +522,7 @@ fn reel_per_preset_at_4k60() {
 #[test]
 #[ignore = "needs the GPU, ffmpeg and the generated target project"]
 fn every_reel_frame_is_the_same_reached_by_playing_or_by_seeking() {
+    use crate::golden::Played;
     use crate::graph::Renderer;
     use crate::paint::Painter;
     use crate::surface::{BufferPool, Matrix, Range, read_rgb};
@@ -531,46 +532,46 @@ fn every_reel_frame_is_the_same_reached_by_playing_or_by_seeking() {
     let plan = preview_plan(&reel.video, &reel.project).expect("the reel plans");
     let effects = reel.project.format.effects();
     let pool = BufferPool::new(1280, 720, Range::Full, Matrix::Bt601).expect("a pool");
-    let digest = |painter: &mut Painter, renderer: &Renderer, frame: u64| {
+    let pixels = |painter: &mut Painter, renderer: &Renderer, frame: u64| {
         let target = pool.buffer().expect("a buffer");
         painter
             .paint(renderer, &plan, frame, &target)
             .expect("the frame paints");
-        blake3::hash(read_rgb(&target).expect("pixels").as_flattened())
+        read_rgb(&target).expect("pixels")
     };
-    let renderer = Renderer::new().expect("a renderer");
-    let mut playing = Painter::new(&reel.video, effects);
-    let played: Vec<blake3::Hash> = (0..plan.frames)
-        .map(|f| digest(&mut playing, &renderer, f))
-        .collect();
     let windows: Vec<u64> = plan
         .transitions
         .iter()
         .flat_map(|t| t.window.clone())
         .collect();
+    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+    let seeks: Vec<u64> = (0..200)
+        .map(|seek| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            // A quarter of the seeks land inside a transition, where both sides may draw.
+            if seek % 4 == 0 {
+                windows[(state % windows.len() as u64) as usize]
+            } else {
+                state % plan.frames
+            }
+        })
+        .collect();
+    let renderer = Renderer::new().expect("a renderer");
+    let mut playing = Painter::new(&reel.video, effects);
+    let mut played = Played::new(plan.frames, seeks.iter().copied());
+    for f in 0..plan.frames {
+        played.push(&pixels(&mut playing, &renderer, f));
+    }
     let fresh = Renderer::new().expect("a renderer");
     let mut seeking = Painter::new(&reel.video, effects);
-    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
-    for seek in 0..200 {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        // A quarter of the seeks land inside a transition, where both sides may draw.
-        let f = if seek % 4 == 0 {
-            windows[(state % windows.len() as u64) as usize]
+    for (seek, &f) in seeks.iter().enumerate() {
+        let drawn = if seek % 2 == 0 {
+            pixels(&mut playing, &renderer, f)
         } else {
-            state % plan.frames
+            pixels(&mut seeking, &fresh, f)
         };
-        let hash = if seek % 2 == 0 {
-            digest(&mut playing, &renderer, f)
-        } else {
-            digest(&mut seeking, &fresh, f)
-        };
-        assert_eq!(
-            hash,
-            played[f as usize],
-            "frame {f} ({})",
-            clock(time_of(f, plan.fps))
-        );
+        played.assert_same(&clock(time_of(f, plan.fps)), f, &drawn);
     }
 }

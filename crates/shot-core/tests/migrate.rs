@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use shot_core::{
     Brand, Cut, Elements, Format, FormatKind, FormatLayer, Id, MediaId, Micros, MigrateInput,
-    Project, Script, StyleInput, Timeline, Video, build, has_rule_nodes, migrate,
+    Project, Script, StyleInput, Timeline, Video, build, has_rule_nodes, implied_rules, migrate,
 };
 
 const OLD_CUT: &str = r#"chapter "One" {
@@ -127,7 +127,7 @@ fn a_migrated_video_keeps_every_chunk() {
         .channel
         .as_ref()
         .expect("the default rules were added");
-    assert_eq!(channel.rules, FormatKind::Opinion.preset_layer().rules);
+    assert_eq!(channel.rules, implied_rules(&FormatKind::Opinion.preset()));
     assert_eq!(migration.video, FormatLayer::default());
     assert_eq!(
         (migration.report.manual, migration.report.overrides),
