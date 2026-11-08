@@ -8,5 +8,11 @@ publish.workspace = true
 repository.workspace = true
 
 [dependencies]
+shot-core = { path = "../shot-core" }
 realfft.workspace = true
 ebur128.workspace = true
+# FLAC for the bundled sounds, lossless so decoding is bit-exact. WAV for the speech fixtures in tests.
+symphonia = { workspace = true, features = ["flac"] }
+
+[dev-dependencies]
+tempfile.workspace = true

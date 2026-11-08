@@ -6327,6 +6327,9 @@ version = "26.11.7"
 dependencies = [
  "ebur128",
  "realfft",
+ "shot-core",
+ "symphonia",
+ "tempfile",
 ]
 
 [[package]]
@@ -6794,11 +6797,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a7edef6a96b696d4e0cab5ee9ebb7ca155ed95f30a6b45bbb8b97d2727f02424"
 dependencies = [
  "lazy_static",
+ "symphonia-bundle-flac",
  "symphonia-codec-aac",
  "symphonia-codec-pcm",
  "symphonia-core",
  "symphonia-format-isomp4",
  "symphonia-format-riff",
+ "symphonia-metadata",
+]
+
+[[package]]
+name = "symphonia-bundle-flac"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6405d5c34ff6f8f7ca08a4101efe66d21e180f7322ef9359900a0e55698a7892"
+dependencies = [
+ "log",
+ "symphonia-common",
+ "symphonia-core",
  "symphonia-metadata",
 ]
 

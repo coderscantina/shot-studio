@@ -41,6 +41,92 @@
       "license": "Apache-2.0 OR MIT",
       "contributes": "Lottie animation for brand stings, logo reveals and templates",
       "crate": "velato =0.12.0 without default features, drawn onto vello 0.11 through shot-render's RenderSink"
+    },
+    {
+      "name": "Kenney Interface Sounds",
+      "repository": "https://kenney.nl/assets/interface-sounds",
+      "revision": "1.0 (2020-02-11)",
+      "license": "CC0-1.0",
+      "contributes": "Bundled sounds click (click_002), tick (tick_002), pop (drop_002), pluck (pluck_001) and glitch (glitch_001). Resampled to 48 kHz mono, silence trimmed, peak normalized to -3 dBFS, 16-bit FLAC.",
+      "assets": [
+        "crates/shot-audio/assets/sounds/click.flac",
+        "crates/shot-audio/assets/sounds/tick.flac",
+        "crates/shot-audio/assets/sounds/pop.flac",
+        "crates/shot-audio/assets/sounds/pluck.flac",
+        "crates/shot-audio/assets/sounds/glitch.flac"
+      ]
+    },
+    {
+      "name": "Kenney Impact Sounds",
+      "repository": "https://kenney.nl/assets/impact-sounds",
+      "revision": "1.0",
+      "license": "CC0-1.0",
+      "contributes": "Bundled sounds impact (impactPunch_heavy_000) and thud (impactSoft_heavy_001). Resampled to 48 kHz mono, silence trimmed, peak normalized to -3 dBFS, 16-bit FLAC.",
+      "assets": [
+        "crates/shot-audio/assets/sounds/impact.flac",
+        "crates/shot-audio/assets/sounds/thud.flac"
+      ]
+    },
+    {
+      "name": "Swishes Sound Pack by artisticdude",
+      "repository": "https://opengameart.org/content/swishes-sound-pack",
+      "revision": "https://opengameart.org/sites/default/files/swishes.zip",
+      "license": "CC0-1.0",
+      "contributes": "Bundled sounds swish (swish-3) and swoosh (swish-7). Resampled to 48 kHz mono, silence trimmed, peak normalized to -3 dBFS, 16-bit FLAC.",
+      "assets": [
+        "crates/shot-audio/assets/sounds/swish.flac",
+        "crates/shot-audio/assets/sounds/swoosh.flac"
+      ]
+    },
+    {
+      "name": "Air whoosh by pyranostudios",
+      "repository": "https://opengameart.org/content/air-whoosh",
+      "revision": "https://opengameart.org/sites/default/files/whoosh2_0.wav",
+      "license": "CC0-1.0",
+      "contributes": "Bundled sound whoosh: 0.15 s to 1.45 s, faded in over 0.25 s and out over 0.7 s. Resampled to 48 kHz mono, silence trimmed, peak normalized to -3 dBFS, 16-bit FLAC.",
+      "assets": [
+        "crates/shot-audio/assets/sounds/whoosh.flac"
+      ]
+    },
+    {
+      "name": "Power-Up Sound Effects by spring-spring",
+      "repository": "https://opengameart.org/content/power-up-sound-effects",
+      "revision": "https://opengameart.org/sites/default/files/power_up_sound_v1_0.ogg",
+      "license": "CC0-1.0",
+      "contributes": "Bundled sound riser: the first 1.29 s of power_up_sound_v1. Resampled to 48 kHz mono, silence trimmed, peak normalized to -3 dBFS, 16-bit FLAC.",
+      "assets": [
+        "crates/shot-audio/assets/sounds/riser.flac"
+      ]
+    },
+    {
+      "name": "Calm Loop by wipics",
+      "repository": "https://opengameart.org/content/calm-loop",
+      "revision": "https://opengameart.org/sites/default/files/Relaxing_0.mp3",
+      "license": "CC0-1.0",
+      "contributes": "Bundled music bed bed-calm, the whole loop. Resampled to 48 kHz mono, normalized to -19 LUFS, 16-bit FLAC.",
+      "assets": [
+        "crates/shot-audio/assets/sounds/bed-calm.flac"
+      ]
+    },
+    {
+      "name": "Loading screen loop by haeldb",
+      "repository": "https://opengameart.org/content/loading-screen-loop",
+      "revision": "https://opengameart.org/sites/default/files/TremLoadingloopl.wav",
+      "license": "CC0-1.0",
+      "contributes": "Bundled music bed bed-pulse, the whole loop. Resampled to 48 kHz mono, normalized to -19 LUFS, 16-bit FLAC.",
+      "assets": [
+        "crates/shot-audio/assets/sounds/bed-pulse.flac"
+      ]
+    },
+    {
+      "name": "Chill lofi inspired (loop edit) by qubodup",
+      "repository": "https://opengameart.org/content/chill-lofi-inspired-loop-edit",
+      "revision": "https://opengameart.org/sites/default/files/chilllofir-loop.ogg",
+      "license": "CC0-1.0",
+      "contributes": "Bundled music bed bed-lofi: bars 17 to 24 at 106.18 BPM (sample 1736496 for 867960 samples at 48 kHz), the next 0.1 s folded into the head on an equal-power fade so it loops. Resampled to 48 kHz mono, normalized to -19 LUFS, 16-bit FLAC.",
+      "assets": [
+        "crates/shot-audio/assets/sounds/bed-lofi.flac"
+      ]
     }
   ]
 }
