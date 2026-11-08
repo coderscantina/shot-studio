@@ -114,6 +114,7 @@ embedded!(
     "camera",
     "check",
     "chevron-down",
+    "chevron-right",
     "close",
     "copy",
     "cursor",

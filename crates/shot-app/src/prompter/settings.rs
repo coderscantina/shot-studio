@@ -50,6 +50,8 @@ pub struct Settings {
     /// Hotkeys as plain letters instead of ⌃⌥ plus the letter. Plain letters are taken from
     /// every app while recording, so typing on screen would drop markers.
     pub plain_keys: bool,
+    /// The pane's "More settings" are open. Closed by default, so the daily controls stand alone.
+    pub more: bool,
 }
 
 impl Default for Settings {
@@ -68,6 +70,7 @@ impl Default for Settings {
             colors: Colors::Soft,
             advance: AdvanceKey::F18,
             plain_keys: false,
+            more: false,
         }
     }
 }
@@ -121,15 +124,14 @@ impl Settings {
         );
     }
 
-    /// The look back at its defaults, keeping the display, scrolling and keys.
-    pub fn reset_look(&mut self) {
-        let base = Self::default();
+    /// Every setting back at its default, keeping what fits the hardware (the display and
+    /// mirroring) and the open "More settings".
+    pub fn reset(&mut self) {
         *self = Self {
             display: self.display.take(),
-            scroll: self.scroll,
-            advance: self.advance,
-            plain_keys: self.plain_keys,
-            ..base
+            mirror: self.mirror,
+            more: self.more,
+            ..Self::default()
         };
     }
 
@@ -334,5 +336,28 @@ mod tests {
         let odd = Settings::parse(r#"{"line_height": 0.2, "countdown": 7, "speed": 1000}"#);
         assert_eq!((odd.line_height, odd.countdown, odd.speed), (1.0, 3, 240.0));
         assert_eq!(Settings::parse("not json"), Settings::default());
+    }
+
+    #[test]
+    fn a_reset_keeps_the_hardware_and_the_open_disclosure() {
+        let mut settings = Settings {
+            display: Some("Elgato Prom.".into()),
+            more: true,
+            mirror: true,
+            text_size: 90.0,
+            plain_keys: true,
+            ..Settings::default()
+        };
+        settings.reset();
+        assert_eq!(
+            settings,
+            Settings {
+                display: Some("Elgato Prom.".into()),
+                mirror: true,
+                more: true,
+                ..Settings::default()
+            }
+        );
+        assert!(!Settings::parse("{}").more, "closed by default");
     }
 }

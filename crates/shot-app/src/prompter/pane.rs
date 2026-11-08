@@ -9,6 +9,8 @@ use gpui::{
     App, Context, DisplayId, Div, Entity, FontWeight, Render, SharedString, Subscription, Window,
     WindowHandle, WindowId, div, prelude::*, px,
 };
+use gpui_component::Sizable;
+use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::slider::{Slider, SliderEvent, SliderState};
 use gpui_component::switch::Switch;
 use shot_capture::events::Hotkey;
@@ -19,7 +21,7 @@ use super::settings::{self, COUNTDOWNS, Colors, ScrollMode, Settings};
 use super::{Live, bindings, log_filter, native};
 use crate::folder::VideoFolder;
 use crate::theme::*;
-use crate::ui::{Segment, hint, icon, kbd, label, mono, pane, segmented};
+use crate::ui::{self, Segment, hint, icon, kbd, mono, pane, segmented};
 
 /// How long the retake toast stays.
 const TOAST: Duration = Duration::from_secs(4);
@@ -38,7 +40,7 @@ struct Knob {
     show: fn(f32) -> String,
 }
 
-/// The look sliders, then the speed.
+/// The sliders: text size and speed in view, the rest under "More settings".
 const KNOBS: [Knob; 6] = [
     Knob {
         name: "Text size",
@@ -89,7 +91,10 @@ const KNOBS: [Knob; 6] = [
         show: |v| format!("{v:.0} wpm"),
     },
 ];
+const TEXT_SIZE: usize = 0;
 const SPEED: usize = 5;
+/// Line height, margins, width and reading line.
+const MORE: [usize; 4] = [1, 2, 3, 4];
 
 /// Where the output is, or why it is not on screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -431,8 +436,8 @@ impl PrompterPane {
         self.sync(cx);
     }
 
-    fn reset_look(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.change(cx, Settings::reset_look);
+    fn reset_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.change(cx, Settings::reset);
         for (knob, slider) in KNOBS.iter().zip(&self.sliders) {
             let value = (knob.get)(&self.settings);
             slider.update(cx, |slider, cx| slider.set_value(value, window, cx));
@@ -448,6 +453,36 @@ impl PrompterPane {
         if result.is_ok() {
             self.reset(cx);
         }
+    }
+
+    /// The "More settings" row that opens and closes the settings set once in a while.
+    fn disclosure(&self, open: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        ui::keyboard_reachable(
+            div()
+                .id("prompter-more")
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .mt(px(6.))
+                .py(px(6.))
+                .px(px(2.))
+                .rounded(RADIUS_SM)
+                .cursor_pointer()
+                .text_size(TEXT_SM)
+                .text_color(MUTED)
+                .hover(|s| s.text_color(TEXT))
+                .child(icon(
+                    if open {
+                        "chevron-down"
+                    } else {
+                        "chevron-right"
+                    },
+                    ICON_SM,
+                    MUTED,
+                ))
+                .child("More settings")
+                .on_click(cx.listener(|pane, _, _, cx| pane.change(cx, |s| s.more = !s.more))),
+        )
     }
 
     fn display_name(&self, id: u32) -> String {
@@ -623,10 +658,6 @@ fn row(text: &'static str, control: impl IntoElement) -> Div {
         .px(px(2.))
         .child(name(text))
         .child(div().flex_1().min_w_0().flex().justify_end().child(control))
-}
-
-fn section(title: &'static str) -> Div {
-    label(title).px(px(2.)).pt(px(10.)).pb(px(2.))
 }
 
 impl Render for PrompterPane {
@@ -808,7 +839,6 @@ impl Render for PrompterPane {
                 div()
                     .flex()
                     .flex_col()
-                    .child(section("Output"))
                     .child(self.display_picker(cx))
                     .child(row(
                         "Mirror",
@@ -820,56 +850,49 @@ impl Render for PrompterPane {
                                 pane.change(cx, |s| s.mirror = on)
                             })),
                     ))
-                    .child(row("Colors", colors.w_full()))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(section("Text"))
-                            .child(
-                                div()
-                                    .id("prompter-reset-look")
-                                    .pt(px(10.))
-                                    .px(px(2.))
-                                    .text_size(TEXT_SM)
-                                    .text_color(MUTED)
-                                    .cursor_pointer()
-                                    .hover(|s| s.text_color(TEXT))
-                                    .child("Reset")
-                                    .on_click(cx.listener(|pane, _, window, cx| {
-                                        pane.reset_look(window, cx)
-                                    })),
-                            ),
-                    )
-                    .children((0..SPEED).map(|index| self.slider_row(index)))
-                    .child(section("Scrolling"))
                     .child(row("Shows", shows.w_full()))
                     .child(row("Scroll", scroll.w_full()))
+                    .child(self.slider_row(TEXT_SIZE))
                     .child(self.slider_row(SPEED))
-                    .child(row("Countdown", countdown.w_full()))
-                    .when(s.scroll == ScrollMode::Pedal, |rows| {
-                        rows.child(row(
-                            "Pedal key",
-                            div()
-                                .id("prompter-pedal")
-                                .px(px(10.))
-                                .h(px(28.))
-                                .flex()
-                                .items_center()
-                                .rounded(RADIUS_SM)
-                                .bg(RAISED)
-                                .cursor_pointer()
-                                .hover(|s| s.bg(FLOAT))
-                                .text_size(TEXT_SM)
-                                .child(s.advance.label())
-                                .on_click(cx.listener(|pane, _, _, cx| {
-                                    pane.change(cx, |s| s.advance = s.advance.following())
-                                })),
-                        ))
-                    })
-                    .child(section("Recording"))
-                    .child(row("Hotkeys", keys.w_full())),
+                    .child(self.disclosure(s.more, cx))
+                    .when(s.more, |rows| {
+                        rows.children(MORE.map(|index| self.slider_row(index)))
+                            .child(row("Countdown", countdown.w_full()))
+                            .child(row("Colors", colors.w_full()))
+                            .when(s.scroll == ScrollMode::Pedal, |rows| {
+                                rows.child(row(
+                                    "Pedal key",
+                                    div()
+                                        .id("prompter-pedal")
+                                        .px(px(10.))
+                                        .h(px(28.))
+                                        .flex()
+                                        .items_center()
+                                        .rounded(RADIUS_SM)
+                                        .bg(RAISED)
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(FLOAT))
+                                        .text_size(TEXT_SM)
+                                        .child(s.advance.label())
+                                        .on_click(cx.listener(|pane, _, _, cx| {
+                                            pane.change(cx, |s| s.advance = s.advance.following())
+                                        })),
+                                ))
+                            })
+                            .child(row("Hotkeys", keys.w_full()))
+                            .child(
+                                div().flex().justify_end().pt(px(6.)).child(
+                                    Button::new("prompter-reset")
+                                        .small()
+                                        .ghost()
+                                        .label("Reset to defaults")
+                                        .tooltip("Keeps the display and mirroring")
+                                        .on_click(cx.listener(|pane, _, window, cx| {
+                                            pane.reset_settings(window, cx)
+                                        })),
+                                ),
+                            )
+                    }),
             )
     }
 }
