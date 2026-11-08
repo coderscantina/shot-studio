@@ -1,9 +1,12 @@
 //! The Text workspace: chapters, the transcript as a document, the preview with a selection
 //! inspector, and the overview bar. The outline and the preview column resize by their edges.
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use gpui::{
-    AnyElement, App, Context, Div, Entity, FontWeight, Hsla, MouseButton, MouseDownEvent,
-    MouseMoveEvent, Stateful, Window, div, prelude::*, px,
+    AnyElement, App, Bounds, Context, Div, Entity, FontWeight, Hsla, MouseButton, MouseDownEvent,
+    MouseMoveEvent, Pixels, ScrollHandle, Stateful, Window, div, prelude::*, px,
 };
 use shot_core::{Placed, TakeAt, TimeRange, WordState, Zoom};
 
@@ -172,12 +175,7 @@ fn outline(
         .py(px(14.))
         .overflow_y_scroll()
         .when(list.is_empty(), |pane| {
-            pane.child(
-                div()
-                    .px(px(10.))
-                    .text_color(MUTED)
-                    .child("No chapters yet. Record a take to start one."),
-            )
+            pane.child(div().px(px(10.)).text_color(MUTED).child("No chapters yet"))
         })
         .children(list)
 }
@@ -199,6 +197,21 @@ fn current_paragraph(this: &EditScreen) -> Option<(TakeAt, usize)> {
 }
 
 fn document(this: &mut EditScreen, follow: &Entity<bool>, cx: &mut Context<EditScreen>) -> Div {
+    if this.map.chapters.is_empty() {
+        return ui::pane().flex_1().flex().flex_col().child(
+            ui::empty_state(
+                "record",
+                "Nothing recorded yet",
+                "Record a take, and its words show here to edit like text.",
+            )
+            .child(
+                div().pt(px(14.)).child(
+                    ui::big_button("record-a-take", "record", "Record a take", "⌘↩", true)
+                        .on_click(cx.listener(|this, _, _, cx| this.go_record(cx))),
+                ),
+            ),
+        );
+    }
     let title = this
         .map
         .chapters
@@ -322,8 +335,80 @@ fn document(this: &mut EditScreen, follow: &Entity<bool>, cx: &mut Context<EditS
                 .flex()
                 .flex_col()
                 .gap(px(22.))
-                .children(rows),
+                .children(rows)
+                .children(floating_toolbar(this, columns.pad, cx)),
         )
+}
+
+/// A word's element key, unique across the video.
+fn word_key(at: TakeAt, index: usize) -> usize {
+    at.chapter * 1_000_000 + at.take * 100_000 + index
+}
+
+/// Where the last selected word sits, by its key and its bounds in the transcript's scrolled
+/// content, so the selection toolbar scrolls with it.
+pub type Anchor = Rc<Cell<Option<(usize, Bounds<Pixels>)>>>;
+
+/// An invisible canvas over the last selected word that records it in `anchor`. A new place
+/// draws one more frame, so the toolbar is never a frame behind the selection.
+fn anchor(anchor: Anchor, key: usize, scroll: ScrollHandle) -> gpui::Canvas<()> {
+    gpui::canvas(
+        move |bounds, window, _| {
+            let content = scroll.bounds().origin + scroll.offset();
+            let at = Some((key, Bounds::new(bounds.origin - content, bounds.size)));
+            if anchor.get() != at {
+                anchor.set(at);
+                window.on_next_frame(|window, _| window.refresh());
+            }
+        },
+        |_, _, _, _| {},
+    )
+}
+
+/// Room kept between the toolbar and the selection or the pane's edge.
+const CLEAR: f32 = 8.;
+
+/// The selection toolbar over the transcript: under the last selected word, above it when
+/// there is no room below, inside the pane's side padding. It covers the text under it and
+/// never moves it. Hidden for the one frame before the selected word is measured.
+fn floating_toolbar(this: &EditScreen, pad: f32, cx: &mut Context<EditScreen>) -> Option<Div> {
+    let selection = this.selection?;
+    this.selected()?;
+    let key = word_key(selection.at, *selection.words().end());
+    let viewport = this.scroll.bounds().size;
+    let offset = f32::from(this.scroll.offset().y);
+    let room = f32::from(viewport.width) - 2. * pad;
+    let size = this.toolbar_bounds.get().size;
+    let (width, height) = (f32::from(size.width), f32::from(size.height));
+    let measured = this.selection_anchor.get().filter(|(k, _)| *k == key);
+    let (left, top) = measured.map_or((pad, 0.), |(_, word)| {
+        let below = f32::from(word.bottom()) + CLEAR;
+        let above = f32::from(word.top()) - CLEAR - height;
+        let fits_below = below + offset + height + CLEAR <= f32::from(viewport.height);
+        let fits_above = above + offset >= CLEAR;
+        let top = if fits_below || !fits_above {
+            below
+        } else {
+            above
+        };
+        let left = f32::from(word.left()).min(pad + room - width).max(pad);
+        (left, top)
+    });
+    Some(
+        div()
+            .absolute()
+            .left(px(left))
+            .top(px(top))
+            .max_w(px(room.max(0.)))
+            .when(measured.is_none(), |bar| bar.invisible())
+            .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+            .child(
+                ui::measure(this.toolbar_bounds.clone())
+                    .absolute()
+                    .size_full(),
+            )
+            .child(selection_toolbar(this, room, cx)),
+    )
 }
 
 /// The transcript's widest reading column.
@@ -408,14 +493,11 @@ fn paragraph_element(
     cx: &mut Context<EditScreen>,
 ) -> Div {
     let at = block.at;
-    let selection = this.selection.filter(|s| s.at == at).map(|s| s.words());
     let zooms = block_zooms(this, at, cx);
     let mut children: Vec<gpui::AnyElement> = Vec::new();
-    let mut ends_selection = false;
     for item in &paragraph.items {
         match item {
             Item::Word(i) => {
-                ends_selection |= selection.as_ref().is_some_and(|s| *s.end() == *i);
                 children.push(word(this, block, *i, &zooms, cx).into_any_element());
             }
             Item::Cut(run) => {
@@ -425,7 +507,6 @@ fn paragraph_element(
                 children.push(cut(at, run, open, cx).into_any_element());
                 if open {
                     for i in run.words.clone() {
-                        ends_selection |= selection.as_ref().is_some_and(|s| *s.end() == i);
                         children.push(word(this, block, i, &zooms, cx).into_any_element());
                     }
                 }
@@ -434,21 +515,12 @@ fn paragraph_element(
     }
     div()
         .flex()
-        .flex_col()
-        .gap(px(8.))
-        .child(
-            div()
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .text_size(px(18.))
-                .line_height(px(32.))
-                .text_color(BODY)
-                .children(children),
-        )
-        .when(ends_selection, |this_paragraph| {
-            this_paragraph.child(selection_toolbar(this, cx))
-        })
+        .flex_wrap()
+        .items_center()
+        .text_size(px(18.))
+        .line_height(px(32.))
+        .text_color(BODY)
+        .children(children)
 }
 
 /// The zooms on show in the block at `at`, each with whether it is the picked one.
@@ -503,9 +575,19 @@ fn word(
         start <= this.playhead && next_output.is_none_or(|next| this.playhead < next)
     });
     let removed = word.state != WordState::Kept;
-    let key = at.chapter * 1_000_000 + at.take * 100_000 + index;
+    let key = word_key(at, index);
+    let ends_selection = this
+        .selection
+        .is_some_and(|s| s.at == at && *s.words().end() == index);
     div()
         .id(("word", key))
+        .when(ends_selection, |w| {
+            w.relative().child(
+                anchor(this.selection_anchor.clone(), key, this.scroll.clone())
+                    .absolute()
+                    .size_full(),
+            )
+        })
         .pr(px(5.))
         .cursor_text()
         .rounded(px(3.))
@@ -598,8 +680,8 @@ fn cut(at: TakeAt, run: &CutRun, open: bool, cx: &mut Context<EditScreen>) -> im
         .on_click(toggle)
 }
 
-/// Anchored under the paragraph that holds the end of the selection, 8 px clear of the text.
-fn selection_toolbar(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement {
+/// The selected words' tools, wrapping inside `room` when it is too narrow for one row.
+fn selection_toolbar(this: &EditScreen, room: f32, cx: &mut Context<EditScreen>) -> Div {
     let Some((_, range, kept, removed)) = this.selected() else {
         return div();
     };
@@ -612,7 +694,6 @@ fn selection_toolbar(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl In
         .items_start()
         .gap(px(8.))
         .child(
-            // Wraps inside the paragraph's column when the pane is too narrow for one row.
             div()
                 .max_w_full()
                 .flex()
@@ -705,11 +786,7 @@ fn selection_toolbar(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl In
                 ),
         )
         .when(sound_open, |bar| {
-            bar.child(
-                super::place::sound_picker(this, cx)
-                    .w_full()
-                    .max_w(px(560.)),
-            )
+            bar.child(super::place::sound_picker(this, cx).w(px(560f32.min(room).max(0.))))
         })
 }
 
@@ -760,15 +837,12 @@ fn inspector(this: &EditScreen, cx: &mut Context<EditScreen>) -> Stateful<Div> {
         });
     let zoom = inspected_zoom(this, cx);
     let picked_zoom = matches!(this.lanes.picked, Some(Pick::Placed(_, Placed::Zoom(_))));
-    ui::pane()
-        .id("inspector")
-        .flex_1()
+    let body = div()
         .flex()
         .flex_col()
         .gap(px(16.))
         .px(px(18.))
         .py(px(16.))
-        .overflow_y_scroll()
         .map(|pane| match &selection {
             _ if picked_zoom => pane.children(zoom.map(|zoom| zoom_section(this, zoom, true, cx))),
             Some((text, count, range, start)) => pane
@@ -799,6 +873,8 @@ fn inspector(this: &EditScreen, cx: &mut Context<EditScreen>) -> Stateful<Div> {
                     div().text_color(TEXT).child(seconds(range.duration())),
                 ))
                 .children(zoom.map(|zoom| zoom_section(this, zoom, false, cx))),
+            // Nothing recorded: the document says what to do, so no word keys here.
+            None if this.map.chapters.is_empty() => pane,
             None => pane.child(chapter_summary(this)).child(
                 div()
                     .flex()
@@ -812,16 +888,27 @@ fn inspector(this: &EditScreen, cx: &mut Context<EditScreen>) -> Stateful<Div> {
                     .child(hint("1–4", "Set the layout"))
                     .child(hint("←→", "Step word by word, ⇧ to extend")),
             ),
-        })
+        });
+    // What is on screen stays in view under the rest, which scrolls when the pane is short.
+    ui::pane()
+        .id("inspector")
+        .flex_1()
+        .flex()
+        .flex_col()
+        .child(ui::scrolling_list(
+            "inspector-body",
+            &this.inspector_scroll,
+            body,
+        ))
         .child(
             div()
-                .mt_auto()
                 .flex()
                 .flex_none()
                 .flex_col()
                 .gap(px(10.))
                 .p(px(14.))
-                .mx(px(-4.))
+                .mx(px(14.))
+                .mb(px(16.))
                 .rounded(RADIUS_MD)
                 .bg(RAISED)
                 .child(label(format!("At {}", timecode(this.playhead))))

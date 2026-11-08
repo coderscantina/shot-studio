@@ -54,6 +54,9 @@ const SPLIT: f32 = 8.;
 /// The top row's height: its least, the most it opens at, and the width the change list keeps.
 const TOP_MIN: f32 = 220.;
 const TOP_OPENS: f32 = 420.;
+/// The least the top row opens at while the lanes can give way to their smallest, so the
+/// preview stays usable on short windows.
+const TOP_USABLE: f32 = 300.;
 const CHANGES_MIN: f32 = 260.;
 /// The title bar above the screen.
 const TITLE_BAR: f32 = 46.;
@@ -230,6 +233,31 @@ impl Lanes {
     }
 }
 
+/// The shortest zoom Z makes when the format has no auto-zoom rule to take its hold from. A
+/// shorter one punches in and out before the eye catches up.
+const ZOOM_HOLD: shot_core::Micros = shot_core::Micros(1_500_000);
+
+/// `range` grown evenly on both sides to at least `hold`, inside `take`. Where one side runs
+/// into the take's edge the other side grows instead.
+fn at_least(range: TimeRange, hold: shot_core::Micros, take: TimeRange) -> TimeRange {
+    let hold = hold.0.min(take.duration().0);
+    let short = hold.saturating_sub(range.duration().0);
+    if short == 0 {
+        return range;
+    }
+    let from = range
+        .from()
+        .0
+        .saturating_sub(short / 2)
+        .max(take.from().0)
+        .min(take.to().0 - hold);
+    TimeRange::new(
+        shot_core::Micros(from),
+        shot_core::Micros(from + hold.max(range.duration().0)),
+    )
+    .unwrap_or(range)
+}
+
 /// Where the zoom slider sits for a window of `span` frames: 0 shows the whole video, 1 the
 /// closest view. The scale is logarithmic, so each step of the slider zooms by the same factor.
 fn slider_at(span: u64, total: u64) -> f32 {
@@ -334,7 +362,7 @@ impl EditScreen {
         let stage_max = width - 32. - super::overlays::PANE_WIDTH - CHANGES_MIN;
         let by_width = (stage_max - 24.) * 9. / 16. + 66.;
         let most = (room - LANES_MIN).min(by_width).max(TOP_MIN);
-        let opens = (room - LANES_HEIGHT).clamp(TOP_MIN, TOP_OPENS).min(most);
+        let opens = (room - LANES_HEIGHT).clamp(TOP_USABLE, TOP_OPENS).min(most);
         self.lanes.top_range = (TOP_MIN, most);
         self.lanes.top.unwrap_or(opens).clamp(TOP_MIN, most)
     }
@@ -494,14 +522,23 @@ impl EditScreen {
         let Some((at, range, ..)) = self.selected() else {
             return;
         };
-        let scale = self
-            .folder
-            .read(cx)
+        let folder = self.folder.read(cx);
+        let rule = folder.project.format.auto_zoom.as_ref();
+        let scale = rule.map_or(DEFAULT_ZOOM, |z| z.scale);
+        let hold = rule.map_or(ZOOM_HOLD, |z| z.hold);
+        let take = folder
             .project
-            .format
-            .auto_zoom
-            .as_ref()
-            .map_or(DEFAULT_ZOOM, |z| z.scale);
+            .cut
+            .chapters
+            .get(at.chapter)
+            .and_then(|c| c.takes.get(at.take))
+            .and_then(|t| {
+                TimeRange::new(
+                    t.ranges.first()?.range().from(),
+                    t.ranges.last()?.range().to(),
+                )
+            });
+        let range = take.map_or(range, |take| at_least(range, hold, take));
         self.selection = None;
         self.edit(cx, |cut| cut.add_zoom(at, range, scale));
         self.lanes.picked = self
@@ -806,6 +843,7 @@ fn change_list(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElem
         |name: &'static str, color: gpui::Rgba, text: String, count: usize, delta: String| {
             div()
                 .flex()
+                .flex_none()
                 .items_center()
                 .gap(px(12.))
                 .px(px(10.))
@@ -848,12 +886,10 @@ fn change_list(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElem
                     timecode(raw * u64::from(FPS) / 1_000_000)
                 ))),
         )
-        .child(
+        .child(ui::scrolling_list(
+            "change-lines",
+            &this.changes_scroll,
             div()
-                .id("change-lines")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
                 .flex()
                 .flex_col()
                 .gap(px(2.))
@@ -884,7 +920,7 @@ fn change_list(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElem
                     changes.layouts,
                     String::new(),
                 )),
-        )
+        ))
         .children(this.active_card().map(|card| {
             div()
                 .flex_none()
@@ -2541,6 +2577,30 @@ pub fn is_highlight(template: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_short_zoom_grows_evenly_inside_its_take() {
+        let range =
+            |from, to| TimeRange::new(shot_core::Micros(from), shot_core::Micros(to)).unwrap();
+        let take = range(0, 10_000_000);
+        let hold = shot_core::Micros(1_500_000);
+        assert_eq!(
+            at_least(range(4_000_000, 4_600_000), hold, take),
+            range(3_550_000, 5_050_000)
+        );
+        assert_eq!(
+            at_least(range(100_000, 700_000), hold, take),
+            range(0, 1_500_000)
+        );
+        assert_eq!(
+            at_least(range(9_500_000, 9_900_000), hold, take),
+            range(8_500_000, 10_000_000)
+        );
+        assert_eq!(
+            at_least(range(1_000_000, 3_000_000), hold, take),
+            range(1_000_000, 3_000_000)
+        );
+    }
 
     #[test]
     fn the_zoom_slider_maps_spans_on_a_log_scale_both_ways() {

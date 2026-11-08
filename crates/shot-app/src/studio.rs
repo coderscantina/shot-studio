@@ -239,8 +239,11 @@ impl Studio {
             cx.subscribe_in(&cut, window, |this, _, GoTo(screen), window, cx| {
                 this.show(*screen, window, cx);
             });
+        let edit_to_record = cx.subscribe_in(&edit, window, |this, _, GoTo(screen), window, cx| {
+            this.show(*screen, window, cx);
+        });
         window.focus(&edit.focus_handle(cx), cx);
-        let mut subscriptions = vec![recorded, continue_to_edit];
+        let mut subscriptions = vec![recorded, continue_to_edit, edit_to_record];
         // Cards move on the board and in other windows: the nav catches up when this comes back.
         subscriptions.push(cx.observe_window_activation(window, |this, window, cx| {
             if window.is_window_active() {

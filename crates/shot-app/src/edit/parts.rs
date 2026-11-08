@@ -315,6 +315,8 @@ impl EditScreen {
                     .text_color(RECORD_TEXT)
                     .child(format!("Export failed: {error}")),
             });
+        // Nothing recorded, nothing to export.
+        let empty = self.map.chapters.is_empty();
         let running = self.export.as_ref().is_some_and(|s| {
             matches!(
                 *s.lock().expect("export status"),
@@ -362,10 +364,10 @@ impl EditScreen {
             ))
             .child(
                 Button::new("export")
-                    .primary()
+                    .when(!empty, |button| button.primary())
                     .icon(gpui_component::Icon::empty().path(crate::theme::icon_path("export")))
                     .label("Export")
-                    .disabled(running)
+                    .disabled(running || empty)
                     .on_click(cx.listener(|this, _, _, cx| this.start_export("main", cx))),
             )
     }
