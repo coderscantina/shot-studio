@@ -1,117 +1,202 @@
 //! The Text workspace: chapters, the transcript as a document, the preview with a selection
-//! inspector, and the overview bar.
+//! inspector, and the overview bar. The outline and the preview column resize by their edges.
 
 use gpui::{
-    Context, Div, FontWeight, Hsla, MouseButton, MouseDownEvent, MouseMoveEvent, Window, div,
-    prelude::*, px,
+    AnyElement, Context, Div, Entity, FontWeight, Hsla, MouseButton, MouseDownEvent,
+    MouseMoveEvent, Stateful, Window, div, prelude::*, px,
 };
 use shot_core::{TakeAt, WordState};
 
 use super::EditScreen;
 use super::parts::{self, layout_name, row};
 use super::proposals::{self, Card};
-use crate::model::{BlockDoc, CutRun, Item, Paragraph, seconds, timecode};
+use crate::layout_store;
+use crate::model::{BlockDoc, CutRun, Item, LAYOUT_KEYS, Paragraph, seconds, timecode};
 use crate::theme::*;
-use crate::ui::{self, icon, kbd, label, mono};
+use crate::ui::{self, hint, icon, kbd, label, mono};
 
-pub fn render(this: &mut EditScreen, _: &mut Window, cx: &mut Context<EditScreen>) -> Div {
+pub fn render(this: &mut EditScreen, window: &mut Window, cx: &mut Context<EditScreen>) -> Div {
     let chapter_frames = this
         .map
         .chapters
         .get(this.chapter)
         .map_or(0..0, |c| c.frames.clone());
+    // Set by a click in the outline: the transcript scrolls to the playhead's paragraph once.
+    let follow = window.use_keyed_state("text-follow", cx, |_, _| false);
+    let outline = outline(this, &follow, cx);
+    let document = document(this, &follow, cx);
+    let side = div()
+        .flex_1()
+        .min_h_0()
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .child(
+            ui::pane()
+                .flex_none()
+                .p(px(12.))
+                .flex()
+                .flex_col()
+                .gap(px(10.))
+                .child(parts::preview(this))
+                .child(parts::transport(this, false, cx)),
+        )
+        .child(inspector(this, cx));
     div()
         .flex_1()
         .min_h_0()
         .flex()
         .flex_col()
         .children(parts::error_strip(this))
-        .child(
-            div()
-                .flex_1()
-                .min_h_0()
-                .flex()
-                .gap(px(8.))
-                .px(px(8.))
-                .child(outline(this, cx))
-                .child(document(this, cx))
-                .child(
-                    div()
-                        .w(px(520.))
-                        .flex_none()
-                        .flex()
-                        .flex_col()
-                        .gap(px(8.))
-                        .child(
-                            ui::pane()
-                                .p(px(12.))
-                                .flex()
-                                .flex_col()
-                                .gap(px(10.))
-                                .child(parts::preview(this))
-                                .child(parts::transport(this, false, cx)),
-                        )
-                        .child(inspector(this, cx)),
-                ),
-        )
+        .child(layout_store::TEXT.render(outline, document, side, window, cx))
         .child(parts::overview_footer(this, chapter_frames, cx))
 }
 
-fn outline(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement {
+/// The chapters, and under the one on show its paragraphs by their first words. A click on a
+/// paragraph seeks there and scrolls the transcript to it.
+fn outline(
+    this: &EditScreen,
+    follow: &Entity<bool>,
+    cx: &mut Context<EditScreen>,
+) -> Stateful<Div> {
+    let current = current_paragraph(this);
+    let mut list: Vec<AnyElement> = Vec::new();
+    for (index, chapter) in this.map.chapters.iter().enumerate() {
+        let on = index == this.chapter;
+        let length = chapter.frames.end - chapter.frames.start;
+        let start = (!chapter.frames.is_empty()).then_some(chapter.frames.start);
+        list.push(
+            div()
+                .id(("chapter", index))
+                .flex()
+                .items_baseline()
+                .gap(px(8.))
+                .px(px(10.))
+                .py(px(9.))
+                .rounded(RADIUS_SM)
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(if on { STRONG } else { MUTED })
+                .when(on, |this| this.bg(RAISED))
+                .when(!on, |this| this.hover(|s| s.bg(RAISED).text_color(TEXT)))
+                .cursor_pointer()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child(chapter.title.clone()),
+                )
+                .child(mono(timecode(length)).text_size(TEXT_SM))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.chapter = index;
+                    this.selection = None;
+                    if let Some(start) = start {
+                        this.seek(start);
+                    }
+                    cx.notify();
+                }))
+                .into_any_element(),
+        );
+        if !on {
+            continue;
+        }
+        let mut row = 0usize;
+        let mut paragraphs = div().flex().flex_col().pl(px(12.)).pt(px(2.)).pb(px(8.));
+        for block in this.doc.iter().filter(|b| b.at.chapter == index) {
+            for (number, paragraph) in block.paragraphs.iter().enumerate() {
+                let Some(start) = paragraph.start else {
+                    continue;
+                };
+                let words: Vec<&str> = paragraph
+                    .items
+                    .iter()
+                    .filter_map(|item| match item {
+                        Item::Word(i) => block.words.get(*i).map(|w| w.text.as_str()),
+                        Item::Cut(_) => None,
+                    })
+                    .take(12)
+                    .collect();
+                let now = current == Some((block.at, number));
+                let follow = follow.clone();
+                paragraphs = paragraphs.child(
+                    div()
+                        .id(("paragraph", row))
+                        .flex()
+                        .items_start()
+                        .gap(px(8.))
+                        .px(px(10.))
+                        .py(px(5.))
+                        .rounded(RADIUS_SM)
+                        .text_size(px(14.))
+                        .text_color(if now { TEXT } else { MUTED })
+                        .cursor_pointer()
+                        .hover(|s| s.bg(RAISED).text_color(TEXT))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .line_height(px(20.))
+                                .line_clamp(2)
+                                .text_ellipsis()
+                                .child(words.join(" ")),
+                        )
+                        .child(
+                            mono(timecode(start))
+                                .pt(px(2.))
+                                .text_size(TEXT_XS)
+                                .text_color(if now { MUTED } else { FAINT }),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.selection = None;
+                            this.seek(start);
+                            follow.update(cx, |follow, _| *follow = true);
+                            cx.notify();
+                        })),
+                );
+                row += 1;
+            }
+        }
+        if row > 0 {
+            list.push(paragraphs.into_any_element());
+        }
+    }
     ui::pane()
         .id("chapters")
-        .w(px(236.))
-        .flex_none()
+        .flex_1()
         .flex()
         .flex_col()
         .gap(px(2.))
         .px(px(10.))
         .py(px(14.))
         .overflow_y_scroll()
-        .children(
-            this.map
-                .chapters
-                .iter()
-                .enumerate()
-                .map(|(index, chapter)| {
-                    let on = index == this.chapter;
-                    let length = chapter.frames.end - chapter.frames.start;
-                    div()
-                        .id(("chapter", index))
-                        .flex()
-                        .items_baseline()
-                        .gap(px(8.))
-                        .px(px(10.))
-                        .py(px(9.))
-                        .rounded(RADIUS_SM)
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(if on { STRONG } else { MUTED })
-                        .when(on, |this| this.bg(RAISED))
-                        .when(!on, |this| this.hover(|s| s.text_color(TEXT)))
-                        .cursor_pointer()
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .child(chapter.title.clone()),
-                        )
-                        .child(mono(timecode(length)).text_size(TEXT_SM))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.chapter = index;
-                            this.selection = None;
-                            if let Some(chapter) = this.map.chapters.get(index)
-                                && !chapter.frames.is_empty()
-                            {
-                                this.seek(chapter.frames.start);
-                            }
-                            cx.notify();
-                        }))
-                }),
-        )
+        .when(list.is_empty(), |pane| {
+            pane.child(
+                div()
+                    .px(px(10.))
+                    .text_color(MUTED)
+                    .child("No chapters yet. Record a take to start one."),
+            )
+        })
+        .children(list)
 }
 
-fn document(this: &mut EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement {
+/// The paragraph of the chapter on show that the playhead is in, by its block and index.
+fn current_paragraph(this: &EditScreen) -> Option<(TakeAt, usize)> {
+    this.doc
+        .iter()
+        .filter(|b| b.at.chapter == this.chapter)
+        .flat_map(|b| {
+            b.paragraphs
+                .iter()
+                .enumerate()
+                .filter_map(move |(i, p)| Some((b.at, i, p.start?)))
+        })
+        .take_while(|(.., start)| *start <= this.playhead)
+        .last()
+        .map(|(at, i, _)| (at, i))
+}
+
+fn document(this: &mut EditScreen, follow: &Entity<bool>, cx: &mut Context<EditScreen>) -> Div {
     let title = this
         .map
         .chapters
@@ -130,6 +215,8 @@ fn document(this: &mut EditScreen, cx: &mut Context<EditScreen>) -> impl IntoEle
         .collect();
     let mut rows: Vec<Div> = Vec::new();
     let mut scroll_to = None;
+    let following = *follow.read(cx);
+    let playing_in = current_paragraph(this);
     if let Some(note) = proposals::agent_note(this) {
         rows.push(doc_row(rail(None, None), note));
     }
@@ -167,6 +254,9 @@ fn document(this: &mut EditScreen, cx: &mut Context<EditScreen>) -> impl IntoEle
                 index = end;
                 continue;
             }
+            if following && playing_in == Some((block.at, index)) {
+                scroll_to = Some(rows.len());
+            }
             let current = paragraph.start.is_some_and(|start| start <= this.playhead)
                 && block
                     .paragraphs
@@ -185,6 +275,9 @@ fn document(this: &mut EditScreen, cx: &mut Context<EditScreen>) -> impl IntoEle
         this.scroll.scroll_to_top_of_item(row);
     }
     this.scroll_to_card = false;
+    if following {
+        follow.update(cx, |follow, _| *follow = false);
+    }
     ui::pane()
         .flex_1()
         .flex()
@@ -474,12 +567,30 @@ fn selection_toolbar(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl In
                     div()
                         .flex()
                         .items_center()
-                        .gap(px(6.))
+                        .gap(px(2.))
                         .h(px(28.))
-                        .px(px(10.))
-                        .text_color(MUTED)
-                        .child("Layout")
-                        .child(kbd("1–4")),
+                        .pl(px(10.))
+                        .pr(px(4.))
+                        .child(div().pr(px(6.)).text_color(MUTED).child("Layout"))
+                        .children(LAYOUT_KEYS.iter().enumerate().map(|(index, layout)| {
+                            let name = layout_name(*layout);
+                            div()
+                                .id(("text-tool-layout", index))
+                                .h(px(24.))
+                                .px(px(3.))
+                                .flex()
+                                .items_center()
+                                .rounded(px(6.))
+                                .cursor_pointer()
+                                .hover(|s| s.bg(FLOAT_ON))
+                                .child(kbd((index + 1).to_string()))
+                                .tooltip(move |window, cx| {
+                                    gpui_component::tooltip::Tooltip::new(name).build(window, cx)
+                                })
+                                .on_click(
+                                    cx.listener(move |this, _, _, cx| this.set_layout(index, cx)),
+                                )
+                        })),
                 ),
         )
         .when(sound_open, |bar| {
@@ -500,7 +611,9 @@ fn tool(name: &'static str, text: &'static str, keys: &'static str) -> Div {
         .child(kbd(keys))
 }
 
-fn inspector(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement {
+/// Under the preview: the selected words, or without a selection the chapter's cuts and the
+/// keys that edit it; at the bottom what is on screen at the playhead.
+fn inspector(this: &EditScreen, cx: &mut Context<EditScreen>) -> Stateful<Div> {
     let folder = this.folder.read(cx);
     let captions = folder
         .project
@@ -513,26 +626,44 @@ fn inspector(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElemen
         .zip(this.selection)
         .and_then(|((at, range, ..), s)| {
             let block = this.block(at)?;
-            let text: Vec<&str> = block.words[s.words()]
+            let words = &block.words[s.words()];
+            let mut text: Vec<&str> = words
                 .iter()
+                .take(QUOTE_WORDS)
                 .map(|w| w.text.as_str())
                 .collect();
+            if words.len() > QUOTE_WORDS {
+                text.push("…");
+            }
             Some((
                 text.join(" "),
+                words.len(),
                 range,
                 block.words[*s.words().start()].output,
             ))
         });
     ui::pane()
+        .id("inspector")
         .flex_1()
         .flex()
         .flex_col()
         .gap(px(16.))
         .px(px(18.))
         .py(px(16.))
+        .overflow_y_scroll()
         .map(|pane| match &selection {
-            Some((text, range, start)) => pane
-                .child(div().font_weight(FontWeight::SEMIBOLD).child("Selection"))
+            Some((text, count, range, start)) => pane
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .child(div().font_weight(FontWeight::SEMIBOLD).child("Selection"))
+                        .child(div().flex_1())
+                        .child(label(match count {
+                            1 => "1 word".to_owned(),
+                            n => format!("{n} words"),
+                        })),
+                )
                 .child(
                     div()
                         .text_size(px(16.))
@@ -548,16 +679,25 @@ fn inspector(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElemen
                     "Length",
                     div().text_color(TEXT).child(seconds(range.duration())),
                 )),
-            None => pane.child(
+            None => pane.child(chapter_summary(this)).child(
                 div()
-                    .text_color(MUTED)
-                    .child("Select words to cut them, or press 1 to 4 to set the layout here."),
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .child(label("Click a word to select it, Shift-click to extend"))
+                    .child(hint("⌫", "Cut the selected words"))
+                    .child(hint("R", "Restore cut words"))
+                    .child(hint("Z", "Zoom in on them"))
+                    .child(hint("S", "Place a sound"))
+                    .child(hint("1–4", "Set the layout"))
+                    .child(hint("←→", "Step word by word, ⇧ to extend")),
             ),
         })
         .child(
             div()
                 .mt_auto()
                 .flex()
+                .flex_none()
                 .flex_col()
                 .gap(px(10.))
                 .p(px(14.))
@@ -565,7 +705,8 @@ fn inspector(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElemen
                 .rounded(RADIUS_MD)
                 .bg(RAISED)
                 .child(label(format!("At {}", timecode(this.playhead))))
-                .child(row(
+                .child(here(
+                    "layout",
                     "Layout",
                     div()
                         .text_color(TEXT)
@@ -575,7 +716,8 @@ fn inspector(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElemen
                     span.map(|s| s.zoom_at(s.source_frame(this.playhead)))
                         .filter(|z| *z > 1.0),
                     |block, zoom| {
-                        block.child(row(
+                        block.child(here(
+                            "zoom",
                             "Zoom",
                             div()
                                 .text_color(TEXT)
@@ -583,7 +725,8 @@ fn inspector(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElemen
                         ))
                     },
                 )
-                .child(row(
+                .child(here(
+                    "text",
                     "Captions",
                     div().text_color(TEXT).child(match captions {
                         shot_core::CaptionStyle::WordPop => "Word pop",
@@ -592,4 +735,61 @@ fn inspector(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElemen
                     }),
                 )),
         )
+}
+
+/// Words of a long selection the inspector quotes.
+const QUOTE_WORDS: usize = 40;
+
+/// The chapter on show: its length and what the cuts took out of it.
+fn chapter_summary(this: &EditScreen) -> Div {
+    let Some(chapter) = this.map.chapters.get(this.chapter) else {
+        return div();
+    };
+    let runs: Vec<&CutRun> = this
+        .doc
+        .iter()
+        .filter(|b| b.at.chapter == this.chapter)
+        .flat_map(|b| &b.paragraphs)
+        .flat_map(|p| &p.items)
+        .filter_map(|item| match item {
+            Item::Cut(run) => Some(run),
+            Item::Word(_) => None,
+        })
+        .collect();
+    let removed = shot_core::Micros(runs.iter().map(|r| r.removed.0).sum());
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(10.))
+        .child(
+            div()
+                .font_weight(FontWeight::SEMIBOLD)
+                .truncate()
+                .child(chapter.title.clone()),
+        )
+        .child(row(
+            "Length",
+            mono(timecode(chapter.frames.end - chapter.frames.start)).text_color(TEXT),
+        ))
+        .child(row(
+            "Cut out",
+            div().text_color(TEXT).child(match runs.len() {
+                0 => "Nothing yet".to_owned(),
+                1 => format!("{} in 1 cut", seconds(removed)),
+                n => format!("{} in {n} cuts", seconds(removed)),
+            }),
+        ))
+}
+
+/// A row of the "At" block: its icon, name and value.
+fn here(icon_name: &'static str, name: &'static str, value: impl IntoElement) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .text_size(px(14.))
+        .child(icon(icon_name, ICON_SM, MUTED))
+        .child(div().text_color(MUTED).child(name))
+        .child(div().flex_1())
+        .child(value)
 }

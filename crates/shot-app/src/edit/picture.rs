@@ -1,69 +1,75 @@
 //! The Picture workspace: the preview fills the stage, the layout picker on the left, what is on
 //! screen now and next on the right with the tools that place callouts, pops and sounds, three
-//! rolling transcript lines, and the overview bar.
+//! rolling transcript lines, and the overview bar. The side panes resize by their edges.
 
 use gpui::{
-    Context, Div, FontWeight, MouseButton, MouseDownEvent, Window, canvas, div, prelude::*, px,
+    Context, Div, Entity, FontWeight, Hsla, MouseButton, MouseDownEvent, Pixels, Size, Stateful,
+    Window, canvas, div, prelude::*, px,
 };
 use shot_core::{Layout, WordState};
 
 use super::EditScreen;
 use super::parts::{self, layout_name};
 use super::place::{self, Picker, tool_button};
-use crate::model::{LAYOUT_KEYS, Span, timecode};
+use crate::layout_store;
+use crate::model::{FPS, LAYOUT_KEYS, Span, timecode};
 use crate::theme::*;
-use crate::ui::{self, icon, kbd, label};
+use crate::ui::{self, icon, kbd, label, mono};
 
 /// Words per rolling line.
 const LINE_WORDS: usize = 9;
+/// The stage's padding around the preview.
+const STAGE_PADDING: f32 = 24.;
+/// Height of the transport under the preview, with the gap above it.
+const TRANSPORT: f32 = 46.;
+/// Height of the three rolling lines, with the gap above them.
+const LINES: f32 = 26. + 24. + 6. + 34. + 6. + 24.;
 
-pub fn render(this: &mut EditScreen, _: &mut Window, cx: &mut Context<EditScreen>) -> Div {
+pub fn render(this: &mut EditScreen, window: &mut Window, cx: &mut Context<EditScreen>) -> Div {
     let chapter_frames = this
         .map
         .chapters
         .get(this.chapter)
         .map_or(0..0, |c| c.frames.clone());
+    // The stage's size as last laid out, which sizes the preview to fill it.
+    let stage_size = window.use_keyed_state("picture-stage", cx, |_, _| Size::<Pixels>::default());
+    let layouts = layouts(this, cx);
+    let stage = stage(this, &stage_size, cx);
+    let layers = layers(this, cx);
     div()
         .flex_1()
         .min_h_0()
         .flex()
         .flex_col()
         .children(parts::error_strip(this))
-        .child(
-            div()
-                .flex_1()
-                .min_h_0()
-                .flex()
-                .gap(px(8.))
-                .mx(px(8.))
-                .child(layouts(this, cx))
-                .child(stage(this, cx))
-                .child(layers(this, cx)),
-        )
+        .child(layout_store::PICTURE.render(layouts, stage, layers, window, cx))
         .child(parts::overview_footer(this, chapter_frames, cx))
 }
 
-fn layouts(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement {
+fn layouts(this: &EditScreen, cx: &mut Context<EditScreen>) -> Stateful<Div> {
     let current = this.map.span_at(this.playhead).map(|s| s.layout);
     ui::pane()
-        .w(px(176.))
-        .flex_none()
+        .id("layouts")
+        .flex_1()
         .flex()
         .flex_col()
         .gap(px(6.))
         .px(px(10.))
         .py(px(14.))
+        .overflow_y_scroll()
         .children(LAYOUT_KEYS.iter().enumerate().map(|(index, layout)| {
             let on = current == Some(*layout);
             div()
                 .id(("layout", index))
                 .flex()
+                .flex_none()
                 .flex_col()
                 .gap(px(6.))
                 .p(px(8.))
                 .rounded(RADIUS_MD)
                 .cursor_pointer()
                 .when(on, |this| this.bg(RAISED))
+                .when(!on, |this| this.hover(|s| s.bg(RAISED)))
                 .child(thumbnail(*layout))
                 .child(
                     div()
@@ -117,27 +123,60 @@ fn thumbnail(layout: Layout) -> Div {
     }
 }
 
-fn stage(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement {
+/// The widest 16:9 preview that fits a stage of `size` with the transport and the lines.
+fn preview_width(size: Size<Pixels>) -> Pixels {
+    let width = f32::from(size.width) - 2. * STAGE_PADDING;
+    let height = f32::from(size.height) - 2. * STAGE_PADDING - TRANSPORT - LINES;
+    px(width.min(height * 16. / 9.).max(0.))
+}
+
+fn stage(this: &EditScreen, size: &Entity<Size<Pixels>>, cx: &mut Context<EditScreen>) -> Div {
+    let measured = *size.read(cx);
+    // Before the first layout the stage has no size yet: the settled 1040 px stands in.
+    let width = if measured.width > px(0.) {
+        preview_width(measured)
+    } else {
+        px(1040.)
+    };
+    let size = size.clone();
     ui::pane()
         .flex_1()
+        .relative()
+        .overflow_hidden()
         .bg(WELL)
         .flex()
         .flex_col()
         .items_center()
         .justify_center()
         .gap(px(26.))
-        .p(px(24.))
+        .p(px(STAGE_PADDING))
+        .child(
+            canvas(
+                move |bounds, _, cx| {
+                    size.update(cx, |size, cx| {
+                        if *size != bounds.size {
+                            *size = bounds.size;
+                            cx.notify();
+                        }
+                    })
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full(),
+        )
         .child(
             div()
-                .w_full()
-                .max_w(px(1040.))
+                .w(width)
                 .flex()
                 .flex_col()
                 .gap(px(14.))
                 .child(callout_target(this, cx))
                 .child(parts::transport(this, false, cx)),
         )
-        .child(lines(this))
+        .child(lines(this).w(width))
 }
 
 /// The preview, which places a callout where it is clicked while the callout tool is on.
@@ -169,7 +208,7 @@ fn callout_target(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoE
 }
 
 /// The line being spoken, with the one before and after it.
-fn lines(this: &EditScreen) -> impl IntoElement {
+fn lines(this: &EditScreen) -> Div {
     let words: Vec<(&str, Option<u64>)> = this
         .doc
         .iter()
@@ -193,8 +232,6 @@ fn lines(this: &EditScreen) -> impl IntoElement {
     let text =
         |line: &[(&str, Option<u64>)]| line.iter().map(|(t, _)| *t).collect::<Vec<_>>().join(" ");
     div()
-        .w_full()
-        .max_w(px(1040.))
         .flex()
         .flex_col()
         .items_center()
@@ -205,6 +242,7 @@ fn lines(this: &EditScreen) -> impl IntoElement {
                 .h(px(24.))
                 .text_size(px(17.))
                 .text_color(FAINT)
+                .truncate()
                 .children(current.checked_sub(1).and_then(line).map(text)),
         )
         .child(
@@ -238,52 +276,99 @@ fn lines(this: &EditScreen) -> impl IntoElement {
                 .h(px(24.))
                 .text_size(px(17.))
                 .text_color(FAINT)
+                .truncate()
                 .children(line(current + 1).map(text)),
         )
 }
 
-fn layers(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement {
+/// What is on screen at the playhead, what changes next, and the tools that place effects.
+fn layers(this: &EditScreen, cx: &mut Context<EditScreen>) -> Stateful<Div> {
     let now = this.map.span_at(this.playhead);
-    let source_frame = now.map(|s| s.source_frame(this.playhead));
     let zoom = now
-        .zip(source_frame)
-        .map(|(s, f)| s.zoom_at(f))
+        .map(|s| s.zoom_at(s.source_frame(this.playhead)))
         .filter(|z| *z > 1.0);
-    let time = source_frame.map(|f| shot_render::plan::frame_time(f, crate::model::FPS));
-    let overlays: Vec<String> = now
-        .zip(time)
-        .map(|(s, t)| {
-            s.overlays
-                .iter()
-                .filter(|o| o.range.from() <= t && t < o.range.to())
-                .map(|o| o.template.to_string())
-                .collect()
-        })
-        .unwrap_or_default();
-    let next = upcoming(this, now);
+    let folder = this.folder.read(cx);
+    let captions = match folder
+        .project
+        .cut
+        .captions
+        .unwrap_or(folder.project.format.captions)
+    {
+        shot_core::CaptionStyle::WordPop => "Word pop",
+        shot_core::CaptionStyle::Clean => "Clean",
+        shot_core::CaptionStyle::Off => "Off",
+    };
+    let overlays = overlays(this, cx);
+    let showing: Vec<&Overlay> = overlays
+        .iter()
+        .filter(|o| o.frames.contains(&this.playhead))
+        .collect();
+    let next = upcoming(this, now, &overlays);
     ui::pane()
-        .w(px(236.))
-        .flex_none()
+        .id("layers")
+        .flex_1()
         .flex()
         .flex_col()
         .gap(px(2.))
         .px(px(10.))
         .py(px(14.))
-        .child(label("On screen now").px(px(10.)).pb(px(8.)))
-        .children(now.map(|s| layer("layout", "Layout", layout_name(s.layout).into(), true)))
-        .children(zoom.map(|z| layer("zoom", "Zoom", format!("{:.0}%", z * 100.0), false)))
-        .children(
-            overlays
-                .into_iter()
-                .map(|name| layer("picture", "Overlay", name, false)),
+        .overflow_y_scroll()
+        .child(
+            label(format!("On screen at {}", timecode(this.playhead)))
+                .px(px(10.))
+                .pb(px(8.)),
         )
-        .child(div().h(px(14.)))
+        .children(now.map(|s| {
+            layer(
+                "layout",
+                MUTED.into(),
+                "Layout",
+                div().child(layout_name(s.layout)),
+            )
+        }))
+        .child(layer(
+            "text",
+            MUTED.into(),
+            "Captions",
+            div().child(captions),
+        ))
+        .children(zoom.map(|z| {
+            layer(
+                "zoom",
+                ZOOM.into(),
+                "Zoom",
+                div().child(format!("{:.0}%", z * 100.0)),
+            )
+        }))
+        .children(showing.into_iter().map(|o| {
+            let length = (o.frames.end - o.frames.start) as f32 / FPS as f32;
+            layer("picture", o.color, &o.text, mono(format!("{length:.1} s")))
+        }))
+        .child(div().flex_none().h(px(14.)))
         .child(label("Next up").px(px(10.)).pb(px(8.)))
-        .children(
-            next.into_iter()
-                .map(|(name, what, frame)| layer(name, &what, timecode(frame), false)),
-        )
-        .child(div().h(px(14.)))
+        .when(next.is_empty(), |pane| {
+            pane.child(
+                div()
+                    .px(px(10.))
+                    .pb(px(6.))
+                    .text_size(TEXT_SM)
+                    .text_color(FAINT)
+                    .child("Nothing changes after the playhead"),
+            )
+        })
+        .children(next.into_iter().enumerate().map(|(index, next)| {
+            let frame = next.frame;
+            layer(next.icon, next.color, &next.name, mono(timecode(frame)))
+                .id(("next-up", index))
+                .cursor_pointer()
+                .hover(|s| s.bg(RAISED).text_color(TEXT))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.set_playing(false);
+                    this.seek(frame);
+                    cx.notify();
+                }))
+        }))
+        .child(div().flex_none().h(px(14.)))
         .child(label("Place at the playhead").px(px(10.)).pb(px(8.)))
         .child(
             div()
@@ -316,10 +401,7 @@ fn layers(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement {
         )
         .child(
             div()
-                .id("place-panel")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
+                .flex_none()
                 .pt(px(8.))
                 .map(|panel| match this.place.picker {
                     Some(Picker::Pop) => panel.child(place::pop_picker(this, cx)),
@@ -329,45 +411,68 @@ fn layers(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement {
         )
 }
 
-fn layer(icon_name: &str, name: &str, value: String, on: bool) -> Div {
+fn layer(icon_name: &'static str, color: Hsla, name: &str, value: Div) -> Div {
     div()
         .flex()
+        .flex_none()
         .items_center()
         .gap(px(10.))
         .px(px(10.))
         .py(px(9.))
         .rounded(RADIUS_SM)
         .text_size(px(14.))
-        .when(on, |this| this.bg(RAISED).text_color(STRONG))
-        .child(icon(icon_name, ICON, if on { STRONG } else { MUTED }))
-        .child(div().font_family(SANS).child(name.to_owned()))
-        .child(div().flex_1())
-        .child(
-            div()
-                .font_family(MONO)
-                .text_size(TEXT_SM)
-                .text_color(MUTED)
-                .child(value),
-        )
+        .child(icon(icon_name, ICON, color))
+        .child(div().flex_1().min_w_0().truncate().child(name.to_owned()))
+        .child(value.flex_none().text_size(TEXT_SM).text_color(MUTED))
 }
 
-/// The next layout change and the next zoom after the playhead, with their output frames.
-fn upcoming(this: &EditScreen, now: Option<&Span>) -> Vec<(&'static str, String, u64)> {
+/// An overlay or highlight of the edit, with its output frames and its lane's color.
+struct Overlay {
+    text: String,
+    frames: std::ops::Range<u64>,
+    color: Hsla,
+}
+
+fn overlays(this: &EditScreen, cx: &Context<EditScreen>) -> Vec<Overlay> {
+    [false, true]
+        .into_iter()
+        .flat_map(|highlight| {
+            let color = super::overlays::lane_colors(highlight).1;
+            super::overlays::lane_items(this, highlight, cx)
+                .into_iter()
+                .map(move |item| Overlay {
+                    text: item.text,
+                    frames: item.frames,
+                    color,
+                })
+        })
+        .collect()
+}
+
+/// A change after the playhead, which a click seeks to.
+struct Next {
+    icon: &'static str,
+    color: Hsla,
+    name: String,
+    frame: u64,
+}
+
+/// The next layout change, zoom and overlay after the playhead, in the order they come.
+fn upcoming(this: &EditScreen, now: Option<&Span>, overlays: &[Overlay]) -> Vec<Next> {
     let mut out = Vec::new();
-    let after = this
+    if let Some(span) = this
         .map
         .spans
         .iter()
-        .filter(|s| s.output_frame > this.playhead);
-    if let Some(span) = after
-        .clone()
+        .filter(|s| s.output_frame > this.playhead)
         .find(|s| now.is_none_or(|n| n.layout != s.layout))
     {
-        out.push((
-            "layout",
-            layout_name(span.layout).to_owned(),
-            span.output_frame,
-        ));
+        out.push(Next {
+            icon: "layout",
+            color: MUTED.into(),
+            name: layout_name(span.layout).to_owned(),
+            frame: span.output_frame,
+        });
     }
     let zoom = this
         .map
@@ -376,15 +481,50 @@ fn upcoming(this: &EditScreen, now: Option<&Span>) -> Vec<(&'static str, String,
         .filter(|s| s.output_frames().end > this.playhead)
         .flat_map(|s| {
             s.zooms.iter().filter_map(move |z| {
-                let start = shot_render::plan::snap(z.range, crate::model::FPS).start;
+                let start = shot_render::plan::snap(z.range, FPS).start;
                 (s.source_frames.contains(&start))
                     .then(|| (z.scale, s.output_frame + (start - s.source_frames.start)))
             })
         })
         .find(|(_, frame)| *frame > this.playhead);
     if let Some((scale, frame)) = zoom {
-        out.push(("zoom", format!("Zoom {scale}%"), frame));
+        out.push(Next {
+            icon: "zoom",
+            color: ZOOM.into(),
+            name: format!("Zoom {scale}%"),
+            frame,
+        });
     }
-    out.sort_by_key(|(.., frame)| *frame);
+    if let Some(overlay) = overlays
+        .iter()
+        .filter(|o| o.frames.start > this.playhead)
+        .min_by_key(|o| o.frames.start)
+    {
+        out.push(Next {
+            icon: "picture",
+            color: overlay.color,
+            name: overlay.text.clone(),
+            frame: overlay.frames.start,
+        });
+    }
+    out.sort_by_key(|next| next.frame);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_preview_fills_the_stage_by_width_or_by_height() {
+        let stage = |w: f32, h: f32| preview_width(Size::new(px(w), px(h)));
+        assert_eq!(stage(1088., 900.), px(1040.), "wide enough at 1600x1000");
+        let tall_enough = 2. * STAGE_PADDING + TRANSPORT + LINES + 585.;
+        assert_eq!(
+            stage(2000., tall_enough),
+            px(1040.),
+            "short: the height decides"
+        );
+        assert_eq!(stage(10., 10.), px(0.));
+    }
 }
