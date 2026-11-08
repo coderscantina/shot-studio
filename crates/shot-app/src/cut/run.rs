@@ -4,7 +4,7 @@
 //! [`VideoFolder`]. Only for a video before migration: a migrated video's rough cut is its lock,
 //! built from the elements by the style rules.
 
-use shot_analyze::autocut::{self, TakeFacts, TakeFiles};
+use shot_analyze::autocut::{self, Change, TakeFacts, TakeFiles};
 use shot_analyze::{Speech, cache};
 use shot_core::{Cut, Format, Id, Micros, Pacing, RuleKind};
 
@@ -15,11 +15,11 @@ pub fn rough_cut(folder: &mut VideoFolder, take: &Id) -> Result<(), String> {
     if folder.is_migrated() {
         return Ok(());
     }
-    let cut = rough_cut_of(folder, &folder.project.cut, take)?;
+    let cut = rough_cut_of(folder, &folder.project.cut, take, Change::All)?;
     folder.write_cut(cut)
 }
 
-/// Switches `rule` on or off in `format.kdl` and runs the rules again.
+/// Switches `rule` on or off in `format.kdl`: on runs that rule, off gives back what it cut.
 pub fn set_rule(folder: &mut VideoFolder, rule: RuleKind, on: bool) -> Result<(), String> {
     let mut format = folder.project.format.clone();
     let rules = &mut format.auto_cut;
@@ -31,14 +31,23 @@ pub fn set_rule(folder: &mut VideoFolder, rule: RuleKind, on: bool) -> Result<()
         RuleKind::Filler => rules.filler = on,
         RuleKind::IdleScreen => rules.idle_screen.on = on,
     }
-    rerun(folder, format)
+    rerun(
+        folder,
+        format,
+        if on {
+            Change::RuleOn(rule)
+        } else {
+            Change::RuleOff
+        },
+    )
 }
 
-/// Sets the pacing in `format.kdl` and moves the cut edges with it.
+/// Sets the pacing in `format.kdl` and moves the cut edges with it, and nothing else.
 pub fn set_pacing(folder: &mut VideoFolder, pacing: Pacing) -> Result<(), String> {
     let mut format = folder.project.format.clone();
+    let before = format.pacing;
     format.pacing = pacing;
-    rerun(folder, format)
+    rerun(folder, format, Change::Pacing(before))
 }
 
 pub fn rule_on(format: &Format, rule: RuleKind) -> bool {
@@ -53,7 +62,8 @@ pub fn rule_on(format: &Format, rule: RuleKind) -> bool {
     }
 }
 
-fn rerun(folder: &mut VideoFolder, format: Format) -> Result<(), String> {
+/// Writes `format` and brings every take's cut in line with it after `change`.
+fn rerun(folder: &mut VideoFolder, format: Format, change: Change) -> Result<(), String> {
     if folder.is_migrated() {
         return Err("this video's cuts come from the style rules of its format".into());
     }
@@ -68,13 +78,13 @@ fn rerun(folder: &mut VideoFolder, format: Format) -> Result<(), String> {
         }
         let mut cut = folder.project.cut.clone();
         for take in &takes {
-            cut = rough_cut_of(folder, &cut, take)?;
+            cut = rough_cut_of(folder, &cut, take, change)?;
         }
         folder.write_cut(cut)
     })
 }
 
-fn rough_cut_of(folder: &VideoFolder, cut: &Cut, take: &Id) -> Result<Cut, String> {
+fn rough_cut_of(folder: &VideoFolder, cut: &Cut, take: &Id, change: Change) -> Result<Cut, String> {
     let Some(transcript) = folder.transcripts.get(take) else {
         // Without words the rules cannot tell a silence from a sentence end.
         return Ok(cut.clone());
@@ -95,7 +105,13 @@ fn rough_cut_of(folder: &VideoFolder, cut: &Cut, take: &Id) -> Result<Cut, Strin
         again: &files.again,
         duration: take_end(cut, take, &speech),
     };
-    Ok(autocut::rough_cut(cut, format, &facts, &folder.transcripts))
+    Ok(autocut::rerun(
+        cut,
+        format,
+        &facts,
+        &folder.transcripts,
+        change,
+    ))
 }
 
 /// Where the take ends: the furthest range of its blocks, or its speech levels.
