@@ -239,11 +239,14 @@ impl Studio {
             cx.subscribe_in(&cut, window, |this, _, GoTo(screen), window, cx| {
                 this.show(*screen, window, cx);
             });
+        let edit_to_record = cx.subscribe_in(&edit, window, |this, _, GoTo(screen), window, cx| {
+            this.show(*screen, window, cx);
+        });
         window.focus(&edit.focus_handle(cx), cx);
         // Focus that drops out of the window, as when the focused element stops rendering,
         // goes back to the shown screen instead of leaving its shortcuts dead.
         let focus_lost = cx.on_focus_lost(window, |this, window, cx| this.focus_screen(window, cx));
-        let mut subscriptions = vec![recorded, continue_to_edit, focus_lost];
+        let mut subscriptions = vec![recorded, continue_to_edit, edit_to_record, focus_lost];
         // Cards move on the board and in other windows: the nav catches up when this comes back.
         subscriptions.push(cx.observe_window_activation(window, |this, window, cx| {
             if window.is_window_active() {

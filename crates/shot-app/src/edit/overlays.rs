@@ -442,17 +442,11 @@ pub fn pane(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement
                 .clone()
                 .map(|note| label(note).px(px(10.))),
         )
-        .child(
-            div()
-                .id("overlay-list")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .flex()
-                .flex_col()
-                .gap(px(4.))
-                .children(rows),
-        )
+        .child(ui::scrolling_list(
+            "overlay-list",
+            &this.overlays_scroll,
+            div().flex().flex_col().gap(px(4.)).children(rows),
+        ))
         .child(derived_cuts(&cut, cx))
 }
 
@@ -503,8 +497,9 @@ fn overlay_row(
                     // Geist Mono is for file names; labels and values stay in Geist.
                     .when(name.as_str() == "file", |value| value.font_family(MONO))
                     .text_color(BODY)
-                    .overflow_hidden()
-                    .whitespace_nowrap()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
                     .child(shown),
             );
         if let (ParamValue::Bool(on), true) = (value, yours) {
@@ -529,6 +524,7 @@ fn overlay_row(
     };
     div()
         .flex()
+        .flex_none()
         .flex_col()
         .gap(px(4.))
         .px(px(10.))

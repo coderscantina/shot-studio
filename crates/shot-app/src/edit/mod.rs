@@ -82,6 +82,7 @@ actions!(
         ZoomToSelection,
         GoToStart,
         GoToEnd,
+        RecordTake,
     ]
 );
 
@@ -114,6 +115,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("alt-z", ZoomToSelection, context),
         KeyBinding::new("home", GoToStart, context),
         KeyBinding::new("end", GoToEnd, context),
+        KeyBinding::new("cmd-enter", RecordTake, context),
     ]);
 }
 
@@ -185,6 +187,14 @@ pub struct EditScreen {
     scroll: ScrollHandle,
     /// Where the Text workspace's document pane was last painted, for its columns.
     document_bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// The last selected word and the selection toolbar's size, for placing the toolbar.
+    selection_anchor: text::Anchor,
+    toolbar_bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// The Timeline's change list and overlay list, for their fades.
+    changes_scroll: ScrollHandle,
+    overlays_scroll: ScrollHandle,
+    /// The Text inspector above its "At" block.
+    inspector_scroll: ScrollHandle,
     /// Where the overview bar was last painted, for mouse mapping.
     overview_bounds: Rc<Cell<Bounds<Pixels>>>,
     /// The Timeline lanes' view, drag and picked block.
@@ -253,6 +263,11 @@ impl EditScreen {
             focus: cx.focus_handle().tab_stop(true),
             scroll: ScrollHandle::new(),
             document_bounds: Rc::default(),
+            selection_anchor: Rc::default(),
+            toolbar_bounds: Rc::default(),
+            changes_scroll: ScrollHandle::new(),
+            overlays_scroll: ScrollHandle::new(),
+            inspector_scroll: ScrollHandle::new(),
             overview_bounds: Rc::default(),
             lanes: timeline::Lanes::default(),
             product: product::ProductState::default(),
@@ -659,6 +674,14 @@ impl EditScreen {
         }
     }
 
+    /// On to Record while there is nothing to edit.
+    fn go_record(&mut self, cx: &mut Context<Self>) {
+        if self.map.chapters.is_empty() {
+            self.set_playing(false);
+            cx.emit(crate::cut::GoTo(crate::studio::Screen::Record));
+        }
+    }
+
     /// Switches the workspace. A pick belongs to the Timeline lanes, so it is dropped.
     fn set_workspace(&mut self, workspace: Workspace, cx: &mut Context<Self>) {
         if self.workspace != workspace {
@@ -740,6 +763,8 @@ impl EditScreen {
     }
 }
 
+impl gpui::EventEmitter<crate::cut::GoTo> for EditScreen {}
+
 impl Focusable for EditScreen {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
@@ -806,6 +831,7 @@ impl Render for EditScreen {
                 this.seek(0);
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &RecordTake, _, cx| this.go_record(cx)))
             .on_action(cx.listener(|this, _: &GoToEnd, _, cx| {
                 this.seek(this.map.frames);
                 cx.notify();

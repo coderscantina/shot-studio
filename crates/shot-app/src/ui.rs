@@ -63,7 +63,7 @@ pub struct Segment {
     pub label: SharedString,
     pub icon: Option<&'static str>,
     pub on: bool,
-    /// Shows the icon alone, with the label as a tooltip.
+    /// Shows the icon alone, with the label as a tooltip, unless the segment is on.
     pub compact: bool,
     pub on_click: ClickHandler,
 }
@@ -128,7 +128,7 @@ pub fn segmented(id: &'static str, well: impl Into<Hsla>, segments: Vec<Segment>
                     this.child(icon(name, ICON, color))
                 })
                 .map(|this| {
-                    if segment.compact {
+                    if segment.compact && !on {
                         let label = segment.label.clone();
                         this.tooltip(move |window, cx| {
                             gpui_component::tooltip::Tooltip::new(label.clone()).build(window, cx)
@@ -265,3 +265,136 @@ pub fn measure(bounds: std::rc::Rc<std::cell::Cell<gpui::Bounds<Pixels>>>) -> gp
         |_, _, _, _| {},
     )
 }
+
+/// A large button of an empty or finished state, lime when it is the way on, with its key.
+pub fn big_button(
+    id: &'static str,
+    icon_name: &'static str,
+    text: impl Into<SharedString>,
+    keys: &'static str,
+    accent: bool,
+) -> Stateful<Div> {
+    let color: Hsla = if accent {
+        ON_ACCENT.into()
+    } else {
+        TEXT.into()
+    };
+    div()
+        .id(id)
+        .flex_none()
+        .h(px(42.))
+        .px(px(16.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(px(9.))
+        .rounded(RADIUS_MD)
+        .cursor_pointer()
+        .text_color(color)
+        .font_weight(if accent {
+            FontWeight::SEMIBOLD
+        } else {
+            FontWeight::MEDIUM
+        })
+        .when(accent, |this| this.bg(ACCENT).hover(|s| s.opacity(0.9)))
+        .when(!accent, |this| this.bg(RAISED).hover(|s| s.bg(FLOAT)))
+        .child(icon(icon_name, ICON, color))
+        .child(text.into())
+        .child(if accent {
+            kbd(keys)
+                .bg(Hsla::from(ON_ACCENT).opacity(0.14))
+                .text_color(ON_ACCENT)
+        } else {
+            kbd(keys)
+        })
+}
+
+/// A centered empty state: an icon in a circle, a title, a line of text and its actions.
+pub fn empty_state(
+    icon_name: &'static str,
+    title: impl Into<SharedString>,
+    text: impl Into<SharedString>,
+) -> Div {
+    div()
+        .flex_1()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(8.))
+        .child(
+            div()
+                .size(px(44.))
+                .mb(px(6.))
+                .rounded_full()
+                .bg(RAISED)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(icon(icon_name, px(22.), MUTED)),
+        )
+        .child(
+            div()
+                .text_size(px(20.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(title.into()),
+        )
+        .child(
+            div()
+                .max_w(px(460.))
+                .text_center()
+                .line_height(px(22.))
+                .text_color(BODY)
+                .child(text.into()),
+        )
+}
+
+/// A list in a pane that scrolls, with a fade over its bottom edge while more of it is below.
+/// The list takes the room its parent gives it.
+pub fn scrolling_list(id: &'static str, scroll: &gpui::ScrollHandle, list: Div) -> Div {
+    let fade = scroll.clone();
+    div()
+        .relative()
+        .flex_1()
+        .min_h_0()
+        .flex()
+        .flex_col()
+        .child(
+            list.id(id)
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .track_scroll(scroll),
+        )
+        // Painted after the list, so it reads this frame's scroll position.
+        .child(
+            gpui::canvas(
+                |_, _, _| {},
+                move |bounds, _, window, _| {
+                    let below = fade.max_offset().y + fade.offset().y;
+                    if below <= px(1.) {
+                        return;
+                    }
+                    let height = px(FADE).min(bounds.size.height);
+                    let strip = gpui::Bounds::new(
+                        gpui::point(bounds.origin.x, bounds.bottom() - height),
+                        gpui::size(bounds.size.width, height),
+                    );
+                    let pane = Hsla::from(SURFACE);
+                    window.paint_quad(gpui::fill(
+                        strip,
+                        gpui::linear_gradient(
+                            180.,
+                            gpui::linear_color_stop(pane.opacity(0.), 0.),
+                            gpui::linear_color_stop(pane, 1.),
+                        ),
+                    ));
+                },
+            )
+            .absolute()
+            .size_full(),
+        )
+}
+
+/// The height of the fade at the bottom of a [`scrolling_list`].
+const FADE: f32 = 48.;
