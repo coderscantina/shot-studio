@@ -303,14 +303,7 @@ chapter "One" {
             let painted = pool.buffer().unwrap();
             painter.paint(&renderer, &plan, frame, &painted).unwrap();
             let (a, b) = (read_rgb(&live).unwrap(), read_rgb(&painted).unwrap());
-            let difference = a
-                .iter()
-                .flatten()
-                .zip(b.iter().flatten())
-                .map(|(x, y)| u64::from(x.abs_diff(*y)))
-                .sum::<u64>() as f64
-                / (a.len() * 3) as f64;
-            assert!(difference < 0.5, "frame {frame} differs by {difference}");
+            crate::golden::assert_match(&format!("frame {frame}"), &a, &b);
         }
     }
 }

@@ -52,7 +52,7 @@ Relaxing scope, targets or the privacy rules is Mike's decision. For a failing g
 - Correctness runs on small generated fixtures. Capacity and the [targets](technical-briefing.md#targets) run on the generated 17 min 4K60 project. Both come from the fixture generator milestone 01 adds. See [0007](decisions/0007-generated-fixtures-only.md).
 - Test through real interfaces: real VideoToolbox, real whisper on a `say` clip, a real git repo in a temp dir. Mock only what can't run in CI, and say so in the report.
 - Timing code takes a clock and a media timebase as inputs, so tests control time.
-- Golden frames compare render output within a tolerance, never byte for byte.
+- Golden frames compare render output with `shot_render::golden::assert_match`: no channel may differ by more than 1 code value and at most 16 pixels may differ at all.
 - Before closing a UI milestone, look at every changed screen at 1600x1000 in dark, check keyboard focus and shortcuts, and store screenshots in `evidence/mNN/`. A screenshot does not verify timing or audio, so those get their own measurements.
 - Performance numbers come from release builds on the reference machine and state the fixture, commit and macOS version.
 
