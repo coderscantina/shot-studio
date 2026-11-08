@@ -30,7 +30,8 @@ use rmcp::{ServerHandler, ServiceExt, schemars, tool, tool_handler, tool_router}
 use serde::Deserialize;
 use shot_board::Board;
 use shot_core::{
-    Cut, Decision, ElementKind, Format, Id, Micros, Project, Script, Selector, Transcript, Video,
+    Cut, Decision, ElementKind, Format, FormatLayer, Id, Micros, Project, Script, Selector,
+    Transcript, Video,
 };
 
 use crate::transcript::WordSpan;
@@ -718,10 +719,14 @@ impl ShotServer {
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| format!("{slug} has no {file} yet"))
         };
+        let video = Video::parse(&read("video.kdl")?).map_err(|e| e.to_string())?;
+        let format_text = board
+            .read_file(slug, "format.kdl")
+            .map_err(|e| e.to_string())?;
         Ok(Project {
-            video: Video::parse(&read("video.kdl")?).map_err(|e| e.to_string())?,
             script: Script::parse(&read("script.md")?).map_err(|e| e.to_string())?,
-            format: Format::parse(&read("format.kdl")?).map_err(|e| e.to_string())?,
+            format: resolved_format(&board, slug, &video, format_text.as_deref())?,
+            video,
             cut,
         })
     }
@@ -829,12 +834,42 @@ impl ServerHandler for ShotServer {
     }
 }
 
+/// A video's format: a full `format.kdl` before migration, otherwise its layer of differences
+/// over the preset and the channel's `formats/<format>.kdl`, as the app and export resolve it.
+fn resolved_format(
+    board: &Board,
+    slug: &str,
+    video: &Video,
+    text: Option<&str>,
+) -> Result<Format, String> {
+    if let Some(format) = text.and_then(|t| Format::parse(t).ok()) {
+        return Ok(format);
+    }
+    let layer = text
+        .map(|t| FormatLayer::parse(t).map_err(|e| format!("format.kdl:{e}")))
+        .transpose()?
+        .unwrap_or_default();
+    let path = format!("formats/{}.kdl", video.format);
+    let channel = board
+        .read_repo_file(slug, &path)
+        .map_err(|e| e.to_string())?
+        .map(|bytes| {
+            let text = String::from_utf8(bytes).map_err(|_| format!("{path} is not UTF-8"))?;
+            FormatLayer::parse(&text).map_err(|e| format!("{path}:{e}"))
+        })
+        .transpose()?;
+    Ok(layer.apply(&video.format.preset().resolve(channel.iter())))
+}
+
 /// A known project file must parse before it is proposed.
 fn validate(file: &str, text: &str) -> Result<(), String> {
     let parsed = match file {
         "video.kdl" => Video::parse(text).map(drop),
         "cut.kdl" => Cut::parse(text).map(drop),
-        "format.kdl" => Format::parse(text).map(drop),
+        // A full format before migration, a layer of differences after it.
+        "format.kdl" => Format::parse(text)
+            .map(drop)
+            .or_else(|_| FormatLayer::parse(text).map(drop)),
         "script.md" => Script::parse(text).map(drop),
         _ => Ok(()),
     };

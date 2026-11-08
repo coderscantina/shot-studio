@@ -67,6 +67,7 @@ fn channel() -> TempDir {
         "title \"Fridays\"\nstatus editing\nformat opinion\n",
     )
     .unwrap();
+    std::fs::write(root.join("videos/fridays/script.md"), "# Fridays\n").unwrap();
     copy(&root.join("videos/fridays"), &root.join("videos/launch"));
     std::fs::write(
         root.join("videos/launch/video.kdl"),
@@ -288,4 +289,13 @@ fn the_disk_loader_builds_the_lock_the_contract_shows() {
         .orphans
         .len();
     assert_eq!(orphan, 1);
+}
+
+#[tokio::test]
+async fn tools_read_a_migrated_video_whose_format_is_a_layer() {
+    let dir = channel();
+    let client = connect(dir.path()).await;
+
+    let (error, text) = call(&client, "describe", json!({ "slug": "fridays" })).await;
+    assert!(!error, "{text}");
 }
