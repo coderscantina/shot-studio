@@ -58,6 +58,8 @@ raw-window-handle = "0.6.2"
 tempfile = "3.27.0"
 # B-roll stills from sources/. Same version gpui pulls in, only the decoders b-roll needs.
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+# The version gpui-pre already builds; brand SVG logos, which carry no text of their own.
+resvg = { version = "0.46", default-features = false }
 # Official MCP Rust SDK. The client feature is only enabled for tests.
 rmcp = { version = "3.9.0", default-features = false, features = ["server", "macros", "transport-io"] }
 tokio = { version = "1.53.1", features = ["rt", "macros", "io-std"] }

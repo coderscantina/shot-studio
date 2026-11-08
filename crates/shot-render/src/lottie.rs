@@ -54,7 +54,40 @@ pub fn check(bytes: &[u8]) -> Vec<Finding> {
     analyze(bytes).err().unwrap_or_default()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The slots a file offers, by its Lottie slot ids, sorted by id: what a brand declares it with.
+/// A file velato cannot render is refused with its findings, as [`LottieTemplate::load`] would.
+/// An id on a property that is neither a color nor an integer is no slot and is left out.
+pub fn slots(bytes: &[u8]) -> Result<Vec<(String, SlotKind)>, LottieError> {
+    let (prepared, _) = analyze(bytes).map_err(LottieError::Unsupported)?;
+    let mut slots: Vec<(String, SlotKind)> = prepared
+        .texts
+        .iter()
+        .map(|t| (t.doc.slot.clone(), SlotKind::Text))
+        .chain(
+            prepared
+                .colors
+                .iter()
+                .map(|b| (b.slot.clone(), SlotKind::Color)),
+        )
+        .chain(
+            prepared
+                .integers
+                .iter()
+                .map(|b| (b.slot.clone(), SlotKind::Integer)),
+        )
+        .chain(
+            prepared
+                .markers
+                .iter()
+                .map(|m| (m.slot.clone(), SlotKind::Time)),
+        )
+        .collect();
+    slots.sort();
+    slots.dedup();
+    Ok(slots)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SlotKind {
     Text,
     Color,
@@ -1188,6 +1221,27 @@ mod tests {
         assert_eq!(start.color, Rgba([1.0, 1.0, 1.0, 1.0]));
         assert_eq!(start.transform.translation(), (10.0, 20.0).into());
         assert_eq!(end.transform.translation(), (110.0, 20.0).into());
+    }
+
+    #[test]
+    fn slots_lists_every_slot_of_a_file_by_id() {
+        let mut file = with_layers(square(), vec![text_layer("title")]);
+        file["markers"] = json!([{ "cm": "hold", "tm": 30, "dr": 30 }]);
+        assert_eq!(
+            slots(&bytes(&file)).unwrap(),
+            [
+                ("accent".to_owned(), SlotKind::Color),
+                ("hold".to_owned(), SlotKind::Time),
+                ("title".to_owned(), SlotKind::Text),
+                ("weight".to_owned(), SlotKind::Integer),
+            ]
+        );
+        let mut refused = square();
+        refused["layers"][0]["ks"]["p"]["x"] = json!("wiggle(2, 30)");
+        assert!(matches!(
+            slots(&bytes(&refused)),
+            Err(LottieError::Unsupported(_))
+        ));
     }
 
     #[test]

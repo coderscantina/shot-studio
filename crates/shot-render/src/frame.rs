@@ -6,6 +6,8 @@
 //!   scaled by its size, clipped to the screen's slot. A ripple spreads from every click.
 //! - **Keystrokes**: the latest key press as a label at the bottom, or the typed run of text.
 //! - **Window**: the window layout's shadow and device frame under the window.
+//! - **Camera**: the brand's frame around the camera beside the screen, see
+//!   [`LayoutSpec::with_camera`].
 //! - **Overlays**: the templates of [`crate::overlay`], in file order, later ones on top.
 
 use std::collections::HashMap;
@@ -80,7 +82,10 @@ pub fn compose(
     sizes: Sources<(u32, u32)>,
 ) -> Result<Frame, UnsupportedLayout> {
     let effects = &look.effects;
-    let spec = LayoutSpec::styled(shot.layout, &effects.window)?;
+    let mut spec = LayoutSpec::styled(shot.layout, &effects.window)?;
+    if let Some(camera) = look.theme.camera {
+        spec = spec.with_camera(camera);
+    }
     let scene_at = |t| {
         let punch = punch_at(shot.zooms, t, effects.zoom_motion, sizes.screen);
         spec.scene(canvas, sizes, punch)

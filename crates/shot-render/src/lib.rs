@@ -13,22 +13,28 @@
 //! - [`audio`]: the mic audio of an output, cut and faded like its video.
 //! - [`voice`]: that audio finished: voice chain, music bed, -14 LUFS.
 //! - [`captions`]: word-timed captions with the caption fixes, and the WebVTT sidecar.
-//! - [`export`]: renders changed segments in parallel and joins them into one MP4.
+//! - [`export`]: renders changed chunks in parallel and joins them into one MP4.
 //! - [`derived`]: Shorts and X clips drawn from the main cut's chunks, reframed and captioned.
 //! - [`overlay_rules`]: link cards, highlights and b-roll slots written into `cut.kdl`.
 //! - [`motion`]: springs, presets and choreography over media time; [`kinetic`] moves text on
 //!   them, [`materials`] holds the light, parallax and motion blur rules that sheets, shadows and
 //!   glass follow, and [`lottie`] checks, fills and draws Lottie templates.
 //! - [`theme`]: what the brand gives the templates (preset, feel, colors, fonts, Lottie
-//!   templates), read from the lock; [`typeface`] holds the font files text draws in.
+//!   templates) and the frame (camera, stinger, logo), read from the lock; [`typeface`] holds the
+//!   font files text draws in.
+//! - [`join`]: the intro and outro around a migrated video's segments and the transitions at
+//!   its chapter edges, placed in the plan; [`bookend`] draws a generated title, and [`paint`]
+//!   draws any output frame for export and preview alike.
 
 pub mod assets;
 pub mod autozoom;
+pub mod bookend;
 pub mod captions;
 pub mod code_diff;
 pub mod drawing;
 pub mod events;
 pub mod frame;
+pub mod join;
 pub mod kinetic;
 pub mod layout;
 pub mod lock;
@@ -51,10 +57,14 @@ pub mod derived;
 pub mod export;
 #[cfg(target_os = "macos")]
 pub mod graph;
+#[cfg(all(test, target_os = "macos"))]
+mod join_reel;
 #[cfg(target_os = "macos")]
 mod material_pass;
 #[cfg(target_os = "macos")]
 pub mod overlay_rules;
+#[cfg(target_os = "macos")]
+pub mod paint;
 #[cfg(all(test, target_os = "macos"))]
 mod reel;
 #[cfg(target_os = "macos")]

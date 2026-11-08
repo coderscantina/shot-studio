@@ -7,10 +7,15 @@
 //! so deleting a word only re-keys the two chunks at the new edges, and every other chunk stays
 //! valid even though it moved. Audio follows the same grid: at 48 kHz and 60 fps a frame is
 //! exactly 800 samples, so audio and video can never drift apart.
+//!
+//! A migrated video's main output also has bookends and transitions, placed by
+//! [`ExportPlan::with_joins`] in [`crate::join`].
 
 use std::ops::Range;
 
 use shot_core::{ContentHash, Id, MediaId, Micros, Output, Segment, TimeRange, Zoom};
+
+use crate::join::{Piece, PlannedBookend, PlannedTransition};
 
 /// Chunks per second of a take: one per keyframe interval of the recordings.
 const CHUNKS_PER_SECOND: u32 = 2;
@@ -22,6 +27,14 @@ pub struct ExportPlan {
     pub chapters: Vec<PlannedChapter>,
     /// Output length in frames.
     pub frames: u64,
+    /// The segments and bookends in output order.
+    pub pieces: Vec<Piece>,
+    /// The intro and outro, in output order.
+    pub bookends: Vec<PlannedBookend>,
+    /// The transitions in output order, their windows apart.
+    pub transitions: Vec<PlannedTransition>,
+    /// The output frames the end card draws over.
+    pub end_card: Option<Range<u64>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,15 +132,19 @@ impl ExportPlan {
         }
         Self {
             fps,
+            pieces: (0..segments.len()).map(Piece::Segment).collect(),
             segments,
             chapters,
             frames,
+            bookends: Vec::new(),
+            transitions: Vec::new(),
+            end_card: None,
         }
     }
 }
 
 /// `frames` cut at every multiple of the chunk length.
-fn chunk_grid(frames: Range<u64>, fps: u32) -> impl Iterator<Item = Range<u64>> {
+pub(crate) fn chunk_grid(frames: Range<u64>, fps: u32) -> impl Iterator<Item = Range<u64>> {
     let length = u64::from((fps / CHUNKS_PER_SECOND).max(1));
     let mut start = frames.start;
     std::iter::from_fn(move || {

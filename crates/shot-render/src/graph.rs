@@ -28,7 +28,7 @@ const MAX_LAYERS: usize = 8;
 /// Bytes per layer in the uniform buffer, the minimum dynamic offset alignment.
 const LAYER_STRIDE: u64 = 256;
 /// Size of the shader's `Layer` struct.
-const LAYER_SIZE: u64 = 96;
+const LAYER_SIZE: u64 = 144;
 
 pub struct Renderer {
     device: wgpu::Device,
@@ -175,7 +175,18 @@ impl Renderer {
         sources: Sources<Option<&CVPixelBuffer>>,
         target: &CVPixelBuffer,
     ) -> Result<(), RenderError> {
-        self.render_with(&frame.scene, &frame.drawing, sources, target)
+        self.render_with(&frame.scene, &frame.drawing, sources, target, true)
+    }
+
+    /// Draws `frame` on top of what `target` holds, without its background: for a frame
+    /// drawn over another, such as one side of a transition over the other.
+    pub fn draw_over(
+        &self,
+        frame: &Frame,
+        sources: Sources<Option<&CVPixelBuffer>>,
+        target: &CVPixelBuffer,
+    ) -> Result<(), RenderError> {
+        self.render_with(&frame.scene, &frame.drawing, sources, target, false)
     }
 
     /// Draws `scene` into `target` and waits for the GPU, so the target can go straight to the
@@ -186,7 +197,7 @@ impl Renderer {
         sources: Sources<Option<&CVPixelBuffer>>,
         target: &CVPixelBuffer,
     ) -> Result<(), RenderError> {
-        self.render_with(scene, &Drawing::default(), sources, target)
+        self.render_with(scene, &Drawing::default(), sources, target, true)
     }
 
     fn render_with(
@@ -195,6 +206,7 @@ impl Renderer {
         drawing: &Drawing,
         sources: Sources<Option<&CVPixelBuffer>>,
         target: &CVPixelBuffer,
+        clear: bool,
     ) -> Result<(), RenderError> {
         if scene.layers.len() > MAX_LAYERS {
             return Err(RenderError::TooManyLayers(scene.layers.len()));
@@ -229,6 +241,14 @@ impl Renderer {
             let [luma, chroma] = views;
             let (luma, chroma) = (luma?, chroma?);
             let offset = index as u64 * LAYER_STRIDE;
+            let quad = layer.extent();
+            let border = layer.border.map_or([0.0; 4], |b| {
+                let [r, g, b2] = b.color;
+                [r, g, b2, b.width]
+            });
+            let shadow = layer
+                .shadow
+                .map_or([0.0; 4], |s| [s.offset[0], s.offset[1], s.blur, s.alpha]);
             let values = [
                 layer.frame.left,
                 layer.frame.top,
@@ -245,7 +265,7 @@ impl Renderer {
                 video_flag(target_range),
                 layer.blur,
                 materials::samples(layer.travel(), canvas) as f32,
-                0.0,
+                layer.opacity,
                 source_kr,
                 source_kb,
                 target_kr,
@@ -254,6 +274,18 @@ impl Renderer {
                 layer.shutter.top,
                 layer.shutter.right,
                 layer.shutter.bottom,
+                border[0],
+                border[1],
+                border[2],
+                border[3],
+                shadow[0],
+                shadow[1],
+                shadow[2],
+                shadow[3],
+                quad.left,
+                quad.top,
+                quad.right,
+                quad.bottom,
             ];
             let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_ne_bytes()).collect();
             self.queue.write_buffer(&self.uniforms, offset, &bytes);
@@ -342,7 +374,7 @@ impl Renderer {
             })
         };
         for plane in Plane::BOTH {
-            let mut pass = begin_pass(&mut encoder, &views[plane as usize], load(plane, true));
+            let mut pass = begin_pass(&mut encoder, &views[plane as usize], load(plane, clear));
             if let Some(under) = &under {
                 vector.draw(&mut pass, plane, under);
             }

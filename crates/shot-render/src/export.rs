@@ -32,15 +32,14 @@ use shot_media::mux::{self, AudioTrack, Chapter, FragmentedFile, Joiner, Movie, 
 use shot_media::videotoolbox::{DecodeError, Decoder};
 
 use crate::RenderError;
-use crate::assets::{AssetError, Assets, EVENTS_FILE};
-use crate::audio::{AudioSegment, TimelineAudio, TimelineAudioError};
-use crate::cursor::FrameCursor;
+use crate::assets::{AssetError, EVENTS_FILE};
+use crate::audio::{TimelineAudio, TimelineAudioError};
 use crate::derived::{DerivedInputs, DerivedPlan, FaceTrack};
-use crate::frame::{Shot, compose};
 use crate::graph::Renderer;
-use crate::layout::{Canvas, LayoutSpec, Source, Sources, UnsupportedLayout};
-use crate::plan::{ExportPlan, PlannedChunk, PlannedSegment, frame_time};
-use crate::surface::size;
+use crate::join::{BookendInput, BookendKind, Joins, KeyInputs, Piece, StingerTiming};
+use crate::layout::{Canvas, LayoutSpec, UnsupportedLayout};
+use crate::paint::{PaintError, Painter, is_lottie};
+use crate::plan::{ExportPlan, PlannedChunk, frame_time};
 use crate::theme::Theme;
 use crate::voice;
 
@@ -145,6 +144,10 @@ pub enum ExportError {
     ChunkStart,
     #[error("no sound `{0}` in the video's sounds/, brand/sounds/ or the bundled set")]
     UnknownSound(Id),
+    #[error(transparent)]
+    Paint(#[from] PaintError),
+    #[error("the brand's bumper {0} is missing")]
+    MissingBumper(PathBuf),
     #[error("another chunk failed")]
     Cancelled,
 }
@@ -176,6 +179,7 @@ pub fn export(
         .find(|output| output.name == cut)
         .ok_or_else(|| ExportError::UnknownCut(cut.to_owned()))?;
     let theme = Arc::new(Theme::load(video_dir, project.video.format, &project.cut)?);
+    let brand = lock.as_ref().map(|l| &l.brand);
     let media = Media {
         root: video_dir.join("media"),
         music: project.cut.music.as_ref().map(|m| {
@@ -187,7 +191,11 @@ pub fn export(
         }),
         cues: lock.as_ref().map(Cues::of).unwrap_or_default(),
         sounds: shot_audio::sound::Library::new(video_dir, channel_brand(video_dir).as_deref()),
+        brand_sounds: brand.map(|b| b.sounds.clone()).unwrap_or_default(),
         dir: video_dir.to_owned(),
+        channel: crate::theme::channel_root(video_dir)
+            .unwrap_or(video_dir)
+            .to_owned(),
     };
     let main = timeline.main();
     let ids: HashMap<&Id, MediaId> = main
@@ -221,6 +229,18 @@ pub fn export(
         None => {
             let mut plan = ExportPlan::new(output, FPS, |take| ids[take]);
             crate::overlay::key_chunks(&mut plan, &assets, &theme);
+            if let Some(lock) = &lock {
+                plan = plan.with_joins(&joins(&media, project, lock, &theme)?);
+                crate::join::key_joins(
+                    &mut plan,
+                    &KeyInputs {
+                        output,
+                        media: &|take| ids[take],
+                        identity: &assets,
+                        theme: &theme,
+                    },
+                );
+            }
             plan
         }
     };
@@ -276,7 +296,7 @@ pub fn export(
     }
     Ok(ExportReport {
         output: out.to_owned(),
-        chunks: plan.segments.iter().map(|s| s.chunks.len()).sum(),
+        chunks: plan.output_chunks().count(),
         rendered,
         frames: plan.frames,
         rendered_frames,
@@ -347,7 +367,7 @@ fn media_path(video_dir: &Path, take: &Id, file: &str) -> PathBuf {
     video_dir.join("media").join(take.as_str()).join(file)
 }
 
-/// Runs of consecutive chunks of one segment that are `wanted` and have no cached file, each
+/// Runs of consecutive chunks of one piece that are `wanted` and have no cached file, each
 /// chunk once.
 fn jobs<'a>(
     plan: &'a ExportPlan,
@@ -357,10 +377,10 @@ fn jobs<'a>(
 ) -> Vec<Job<'a>> {
     let mut seen = HashSet::new();
     let mut jobs = Vec::new();
-    for (segment, planned) in plan.segments.iter().enumerate() {
-        let job = |run| Job::new(planned, segment, run, derived);
+    for &piece in &plan.pieces {
+        let job = |run| Job::new(plan, piece, run, derived);
         let mut run: Option<Range<usize>> = None;
-        for (index, chunk) in planned.chunks.iter().enumerate() {
+        for (index, (_, chunk)) in plan.chunks_of(piece).enumerate() {
             let missing =
                 wanted(chunk) && seen.insert(chunk.hash) && !cache.path(chunk.hash).exists();
             match (&mut run, missing) {
@@ -375,11 +395,14 @@ fn jobs<'a>(
     jobs
 }
 
-/// Chunks that follow each other in one segment, rendered by one encoder session.
+/// Chunks that follow each other in one piece, rendered by one encoder session.
 pub(crate) struct Job<'a> {
-    pub planned: &'a PlannedSegment,
+    /// The plan the piece is in: the output's, or for a derived cut's base chunks the main
+    /// cut's.
+    pub plan: &'a ExportPlan,
+    pub piece: Piece,
     pub chunks: &'a [PlannedChunk],
-    /// The segment's index in its plan and the chunks' indices in the segment.
+    /// The segment's index in its plan, for a segment, and the chunks' indices in the piece.
     pub segment: usize,
     pub range: Range<usize>,
     /// Whether the chunks are a derived cut's, drawn from main chunks.
@@ -387,15 +410,15 @@ pub(crate) struct Job<'a> {
 }
 
 impl<'a> Job<'a> {
-    fn new(
-        planned: &'a PlannedSegment,
-        segment: usize,
-        range: Range<usize>,
-        derived: bool,
-    ) -> Self {
+    fn new(plan: &'a ExportPlan, piece: Piece, range: Range<usize>, derived: bool) -> Self {
+        let (chunks, segment) = match piece {
+            Piece::Segment(i) => (&plan.segments[i].chunks, i),
+            Piece::Bookend(i) => (&plan.bookends[i].chunks, i),
+        };
         Self {
-            planned,
-            chunks: &planned.chunks[range.clone()],
+            plan,
+            piece,
+            chunks: &chunks[range.clone()],
             segment,
             range,
             derived,
@@ -414,8 +437,113 @@ struct Media {
     /// The lock's music cues and sound effects, in take time.
     cues: Cues,
     sounds: shot_audio::sound::Library,
+    /// The brand's automatic sounds.
+    brand_sounds: Vec<(shot_core::SoundKey, Id)>,
     /// The video folder, which music files are relative to.
     dir: PathBuf,
+    /// The channel repo, which bumpers are relative to.
+    channel: PathBuf,
+}
+
+/// The plan of the main cut as export draws it, for the preview: the timeline styled by the
+/// lock, with its bookends and transitions. Chunk keys are left out; the preview draws frames
+/// by [`Painter::paint`] and caches nothing.
+pub fn preview_plan(video_dir: &Path, project: &Project) -> Result<ExportPlan, ExportError> {
+    let lock = crate::lock::read(video_dir)?;
+    let timeline = match &lock {
+        Some(lock) => shot_core::Timeline::styled(project, lock),
+        None => shot_core::Timeline::evaluate(project),
+    };
+    let plan = ExportPlan::new(timeline.main(), FPS, |_| MediaId::default());
+    let Some(lock) = lock else {
+        return Ok(plan);
+    };
+    let theme = Theme::load(video_dir, project.video.format, &project.cut)?;
+    let media = Media {
+        root: video_dir.join("media"),
+        music: None,
+        cues: Cues::default(),
+        sounds: shot_audio::sound::Library::new(video_dir, None),
+        brand_sounds: Vec::new(),
+        dir: video_dir.to_owned(),
+        channel: crate::theme::channel_root(video_dir)
+            .unwrap_or(video_dir)
+            .to_owned(),
+    };
+    Ok(plan.with_joins(&joins(&media, project, &lock, &theme)?))
+}
+
+/// What the lock's brand and transitions put around and between the main cut's segments, with
+/// each bumper measured: a video by its track, a Lottie by its composition. A bumper the brand
+/// names but the channel lacks is an error. The intro plays after the hook in the opinion and
+/// reaction formats (the cold open), before the video in the others. The intro's generated title
+/// shows the video's title, the outro's only the logo.
+fn joins(
+    media: &Media,
+    project: &Project,
+    lock: &shot_core::Lock,
+    theme: &Theme,
+) -> Result<Joins, ExportError> {
+    let brand = &lock.brand;
+    let bookend = |bookend: &Option<shot_core::Bookend>,
+                   kind: BookendKind|
+     -> Result<Option<BookendInput>, ExportError> {
+        let Some(bookend) = bookend else {
+            return Ok(None);
+        };
+        let title = bookend.title.then(|| match kind {
+            BookendKind::Intro => project.video.title.clone(),
+            BookendKind::Outro => String::new(),
+        });
+        let mut identity = Vec::new();
+        let mut length = crate::bookend::TITLE_LENGTH;
+        if let Some(file) = &bookend.bumper {
+            let path = media.channel.join(file);
+            if !path.exists() {
+                return Err(ExportError::MissingBumper(path));
+            }
+            length = if is_lottie(file) {
+                let bytes = fs::read(&path).map_err(io_error(&path))?;
+                crate::lottie::LottieTemplate::load(&bytes, &[])
+                    .and_then(|t| t.fill(&[]))
+                    .map_err(|source| PaintError::Lottie {
+                        path: path.clone(),
+                        source,
+                    })?
+                    .duration()
+            } else {
+                let decoder = Decoder::open_native(&path).map_err(decode_error(&path))?;
+                Micros(decoder.duration().as_micros() as u64)
+            };
+            identity.extend(media.asset_id(&media.channel, file));
+        }
+        if let Some(title) = &title {
+            identity.extend_from_slice(b"title");
+            identity.extend_from_slice(&(title.len() as u64).to_le_bytes());
+            identity.extend_from_slice(title.as_bytes());
+            identity.extend(theme.end_card_key());
+        }
+        Ok(Some(BookendInput {
+            bumper: bookend.bumper.clone(),
+            title,
+            length,
+            identity,
+        }))
+    };
+    Ok(Joins {
+        intro: bookend(&brand.intro, BookendKind::Intro)?,
+        outro: bookend(&brand.outro, BookendKind::Outro)?,
+        intro_after_hook: matches!(
+            project.video.format,
+            shot_core::FormatKind::Opinion | shot_core::FormatKind::Reaction
+        ),
+        transitions: Joins::transitions_of(lock),
+        stinger: theme.stinger.as_ref().map(|s| StingerTiming {
+            duration: s.lottie.duration(),
+            peak: s.peak,
+        }),
+        end_card: brand.end_card,
+    })
 }
 
 /// The lock's `music` and `sfx` instances by take, still in media time.
@@ -475,7 +603,8 @@ fn output_samples(plan: &ExportPlan, take: &Id, at: Micros) -> Vec<u64> {
 }
 
 /// The output's music and sound effects: the cut's music bed from the start, then the lock's
-/// cues and sounds where their moments play.
+/// cues and sounds where their moments play, the brand's transition sounds on each transition
+/// and the bumpers' own sound, which the music ducks under.
 fn score(plan: &ExportPlan, media: &Media) -> Result<voice::Score, ExportError> {
     let read = |path: &Path| {
         voice::read_samples(path).map_err(|source| TimelineAudioError {
@@ -513,19 +642,56 @@ fn score(plan: &ExportPlan, media: &Media) -> Result<voice::Score, ExportError> 
             }),
         }));
     }
-    let mut sfx = Vec::new();
-    for (take, at, name, gain) in &media.cues.sfx {
-        let places = output_samples(plan, take, *at);
-        if places.is_empty() {
-            continue;
-        }
-        let sound = match media.sounds.find(name) {
+    let find = |name: &Id| -> Result<shot_audio::sound::Sound, ExportError> {
+        Ok(match media.sounds.find(name) {
             Some(shot_audio::sound::Source::File(path)) => {
                 shot_audio::sound::Sound::new(read(&path)?)
             }
             Some(shot_audio::sound::Source::Bundled(bundled)) => bundled.decode(),
             None => return Err(ExportError::UnknownSound(name.clone())),
+        })
+    };
+    let per_frame = u64::from(SAMPLE_RATE) / u64::from(FPS);
+    let mut sfx = Vec::new();
+    for transition in &plan.transitions {
+        let travel = shot_audio::phases::Move {
+            effect: shot_core::SoundEffect::Transition,
+            start: transition.window.start * per_frame,
+            impact: transition.edge * per_frame,
+            settle: transition.window.end * per_frame,
+            exit: None,
         };
+        for (name, anchor) in shot_audio::phases::move_sounds(&travel, &media.brand_sounds) {
+            sfx.push(shot_audio::SfxCue::new(find(name)?, anchor, 0.0));
+        }
+    }
+    let mut bumpers = Vec::new();
+    for bookend in &plan.bookends {
+        let Some(file) = bookend.bumper.as_deref().filter(|f| !is_lottie(f)) else {
+            continue;
+        };
+        let start = bookend.output_frame * per_frame;
+        let end = start + bookend.frames * per_frame;
+        bumpers.push(start..end);
+        let path = media.channel.join(file);
+        let mut samples = match voice::read_samples(&path) {
+            Ok(samples) => samples,
+            Err(shot_media::audio::AudioError::NoAudioTrack(_)) => continue,
+            Err(source) => return Err(TimelineAudioError { path, source }.into()),
+        };
+        samples.truncate((end - start) as usize);
+        sfx.push(shot_audio::SfxCue::new(
+            shot_audio::sound::Sound::new(samples),
+            shot_audio::Anchor::Start(start),
+            0.0,
+        ));
+    }
+    for (take, at, name, gain) in &media.cues.sfx {
+        let places = output_samples(plan, take, *at);
+        if places.is_empty() {
+            continue;
+        }
+        let sound = find(name)?;
         sfx.extend(places.into_iter().map(|at| {
             shot_audio::SfxCue::new(
                 sound.clone(),
@@ -537,7 +703,7 @@ fn score(plan: &ExportPlan, media: &Media) -> Result<voice::Score, ExportError> 
     Ok(voice::Score {
         music: shot_audio::Music::new(music, shot_audio::CROSSFADE),
         sfx,
-        bumpers: Vec::new(),
+        bumpers,
     })
 }
 
@@ -582,16 +748,6 @@ impl Media {
 
     fn track(&self, take: &Id, file: &str) -> PathBuf {
         self.root.join(take.as_str()).join(file)
-    }
-
-    fn video(&self, take: &Id, source: Source) -> PathBuf {
-        self.track(
-            take,
-            match source {
-                Source::Screen => SCREEN_FILE,
-                Source::Camera => CAMERA_FILE,
-            },
-        )
     }
 }
 
@@ -732,7 +888,7 @@ fn run(
                                     pending,
                                     &chunk_done,
                                 )?,
-                                None => worker.render(&job, media, cache, &chunk_done)?,
+                                None => worker.render(&job, cache, &chunk_done)?,
                             }
                         }
                     })
@@ -756,81 +912,28 @@ fn run(
     })
 }
 
-/// One render thread: its own GPU device, and decoders and assets kept open across segments.
+/// One render thread: its own GPU device, and a painter that keeps decoders and assets open
+/// across jobs.
 struct Worker {
     renderer: Renderer,
-    cursors: HashMap<PathBuf, FrameCursor>,
-    assets: Assets,
-    effects: Effects,
+    painter: Painter,
 }
 
 impl Worker {
     fn new(media: &Media, effects: Effects, theme: Arc<Theme>) -> Result<Self, ExportError> {
-        let video_dir = media.root.parent().unwrap_or(&media.root);
         Ok(Self {
             renderer: Renderer::new()?,
-            cursors: HashMap::new(),
-            assets: Assets::with_theme(video_dir, theme),
-            effects,
+            painter: Painter::with_theme(&media.dir, effects, theme),
         })
-    }
-
-    /// Moves the decoder of `path` to `time`, opening it on first use. A clip shorter than the
-    /// cutaway holds its last frame.
-    fn goto(&mut self, path: &Path, time: Duration) -> Result<(), ExportError> {
-        if !self.cursors.contains_key(path) {
-            let decoder = Decoder::open_native(path).map_err(decode_error(path))?;
-            self.cursors
-                .insert(path.to_owned(), FrameCursor::new(decoder));
-        }
-        let cursor = self.cursors.get_mut(path).expect("opened above");
-        if cursor.goto(time).map_err(decode_error(path))?.is_none() {
-            return Err(ExportError::MediaEnds {
-                path: path.to_owned(),
-                time,
-            });
-        }
-        Ok(())
     }
 
     /// Renders the chunks of `job` into the cache, calling `chunk_done` after each one.
     fn render(
         &mut self,
         job: &Job,
-        media: &Media,
         cache: &Cache,
         chunk_done: &dyn Fn(ContentHash),
     ) -> Result<(), ExportError> {
-        let planned = job.planned;
-        let segment = &planned.segment;
-        let spec = LayoutSpec::styled(segment.layout, &self.effects.window)?;
-        let look = self
-            .assets
-            .look(&segment.take, &segment.overlays, self.effects)?;
-        let first = job.chunks[0].frames.start;
-        let paths = Sources {
-            screen: spec
-                .uses(Source::Screen)
-                .then(|| media.video(&planned.segment.take, Source::Screen)),
-            camera: spec
-                .uses(Source::Camera)
-                .then(|| media.video(&planned.segment.take, Source::Camera)),
-        };
-        for path in [&paths.screen, &paths.camera].into_iter().flatten() {
-            if !self.cursors.contains_key(path) {
-                let decoder = Decoder::open_native(path).map_err(decode_error(path))?;
-                self.cursors.insert(path.clone(), FrameCursor::new(decoder));
-            }
-            let cursor = self.cursors.get_mut(path).expect("opened above");
-            let time = to_duration(first);
-            if cursor.goto(time).map_err(decode_error(path))?.is_none() {
-                return Err(ExportError::MediaEnds {
-                    path: path.clone(),
-                    time,
-                });
-            }
-        }
-
         let canvas = Canvas::UHD;
         let mut encoder = HevcEncoder::new(EncoderSettings {
             width: canvas.width,
@@ -840,62 +943,17 @@ impl Worker {
             quality: QUALITY,
         })?;
         let mut files = ChunkFiles::new(job.chunks, cache, canvas, chunk_done);
-        let starts: HashSet<u64> = job.chunks.iter().map(|chunk| chunk.frames.start).collect();
-        for chunk in job.chunks {
-            for frame in chunk.frames.clone() {
-                let time = to_duration(frame);
-                for path in [&paths.screen, &paths.camera].into_iter().flatten() {
-                    self.cursors
-                        .get_mut(path)
-                        .expect("opened above")
-                        .goto(time)
-                        .map_err(decode_error(path))?;
-                }
-                let current = |cursors: &HashMap<PathBuf, FrameCursor>, path: &Option<PathBuf>| {
-                    path.as_ref()
-                        .and_then(|path| cursors.get(path))
-                        .and_then(FrameCursor::current)
-                        .map(|f| size(&f.buffer))
-                };
-                let sizes = Sources {
-                    screen: current(&self.cursors, &paths.screen).unwrap_or((1, 1)),
-                    camera: current(&self.cursors, &paths.camera).unwrap_or((1, 1)),
-                };
-                let shot = Shot {
-                    layout: segment.layout,
-                    zooms: &segment.zooms,
-                    overlays: &segment.overlays,
-                    time: frame_time(frame, FPS),
-                };
-                let mut drawn = compose(&shot, &look, canvas, sizes)?;
-                let mut screen = paths.screen.clone();
-                if let Some(cutaway) = &drawn.cutaway {
-                    let path = media
-                        .root
-                        .parent()
-                        .unwrap_or(&media.root)
-                        .join(&cutaway.file);
-                    self.goto(&path, Duration::from_micros(cutaway.time.0))?;
-                    let clip = current(&self.cursors, &Some(path.clone())).unwrap_or((16, 9));
-                    crate::overlay::broll::fit_cutaway(&mut drawn, clip);
-                    screen = Some(path);
-                }
-                let buffer = |path: &Option<PathBuf>| {
-                    path.as_ref()
-                        .and_then(|path| self.cursors.get(path))
-                        .and_then(FrameCursor::current)
-                        .map(|f| &*f.buffer)
-                };
+        let starts = job
+            .plan
+            .chunks_of(job.piece)
+            .skip(job.range.start)
+            .map(|(start, _)| start);
+        for (chunk, start) in job.chunks.iter().zip(starts) {
+            for i in 0..chunk.frame_count() {
                 let target = encoder.input_buffer()?;
-                self.renderer.draw(
-                    &drawn,
-                    Sources {
-                        screen: buffer(&screen),
-                        camera: buffer(&paths.camera),
-                    },
-                    &target,
-                )?;
-                if starts.contains(&frame) {
+                self.painter
+                    .paint(&self.renderer, job.plan, start + i, &target)?;
+                if i == 0 {
                     encoder.encode_keyframe(&target)?;
                 } else {
                     encoder.encode(&target)?;
@@ -1098,14 +1156,7 @@ fn encode_audio(
         AacEncoder::new(SAMPLE_RATE, AUDIO_BITRATE).map_err(ExportError::AudioEncode)?;
     send(encoder.take())?;
     let root = media.root.clone();
-    let audio = TimelineAudio::new(
-        plan.segments.iter().map(|planned| AudioSegment {
-            take: planned.segment.take.clone(),
-            source_frames: planned.source_frames.clone(),
-        }),
-        FPS,
-        move |take| root.join(take.as_str()).join(MIC_FILE),
-    );
+    let audio = TimelineAudio::of_plan(plan, move |take| root.join(take.as_str()).join(MIC_FILE));
     let mut bleeps: Vec<(Id, shot_core::TimeRange)> = plan
         .segments
         .iter()
@@ -1150,7 +1201,8 @@ fn join(
         Ok(file)
     };
     let format = audio.recv().map_err(|_| ExportError::Cancelled)?;
-    let video = read(&plan.segments[0].chunks[0])?.track;
+    let (_, first) = plan.output_chunks().next().ok_or(ExportError::Cancelled)?;
+    let video = read(first)?.track;
     let movie = Movie {
         timescale: TIMESCALE,
         duration: plan.frames * u64::from(FRAME_TICKS),
@@ -1182,20 +1234,18 @@ fn join(
     let mut joiner =
         Joiner::new(BufWriter::with_capacity(1 << 22, file), &movie).map_err(io_error(&partial))?;
     let mut packets = AudioPackets::new(format, audio, pending);
-    for planned in &plan.segments {
-        for chunk in &planned.chunks {
-            let file = read(chunk)?;
-            let path = cache.path(chunk.hash);
-            if file.track != video {
-                return Err(MuxError::CodecMismatch(path.display().to_string()).into());
-            }
-            let mut source = File::open(&path).map_err(io_error(&path))?;
-            let start = planned.output_frame_of(chunk) * u64::from(FRAME_TICKS);
-            for fragment in &file.fragments {
-                let base = start + fragment.base_time;
-                joiner.copy(&mut source, fragment, 1, base)?;
-                packets.write_until(&mut joiner, Some(base + fragment.duration), &partial)?;
-            }
+    for (output_frame, chunk) in plan.output_chunks() {
+        let file = read(chunk)?;
+        let path = cache.path(chunk.hash);
+        if file.track != video {
+            return Err(MuxError::CodecMismatch(path.display().to_string()).into());
+        }
+        let mut source = File::open(&path).map_err(io_error(&path))?;
+        let start = output_frame * u64::from(FRAME_TICKS);
+        for fragment in &file.fragments {
+            let base = start + fragment.base_time;
+            joiner.copy(&mut source, fragment, 1, base)?;
+            packets.write_until(&mut joiner, Some(base + fragment.duration), &partial)?;
         }
     }
     packets.write_until(&mut joiner, None, &partial)?;
