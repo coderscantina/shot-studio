@@ -17,6 +17,7 @@ Mark a milestone complete only after its acceptance criteria pass and an evidenc
 | 10 | [Semantic core](10-semantic-core.md) | 07, 08 | Core, Analysis, Media, App | Items 1 to 6 and 8 on `milestone/10-12`, item 7 waits for a design round with Mike. [Evidence](../evidence/m10-semantic-core.md) |
 | 11 | [Motion system and effects as styles](11-effects-as-styles.md) | 10 (items 1 to 4 can start earlier) | Media, App | Built on `milestone/10-12`; Mike's reel scores are the open criterion. [Evidence](../evidence/m11-effects-as-styles.md) |
 | 12 | [Styled monitor and watch builds](12-styled-monitor-and-watch-builds.md) | 10, 11 | App, Media, Agents | Built on `milestone/10-12`; watch rebuild 7.8 to 13.5 s, the URL card latency waits for Mike. [Evidence](../evidence/m12-styled-monitor-and-watch-builds.md) |
+| 13 | [Takes, scenes and studio tools](13-takes-scenes-and-studio-tools.md) | 10, 11, 12 | All roles | In progress on `m13/integration` |
 | 09 | [Release gate](09-release-gate.md) | 01 to 08, 10 to 12 | Core | Items 1 to 3 and 6 built (release.sh, workflow, bundle, cask, credits); signing waits for Mike's Apple secrets. [Evidence](../evidence/m09/release-machinery.md) |
 
 Milestone 02 is a go/no-go gate. If gpui can't show a 4K60 VideoToolbox decode without a CPU copy, stop and bring the measurements to Mike before 03 starts, because the UI choice changes.
