@@ -36,7 +36,6 @@ use crate::model::{
     self, BlockDoc, EditMap, FPS, LAYOUT_KEYS, Selection, View, apply_layout, document,
 };
 use crate::peaks::Peaks;
-use crate::score::Cues;
 use crate::sound::Sound;
 use crate::theme::*;
 
@@ -263,9 +262,8 @@ impl EditScreen {
             .unwrap_or(self.playhead)
             .min(self.map.frames.saturating_sub(1));
         self.playhead = frame;
-        let media = folder.dir.join("media");
-        let cues = Cues::of(&folder.dir, project.cut.music.as_ref(), folder.lock());
-        self.sound.set_plan(&self.map, media, cues, frame);
+        self.sound
+            .set_plan(&self.map, folder.dir.clone(), project.clone(), frame);
         self.engine.set_plan(
             Plan {
                 map: self.map.clone(),

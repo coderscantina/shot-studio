@@ -72,6 +72,8 @@ pub mod rules;
 #[cfg(all(test, target_os = "macos"))]
 mod showreel;
 #[cfg(target_os = "macos")]
+mod sounds;
+#[cfg(target_os = "macos")]
 pub mod surface;
 #[cfg(target_os = "macos")]
 mod vector;

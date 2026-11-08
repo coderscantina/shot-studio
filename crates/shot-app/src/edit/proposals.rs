@@ -35,7 +35,6 @@ use super::{EditScreen, Workspace};
 use crate::agent::{self, AgentRun};
 use crate::engine::Plan;
 use crate::model::{self, BlockDoc, DocWord, EditMap, FPS, Item, Paragraph, timecode};
-use crate::score::Cues;
 use crate::script::proposal::{self as words, Piece};
 use crate::theme::*;
 use crate::ui::{ActionLook, icon, kbd, proposal_action};
@@ -946,13 +945,14 @@ impl EditScreen {
             self.view,
             folder.shown.format.default_layout,
         );
-        let cues = Cues::of(&dir, project.cut.music.as_ref(), lock.as_ref());
-        self.sound.set_plan(&map, dir.join("media"), cues, from);
+        let effects = project.format.effects();
+        self.sound
+            .set_plan_with(&map, dir.clone(), project, lock, from);
         self.engine.set_plan(
             Plan {
                 map: map.clone(),
                 dir,
-                effects: project.format.effects(),
+                effects,
                 theme: Ok(Arc::new(theme)),
             },
             from,

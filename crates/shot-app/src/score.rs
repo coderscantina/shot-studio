@@ -1,276 +1,27 @@
-//! The preview's finished sound, made like export's ([`shot_render::voice`]): the cut's voice
-//! through the voice chain, bleeps over it, the music bed and the lock's music and sound
-//! effects in a [`Mix`], and the gain to the loudness target with the true-peak limiter.
+//! The preview's finished sound, made like export's ([`shot_render::voice`]): the plan's voice
+//! ([`shot_render::export::plan_audio`]) through the voice chain, bleeps over it, export's
+//! [`Score`] of music, sound effects, the brand's sounds and the bumpers' own sound
+//! ([`shot_render::export::preview_score`]), and the gain to the loudness target with the
+//! true-peak limiter.
 //!
 //! Export runs the whole cut from its first sample. The preview starts anywhere, so it starts
 //! the chain, the mix and the limiter a second early and drops that second: the compressor, the
 //! ducking and a music cue's fade-in are settled where the sound is heard. The gain comes from
 //! a pass over the whole cut on a thread of its own, export's first pass.
 
-use std::collections::HashMap;
 use std::ops::Range;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use shot_audio::sound::{Library, Sound, Source};
-use shot_audio::{
-    Anchor, CEILING_DBTP, CROSSFADE, Finish, Meter, Mix, Music, MusicCue, Play, SfxCue,
-    TARGET_LUFS, Track, VoiceChain,
-};
-use shot_core::{Applied, Id, Lock, Micros};
+use shot_audio::{CEILING_DBTP, CROSSFADE, Finish, Meter, Mix, TARGET_LUFS, VoiceChain};
 use shot_media::audio::SAMPLE_RATE;
 use shot_render::audio::{TimelineAudio, TimelineAudioError};
-
-use crate::model::{EditMap, FPS};
+use shot_render::voice::Score;
 
 /// How early the chain starts before the first heard sample.
 const PREROLL: u64 = CROSSFADE;
 /// Samples processed per step of the gain pass.
 const PASS_BLOCK: usize = SAMPLE_RATE as usize / 4;
-
-/// What plays with the voice, as the files and the lock name it, still in take time.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Cues {
-    /// Where `music` files are relative to and the sound library's folders.
-    dir: PathBuf,
-    brand: Option<PathBuf>,
-    /// The cut's music bed: file, gain and duck in dB.
-    bed: Option<(String, i16, i16)>,
-    music: Vec<(Id, Micros, String, i16, i16)>,
-    sfx: Vec<(Id, Micros, Id, i16)>,
-}
-
-impl Cues {
-    /// The music bed of `cut.kdl` and the `music` and `sfx` instances of the lock, for the
-    /// video in `dir`.
-    pub fn of(dir: &Path, bed: Option<&shot_core::Music>, lock: Option<&Lock>) -> Self {
-        let mut cues = Self {
-            dir: dir.to_owned(),
-            brand: channel_brand(dir),
-            bed: bed.map(|m| (m.file.clone(), m.gain, m.duck)),
-            ..Self::default()
-        };
-        for take in lock.iter().flat_map(|l| &l.takes) {
-            for instance in &take.instances {
-                match &instance.applied {
-                    Applied::Music {
-                        file,
-                        at,
-                        gain,
-                        duck,
-                    } => cues
-                        .music
-                        .push((take.take.clone(), *at, file.clone(), *gain, *duck)),
-                    Applied::Sfx { sound, at, gain } => {
-                        cues.sfx
-                            .push((take.take.clone(), *at, sound.clone(), *gain));
-                    }
-                    _ => {}
-                }
-            }
-        }
-        cues
-    }
-}
-
-/// The channel's `brand/` folder when the video is `<repo>/videos/<slug>`, as export finds it.
-fn channel_brand(dir: &Path) -> Option<PathBuf> {
-    let brand = dir.parent()?.parent()?.join("brand");
-    brand.is_dir().then_some(brand)
-}
-
-/// Decoded sounds by file or name, kept across plans so an edit does not decode them again.
-#[derive(Default)]
-pub struct Sounds {
-    files: HashMap<PathBuf, Sound>,
-    named: HashMap<(Option<PathBuf>, Id), Sound>,
-}
-
-impl Sounds {
-    fn file(&mut self, path: &Path) -> Result<Sound, String> {
-        if let Some(sound) = self.files.get(path) {
-            return Ok(sound.clone());
-        }
-        let samples = shot_render::voice::read_samples(path)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
-        let sound = Sound::new(samples);
-        self.files.insert(path.to_owned(), sound.clone());
-        Ok(sound)
-    }
-
-    fn named(&mut self, cues: &Cues, name: &Id) -> Result<Sound, String> {
-        let key = (cues.brand.clone(), name.clone());
-        if let Some(sound) = self.named.get(&key) {
-            return Ok(sound.clone());
-        }
-        let sound = match Library::new(&cues.dir, cues.brand.as_deref()).find(name) {
-            Some(Source::File(path)) => self.file(&path)?,
-            Some(Source::Bundled(bundled)) => bundled.decode(),
-            None => return Err(format!("no sound named {name}")),
-        };
-        self.named.insert(key, sound.clone());
-        Ok(sound)
-    }
-}
-
-/// A sound placed at an output sample.
-#[derive(Clone)]
-struct Placed {
-    at: u64,
-    sound: Sound,
-    gain_db: f32,
-    duck_db: f32,
-}
-
-/// The music and sound effects of one plan in output samples, and its bleeps.
-#[derive(Clone, Default)]
-pub struct Score {
-    music: Vec<Placed>,
-    sfx: Vec<Placed>,
-    pub bleeps: Vec<(Id, shot_core::TimeRange)>,
-}
-
-impl Score {
-    /// Places `cues` where `map` plays their moments, like export does: the bed from the start,
-    /// each cue once for every span that shows its take time.
-    pub fn place(map: &EditMap, cues: &Cues, sounds: &mut Sounds) -> Result<Self, String> {
-        let mut score = Self::default();
-        if let Some((file, gain, duck)) = &cues.bed {
-            score.music.push(Placed {
-                at: 0,
-                sound: sounds.file(&cues.dir.join(file))?,
-                gain_db: f32::from(*gain),
-                duck_db: f32::from(*duck),
-            });
-        }
-        for (take, at, file, gain, duck) in &cues.music {
-            let places = output_samples(map, take, *at);
-            if places.is_empty() {
-                continue;
-            }
-            let sound = sounds.file(&cues.dir.join(file))?;
-            score.music.extend(places.into_iter().map(|at| Placed {
-                at,
-                sound: sound.clone(),
-                gain_db: f32::from(*gain),
-                duck_db: f32::from(*duck),
-            }));
-        }
-        for (take, at, name, gain) in &cues.sfx {
-            let places = output_samples(map, take, *at);
-            if places.is_empty() {
-                continue;
-            }
-            let sound = sounds.named(cues, name)?;
-            score.sfx.extend(places.into_iter().map(|at| Placed {
-                at,
-                sound: sound.clone(),
-                gain_db: f32::from(*gain),
-                duck_db: 0.0,
-            }));
-        }
-        score.music.sort_by_key(|p| p.at);
-        let mut bleeps: Vec<(Id, shot_core::TimeRange)> = map
-            .spans
-            .iter()
-            .flat_map(|span| {
-                shot_render::overlay::redact::bleeps(&span.overlays)
-                    .into_iter()
-                    .map(|range| (span.take.clone(), range))
-            })
-            .collect();
-        bleeps.sort_by_key(|(take, range)| (take.to_string(), range.from()));
-        bleeps.dedup();
-        score.bleeps = bleeps;
-        Ok(score)
-    }
-
-    /// The mix as export's would be at output sample `start`, with `start` as its sample 0. A
-    /// music cue playing there starts from the place in its track export has reached; its
-    /// fade-in falls in the preroll. Sound effects that started before are cut to their rest.
-    fn mix_from(&self, start: u64) -> Mix {
-        let track = |sound: Sound| {
-            Track::new(
-                sound,
-                shot_audio::beats::Beats {
-                    bpm: 0.0,
-                    at: Vec::new(),
-                },
-            )
-        };
-        let playing = self.music.partition_point(|p| p.at <= start);
-        let mut music = Vec::new();
-        if let Some(cue) = playing.checked_sub(1).map(|i| &self.music[i]) {
-            let samples = cue.sound.samples();
-            if !samples.is_empty() {
-                let offset = ((start - cue.at) % samples.len() as u64) as usize;
-                let rotated: Vec<f32> = samples[offset..]
-                    .iter()
-                    .chain(&samples[..offset])
-                    .copied()
-                    .collect();
-                music.push(MusicCue {
-                    at: 0,
-                    play: Some(Play {
-                        track: track(Sound::new(rotated)),
-                        gain_db: cue.gain_db,
-                        duck_db: cue.duck_db,
-                    }),
-                });
-            }
-        }
-        music.extend(self.music[playing..].iter().map(|cue| MusicCue {
-            at: cue.at - start,
-            play: Some(Play {
-                track: track(cue.sound.clone()),
-                gain_db: cue.gain_db,
-                duck_db: cue.duck_db,
-            }),
-        }));
-        let sfx = self
-            .sfx
-            .iter()
-            .filter(|cue| cue.at + cue.sound.len() as u64 > start)
-            .map(|cue| {
-                let (sound, at) = match start.checked_sub(cue.at) {
-                    Some(gone) if gone > 0 => {
-                        (Sound::new(cue.sound.samples()[gone as usize..].to_vec()), 0)
-                    }
-                    _ => (cue.sound.clone(), cue.at - start),
-                };
-                SfxCue::new(sound, Anchor::Start(at), cue.gain_db)
-            })
-            .collect();
-        Mix::new(Music::new(music, CROSSFADE), sfx, [])
-    }
-}
-
-/// Where take time `at` of `take` plays, in output samples, once per span showing it.
-fn output_samples(map: &EditMap, take: &Id, at: Micros) -> Vec<u64> {
-    let per_frame = u64::from(SAMPLE_RATE / FPS);
-    let t = at.0 * u64::from(SAMPLE_RATE) / 1_000_000;
-    map.spans
-        .iter()
-        .filter(|s| s.take == *take)
-        .filter_map(|s| {
-            let start = s.source_frames.start * per_frame;
-            let end = s.source_frames.end * per_frame;
-            (start..end)
-                .contains(&t)
-                .then(|| s.output_frame * per_frame + t - start)
-        })
-        .collect()
-}
-
-/// The voice of `map`'s plan as export places it, silent under the bookends and blended over
-/// the transitions, with bleeps over the ranges of `score`.
-pub fn timeline_audio(map: &EditMap, media: PathBuf, score: &Score) -> TimelineAudio {
-    TimelineAudio::of_plan(&map.plan, move |take| {
-        media.join(take.as_str()).join("mic.mp4")
-    })
-    .with_bleeps(&score.bleeps)
-}
 
 /// Voice chain, bleeps and mix from output sample `start` on, export's `pass`.
 struct Voice {
@@ -394,6 +145,8 @@ pub fn gain(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shot_audio::sound::Sound;
+    use shot_audio::{Anchor, Music, MusicCue, Play, SfxCue, Track};
 
     #[test]
     fn a_mix_started_late_matches_the_whole_mix_after_the_preroll() {
@@ -403,16 +156,24 @@ mod tests {
         let hit: Vec<f32> = (0..90_000)
             .map(|i| ((i % 97) as f32 - 48.0) / 200.0)
             .collect();
-        let placed = |at, samples: &[f32]| Placed {
+        let cue = |at| MusicCue {
             at,
-            sound: Sound::new(samples.to_vec()),
-            gain_db: -6.0,
-            duck_db: -12.0,
+            play: Some(Play {
+                track: Track::new(
+                    Sound::new(bed.clone()),
+                    shot_audio::beats::Beats {
+                        bpm: 0.0,
+                        at: Vec::new(),
+                    },
+                ),
+                gain_db: -6.0,
+                duck_db: -12.0,
+            }),
         };
         let score = Score {
-            music: vec![placed(0, &bed), placed(200_000, &bed)],
-            sfx: vec![placed(100_000, &hit)],
-            bleeps: Vec::new(),
+            music: Music::new(vec![cue(0), cue(200_000)], CROSSFADE),
+            sfx: vec![SfxCue::new(Sound::new(hit), Anchor::Start(100_000), -6.0)],
+            bumpers: std::iter::once(300_000..320_000).collect(),
         };
         let voice = |n: u64| if n % 40_000 < 20_000 { 0.3 } else { 0.0 };
         let run = |start: u64, len: u64| {
@@ -421,7 +182,7 @@ mod tests {
             out
         };
         let whole = run(0, 400_000);
-        for at in [150_000, 230_000] {
+        for at in [150_000, 230_000, 310_000] {
             let start = at - PREROLL;
             let late = run(start, 400_000 - start);
             let (late, whole) = (&late[PREROLL as usize..], &whole[at as usize..]);

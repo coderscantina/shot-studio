@@ -49,6 +49,12 @@ impl Score {
     fn mix(&self) -> Mix {
         Mix::new(self.music.clone(), self.sfx.clone(), self.bumpers.clone())
     }
+
+    /// The mix from output sample `at` on, as the whole output's mix plays it there except for
+    /// the music's ducking, which starts released: start it a little early and drop the lead.
+    pub fn mix_from(&self, at: u64) -> Mix {
+        self.mix().starting_at(at)
+    }
 }
 
 /// Reads a sound or music file as mono 48 kHz samples. AVFoundation reads past the end as
@@ -83,6 +89,17 @@ pub struct Loudness {
 pub fn finish<E: From<TimelineAudioError>>(
     audio: &mut TimelineAudio,
     score: &Score,
+    sink: impl FnMut(&[f32]) -> Result<(), E>,
+) -> Result<Loudness, E> {
+    finish_under(audio, score, CEILING_DBTP, sink)
+}
+
+/// [`finish`] with the true peak held under `ceiling_dbtp` less the codec's headroom, for an
+/// encode that overshot [`CEILING_DBTP`] and runs again lower.
+pub fn finish_under<E: From<TimelineAudioError>>(
+    audio: &mut TimelineAudio,
+    score: &Score,
+    ceiling_dbtp: f64,
     mut sink: impl FnMut(&[f32]) -> Result<(), E>,
 ) -> Result<Loudness, E> {
     let mut meter = Meter::new();
@@ -97,7 +114,7 @@ pub fn finish<E: From<TimelineAudioError>>(
     // the higher the gain, so each step follows the slope the last two trials measured.
     if let Some(mut last) = before.map(|b| (0.0, b)) {
         for _ in 0..TRIALS {
-            let meter = finished(audio, score, gain_db, |_| Ok::<_, E>(()))?;
+            let meter = finished(audio, score, gain_db, ceiling_dbtp, |_| Ok::<_, E>(()))?;
             let Some(after) = meter.loudness() else {
                 break;
             };
@@ -114,7 +131,7 @@ pub fn finish<E: From<TimelineAudioError>>(
             gain_db += (TARGET_LUFS - after) / slope;
         }
     }
-    let meter = finished(audio, score, gain_db, &mut sink)?;
+    let meter = finished(audio, score, gain_db, ceiling_dbtp, &mut sink)?;
     Ok(Loudness {
         before,
         after: meter.loudness(),
@@ -122,14 +139,16 @@ pub fn finish<E: From<TimelineAudioError>>(
     })
 }
 
-/// A pass through [`Finish`] at `gain_db`, measured, with the limiter's latency taken out.
+/// A pass through [`Finish`] at `gain_db` and `ceiling_dbtp`, measured, with the limiter's
+/// latency taken out.
 fn finished<E: From<TimelineAudioError>>(
     audio: &mut TimelineAudio,
     score: &Score,
     gain_db: f64,
+    ceiling_dbtp: f64,
     mut sink: impl FnMut(&[f32]) -> Result<(), E>,
 ) -> Result<Meter, E> {
-    let mut finish = Finish::new(gain_db, CEILING_DBTP);
+    let mut finish = Finish::new(gain_db, ceiling_dbtp);
     let mut meter = Meter::new();
     let mut skip = Finish::LATENCY;
     let mut out = |samples: &[f32]| {
