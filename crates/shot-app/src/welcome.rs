@@ -1,33 +1,29 @@
-//! The welcome window: open a video folder, start a new one, or reopen a recent one. It shows
-//! when the app starts without a folder and when the Dock icon is clicked with no window open.
-//! Recent folders are a list of this machine, in
-//! `~/Library/Application Support/Shot Studio/recent.json`.
+//! The welcome window: open a video folder or a channel, start a new one, or reopen a recent
+//! one. It shows when the app starts without a folder and when the Dock icon is clicked with no
+//! window open. Recent videos and channels are lists of this machine, in
+//! `~/Library/Application Support/Shot Studio/recent.json` and `recent-channels.json`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use gpui::{
-    App, Bounds, Context, FontWeight, KeyBinding, PathPromptOptions, SharedString, TitlebarOptions,
-    Window, WindowBounds, WindowOptions, actions, div, point, prelude::*, px, size,
+    App, Bounds, Context, Div, FontWeight, KeyBinding, PathPromptOptions, SharedString,
+    TitlebarOptions, Window, WindowBounds, WindowOptions, actions, div, point, prelude::*, px,
+    size,
 };
 use shot_core::{FormatKind, Status, Video};
 
-use crate::board::{format_color, format_name};
+use crate::board::channel;
+use crate::board::{FORMATS, format_color, format_name};
 use crate::theme::*;
-use crate::ui::{ActionLook, alert, label, mono, pane, proposal_action};
+use crate::ui::{ActionLook, alert, icon, label, mono, pane, proposal_action};
 
 actions!(shot_app, [ShowWelcome, OpenVideo]);
 
-/// How many recent folders the list keeps.
+/// How many recent folders each list keeps.
 const RECENT: usize = 8;
-
-/// The formats in the order the new video picker lists them.
-const FORMATS: [FormatKind; 4] = [
-    FormatKind::Tutorial,
-    FormatKind::ProductTour,
-    FormatKind::Opinion,
-    FormatKind::Reaction,
-];
+const RECENT_VIDEOS: &str = "recent.json";
+const RECENT_CHANNELS: &str = "recent-channels.json";
 
 /// Registers the welcome actions and ⌘O. Call once at startup, with [`on_reopen`] on the app.
 pub fn init(cx: &mut App) {
@@ -53,6 +49,7 @@ pub fn open(cx: &mut App) {
         window
             .update(cx, |welcome, window, cx| {
                 welcome.recent = recent_videos();
+                welcome.channels = recent_channels();
                 cx.notify();
                 window.activate_window();
             })
@@ -75,6 +72,7 @@ pub fn open(cx: &mut App) {
             cx.new(|_| WelcomeView {
                 format: FormatKind::Tutorial,
                 recent: recent_videos(),
+                channels: recent_channels(),
                 error: None,
             })
         },
@@ -83,23 +81,35 @@ pub fn open(cx: &mut App) {
     cx.activate(true);
 }
 
-/// Opens the studio on `dir` and closes the welcome window, or shows why the folder did not
-/// open in it. Not for a click in the welcome window, which closes itself (see
-/// [`WelcomeView::open_video`]).
-fn open_video(dir: &Path, cx: &mut App) {
-    match crate::studio::open(dir, cx) {
-        Ok(()) => {
-            if let Some(window) = welcome_window(cx) {
-                window
-                    .update(cx, |_, window, _| window.remove_window())
-                    .ok();
-            }
-        }
+/// Opens `dir` and closes the welcome window, or shows why it did not open in it: a video
+/// folder (one with `video.kdl`) in the studio, a git repo as a channel board.
+fn open_folder(dir: &Path, cx: &mut App) {
+    let opened = if dir.join("video.kdl").exists() {
+        crate::studio::open(dir, cx)
+    } else if channel::is_channel(dir) {
+        crate::board::open_window(dir, cx)
+    } else {
+        Err(format!(
+            "{} is not a video folder (it has no video.kdl) or a channel (the root of a git repo)",
+            shown_path(dir)
+        ))
+    };
+    match opened {
+        Ok(()) => close(cx),
         Err(error) => show_error(error, cx),
     }
 }
 
-fn show_error(error: String, cx: &mut App) {
+fn close(cx: &mut App) {
+    if let Some(window) = welcome_window(cx) {
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .ok();
+    }
+}
+
+/// Shows `error` in the welcome window, opening it if it is closed.
+pub fn show_error(error: String, cx: &mut App) {
     open(cx);
     if let Some(window) = welcome_window(cx) {
         window
@@ -117,8 +127,67 @@ fn welcome_window(cx: &App) -> Option<gpui::WindowHandle<WelcomeView>> {
         .find_map(|window| window.downcast::<WelcomeView>())
 }
 
-/// Asks for a video folder and opens it. With `format`, asks for a new folder instead and
-/// creates a video of that format in it first.
+/// Asks for a channel repo and opens its board. `done` hears whether it opened, not when the
+/// person cancels.
+pub fn pick_channel(done: impl FnOnce(Result<(), String>, &mut App) + 'static, cx: &mut App) {
+    let paths = cx.prompt_for_paths(PathPromptOptions {
+        files: false,
+        directories: true,
+        multiple: false,
+        prompt: Some("Open channel".into()),
+    });
+    cx.spawn(async move |cx| {
+        let Some(repo) = paths
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .flatten()
+            .and_then(|paths| paths.into_iter().next())
+        else {
+            return;
+        };
+        cx.update(|cx| {
+            let opened = crate::board::open_window(&repo, cx);
+            done(opened, cx);
+        });
+    })
+    .detach();
+}
+
+/// Asks for a new folder in `parent`, starts a channel there and opens its board. `done` hears
+/// whether it opened, not when the person cancels.
+pub fn new_channel(
+    parent: &Path,
+    done: impl FnOnce(Result<(), String>, &mut App) + 'static,
+    cx: &mut App,
+) {
+    let path = cx.prompt_for_new_path(parent, Some("my-channel"));
+    cx.spawn(async move |cx| {
+        let Some(repo) = path.await.ok().and_then(Result::ok).flatten() else {
+            return;
+        };
+        cx.update(|cx| {
+            let opened = channel::create(&repo).and_then(|()| crate::board::open_window(&repo, cx));
+            done(opened, cx);
+        });
+    })
+    .detach();
+}
+
+fn home() -> PathBuf {
+    PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+}
+
+/// Closes the welcome window once a channel opened, or shows why it did not.
+fn welcome_done(result: Result<(), String>, cx: &mut App) {
+    match result {
+        Ok(()) => close(cx),
+        Err(error) => show_error(error, cx),
+    }
+}
+
+/// Asks for a video folder or a channel and opens it. With `format`, asks for a new folder
+/// instead and creates a video of that format in it first.
 fn pick_folder(format: Option<FormatKind>, cx: &mut App) {
     let picked = match format {
         None => {
@@ -134,8 +203,7 @@ fn pick_folder(format: Option<FormatKind>, cx: &mut App) {
             })
         }
         Some(_) => {
-            let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
-            let path = cx.prompt_for_new_path(&home, Some("new-video"));
+            let path = cx.prompt_for_new_path(&home(), Some("new-video"));
             cx.spawn(async move |_| path.await.ok()?.ok()?)
         }
     };
@@ -149,7 +217,7 @@ fn pick_folder(format: Option<FormatKind>, cx: &mut App) {
                 None => Ok(()),
             };
             match created {
-                Ok(()) => open_video(&dir, cx),
+                Ok(()) => open_folder(&dir, cx),
                 Err(error) => show_error(error, cx),
             }
         });
@@ -201,25 +269,35 @@ fn title_from(name: &str) -> String {
     }
 }
 
-fn recent_path() -> PathBuf {
-    let home = std::env::var_os("HOME").unwrap_or_default();
-    PathBuf::from(home).join("Library/Application Support/Shot Studio/recent.json")
+fn recent_path(file: &str) -> PathBuf {
+    home()
+        .join("Library/Application Support/Shot Studio")
+        .join(file)
 }
 
-fn load_recent() -> Vec<PathBuf> {
-    fs::read_to_string(recent_path())
+fn load_recent(file: &str) -> Vec<PathBuf> {
+    fs::read_to_string(recent_path(file))
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default()
 }
 
-/// Puts `dir` first in the recent list. Called by the studio after a folder opens.
+/// Puts `dir` first in the recent videos. Called by the studio after a folder opens.
 pub fn remember(dir: &Path) {
+    remember_in(RECENT_VIDEOS, dir);
+}
+
+/// Puts `repo` first in the recent channels. Called when a board window opens.
+pub fn remember_channel(repo: &Path) {
+    remember_in(RECENT_CHANNELS, repo);
+}
+
+fn remember_in(file: &str, dir: &Path) {
     let Ok(dir) = std::path::absolute(dir) else {
         return;
     };
-    let list = remembered(load_recent(), dir);
-    let path = recent_path();
+    let list = remembered(load_recent(file), dir);
+    let path = recent_path(file);
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
@@ -245,7 +323,7 @@ struct Recent {
 }
 
 fn recent_videos() -> Vec<Recent> {
-    load_recent()
+    load_recent(RECENT_VIDEOS)
         .into_iter()
         .filter_map(|dir| {
             let video = Video::parse(&fs::read_to_string(dir.join("video.kdl")).ok()?).ok()?;
@@ -258,8 +336,29 @@ fn recent_videos() -> Vec<Recent> {
         .collect()
 }
 
+/// A recent channel that still opens as a board.
+struct RecentChannel {
+    repo: PathBuf,
+    name: String,
+    videos: usize,
+}
+
+fn recent_channels() -> Vec<RecentChannel> {
+    load_recent(RECENT_CHANNELS)
+        .into_iter()
+        .filter_map(|repo| {
+            let videos = shot_board::Board::open(&repo).ok()?.cards().ok()?.len();
+            Some(RecentChannel {
+                name: channel::name(&repo),
+                repo,
+                videos,
+            })
+        })
+        .collect()
+}
+
 /// `dir` with the home folder written as `~`.
-fn shown_path(dir: &Path) -> String {
+pub fn shown_path(dir: &Path) -> String {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     match home.and_then(|home| dir.strip_prefix(home).ok().map(Path::to_owned)) {
         Some(rest) => format!("~/{}", rest.display()),
@@ -271,6 +370,7 @@ pub struct WelcomeView {
     /// The format a new video gets.
     format: FormatKind,
     recent: Vec<Recent>,
+    channels: Vec<RecentChannel>,
     error: Option<SharedString>,
 }
 
@@ -341,16 +441,17 @@ impl WelcomeView {
             )
             .child(
                 div().pt(px(24.)).child(
-                    proposal_action(
-                        "open-video",
-                        "Open video folder",
-                        Some("script"),
-                        Some("⌘O"),
-                        ActionLook::Accent,
-                    )
-                    .justify_center()
-                    .on_click(|_, _, cx| pick_folder(None, cx)),
+                    proposal_action("open-video", "Open…", None, Some("⌘O"), ActionLook::Accent)
+                        .justify_center()
+                        .on_click(|_, _, cx| pick_folder(None, cx)),
                 ),
+            )
+            .child(
+                div()
+                    .pt(px(6.))
+                    .text_size(TEXT_SM)
+                    .text_color(MUTED)
+                    .child("A video folder or a channel"),
             )
             .child(div().pt(px(28.)).pb(px(4.)).child(label("New video")))
             .children(FORMATS.map(|format| format_row(format, cx)))
@@ -369,6 +470,114 @@ impl WelcomeView {
                         pick_folder(Some(this.format), cx);
                     })),
                 ),
+            )
+    }
+
+    fn open_channel(&mut self, repo: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        match crate::board::open_window(repo, cx) {
+            Ok(()) => window.remove_window(),
+            Err(error) => {
+                self.error = Some(error.into());
+                cx.notify();
+            }
+        }
+    }
+
+    fn channel_list(&self, cx: &mut Context<Self>) -> Div {
+        let row = |index: usize, channel: &RecentChannel, cx: &mut Context<Self>| {
+            let repo = channel.repo.clone();
+            div()
+                .id(("channel", index))
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .px(px(12.))
+                .py(px(9.))
+                .rounded(RADIUS_SM)
+                .cursor_pointer()
+                .hover(|s| s.bg(RAISED))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(10.))
+                        .child(icon("board", ICON_SM, MUTED))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(TEXT)
+                                .child(channel.name.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(TEXT_SM)
+                                .text_color(MUTED)
+                                .child(match channel.videos {
+                                    1 => "1 video".to_owned(),
+                                    n => format!("{n} videos"),
+                                }),
+                        ),
+                )
+                .child(
+                    div()
+                        .pl(px(24.))
+                        .truncate()
+                        .font_family(MONO)
+                        .text_size(TEXT_XS)
+                        .text_color(FAINT)
+                        .child(shown_path(&channel.repo)),
+                )
+                .on_click(
+                    cx.listener(move |this, _, window, cx| this.open_channel(&repo, window, cx)),
+                )
+        };
+        div()
+            .flex()
+            .flex_col()
+            .pb(px(12.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .pl(px(12.))
+                    .pb(px(4.))
+                    .child(label("Channels"))
+                    .child(
+                        proposal_action(
+                            "new-channel",
+                            "Start a channel",
+                            None,
+                            None,
+                            ActionLook::Quiet,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.error = None;
+                            new_channel(&home(), welcome_done, cx);
+                        })),
+                    ),
+            )
+            .when(self.channels.is_empty(), |this| {
+                this.child(
+                    div()
+                        .px(px(12.))
+                        .text_color(MUTED)
+                        .line_height(px(21.))
+                        .child(
+                            "A channel is a git repo of your videos, planned on a board from \
+                             idea to shipped. Open one with ⌘O.",
+                        ),
+                )
+            })
+            .children(
+                self.channels
+                    .iter()
+                    .enumerate()
+                    .map(|(index, channel)| row(index, channel, cx)),
             )
     }
 
@@ -432,6 +641,7 @@ impl WelcomeView {
             .flex_col()
             .overflow_y_scroll()
             .p(px(12.))
+            .child(self.channel_list(cx))
             .child(
                 div()
                     .px(px(12.))
