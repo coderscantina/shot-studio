@@ -780,7 +780,7 @@ captions karaoke size=120 position=top
 
 ### Themes
 
-A channel can keep several looks and switch between them ([0029](../decisions/0029-several-themes-per-channel.md)). `brand/brand.kdl` holds the active one, so the build reads one brand as before, with `theme` naming it. Every other theme is a file `brand/themes/<id>.kdl` with the grammar of a format layer's `brand` block: no imports, rules, `theme` or `overlay-preset`, those stay with the channel. A brand without `theme` is one theme named `default`. Switching writes the active look to its own file, replaces the look in `brand.kdl` with the chosen file's and removes that file. Imports, rules and overlay presets stay in `brand.kdl` through a switch. This is the example channel's other theme:
+A channel can keep several looks and switch between them ([0029](../decisions/0029-several-themes-per-channel.md)). `brand/brand.kdl` holds the active one, so the build reads one brand as before, with `theme` naming it. Every other theme is a file `brand/themes/<id>.kdl` with the grammar of a format layer's `brand` block: no imports, rules, `theme`, `overlay-preset` or channel `layout`, those stay with the channel. A brand without `theme` is one theme named `default`. Switching writes the active look to its own file, replaces the look in `brand.kdl` with the chosen file's and removes that file. Imports, rules, overlay presets and channel layouts stay in `brand.kdl` through a switch. This is the example channel's other theme:
 
 ```kdl
 fonts heading=inter body=inter mono=jetbrains-mono

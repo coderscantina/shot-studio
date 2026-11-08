@@ -732,6 +732,7 @@ impl ThemeEditor {
                     camera.border = v;
                 }
             }
+            Key::Handheld => look.handheld = Some(value as u8).filter(|&v| v > 0),
             Key::Feel(name, knob) => {
                 let preset = preset_entry(look, name);
                 let v = Some(value as u8);
@@ -750,11 +751,31 @@ impl ThemeEditor {
     }
 
     fn camera_section(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
-        let camera = self.look().camera;
-        let mut out = div().flex().flex_col().gap(px(10.)).child(heading(
-            "Camera",
-            "How the camera is framed beside the screen. Without a frame it keeps the layout's corners.",
-        ));
+        let look = self.look();
+        let camera = look.camera;
+        let strength = look.handheld.unwrap_or(0);
+        let handheld = self.sliders.get(
+            Key::Handheld,
+            f32::from(strength),
+            (0., 100., 1.),
+            window,
+            cx,
+            Self::slid,
+        );
+        let shown = if strength == 0 {
+            "Off".to_owned()
+        } else {
+            strength.to_string()
+        };
+        let mut out = div()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(heading(
+                "Camera",
+                "How the camera is framed beside the screen, and whether it drifts as if hand-held. Without a frame it keeps the layout's corners.",
+            ))
+            .child(row("Hand-held", fields::slider(&handheld, "Hand-held", shown)));
         let Some(camera) = camera else {
             return out.child(
                 button("camera-frame", "Frame the camera").on_click(cx.listener(

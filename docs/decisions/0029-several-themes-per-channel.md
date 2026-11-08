@@ -11,7 +11,7 @@ Mike wants to keep more than one look for a channel (a dark and a light one, a l
 - `brand/brand.kdl` holds the active theme, as today, and names it with a new `theme <id>` node. The build keeps reading this one file; nothing in `shot-mcp`, the cascade or the lock changes.
 - Every other theme is a file `brand/themes/<id>.kdl` with the grammar of a format layer's `brand` block: the look, without imports, rules, `theme` or `overlay-preset`. `Brand::parse_theme` reads it.
 - Switching to a theme writes the active look to `brand/themes/<active>.kdl`, puts the chosen file's look into `brand.kdl` with its name, and removes the chosen file. Each theme lives in exactly one file, so there is no copy to drift.
-- Imports, rules and overlay presets belong to the channel, not to a theme, and stay in `brand.kdl` through a switch.
+- Imports, rules, overlay presets and channel layouts belong to the channel, not to a theme, and stay in `brand.kdl` through a switch: a video's `cut.kdl` names a channel layout, so it must not vanish with a look.
 - A brand without a `theme` node is one theme called `default`; the first management action writes the name.
 - Overlay presets are `overlay-preset <id> template=<template> length=<time> { <param> <value> }` in `brand.kdl`. Like the theme name they are not part of the resolved brand: `Brand::merge` leaves them out, so a lock never carries them and a preset change re-renders nothing.
 - The theme editor writes the files through `shot-core`'s canonical writer and keeps its own undo history of the brand and the theme files.

@@ -189,6 +189,7 @@ pub(crate) enum Key {
     Feel(shot_core::PresetName, &'static str),
     Corners,
     Border,
+    Handheld,
     EndCard,
     Rename,
 }

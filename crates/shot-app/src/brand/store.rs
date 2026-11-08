@@ -32,6 +32,7 @@ pub fn look_of(brand: &Brand) -> Brand {
         rules: Default::default(),
         theme: None,
         overlay_presets: Vec::new(),
+        layouts: Vec::new(),
         ..brand.clone()
     }
 }
@@ -43,6 +44,7 @@ fn with_look(brand: &Brand, look: &Brand) -> Brand {
         rules: brand.rules.clone(),
         theme: brand.theme.clone(),
         overlay_presets: brand.overlay_presets.clone(),
+        layouts: brand.layouts.clone(),
         ..look_of(look)
     }
 }
@@ -277,7 +279,7 @@ mod tests {
         Id::new(s).unwrap()
     }
 
-    const BRAND: &str = "import \"https://example.com/styles\" rev=\"abc\" style=base\ncolors accent=\"#c8f25a\"\noverlay-preset speaker template=lower-third length=5_000_000 {\n    text \"Mike\"\n}\non punchline off\n";
+    const BRAND: &str = "import \"https://example.com/styles\" rev=\"abc\" style=base\ncolors accent=\"#c8f25a\"\nlayout big-face {\n    camera x=0 y=0 width=3840 height=2160\n}\noverlay-preset speaker template=lower-third length=5_000_000 {\n    text \"Mike\"\n}\non punchline off\n";
 
     fn channel() -> (tempfile::TempDir, Themes) {
         let dir = tempfile::tempdir().unwrap();
@@ -322,6 +324,7 @@ mod tests {
         let brand = read(dir.path(), "brand/brand.kdl").unwrap();
         assert!(brand.contains("theme light\n") && brand.contains("accent=\"#3d7a00\""));
         assert!(brand.contains("import ") && brand.contains("overlay-preset speaker"));
+        assert!(brand.contains("layout big-face"), "channel layouts stay with the channel");
         assert!(brand.contains("on punchline off"));
         assert_eq!(read(dir.path(), "brand/themes/light.kdl"), None);
         assert_eq!(
