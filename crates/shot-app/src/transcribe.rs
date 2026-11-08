@@ -9,9 +9,10 @@
 //! ```
 //!
 //! When it is done the folder holds the new transcripts and [`Transcribed`] names their takes.
+//! Stop ends it after the current decode and writes nothing for the take it was on.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -24,7 +25,7 @@ use shot_core::{Id, Micros};
 use crate::folder::VideoFolder;
 use crate::model;
 use crate::theme::*;
-use crate::ui::{alert, icon};
+use crate::ui::{ActionLook, alert, icon, proposal_action};
 
 const POLL: Duration = Duration::from_millis(200);
 
@@ -41,6 +42,10 @@ struct Progress {
     /// Media time of the last word heard, and the take's length.
     heard: Arc<AtomicU64>,
     length: Micros,
+    /// Set by Stop. The job then ends with the takes it finished.
+    cancel: Arc<AtomicBool>,
+    /// Stops the transcriber of the current take.
+    stopper: Option<Arc<AtomicBool>>,
     /// Set once when the job ends.
     result: Option<Result<Vec<Id>, String>>,
 }
@@ -119,6 +124,18 @@ impl Transcribe {
         .detach();
     }
 
+    /// Ends the job after the current decode, keeping only the takes it finished.
+    fn stop(&mut self, cx: &mut Context<Self>) {
+        if let State::Running(progress) = &self.state {
+            let progress = progress.lock().expect("not poisoned");
+            progress.cancel.store(true, Ordering::Relaxed);
+            if let Some(stopper) = &progress.stopper {
+                stopper.store(true, Ordering::Relaxed);
+            }
+            cx.notify();
+        }
+    }
+
     /// Loads the new transcripts into the folder, or shows why the job failed.
     fn finish(&mut self, result: Result<Vec<Id>, String>, cx: &mut Context<Self>) {
         let loaded = result.and_then(|takes| {
@@ -130,20 +147,24 @@ impl Transcribe {
         match loaded {
             Ok(takes) => {
                 self.state = State::Idle;
-                cx.emit(Transcribed(takes));
+                if !takes.is_empty() {
+                    cx.emit(Transcribed(takes));
+                }
             }
             Err(error) => self.state = State::Failed(error),
         }
     }
 }
 
-/// Transcribes each take in turn and writes its transcript to the cache.
+/// Transcribes each take in turn and writes its transcript to the cache, until Stop.
 fn transcribe_all(
     dir: &Path,
     takes: &[(Id, Micros)],
     progress: &Mutex<Progress>,
 ) -> Result<Vec<Id>, String> {
     let set = |f: &dyn Fn(&mut Progress)| f(&mut progress.lock().expect("not poisoned"));
+    let cancel = progress.lock().expect("not poisoned").cancel.clone();
+    let cancelled = || cancel.load(Ordering::Relaxed);
     let model_dir = models::models_dir();
     let fetch = |spec: models::ModelSpec| -> Result<PathBuf, String> {
         let path = spec
@@ -158,6 +179,9 @@ fn transcribe_all(
     let vad = fetch(models::vad_model())?;
     let mut done = Vec::new();
     for (n, (take, length)) in takes.iter().enumerate() {
+        if cancelled() {
+            break;
+        }
         let heard = Arc::new(AtomicU64::new(0));
         set(&|state| {
             state.take = (n, takes.len());
@@ -175,8 +199,17 @@ fn transcribe_all(
             heard.store(word.range.to().0, Ordering::Relaxed);
         })
         .map_err(fail)?;
+        let stopper = transcriber.stopper();
+        set(&|state| {
+            // Stop may have come while the models loaded.
+            stopper.store(state.cancel.load(Ordering::Relaxed), Ordering::Relaxed);
+            state.stopper = Some(stopper.clone());
+        });
         decode_mono(&mic, |t, samples, rate| transcriber.feed(t, samples, rate)).map_err(fail)?;
         let transcript = transcriber.finish().map_err(fail)?;
+        if cancelled() {
+            break;
+        }
         cache::write_cached(dir, &transcript).map_err(fail)?;
         done.push(take.clone());
     }
@@ -275,17 +308,26 @@ impl Render for Transcribe {
                     }
                 };
                 let fraction = fraction.clamp(0.0, 1.0);
+                let stopping = progress.cancel.load(Ordering::Relaxed);
                 card.child(
                     div()
                         .flex()
-                        .justify_between()
+                        .items_center()
+                        .gap(px(10.))
                         .text_color(BODY)
-                        .child(text)
+                        .child(div().flex_1().min_w_0().child(text))
                         .child(
                             div()
                                 .text_color(MUTED)
                                 .child(format!("{}%", (fraction * 100.0).round() as u32)),
-                        ),
+                        )
+                        .child(if stopping {
+                            div().text_color(MUTED).child("Stopping").into_any_element()
+                        } else {
+                            proposal_action("transcribe-stop", "Stop", None, None, ActionLook::Plain)
+                                .on_click(cx.listener(|this, _, _, cx| this.stop(cx)))
+                                .into_any_element()
+                        }),
                 )
                 .child(
                     div().h(px(4.)).rounded_full().bg(FLOAT).child(

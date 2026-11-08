@@ -21,9 +21,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui::{
-    App, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla, KeyBinding,
-    ObjectFit, ScrollHandle, SharedString, Subscription, Window, actions, div, prelude::*, px,
-    relative, surface,
+    App, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle,
+    Hsla, KeyBinding, ObjectFit, ScrollHandle, SharedString, StrikethroughStyle, StyledText,
+    Subscription, Window, actions, div, prelude::*, px, relative, surface,
 };
 use shot_analyze::autocut::{self, RuleCount};
 use shot_analyze::{Speech, cache};
@@ -46,6 +46,8 @@ const CONTEXT: &str = "CutScreen";
 const CONTEXT_WORDS: usize = 8;
 /// Bars of the waveform under an item.
 const BARS: usize = 120;
+/// Line height of the words around a review item.
+const CONTEXT_LINE: f32 = 30.;
 
 actions!(
     cut,
@@ -493,9 +495,12 @@ fn rule_name(rule: RuleKind) -> &'static str {
     }
 }
 
-/// What an item of the rule is called.
-fn kind_name(rule: RuleKind) -> &'static str {
+/// What an item of the rule is called. `speaks` says the item strikes words although its rule
+/// cuts only gaps between them, so the name does not call speech a pause.
+fn kind_name(rule: RuleKind, speaks: bool) -> &'static str {
     match rule {
+        RuleKind::Silence if speaks => "Speech marked as silence",
+        RuleKind::Pause if speaks => "Speech marked as a pause",
         RuleKind::Silence => "Silence",
         RuleKind::Retake => "Inline retake",
         RuleKind::Misspoken => "Misspoken word",
@@ -532,6 +537,68 @@ fn reason(rule: RuleKind, length: Micros, murmur: Option<bool>) -> String {
         RuleKind::IdleScreen => format!(
             "The screen does not change for {seconds} while you talk. A jump cut or b-roll could cover it."
         ),
+    }
+}
+
+/// The words around an item as one paragraph: those before muted, the item struck through.
+fn context_text(pre: &str, cut: &str, post: &str) -> StyledText {
+    let mut text = String::new();
+    let mut highlights = Vec::new();
+    if !pre.is_empty() {
+        text.push_str(pre);
+        highlights.push((
+            0..text.len(),
+            HighlightStyle {
+                color: Some(MUTED.into()),
+                ..HighlightStyle::default()
+            },
+        ));
+        text.push(' ');
+    }
+    let start = text.len();
+    text.push_str(cut);
+    highlights.push((
+        start..text.len(),
+        HighlightStyle {
+            color: Some(CUT_TEXT.into()),
+            background_color: Some(CUT_TINT.into()),
+            strikethrough: Some(StrikethroughStyle {
+                thickness: px(1.),
+                color: Some(CUT.into()),
+            }),
+            ..HighlightStyle::default()
+        },
+    ));
+    if !post.is_empty() {
+        text.push(' ');
+        text.push_str(post);
+    }
+    StyledText::new(text).with_highlights(highlights)
+}
+
+/// Whether an item of `rule` strikes words of the transcript although its rule cuts only the gaps
+/// between words. The rules never place one like that, but a newer transcript or a cut written
+/// by hand can leave the label on speech.
+fn speaks(rule: RuleKind, words: &[&str]) -> bool {
+    matches!(rule, RuleKind::Silence | RuleKind::Pause) && !words.is_empty()
+}
+
+/// Why an item that [`speaks`] is in the list, open or `applied`.
+fn speech_reason(rule: RuleKind, length: Micros, applied: bool) -> String {
+    let seconds = self::length(length);
+    let what = if rule == RuleKind::Pause {
+        format!("a {seconds} pause")
+    } else {
+        format!("{seconds} of silence")
+    };
+    if applied {
+        format!(
+            "Cut as {what}, but the transcript has words here. Play it, and restore it if the words belong."
+        )
+    } else {
+        format!(
+            "Marked as {what}, but the transcript has words here, so cutting it cuts speech. Play it before you decide."
+        )
     }
 }
 
@@ -665,7 +732,12 @@ fn rule_detail(count: &RuleCount, on: bool, recorded: bool) -> Vec<(String, bool
     if count.removed > 0 {
         let cuts = if count.removed == 1 { "cut" } else { "cuts" };
         parts.push((format!("{} {cuts},", count.removed), false));
-        parts.push((length(count.removed_time), true));
+        // The unit is set in Geist, as a space in Geist Mono reads twice as wide.
+        let time = length(count.removed_time);
+        match time.strip_suffix(" s") {
+            Some(number) => parts.extend([(number.to_owned(), true), ("s".to_owned(), false)]),
+            None => parts.push((time, true)),
+        }
     }
     if count.queued > 0 {
         if !parts.is_empty() {
@@ -1008,7 +1080,7 @@ impl CutScreen {
             (true, RuleKind::Silence) => format!("[silence {duration}]"),
             (true, _) => format!("[pause {duration}]"),
         };
-        let (pre, post) = (pre.join(" "), post.join(" "));
+        let context = context_text(&pre.join(" "), &cut_text, &post.join(" "));
         let murmur = (review.by == RuleKind::Silence)
             .then(|| {
                 self.speech(&take, cx)
@@ -1016,7 +1088,10 @@ impl CutScreen {
             })
             .flatten();
         let applied = self.mode == Mode::Applied;
-        let why = if applied {
+        let speaks = speaks(review.by, &inside_text);
+        let why = if speaks {
+            speech_reason(review.by, review.range.duration(), applied)
+        } else if applied {
             applied_reason(review.by, review.range.duration())
         } else {
             reason(review.by, review.range.duration(), murmur)
@@ -1100,41 +1175,37 @@ impl CutScreen {
                                 div()
                                     .text_size(px(20.))
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child(kind_name(review.by)),
+                                    .child(kind_name(review.by, speaks)),
                             )
                             .child(mono(at_text.clone()).text_color(MUTED))
                             .child(div().min_w_0().truncate().text_color(MUTED).child(chapter)),
                     )
-                    .child(div().text_color(BODY).line_height(px(23.)).child(why)),
+                    .child(
+                        // Two lines tall, like the words below, so the video keeps its size.
+                        div()
+                            .h(px(46.))
+                            .text_color(BODY)
+                            .line_height(px(23.))
+                            .line_clamp(2)
+                            .text_ellipsis()
+                            .child(why),
+                    ),
             )
             .child(
+                // Two lines tall whatever the words, so the video below keeps its size.
                 div()
                     .flex_none()
+                    .h(px(CONTEXT_LINE * 2. + 28.))
                     .px(px(20.))
                     .py(px(14.))
                     .rounded(RADIUS_LG)
                     .bg(RAISED)
                     .text_size(px(19.))
-                    .line_height(px(30.))
-                    .flex()
-                    .flex_wrap()
-                    .gap_x(px(6.))
-                    .when(!pre.is_empty(), |this| {
-                        this.child(div().text_color(MUTED).child(pre))
-                    })
-                    .child(
-                        div()
-                            .px(px(4.))
-                            .rounded(px(5.))
-                            .bg(CUT_TINT)
-                            .text_color(CUT_TEXT)
-                            .line_through()
-                            .text_decoration_color(CUT)
-                            .child(cut_text),
-                    )
-                    .when(!post.is_empty(), |this| {
-                        this.child(div().text_color(STRONG).child(post))
-                    }),
+                    .line_height(px(CONTEXT_LINE))
+                    .text_color(STRONG)
+                    .line_clamp(2)
+                    .text_ellipsis()
+                    .child(context),
             )
             .child(
                 div()
@@ -1400,11 +1471,12 @@ impl CutScreen {
             rows.push((Row::Answered(i, at), time));
         }
         rows.sort_by_key(|(_, t)| *t);
-        // The words cut, or for a gap the words it follows. A gap that opens a chapter's part
-        // of the take says so, as the gap before it can follow the same words.
+        // The words cut, or for a gap the words it follows, and whether a gap rule's item
+        // strikes words. A gap that opens a chapter's part of the take says so, as the gap
+        // before it can follow the same words.
         let detail = |at: Option<TakeAt>, take: &Id, review: &Review| {
             let Some(transcript) = folder.transcripts.get(take) else {
-                return format!("Take {take}, no transcript yet");
+                return (format!("Take {take}, no transcript yet"), false);
             };
             let words = transcript.words();
             let (inside, text) = words_in(words, review.range);
@@ -1418,15 +1490,18 @@ impl CutScreen {
                 let spoken = before.last().is_some_and(|w| w.range.from() >= start);
                 (!spoken).then(|| cut.chapters[at.chapter].title.as_str())
             });
-            match (text.is_empty(), before.is_empty(), opens) {
-                (false, ..) => format!("\"{}\"", text.join(" ")),
+            let text = match (text.is_empty(), before.is_empty(), opens) {
+                (false, ..) => {
+                    return (format!("\"{}\"", text.join(" ")), speaks(review.by, &text));
+                }
                 (true, false, Some(chapter)) => format!("Start of {chapter}"),
                 (true, true, _) => "At the start of the take".to_owned(),
                 (true, false, None) => {
                     let before: Vec<&str> = before.iter().map(|w| w.text.as_str()).collect();
                     format!("After \"{}\"", before.join(" "))
                 }
-            }
+            };
+            (text, false)
         };
         let mut on_row = None;
         let items: Vec<_> = rows
@@ -1459,6 +1534,9 @@ impl CutScreen {
                     }
                 };
                 let on = open.is_some() && open == shown;
+                let (detail, speaks) = detail(at, take, &review);
+                // An answered row dims, but its status stays readable.
+                let dim = |el: Div| el.when(open.is_none(), |this| this.opacity(0.5));
                 div()
                     .id(("item", n))
                     .flex()
@@ -1468,30 +1546,27 @@ impl CutScreen {
                     .py(px(10.))
                     .rounded(RADIUS_MD)
                     .when(on, |this| this.bg(FLOAT))
-                    .when(open.is_none(), |this| this.opacity(0.5))
                     .when(open.is_some() && !on, |this| {
                         this.cursor_pointer().hover(|s| s.bg(RAISED))
                     })
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.))
-                            .child(
-                                div()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child(kind_name(review.by)),
-                            )
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_size(TEXT_SM)
-                                    .text_color(MUTED)
-                                    .child(detail(at, take, &review)),
-                            ),
-                    )
+                    .child(dim(div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .child(
+                            div()
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(kind_name(review.by, speaks)),
+                        )
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(TEXT_SM)
+                                .text_color(MUTED)
+                                .child(detail),
+                        )))
                     .child(
                         div()
                             .flex_none()
@@ -1499,7 +1574,7 @@ impl CutScreen {
                             .flex_col()
                             .items_end()
                             .gap(px(2.))
-                            .child(mono(timecode(time)).text_size(px(14.)))
+                            .child(dim(mono(timecode(time)).text_size(px(14.))))
                             .child(
                                 if open.is_some() {
                                     mono(status)
@@ -1507,7 +1582,7 @@ impl CutScreen {
                                     div().child(status)
                                 }
                                 .text_size(TEXT_SM)
-                                .text_color(if open.is_some() { BODY } else { FAINT }),
+                                .text_color(if open.is_some() { BODY } else { MUTED }),
                             ),
                     )
                     .when_some(open, |this, index| {
@@ -1744,6 +1819,14 @@ mod tests {
                 "12 cuts, 2:41 · 3 to review".to_owned(),
                 vec!["2:41".to_owned()]
             )
+        );
+        let short = RuleCount {
+            removed_time: Micros(3_700_000),
+            ..count(2, 0)
+        };
+        assert_eq!(
+            text(rule_detail(&short, true, true)),
+            ("2 cuts, 3.7 s".to_owned(), vec!["3.7".to_owned()])
         );
         assert_eq!(
             text(rule_detail(&count(0, 0), true, true)).0,
