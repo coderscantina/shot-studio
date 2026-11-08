@@ -4,9 +4,11 @@ Updated 2026-11-08. Read by agents at the start of a thread; rewrite it before h
 
 ## Branches
 
-`main` is the branch of record and is public at https://github.com/coderscantina/shot-studio. It holds milestones 01 to 08, milestones 10 to 12 built except what waits on Mike, milestone 09's release machinery, the welcome window, and timeline editing with undo.
+`main` is the branch of record and is public at https://github.com/coderscantina/shot-studio. Local `main` is ahead of `origin/main` and not pushed: it holds milestones 01 to 08, milestones 10 to 12 built except what waits on Mike, milestone 09's release machinery, the welcome window, timeline editing with undo, and the polish wave of 2026-11-08 merged on the same day. fmt, workspace clippy and `cargo test --workspace` pass except the flaky watchdog test (see known gaps). `polish/integration` is merged and can be deleted.
 
-`polish/integration` (local, not pushed) is `main` plus the polish wave of 2026-11-08, waiting for Mike's go to merge into `main`. fmt, workspace clippy and `cargo test --workspace` pass except the flaky watchdog test (see known gaps). It holds:
+The script agent can search the web and read pages (WebSearch and WebFetch, script sessions only, recorded in decision 0005), and `propose_script` can add text files to `sources/`. Checked with `shot agent --video` on a copy of the demo channel against a real article. WebFetch will not return a page's full text word for word, so snapshots hold section headings, one exact sentence per section and a paraphrase.
+
+The polish wave holds:
 - Timeline: context-aware right-click menus on every lane element, layout from the Layout lane, adding, replacing and removing a music bed with its gain, a zoom slider, a draggable overview frame, zoom to selection or chapter (⌥Z), and a resizable split between the top row and the lanes.
 - Sound: the picker auditions sounds and explains when placing needs a migrated channel video, the preview's loudness gain fades in without a seek, a broken music file no longer silences the voice, pausing fades out instead of clicking.
 - Text and Picture: panes resize by their edges and keep their widths in `layout.json`, a useful inspector without a selection, working layout buttons, an outline with paragraphs, a Picture stage that fills the space.
@@ -29,7 +31,7 @@ The demo app on `/tmp/shot-demo` (a copy of the target project), PID in `.demo/p
 ## Waiting on Mike
 
 See the [open decisions](milestones/README.md#open-decisions) and [prerequisites](milestones/README.md#prerequisites-from-mike):
-- Merge `polish/integration` into `main`.
+- Push `main`.
 - How studio edits reach a video's branch so the board shows them (known gaps).
 - Score the four reels and listen to the bundled sounds and beds.
 - The design-variants round for milestone 10 item 7.
