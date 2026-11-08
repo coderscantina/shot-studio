@@ -463,21 +463,41 @@ impl WelcomeView {
             .child(div().pt(px(28.)).pb(px(4.)).child(label("New video")))
             .children(FORMATS.map(|format| format_row(format, cx)))
             .child(
-                div().pt(px(8.)).child(
-                    proposal_action("new-video", "Create video folder", None, None, create_look)
+                div()
+                    .pt(px(8.))
+                    .flex()
+                    .gap(px(8.))
+                    .child(
+                        proposal_action("new-video", "Create video", None, None, create_look)
+                            .flex_1()
+                            .justify_center()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.error = None;
+                                pick_folder(Some(this.format), cx);
+                            })),
+                    )
+                    .child(
+                        proposal_action(
+                            "new-channel-start",
+                            "Start a channel",
+                            None,
+                            None,
+                            ActionLook::Quiet,
+                        )
+                        .flex_1()
                         .justify_center()
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.error = None;
-                            pick_folder(Some(this.format), cx);
+                            new_channel(&home(), welcome_done, cx);
                         })),
-                ),
+                    ),
             )
             .child(
                 div()
                     .pt(px(6.))
                     .text_size(TEXT_SM)
                     .text_color(MUTED)
-                    .child("Script and Board come with a channel"),
+                    .child("A video starts with recording. A channel adds a board and scripts."),
             )
     }
 

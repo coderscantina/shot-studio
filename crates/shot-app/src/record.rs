@@ -1229,7 +1229,14 @@ impl RecordScreen {
                     .expect("standby error")
                     .clone()
                     .filter(|_| !busy_stage(phase))
-                    .map(|e| alert(format!("The preview could not start: {e}"))),
+                    .map(|e| {
+                        alert(format!("The preview could not start: {e}")).child(
+                            Button::new("retry-preview")
+                                .small()
+                                .label("Try again")
+                                .on_click(cx.listener(|this, _, _, cx| this.restart(cx))),
+                        )
+                    }),
             )
             .children(monitor_error.map(|e| alert(format!("The monitor shows the raw feed: {e}"))))
             .child(
@@ -1474,14 +1481,15 @@ fn card_value(text: impl Into<gpui::SharedString>) -> Div {
         .child(text.into())
 }
 
-/// A track's privacy access: ready, waiting for the macOS prompt, or how to allow it.
+/// A track's privacy access: allowed, waiting for the macOS prompt, or how to allow it.
 fn access(permission: Permission, access: Access) -> Div {
     let row = div().flex().items_center().gap(px(6.)).text_size(TEXT_SM);
     match access {
+        // Access alone, not a working device: a failed preview shows above the stage.
         Access::Allowed => row
             .text_color(MUTED)
             .child(icon("check", ICON_SM, ACCENT))
-            .child("Ready"),
+            .child("Access allowed"),
         Access::NotAsked => row.text_color(MUTED).child("Answer the macOS prompt."),
         Access::Denied => {
             // Screen and event access only apply after a restart.

@@ -1143,9 +1143,12 @@ impl CutScreen {
                     ),
             )
             .child(
+                // Playback left, the decision right; in a narrow window the decision wraps
+                // below as one group instead of slipping under the next pane.
                 div()
                     .flex_none()
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .gap(px(10.))
                     .child(play_button(
@@ -1155,30 +1158,40 @@ impl CutScreen {
                         "Space",
                     ))
                     .child(play_button(Hear::Cut, "play-cut", "Play as cut", "⇧Space"))
-                    .child(div().flex_1())
                     .child(
-                        button(
-                            "keep",
-                            None,
-                            if applied { "Restore" } else { "Keep" },
-                            "K",
-                            false,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| this.decide(Decision::Keep, cx))),
-                    )
-                    .child(
-                        button(
-                            "cut",
-                            None,
-                            if applied {
-                                "Leave cut".to_owned()
-                            } else {
-                                format!("Cut {duration}")
-                            },
-                            "C",
-                            true,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| this.decide(Decision::Cut, cx))),
+                        div()
+                            .ml_auto()
+                            .flex()
+                            .items_center()
+                            .gap(px(10.))
+                            .child(
+                                button(
+                                    "keep",
+                                    None,
+                                    if applied { "Restore" } else { "Keep" },
+                                    "K",
+                                    false,
+                                )
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.decide(Decision::Keep, cx)),
+                                ),
+                            )
+                            .child(
+                                button(
+                                    "cut",
+                                    None,
+                                    if applied {
+                                        "Leave cut".to_owned()
+                                    } else {
+                                        format!("Cut {duration}")
+                                    },
+                                    "C",
+                                    true,
+                                )
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.decide(Decision::Cut, cx)),
+                                ),
+                            ),
                     ),
             )
     }
