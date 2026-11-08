@@ -20,7 +20,7 @@ use shot_audio::{
 };
 use shot_core::{Applied, Id, Lock, Micros};
 use shot_media::audio::SAMPLE_RATE;
-use shot_render::audio::{AudioSegment, TimelineAudio, TimelineAudioError};
+use shot_render::audio::{TimelineAudio, TimelineAudioError};
 
 use crate::model::{EditMap, FPS};
 
@@ -263,16 +263,12 @@ fn output_samples(map: &EditMap, take: &Id, at: Micros) -> Vec<u64> {
         .collect()
 }
 
-/// The voice of `map`, cut like export's, with bleeps over the ranges of `score`.
+/// The voice of `map`'s plan as export places it, silent under the bookends and blended over
+/// the transitions, with bleeps over the ranges of `score`.
 pub fn timeline_audio(map: &EditMap, media: PathBuf, score: &Score) -> TimelineAudio {
-    TimelineAudio::new(
-        map.spans.iter().map(|span| AudioSegment {
-            take: span.take.clone(),
-            source_frames: span.source_frames.clone(),
-        }),
-        FPS,
-        move |take| media.join(take.as_str()).join("mic.mp4"),
-    )
+    TimelineAudio::of_plan(&map.plan, move |take| {
+        media.join(take.as_str()).join("mic.mp4")
+    })
     .with_bleeps(&score.bleeps)
 }
 

@@ -103,7 +103,9 @@ pub fn describe(args: DescribeArgs) -> Result<(), String> {
     let project = load(&args.video)?;
     let transcripts = transcripts(&args.video, &project)?;
     let timeline = shot_ship::lock::timeline(&args.video, &project).map_err(|e| e.to_string())?;
-    let description = shot_ship::describe::describe(&project, timeline.main(), &transcripts);
+    let bookends = shot_ship::lock::bookends(&args.video, &project).map_err(|e| e.to_string())?;
+    let description =
+        shot_ship::describe::describe(&project, timeline.main(), &bookends, &transcripts);
     println!("{}\n\n{}", description.title, description.text.trim_end());
     Ok(())
 }

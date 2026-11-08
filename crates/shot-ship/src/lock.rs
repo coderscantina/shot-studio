@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 
 use shot_core::{Lock, ParseError, Project, Timeline};
 
+use crate::spoken::Bookends;
+
 /// The lock's file name in the video folder. A video with one is migrated.
 pub const LOCK_FILE: &str = "cut.lock";
 
@@ -16,6 +18,9 @@ pub enum LockError {
     Io { path: PathBuf, source: io::Error },
     #[error("cut.lock: {0}")]
     Parse(#[from] ParseError),
+    /// Placing the brand's intro and outro failed, for example on a missing bumper.
+    #[error("{0}")]
+    Bookends(String),
 }
 
 /// The video's lock, `None` when it is not migrated.
@@ -34,6 +39,48 @@ pub fn timeline(video_dir: &Path, project: &Project) -> Result<Timeline, LockErr
         Some(lock) => Timeline::styled(project, &lock),
         None => Timeline::evaluate(project),
     })
+}
+
+/// The main cut's intro and outro where export places them, for chapter times: none before
+/// the video is migrated or when its brand has neither.
+#[cfg(target_os = "macos")]
+pub fn bookends(video_dir: &Path, project: &Project) -> Result<Bookends, LockError> {
+    use shot_render::join::Piece;
+    let has_bookends =
+        read(video_dir)?.is_some_and(|l| l.brand.intro.is_some() || l.brand.outro.is_some());
+    if !has_bookends {
+        return Ok(Bookends::default());
+    }
+    let plan = shot_render::export::preview_plan(video_dir, project)
+        .map_err(|e| LockError::Bookends(e.to_string()))?;
+    let placed = plan
+        .pieces
+        .iter()
+        .enumerate()
+        .filter_map(|(index, piece)| {
+            let Piece::Bookend(b) = *piece else {
+                return None;
+            };
+            let before = match plan.pieces.get(index + 1) {
+                Some(Piece::Segment(s)) => {
+                    let segment = &plan.segments[*s].segment;
+                    Some((segment.take.clone(), segment.source.from()))
+                }
+                _ => None,
+            };
+            Some(crate::spoken::Bookend {
+                before,
+                length: shot_render::plan::frame_time(plan.bookends[b].frames, plan.fps),
+            })
+        })
+        .collect();
+    Ok(Bookends(placed))
+}
+
+/// Export renders only on macOS, so elsewhere nothing is placed around the cut.
+#[cfg(not(target_os = "macos"))]
+pub fn bookends(_video_dir: &Path, _project: &Project) -> Result<Bookends, LockError> {
+    Ok(Bookends::default())
 }
 
 #[cfg(test)]

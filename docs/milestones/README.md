@@ -70,7 +70,9 @@ Found by agents and waiting for a task. Remove a line when it's fixed.
 - vello's coverage order varies between runs; rectangle shadows are snapped to whole pixels, but a rare one-bit flip in text or other shapes is still possible.
 - The bundled Noto animated emoji are CC BY 4.0, which needs attribution in the app's About or credits before release (milestone 09).
 - The first seek after playback in the editor engine takes about 0.5 s.
-- The MCP server's `describe` and caption tools evaluate the timeline without the lock, so a migrated video's chapter times there differ from the export by its rule cuts.
+- The app's preview plays the voice and the lock's music and sound effects, but not export's bumper sound, the brand's per-phase transition sounds or the music ducking under bumpers.
+- `shot check` (`check_cut`) and the Ship screen's cut length read the timeline without bookends, so with an intro the chapter rules and the length are off by the bookends.
+- `shot-render`'s painter returns no screen layer, so the editor engine lays out a paused frame a second time for callout clicks; and it has no decoration hook, so `--bench-edit --glass` draws its reel in a pass of its own.
 - On a migrated video the Cut screen's rule switches and pacing only show; changing the rules waits for the rule editor (milestone 10 item 7). A lock cut on a kind outside the six pacing kinds shows as a person's cut in the app.
 - The preview's loudness gain comes from one measuring pass, without export's limiter trials, and a new gain plays from the next seek.
 - `shot-render` keeps export's score (bed, lock music and sfx at their output samples) private and `shot-core` its settings diff, so the app has its own copies of both (`score.rs`, `style::layer`).

@@ -84,7 +84,8 @@ pub fn plan(
     options: Options,
 ) -> Result<Vec<PlannedCut>, LockError> {
     let timeline = crate::lock::timeline(video_dir, project)?;
-    let description = describe(project, timeline.main(), transcripts);
+    let bookends = crate::lock::bookends(video_dir, project)?;
+    let description = describe(project, timeline.main(), &bookends, transcripts);
     let hook = project
         .script
         .chapters

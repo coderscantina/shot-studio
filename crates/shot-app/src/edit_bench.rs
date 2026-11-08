@@ -1,5 +1,6 @@
 //! `--bench-edit <video-folder>`: plays the edited timeline through the Edit screen's preview
-//! engine, which draws every frame through `shot-render`'s render graph, then seeks at random,
+//! engine, which paints every frame as export does, bookends and transitions included, then
+//! seeks at random,
 //! and prints the same measurements and PASS or FAIL rule as [`crate::bench`].
 //!
 //! It runs headless: a 60 Hz ticker takes frames from the engine's queue the way the Edit
@@ -12,7 +13,8 @@
 //!
 //! `--glass` draws a launch preset reel (glass card with a soft shadow, tilt and kinetic headline,
 //! a motion blurred badge, word pop captions) over every frame, 6 s of every 12 s, the costliest
-//! motion the renderer has.
+//! motion the renderer has, in a pass of its own over the painted frame. Each run prints the
+//! bookends and transitions it played through.
 
 use std::time::{Duration, Instant};
 
@@ -47,6 +49,8 @@ struct Playback {
     stalled: u64,
     starved: u64,
     late_ticks: u64,
+    /// The frames shown right after a drop.
+    drops_before: Vec<u64>,
     cpu_percent: f64,
     service_cpu_percent: f64,
 }
@@ -60,11 +64,12 @@ struct Seeks {
 pub fn run(dir: &std::path::Path, options: &BenchOptions) -> Result<bool, String> {
     let folder = VideoFolder::open(dir)?;
     let project = &folder.shown;
-    let map = EditMap::of(project, View::Edited);
+    let map = EditMap::preview(dir, &folder.project, project, View::Edited)?;
     if map.frames == 0 {
         return Err("the edit has no frames".into());
     }
     let frames = map.frames;
+    let joins = map.plan.clone();
     let engine = Engine::spawn();
     if options.glass {
         engine.set_decoration(launch_reel);
@@ -72,7 +77,7 @@ pub fn run(dir: &std::path::Path, options: &BenchOptions) -> Result<bool, String
     engine.set_plan(
         Plan {
             map,
-            media: dir.join("media"),
+            dir: dir.to_owned(),
             effects: project.format.effects(),
             theme: folder.theme.clone(),
         },
@@ -80,10 +85,13 @@ pub fn run(dir: &std::path::Path, options: &BenchOptions) -> Result<bool, String
     );
 
     println!(
-        "edit: {} frames ({:.1} s) at {FPS} fps, {} spans, {}",
+        "edit: {} frames ({:.1} s) at {FPS} fps, {} spans, {} bookends, {} transitions ({} two-sided), {}",
         frames,
         frames as f64 / f64::from(FPS),
         engine_spans(&folder),
+        joins.bookends.len(),
+        joins.transitions.len(),
+        joins.transitions.iter().filter(|t| t.two_sided()).count(),
         if options.glass {
             "launch reel with glass and motion blur on"
         } else {
@@ -101,6 +109,34 @@ pub fn run(dir: &std::path::Path, options: &BenchOptions) -> Result<bool, String
         let playback = play(&engine, start, play_frames, &mut peak)?;
         let seeks = seek(&engine, frames, options.seeks, &mut rng, &mut peak)?;
         print_run(run + 1, options.runs, &playback, &seeks);
+        let played = start..start + play_frames;
+        let crossed: Vec<String> = joins
+            .transitions
+            .iter()
+            .filter(|t| played.contains(&t.window.start) && played.contains(&(t.window.end - 1)))
+            .map(|t| format!("{} at {:.1} s", t.kind, t.edge as f64 / f64::from(FPS)))
+            .collect();
+        let bookends = joins
+            .bookends
+            .iter()
+            .filter(|b| played.contains(&b.output_frame))
+            .count();
+        let drops: Vec<String> = playback
+            .drops_before
+            .iter()
+            .map(|f| format!("{:.2} s", *f as f64 / f64::from(FPS)))
+            .collect();
+        println!(
+            "  played through {} bookend starts and {} transitions: {}; drops before {}",
+            bookends,
+            crossed.len(),
+            crossed.join(", "),
+            if drops.is_empty() {
+                "none".to_owned()
+            } else {
+                drops.join(", ")
+            }
+        );
         runs.push((playback, seeks));
     }
     Ok(report(&runs, peak))
@@ -192,8 +228,9 @@ fn play(
                 let skipped = frame.frame.saturating_sub(last + 1);
                 if stalled {
                     stats.stalled += skipped;
-                } else {
+                } else if skipped > 0 {
                     stats.dropped += skipped;
+                    stats.drops_before.push(frame.frame);
                 }
                 if frame.frame < due {
                     stats.late += 1;
