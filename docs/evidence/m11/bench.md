@@ -54,3 +54,7 @@ Both on a temp copy of `$SHOT_FIXTURES/target-project` (the media is a symlink, 
 ## Needs from other tasks
 
 When `shot-render` moves onto `cut.lock`, `compose`/`Shot`/`Look` may change shape; `Engine::render` in `engine.rs` is the one place calling them, and `launch_reel` in `edit_bench.rs` needs `Frame.drawing` with `Sheet`, `SoftShadow` and `Shape::{Kinetic, Caption, Label}` to stay public.
+
+## Rerun by the integration owner
+
+On 2026-11-08 at `1cdf244`, after all agents finished, `shot-app --bench-edit <heavy copy> --glass` passed: 5 runs of 60 s, 0 dropped frames, 0 wrong seek frames, seek p50 14.0 ms, p95 32.0 ms, max 523.3 ms (the cold first seek after playback), peak footprint 332 MB. Load average was 10 at the start and 2.7 at the end, so the earlier failures were contention.
