@@ -13,7 +13,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use shot_analyze::vision::{self, VisionError};
+use shot_analyze::elements::read_outs;
+use shot_analyze::vision::{self, Sampled, TextLine, VisionError};
 use shot_core::{
     CaptionFix, Cut, Id, Micros, Overlay, ParamValue, TakeEdit, TimeRange, Transcript, Word,
 };
@@ -58,8 +59,8 @@ struct TakeFacts {
     words: Vec<Word>,
     idle: Vec<TimeRange>,
     markers: Vec<Micros>,
-    /// Text on screen at sample times, in screen pixels.
-    screen: Vec<(Micros, Vec<ScreenLine>)>,
+    /// Text on screen at sample times, `None` without a screen track or words.
+    screen: Option<Sampled<Vec<TextLine>>>,
 }
 
 /// `cut` with link cards, b-roll slots and highlights added to every take block of the main cut.
@@ -86,7 +87,14 @@ pub fn run(video_dir: &Path, cut: &Cut) -> Result<(Cut, Added), OverlayRuleError
                 .into_iter()
                 .filter(|o| kept(o.range.from()))
                 .collect();
-            let marks = highlight::matches(&words, &take.screen, &edit.overlays);
+            let marks = match &take.screen {
+                Some(screen) => highlight::highlights(
+                    &read_outs(&words, &screen.samples),
+                    screen.size,
+                    &edit.overlays,
+                ),
+                None => Vec::new(),
+            };
             added.link_cards += cards.len();
             added.b_roll += slots.len();
             added.highlights += marks.len();
@@ -147,9 +155,13 @@ fn take_facts(
         .map(|m| m.t)
         .collect();
     let screen = if has_screen && !words.is_empty() {
-        screen_lines(video_dir, take, &sentence_starts(&words))?
+        Some(vision::screen_text(
+            video_dir,
+            take,
+            &sentence_starts(&words),
+        )?)
     } else {
-        Vec::new()
+        None
     };
     Ok(TakeFacts {
         words,

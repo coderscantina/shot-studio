@@ -413,7 +413,7 @@ short friday-deploys {
 - A derived chunk renders in two passes. Its base is the main chunk that holds its frames, keyed as above and shared with the main export, so whichever export runs first renders it for both. The derived chunk's own key extends the hash above (with the derived aspect and burned-in captions) with the base chunk's key, which of its frames it shows, the window's position on every frame and the caption on screen on every frame with its highlighted word. A new transcript or a moved face re-renders only the derived chunks whose captions or window changed.
 - A take's media identity hashes the size and modification time of its video tracks and of its event log, since the cursor is drawn from events. A take recorded again under a reused id gets a new identity, so it never matches the old recording's chunks.
 - Audio is not cached. Export encodes the whole cut's audio as one AAC stream with the music bed mixed under the voice, so the joins have no encoder delay or padding.
-- Once a video is migrated, the pacing's cuts, zooms and overlays come from the [lock](#cutlock) instead of the take blocks: the timeline removes the union of the lock's `cut` instances from the kept ranges, and segments carry the lock's zooms and overlays next to a person's. The chunk hash then reads the same values from the lock. It adds the brand fields where something branded draws, font and Lottie files by content hash, the camera style where the camera shows and, at a chapter edge, both sides of the transition. Rule layer and element provenance are not part of it, like zoom provenance today. Milestone 10 item 6 implements this; until then the timeline reads the take blocks as above.
+- Once a video is migrated, the pacing's cuts, zooms and overlays come from the [lock](#cutlock) instead of the take blocks: the timeline removes the union of the lock's `cut` instances from the kept ranges, and segments carry the lock's zooms and overlays next to a person's. The chunk hash then reads the same values from the lock. It adds the brand fields where something branded draws, font and Lottie files by content hash, the camera style where the camera shows and, at a chapter edge, both sides of the transition. Rule layer and element provenance are not part of it, like zoom provenance today. A video without a `cut.lock` is read from the take blocks as above. Nothing branded draws yet, so no brand field, font or Lottie hash enters a chunk; each enters with the renderer feature that draws it. The lock's `music` and `sfx` instances play in the export's audio at their moments' output time, mixed with the music bed before the loudness pass.
 
 ## Overlay templates
 
@@ -660,19 +660,22 @@ Shipping freezes the lock at the release tag. A rule change reaches unshipped vi
 
 ## Migration of today's nodes
 
-`shot migrate` turns a video written before the lock into the model above once, mechanically ([0024](../decisions/0024-content-stays-in-cut-kdl-style-moves-to-the-lock.md)). It runs analysis to write the elements first, then maps each take block node:
+`shot migrate --video <dir>` turns a video written before the lock into the model above once, mechanically ([0024](../decisions/0024-content-stays-in-cut-kdl-style-moves-to-the-lock.md)). It runs analysis for every take without an elements file, then maps each take block node so the migrated video shows the same frames, and refuses to write anything when its timeline would differ from the old one:
 
 | Today | After |
 | --- | --- |
 | `keep from= to=` and `remove ... by=manual` | stay as written. Adjacent kept ranges that were split only by a rule's removal merge into one |
-| `remove from= to= by=<rule>` | dropped when the format's pacing rule produces the same cut from an element of that kind (`silence`, `pause`, `idle` for `idle-screen`, `filler`, `retake`, `misspoken`). Otherwise `override <take> <kind> at=<element t> { cut }` on the nearest element of that kind, or kept as `remove ... by=manual` when no element is within 500 ms |
+| `remove from= to= by=<rule>` | dropped when the lock's cuts cover it. Otherwise `override <take> <kind> at=<element t> { cut }` on the queued element of that kind within 500 ms (C in the old queue), else kept as `remove ... by=manual`, the exact range |
+| a lock cut that removes material the old cut kept | `override <take> <kind> at=<element t> { keep }` on its element |
 | `review from= to= by=<rule>` | dropped: the queue is the lock's `review` instances |
 | `ignore from= to= by=<rule>` | `override <take> <kind> at=<element t> { keep }` |
-| `zoom ... by=jump-cut`, `by=emphasis`, `by=click`, `by=typing`, `by=cursor` | dropped when the format's zoom rule reproduces it; otherwise an override `{ zoom <scale> hold=... }` on its element. `by=marker` becomes an override on the `marker` element, a zoom without `by` stays a person's zoom |
-| `overlay link-card`, `highlight`, `b-roll` written by a rule | dropped when the rule reproduces it; a person's change (an `accent`, a filled b-roll `file`) becomes an override on the `url`, `ocr` or `idle` element with the full overlay |
-| `auto-cut`, `auto-zoom` in `format.kdl` | the thresholds become the pacing and zoom rules of the channel's `formats/<format>.kdl`; the video's `format.kdl` keeps only the settings that differ from it |
+| `zoom ... by=<what>` | dropped when a rule's zoom equals it (scale, range, center). Otherwise `{ zoom <scale> hold=... lead=... }` on an element inside it whose point is its center (the trigger's kind, a `word` for `jump-cut` and `emphasis`), else kept as a person's zoom. A rule zoom the old cut did not have gets `zoom off` |
+| `overlay link-card`, `highlight`, `b-roll` | dropped when a rule's overlay equals it. Otherwise `{ overlay <template> for=... { <params> } }` on an element of its kind starting with it, else kept as a person's overlay in its drawing order. A rule overlay the old cut did not have gets `overlay <template> off` |
+| `auto-cut`, `auto-zoom`, `pacing` in `format.kdl` | a channel `formats/<format>.kdl` without rules gets the rules its settings stand for, the rules the shipped presets carry. The video's `format.kdl` keeps only the settings that differ from the channel's, its own rules where its settings stood for other rules, and `on <selector> off` for the channel's cut and zoom rules it never had |
 
-The migrated video builds a lock whose cuts, zooms and overlays equal the nodes it replaced, which the golden frames check.
+Two choices keep the frames equal. A cut keeps its breath only on a side that borders kept material, so a silence that opens or ends the take's material goes whole there, as the pacing did. Chapter and video edges sit on the first and last moments the cuts leave. The jump-cut punch-in on every other cut has no rule, since a selector does not count (0019); migrated ones become overrides, new videos get none.
+
+A migrated video has a `cut.lock`. `shot style build`, `shot export` and `shot check` rebuild it from the files unless the video shipped; the old rule commands (`shot autocut`, `shot autozoom`, `shot overlays find`) refuse a migrated video, and a build refuses a video whose `cut.kdl` still holds rule removals, review items or rule zooms.
 
 ## `script.md`
 

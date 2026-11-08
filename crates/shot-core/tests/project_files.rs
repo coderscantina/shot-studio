@@ -97,7 +97,7 @@ fn cut_round_trips() {
 fn presets_parse_and_are_canonical() {
     for &kind in FormatKind::ALL {
         assert_eq!(
-            kind.preset().to_kdl(),
+            kind.preset_layer().to_kdl(),
             kind.preset_source(),
             "{kind} preset"
         );

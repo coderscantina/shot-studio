@@ -118,13 +118,13 @@ pub fn clock(t: Micros) -> String {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use shot_core::{Cut, Format, FormatKind, Project, Script, TimeRange, Timeline, Video, Word};
+    use shot_core::{Cut, FormatKind, Project, Script, TimeRange, Timeline, Video, Word};
 
     pub(crate) fn project(cut: &str) -> Project {
         Project {
             video: Video::parse("title \"A\"\nstatus editing\nformat opinion\n").unwrap(),
             script: Script::parse("# A\n").unwrap(),
-            format: Format::parse(FormatKind::Opinion.preset_source()).unwrap(),
+            format: FormatKind::Opinion.preset(),
             cut: Cut::parse(cut).unwrap(),
         }
     }

@@ -57,12 +57,14 @@ impl Board {
             }
             changes.push((video_path(slug, path), text.clone()));
         }
-        self.propose(slug, name, subject, changes)
+        self.propose(slug, name, subject, self.tip(slug)?, changes)
     }
 
     /// Like [`Board::create_proposal`], with paths relative to the repo root, so a proposal can
-    /// change the channel's `brand/` and `formats/` along with the video. The proposal still
-    /// branches off the video, and accepting it merges those files into the video's branch.
+    /// change the channel's `brand/` and `formats/`. Channel files live on the default branch:
+    /// a proposal of only those branches off it and accepting it merges into it, so every
+    /// video sees the change. A proposal of the video's files branches off the video. One
+    /// proposal does not mix the two.
     pub fn create_repo_proposal(
         &self,
         slug: &str,
@@ -73,8 +75,17 @@ impl Board {
         if let Some(path) = files.keys().find(|p| !is_inside(p)) {
             return Err(Error::InvalidPath(path.clone()));
         }
+        let channel = files.keys().filter(|p| is_channel_path(p)).count();
+        let base = match channel {
+            0 => self.tip(slug)?,
+            n if n == files.len() => {
+                self.tip(slug)?;
+                self.default_tip()?
+            }
+            _ => return Err(Error::MixedProposal),
+        };
         let changes = files.iter().map(|(p, t)| (p.clone(), t.clone())).collect();
-        self.propose(slug, name, subject, changes)
+        self.propose(slug, name, subject, base, changes)
     }
 
     fn propose(
@@ -82,10 +93,10 @@ impl Board {
         slug: &str,
         name: &str,
         subject: &str,
+        base: Commit<'_>,
         changes: Vec<(String, String)>,
     ) -> Result<Proposal> {
         check_name(name)?;
-        let base = self.tip(slug)?;
         let branch = proposal_branch(slug, name);
         if self.repo.find_branch(&branch, BranchType::Local).is_ok() {
             return Err(Error::ProposalExists {
@@ -138,7 +149,7 @@ impl Board {
     /// diff per file. Changes made on the video branch since then are not shown.
     pub fn proposal_diff(&self, slug: &str, name: &str) -> Result<Vec<FileDiff>> {
         let head = self.proposal_head(slug, name)?;
-        let tip = self.tip(slug)?;
+        let (_, tip) = self.target(slug, &head)?;
         let base = self
             .repo
             .find_commit(self.repo.merge_base(tip.id(), head.id())?)?;
@@ -161,7 +172,7 @@ impl Board {
             return Err(Error::InvalidPath(file.to_owned()));
         }
         let head = self.proposal_head(slug, name)?;
-        let tip = self.tip(slug)?;
+        let (_, tip) = self.target(slug, &head)?;
         let base = self
             .repo
             .find_commit(self.repo.merge_base(tip.id(), head.id())?)?;
@@ -176,13 +187,13 @@ impl Board {
         Ok((read(&base)?, read(&head)?))
     }
 
-    /// Merges the proposal into the video branch, fast-forward when the branch has not moved,
-    /// else with a merge commit, then deletes the proposal branch. On a conflict nothing changes
-    /// and [`Error::Conflict`] lists the paths.
+    /// Merges the proposal into the video branch, or into the default branch for a proposal of
+    /// channel files, fast-forward when that branch has not moved, else with a merge commit,
+    /// then deletes the proposal branch. On a conflict nothing changes and [`Error::Conflict`]
+    /// lists the paths.
     pub fn accept_proposal(&self, slug: &str, name: &str) -> Result<Accepted> {
         let head = self.proposal_head(slug, name)?;
-        let tip = self.tip(slug)?;
-        let branch = branch_name(slug);
+        let (branch, tip) = self.target(slug, &head)?;
 
         let (new_tip, fast_forward) = if self.repo.graph_descendant_of(head.id(), tip.id())? {
             (head.id(), true)
@@ -216,6 +227,27 @@ impl Board {
         self.delete_proposal(slug, name)
     }
 
+    /// The branch a proposal merges into and its tip: the default branch when everything the
+    /// proposal changes since it left the default branch is a channel file, else the video's.
+    fn target(&self, slug: &str, head: &Commit<'_>) -> Result<(String, Commit<'_>)> {
+        let (default, default_tip) = self.default_branch()?;
+        let base = self
+            .repo
+            .find_commit(self.repo.merge_base(default_tip.id(), head.id())?)?;
+        let diff = self
+            .repo
+            .diff_tree_to_tree(Some(&base.tree()?), Some(&head.tree()?), None)?;
+        let channel_only = diff.deltas().all(|d| {
+            let file = d.new_file().path().or(d.old_file().path());
+            file.and_then(|p| p.to_str()).is_some_and(is_channel_path)
+        });
+        if channel_only && diff.deltas().len() > 0 {
+            Ok((default, default_tip))
+        } else {
+            Ok((branch_name(slug), self.tip(slug)?))
+        }
+    }
+
     fn proposal_head(&self, slug: &str, name: &str) -> Result<Commit<'_>> {
         check_name(slug)?;
         check_name(name)?;
@@ -238,6 +270,11 @@ impl Board {
 
 fn proposal_branch(slug: &str, name: &str) -> String {
     format!("{PROPOSAL_PREFIX}{slug}/{name}")
+}
+
+/// A repo path of the channel rather than of a video: `brand/`, `formats/`, `styles/`.
+pub(crate) fn is_channel_path(path: &str) -> bool {
+    !path.starts_with("videos/")
 }
 
 /// A relative path that stays inside the folder.

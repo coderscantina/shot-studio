@@ -1254,6 +1254,7 @@ fn check_name(kind: CheckKind) -> &'static str {
         CheckKind::Links => "Links have cards",
         CheckKind::Chapters => "Chapters",
         CheckKind::Thumbnail => "Thumbnail",
+        CheckKind::Overrides => "Overrides find their element",
     }
 }
 

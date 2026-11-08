@@ -29,6 +29,7 @@ fn parse_id(text: &str) -> Result<Id, String> {
 }
 
 pub fn run(args: AutocutArgs) -> Result<(), String> {
+    crate::migrate::refuse_if_migrated(&args.video, "cuts and review items")?;
     let fail = |e: shot_analyze::Error| e.to_string();
     let format_path = args.video.join("format.kdl");
     let format = Format::parse(&read(&format_path)?).map_err(|e| format!("format.kdl:{e}"))?;

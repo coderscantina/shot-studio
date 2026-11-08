@@ -29,6 +29,7 @@ pub struct CheckArgs {
 
 /// Prints only the problems; a cut that passes prints nothing and exits 0.
 pub fn check(args: CheckArgs) -> Result<(), String> {
+    crate::restyle::refresh(&args.video)?;
     let project = load(&args.video)?;
     let export = args
         .out

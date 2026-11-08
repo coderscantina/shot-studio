@@ -406,3 +406,45 @@ fn generated_demo_channel_has_a_card_in_every_column() {
         Some("tailwind-without-the-config")
     );
 }
+
+#[test]
+fn a_channel_proposal_branches_off_and_merges_into_the_default_branch() {
+    let channel = Channel::new(&[("alpha", VIDEO)]);
+    let board = channel.board();
+    board.move_card("alpha", Status::Scripting).unwrap();
+    let (main, video) = (channel.sha("main"), channel.sha("video/alpha"));
+    let rule = "on click {\n    zoom 130\n}\n";
+
+    let proposal = board
+        .create_repo_proposal(
+            "alpha",
+            "gentler-click",
+            "🔍 zoom less on clicks",
+            &files(&[("formats/opinion.kdl", rule)]),
+        )
+        .unwrap();
+    let repo = channel.repo();
+    let head = repo.find_commit(proposal.head.parse().unwrap()).unwrap();
+    assert_eq!(head.parent_id(0).unwrap().to_string(), main);
+    let diff = board.proposal_diff("alpha", "gentler-click").unwrap();
+    assert_eq!(diff.len(), 1);
+    assert_eq!(diff[0].path, "formats/opinion.kdl");
+
+    let accepted = board.accept_proposal("alpha", "gentler-click").unwrap();
+    assert_eq!(accepted.head, proposal.head);
+    assert_eq!(channel.sha("main"), proposal.head);
+    assert_eq!(channel.sha("video/alpha"), video);
+    // Every video reads the channel's files from the default branch.
+    let read = board
+        .read_repo_file("alpha", "formats/opinion.kdl")
+        .unwrap();
+    assert_eq!(read.as_deref(), Some(rule.as_bytes()));
+
+    let mixed = board.create_repo_proposal(
+        "alpha",
+        "both",
+        "x",
+        &files(&[("formats/opinion.kdl", "x"), ("videos/alpha/cut.kdl", "y")]),
+    );
+    assert!(matches!(mixed, Err(Error::MixedProposal)));
+}

@@ -63,6 +63,10 @@ pub fn run(args: OverlaysArgs) -> Result<(), String> {
     let fail = |e: overlay_rules::OverlayRuleError| e.to_string();
     let cut = match args.action {
         OverlaysAction::Find => {
+            crate::migrate::refuse_if_migrated(
+                &args.video,
+                "link cards, highlights and b-roll slots",
+            )?;
             let (cut, added) = overlay_rules::run(&args.video, &project.cut).map_err(fail)?;
             println!(
                 "{} link cards, {} b-roll slots, {} highlights added",

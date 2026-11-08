@@ -25,6 +25,8 @@ pub enum Error {
     Card(#[from] CardError),
     #[error("a proposal needs at least one changed file")]
     EmptyProposal,
+    #[error("a proposal changes either the channel's files or one video's, not both")]
+    MixedProposal,
     #[error("proposal `{name}` for `{slug}` already exists")]
     ProposalExists { slug: String, name: String },
     #[error("no proposal `{name}` for `{slug}`")]

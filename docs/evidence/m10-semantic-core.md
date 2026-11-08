@@ -31,3 +31,17 @@ Against the 5 s rough-cut budget, style evaluation is noise. The test asserts un
 - Rendering from the lock, the chunk hash and the golden-frame comparison before and after migration (items 5 and 6).
 - Real element files from `shot-analyze` (item 2); the fixture elements are hand-written in the contract's shape.
 - Import fetching and asset hashing are the build's IO, outside the pure engine; the tests pass an imported brand and hashes in.
+
+## Migration and the renderer on the lock (items 5, 6)
+
+Branch `task/m10-migrate`, details in [m10/migrate.md](m10/migrate.md).
+
+| Acceptance criterion | Result |
+| --- | --- |
+| The 17 min fixture migrates and its export matches with every chunk reused | rough cut with `shot autocut`, exported (593 chunks), migrated (27 nodes reproduced by rules, 1 override, 9 manual cuts), exported again: 0 of 593 chunks rendered, MP4 and caption sidecar byte-identical |
+| Two builds of the same files write byte-identical locks with no analysis | `shot style build` twice and after deleting `cut.lock`: `cmp` identical, 10 ms each |
+| Changing the pacing re-cuts the video; a channel rule reaches unshipped videos only | breath 250 ms in the video's layer moves 10 silence cuts, 14 of 597 chunks render; a channel `on chapter-start` rule changed both unshipped demo locks and left the shipped one byte-identical until `shot restyle` |
+| An override survives a re-cut, `shot check` reports one that lost its element | a `keep` on a queued filler stayed bound through a manual cut elsewhere; with the filler gone from the elements, `shot check` reports it under `overrides` |
+| Rough cut within 5 s of stop with style evaluation | lock build of the 17 min take 10 ms; with the quick elements pass and the transcriber flush under 0.4 s. Measured on the CLI path: the app's stop path still writes nodes |
+
+Breath is kept only on sides that border kept material, which is what the old pacing did at the take's start and end, and chapter edges sit after the pacing's cuts. Both are in the contract's migration section.

@@ -209,7 +209,7 @@ fn with_recording(dir: &Path) {
     .unwrap();
     std::fs::write(
         folder.join("format.kdl"),
-        shot_core::FormatKind::Opinion.preset_source(),
+        shot_core::FormatKind::Opinion.preset().to_kdl(),
     )
     .unwrap();
     std::fs::write(
