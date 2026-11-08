@@ -10,10 +10,10 @@ use shot_render::plan::frame_time;
 use super::parts::layout_name;
 use super::timeline::{MenuOn, Pick, ZOOM_SCALES, picked_text, removed_words, words};
 use super::{
-    AddZoom, DeleteSelection, EditScreen, Layout1, Layout2, Layout3, Layout4, PickSound,
-    RestoreSelection, ZoomToSelection, music,
+    AddZoom, BuildLayout, DeleteSelection, EditScreen, EditSwitch, Layout1, Layout2, Layout3,
+    Layout4, PickSound, RestoreSelection, ZoomToSelection, music,
 };
-use crate::model::{FPS, LAYOUT_KEYS, seconds};
+use crate::model::{FPS, seconds};
 
 /// What the right-click menu is about, with what it shows.
 enum Subject {
@@ -124,6 +124,7 @@ pub(super) fn context_menu(
     let this = screen.read(cx);
     let menu = menu.action_context(this.focus.clone()).min_w(px(240.));
     let subject = subject(this, cx);
+    let choices = this.layout_choices(cx);
     match subject {
         Subject::Words {
             title,
@@ -135,7 +136,10 @@ pub(super) fn context_menu(
             .when(kept, |m| m.item(keyed("Cut", DeleteSelection)))
             .when(removed, |m| m.item(keyed("Restore", RestoreSelection)))
             .when(kept, |m| m.item(keyed("Zoom", AddZoom)))
-            .submenu("Layout", window, cx, move |m, _, _| layout_items(m, layout))
+            .submenu("Layout", window, cx, {
+                let (screen, choices) = (screen.clone(), choices.clone());
+                move |m, _, _| layout_items(m, layout, &choices, &screen)
+            })
             .item(sound_item(screen))
             .separator()
             .item(play_item(screen))
@@ -171,9 +175,12 @@ pub(super) fn context_menu(
                 .item(play_item(screen))
                 .item(keyed("Remove", DeleteSelection))
         }
-        Subject::Layout { title, layout } => layout_items(menu.label(title), Some(layout))
-            .separator()
-            .item(play_item(screen)),
+        Subject::Layout { title, layout } => {
+            layout_items(menu.label(title), Some(layout), &choices, screen)
+                .item(keyed("Edit the switch…", EditSwitch))
+                .separator()
+                .item(play_item(screen))
+        }
         Subject::Cut { title, removed } => menu
             .label(title)
             .when(!removed.is_empty(), |m| m.label(shortened(&removed, 48)))
@@ -188,8 +195,9 @@ pub(super) fn context_menu(
             .item(play_item(screen)),
         Subject::Empty { layout, music } => {
             let menu = menu
-                .submenu("Set layout here", window, cx, move |m, _, _| {
-                    layout_items(m, layout)
+                .submenu("Set layout here", window, cx, {
+                    let (screen, choices) = (screen.clone(), choices.clone());
+                    move |m, _, _| layout_items(m, layout, &choices, &screen)
                 })
                 .item(sound_item(screen));
             let menu = if music {
@@ -210,20 +218,50 @@ fn keyed(text: &'static str, action: impl gpui::Action) -> PopupMenuItem {
     PopupMenuItem::new(text).action(Box::new(action))
 }
 
-/// The four layouts on 1 to 4, `current` checked.
-fn layout_items(menu: PopupMenu, current: Option<Layout>) -> PopupMenu {
-    LAYOUT_KEYS
-        .iter()
-        .enumerate()
-        .fold(menu, |menu, (key, layout)| {
-            let item = PopupMenuItem::new(layout_name(*layout)).checked(current == Some(*layout));
-            menu.item(match key {
-                0 => item.action(Box::new(Layout1)),
-                1 => item.action(Box::new(Layout2)),
-                2 => item.action(Box::new(Layout3)),
-                _ => item.action(Box::new(Layout4)),
-            })
+/// The layouts on 1 to 4, then the other built-in and channel layouts, `current` checked, and
+/// the layout builder: a new layout, or this channel layout to edit.
+fn layout_items(
+    menu: PopupMenu,
+    current: Option<Layout>,
+    (keys, more): &(Vec<Layout>, Vec<Layout>),
+    screen: &Entity<EditScreen>,
+) -> PopupMenu {
+    let menu = keys.iter().enumerate().fold(menu, |menu, (key, layout)| {
+        let item = PopupMenuItem::new(layout_name(*layout)).checked(current == Some(*layout));
+        menu.item(match key {
+            0 => item.action(Box::new(Layout1)),
+            1 => item.action(Box::new(Layout2)),
+            2 => item.action(Box::new(Layout3)),
+            _ => item.action(Box::new(Layout4)),
         })
+    });
+    let menu = more.iter().fold(
+        menu.when(!more.is_empty(), |m| m.separator()),
+        |menu, &layout| {
+            let screen = screen.clone();
+            menu.item(
+                PopupMenuItem::new(layout_name(layout))
+                    .checked(current == Some(layout))
+                    .on_click(move |_, _, cx| {
+                        screen.update(cx, |this, cx| this.set_layout_to(layout, cx))
+                    }),
+            )
+        },
+    );
+    let menu = menu
+        .separator()
+        .item(PopupMenuItem::new("New layout…").action(Box::new(BuildLayout)));
+    match current {
+        Some(layout @ Layout::Custom(_)) => {
+            let screen = screen.clone();
+            menu.item(
+                PopupMenuItem::new("Edit layout…").on_click(move |_, window, cx| {
+                    screen.update(cx, |this, cx| this.open_builder(Some(layout), window, cx))
+                }),
+            )
+        }
+        _ => menu,
+    }
 }
 
 /// Opens the sound picker for the selection or the playhead. S toggles the picker, so this

@@ -383,5 +383,6 @@ pub fn layout_name(layout: shot_core::Layout) -> &'static str {
         shot_core::Layout::Screen => "Screen",
         shot_core::Layout::FaceCorner => "Face corner",
         shot_core::Layout::Window => "Window",
+        shot_core::Layout::Custom(name) => crate::layouts::display_name(name),
     }
 }

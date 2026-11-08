@@ -12,6 +12,9 @@ mod picture;
 mod place;
 mod product;
 mod proposals;
+mod switch;
+
+pub use parts::layout_name;
 mod text;
 mod timeline;
 
@@ -26,10 +29,11 @@ use gpui::{
     App, Bounds, Context, Entity, FocusHandle, Focusable, KeyBinding, Pixels, ScrollHandle, Window,
     actions, div, prelude::*,
 };
-use shot_core::{Cut, EditError, Id, Micros, TakeAt, TimeRange, WordState};
+use shot_core::{Cut, EditError, Id, Layout, Micros, TakeAt, TimeRange, WordState};
 use shot_mcp::bridge::Claude;
 use shot_media::timing::ClockFollower;
 use shot_render::export::{self, ExportOptions};
+use shot_render::plan::frame_time;
 
 use crate::agent::AgentRun;
 use crate::engine::{Engine, Plan, PreviewFrame};
@@ -83,6 +87,8 @@ actions!(
         GoToStart,
         GoToEnd,
         RecordTake,
+        EditSwitch,
+        BuildLayout,
     ]
 );
 
@@ -116,7 +122,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("home", GoToStart, context),
         KeyBinding::new("end", GoToEnd, context),
         KeyBinding::new("cmd-enter", RecordTake, context),
+        KeyBinding::new("t", EditSwitch, context),
+        KeyBinding::new("l", BuildLayout, context),
     ]);
+    switch::bind_keys(cx);
 }
 
 /// A cut run by its block and media start.
@@ -171,6 +180,8 @@ pub struct EditScreen {
     shown: Option<PreviewFrame>,
     playhead: u64,
     playing: bool,
+    /// Where playing stops by itself, as after a layout switch's preview.
+    play_until: Option<u64>,
     clock: Option<Clock>,
     /// Picks frames from the sound's clock, see [`ClockFollower`].
     follower: ClockFollower,
@@ -254,6 +265,7 @@ impl EditScreen {
             shown: None,
             playhead: 0,
             playing: false,
+            play_until: None,
             clock: None,
             follower: ClockFollower::default(),
             seeking: false,
@@ -431,6 +443,7 @@ impl EditScreen {
             self.seek(0);
         }
         self.playing = playing;
+        self.play_until = None;
         self.clock = None;
         self.engine.set_playing(playing);
         if !playing {
@@ -481,6 +494,10 @@ impl EditScreen {
         if let Some(frame) = self.engine.take_due(due) {
             self.playhead = frame.frame;
             self.shown = Some(frame);
+        }
+        if self.play_until.is_some_and(|until| self.playhead >= until) {
+            self.set_playing(false);
+            return;
         }
         if due + 1 >= self.map.frames {
             self.playing = false;
@@ -644,10 +661,121 @@ impl EditScreen {
         self.wrote(result, cx);
     }
 
-    /// Sets the layout on key `key + 1` over the selected words, else the picked layout
-    /// stretch, else the stretch between cuts at the playhead.
+    /// Sets the layout on key `key + 1`, see [`Self::set_layout_to`].
     fn set_layout(&mut self, key: usize, cx: &mut Context<Self>) {
-        let layout = LAYOUT_KEYS[key];
+        let keys = model::layout_keys(&self.folder.read(cx).project.format);
+        if let Some(&layout) = keys.get(key) {
+            self.set_layout_to(layout, cx);
+        }
+    }
+
+    /// The layouts on 1 to 4, and the other built-in and channel layouts a menu offers.
+    pub(super) fn layout_choices(&self, cx: &App) -> (Vec<Layout>, Vec<Layout>) {
+        let folder = self.folder.read(cx);
+        let keys = model::layout_keys(&folder.project.format);
+        let custom = folder.theme.as_ref().map_or(&[][..], |t| &t.layouts[..]);
+        let more = LAYOUT_KEYS
+            .into_iter()
+            .chain(custom.iter().map(|l| Layout::Custom(l.name)))
+            .filter(|l| !keys.contains(l))
+            .collect();
+        (keys, more)
+    }
+
+    /// Opens the layout builder on `layout`, or the picked or playhead's layout: a channel
+    /// layout to edit, a built-in to start a new one from.
+    pub(super) fn open_builder(
+        &mut self,
+        layout: Option<Layout>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let folder = self.folder.read(cx);
+        if folder.brand_path().is_none() {
+            self.error = Some(
+                "Channel layouts live in a channel's brand: open a video of a channel to build \
+                 one"
+                .into(),
+            );
+            cx.notify();
+            return;
+        }
+        let theme = match &folder.theme {
+            Ok(theme) => theme.clone(),
+            Err(error) => {
+                self.error = Some(error.clone());
+                cx.notify();
+                return;
+            }
+        };
+        let span = self.map.span_at(self.playhead);
+        let picked = match self.lanes.picked {
+            Some(timeline::Pick::Layout(at, range)) => self
+                .map
+                .layout_runs()
+                .into_iter()
+                .find(|r| r.at == at && r.range == range)
+                .map(|r| r.layout),
+            _ => None,
+        };
+        let layout = layout
+            .or(picked)
+            .or(span.map(|s| s.layout))
+            .unwrap_or(folder.project.format.default_layout);
+        let editing = match layout {
+            Layout::Custom(name) => theme.layouts.iter().find(|l| l.name == name).cloned(),
+            _ => None,
+        };
+        let format = &folder.project.format;
+        let on_keys = editing.as_ref().is_none_or(|l| {
+            let name = Layout::Custom(l.name);
+            format.default_layout == name || format.other_layouts.contains(&name)
+        });
+        let input = crate::layouts::builder::BuilderInput {
+            dir: folder.dir.clone(),
+            frame: span.map(|s| {
+                (
+                    s.take.clone(),
+                    frame_time(s.source_frame(self.playhead), FPS),
+                )
+            }),
+            theme,
+            editing,
+            start: layout,
+            on_keys,
+        };
+        match crate::layouts::builder::open(input, cx) {
+            Ok((builder, window)) => cx
+                .subscribe(
+                    &builder,
+                    move |this, builder, save: &crate::layouts::builder::SaveRequest, cx| {
+                        let result = this.folder.update(cx, |folder, cx| {
+                            let result = folder.save_layout(save.layout.clone(), save.on_keys);
+                            cx.notify();
+                            result
+                        });
+                        match result {
+                            Ok(()) => {
+                                window
+                                    .update(cx, |_, window, _| window.remove_window())
+                                    .ok();
+                                this.wrote(Ok(()), cx);
+                            }
+                            Err(error) => builder.update(cx, |b, cx| b.failed(error, cx)),
+                        }
+                    },
+                )
+                .detach(),
+            Err(error) => {
+                self.error = Some(error);
+                cx.notify();
+            }
+        }
+    }
+
+    /// Sets `layout` over the selected words, else the picked layout stretch, else the stretch
+    /// between cuts at the playhead.
+    pub(super) fn set_layout_to(&mut self, layout: Layout, cx: &mut Context<Self>) {
         let target = match (self.selected(), self.lanes.picked) {
             (Some((at, range, ..)), _) => Some((at, range)),
             (None, Some(timeline::Pick::Layout(at, range))) => Some((at, range)),
@@ -835,6 +963,14 @@ impl Render for EditScreen {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &RecordTake, _, cx| this.go_record(cx)))
+            .on_action(cx.listener(|this, _: &EditSwitch, window, cx| {
+                this.open_switch_near_playhead(window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &BuildLayout, window, cx| {
+                    this.open_builder(None, window, cx)
+                }),
+            )
             .on_action(cx.listener(|this, _: &GoToEnd, _, cx| {
                 this.seek(this.map.frames);
                 cx.notify();

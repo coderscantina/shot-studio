@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use shot_core::{
-    Cut, Decision, Elements, Format, FormatLayer, Id, Lock, Micros, MigrateInput, Project, Script,
-    TakeAt, TimeRange, Transcript, Video, ZoomBy,
+    Brand, CustomLayout, Cut, Decision, Elements, Format, FormatLayer, Id, Layout, Lock, Micros,
+    MigrateInput, Project, Script, TakeAt, TimeRange, Transcript, Video, ZoomBy,
 };
 use shot_mcp::style::{self, Disk, Repo};
 use shot_render::theme::Theme;
@@ -46,6 +46,8 @@ pub struct VideoFolder {
 struct Snapshot {
     cut: Cut,
     format: Format,
+    /// The channel's `brand/brand.kdl` as written, for channel layouts; `None` without one.
+    brand: Option<String>,
 }
 
 /// How many writes undo can step back through.
@@ -300,10 +302,21 @@ impl VideoFolder {
         Snapshot {
             cut: self.project.cut.clone(),
             format: self.project.format.clone(),
+            brand: self
+                .brand_path()
+                .and_then(|path| fs::read_to_string(path).ok()),
         }
     }
 
     fn restore_snapshot(&mut self, snapshot: Snapshot) -> Result<(), String> {
+        if let Some(path) = self.brand_path()
+            && snapshot.brand != fs::read_to_string(&path).ok()
+        {
+            match &snapshot.brand {
+                Some(text) => write(&path, text)?,
+                None => fs::remove_file(&path).map_err(|e| format!("{}: {e}", path.display()))?,
+            }
+        }
         if snapshot.format != self.project.format {
             self.store_format(snapshot.format)?;
         }
@@ -428,6 +441,56 @@ impl VideoFolder {
         let imported = crate::place::add_lottie(&repo, source)?;
         self.rebuild_lock()?;
         Ok(imported)
+    }
+
+    /// The channel's `brand/brand.kdl`, where channel layouts live: `None` unless the video is
+    /// migrated in a channel repo, the only videos whose brand reaches the picture.
+    pub fn brand_path(&self) -> Option<PathBuf> {
+        self.style.as_ref()?.repo.as_ref()?;
+        Some(shot_render::theme::channel_root(&self.dir)?.join("brand/brand.kdl"))
+    }
+
+    /// The channel's brand as its file says, the empty brand before it has one.
+    pub fn channel_brand(&self) -> Result<Brand, String> {
+        let Some(path) = self.brand_path() else {
+            return Ok(Brand::default());
+        };
+        match fs::read_to_string(&path) {
+            Ok(text) => Brand::parse(&text).map_err(|e| format!("brand/brand.kdl:{e}")),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Brand::default()),
+            Err(e) => Err(format!("{}: {e}", path.display())),
+        }
+    }
+
+    /// Saves `layout` in the channel's brand, replacing the one of its name, and offers it on
+    /// the 1 to 4 keys through the video's format when `on_keys`, or stops offering it. One
+    /// change with undo.
+    pub fn save_layout(&mut self, layout: CustomLayout, on_keys: bool) -> Result<(), String> {
+        let path = self.brand_path().ok_or(
+            "Channel layouts live in a channel's brand, and this video is not a migrated video \
+             of a channel",
+        )?;
+        self.as_one_change(|folder| {
+            let mut brand = folder.channel_brand()?;
+            let name = Layout::Custom(layout.name);
+            brand.set_layout(layout);
+            if let Some(dir) = path.parent() {
+                fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+            }
+            write(&path, &brand.to_kdl())?;
+            let mut format = folder.project.format.clone();
+            let listed = format.other_layouts.contains(&name);
+            if on_keys && !listed && format.default_layout != name {
+                format.other_layouts.push(name);
+            } else if !on_keys && listed {
+                format.other_layouts.retain(|l| *l != name);
+            }
+            if format != folder.project.format {
+                folder.store_format(format)
+            } else {
+                folder.rebuild_lock()
+            }
+        })
     }
 
     pub fn media(&self, take: &Id, file: &str) -> PathBuf {
