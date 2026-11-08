@@ -2,6 +2,12 @@
 //! lane, Picture), the pop picker with the brand's stickers and the Lottie import, and the
 //! callout tool on the Picture preview. Every placement writes `cut.kdl` through
 //! [`crate::place`], and the brand's files for a Lottie.
+//!
+//! Each sound in the picker has a play button that plays it on its own ([`Audition`]), so a
+//! sound can be heard before it is placed. The picker stays open after a placement, so another
+//! sound can replace it on the same word.
+
+use std::time::Duration;
 
 use gpui::{Context, Div, FontWeight, PathPromptOptions, SharedString, div, prelude::*, px};
 use shot_core::{Id, Micros, TakeAt};
@@ -9,6 +15,7 @@ use shot_render::overlay::pop::EMOJI;
 
 use super::EditScreen;
 use crate::place::{self, LottieImport, Pop, SoundOrigin};
+use crate::sound::Audition;
 use crate::theme::*;
 use crate::ui::{self, kbd, label};
 
@@ -25,6 +32,10 @@ pub struct PlaceState {
     pub picker: Option<Picker>,
     /// Read when the sound picker opens.
     sounds: Vec<(Id, SoundOrigin)>,
+    /// Why sounds cannot be placed on this video, read when the sound picker opens.
+    blocked: Option<String>,
+    /// Plays a sound on its own, made with the first one played.
+    audition: Option<Audition>,
     /// The next click on the Picture preview places a callout.
     pub callout: bool,
     note: Option<String>,
@@ -39,8 +50,24 @@ impl EditScreen {
         place.callout = false;
         place.note = None;
         place.findings.clear();
+        place.stop_audition();
         if place.picker == Some(Picker::Sound) {
-            place.sounds = place::sounds(&self.folder.read(cx).dir);
+            let folder = self.folder.read(cx);
+            place.sounds = place::sounds(&folder.dir);
+            // A placed sound plays from the lock, which only a channel repo rebuilds.
+            place.blocked = match (&self.channel, folder.is_migrated()) {
+                (Some(_), true) => None,
+                (Some(_), false) => Some(format!(
+                    "Sounds are part of the style: run shot migrate --video {} once to place \
+                     them. You can listen to them now",
+                    folder.dir.display()
+                )),
+                (None, _) => Some(
+                    "Sounds are placed on a migrated video in a channel repo. You can listen \
+                     to them here"
+                        .into(),
+                ),
+            };
         }
         cx.notify();
     }
@@ -60,7 +87,50 @@ impl EditScreen {
         let open = self.place.picker.is_some() || self.place.callout;
         self.place.picker = None;
         self.place.callout = false;
+        self.place.stop_audition();
         open
+    }
+
+    /// Plays `sound` on its own, or stops it when it is the one playing. Pauses the preview.
+    fn audition(&mut self, sound: Id, cx: &mut Context<Self>) {
+        let place = &mut self.place;
+        let audition = place.audition.get_or_insert_with(Audition::spawn);
+        if audition.playing().as_ref() == Some(&sound) {
+            audition.stop();
+            cx.notify();
+            return;
+        }
+        let Some(source) = place::library(&self.folder.read(cx).dir).find(&sound) else {
+            place.note = Some(format!("{sound} is not in the sound folders any more"));
+            cx.notify();
+            return;
+        };
+        audition.play(sound, source);
+        if self.playing {
+            self.set_playing(false);
+        }
+        // Redraws when the sound ends, so its play button turns back.
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(50))
+                    .await;
+                let Ok(playing) = this.update(cx, |this, _| {
+                    this.place
+                        .audition
+                        .as_ref()
+                        .is_some_and(|a| a.playing().is_some())
+                }) else {
+                    return;
+                };
+                if !playing {
+                    this.update(cx, |_, cx| cx.notify()).ok();
+                    return;
+                }
+            }
+        })
+        .detach();
+        cx.notify();
     }
 
     /// Where a placement goes: the start of the selected words, else the playhead.
@@ -84,28 +154,32 @@ impl EditScreen {
     }
 
     pub(super) fn place_sound(&mut self, sound: Id, cx: &mut Context<Self>) {
-        let Some((at, t)) = self.moment() else {
+        if self.place.blocked.is_some() {
             return;
-        };
-        let Some(take) = self.take_of(at, cx) else {
+        }
+        let Some((take, t)) = self
+            .moment()
+            .and_then(|(at, t)| Some((self.take_of(at, cx)?, t)))
+        else {
+            self.place.note =
+                Some("The playhead is outside the takes. Move it onto a spoken word".into());
+            cx.notify();
             return;
         };
         let folder = self.folder.read(cx);
-        if !folder.is_migrated() {
-            self.place.note =
-                Some("Sounds are style: run shot migrate on this video to place them".into());
-            cx.notify();
-            return;
-        }
         match place::with_sound(
             &folder.project.cut,
             &take,
             folder.elements.get(&take),
             t,
-            sound,
+            sound.clone(),
         ) {
-            Ok(cut) => {
-                self.place.picker = None;
+            Ok((cut, word)) => {
+                self.place.stop_audition();
+                self.place.note = Some(format!(
+                    "Placed {sound} on \"{word}\". Press space to hear it in the \
+                     cut, or pick another sound to replace it"
+                ));
                 self.edit(cx, |_| Ok(cut));
             }
             Err(note) => {
@@ -188,6 +262,14 @@ impl EditScreen {
     }
 }
 
+impl PlaceState {
+    fn stop_audition(&self) {
+        if let Some(audition) = &self.audition {
+            audition.stop();
+        }
+    }
+}
+
 fn panel() -> Div {
     div()
         .flex()
@@ -238,19 +320,30 @@ pub fn note(this: &EditScreen) -> Option<Div> {
     })
 }
 
-/// The sounds a video can place, by where they come from. A click places the sound on the
-/// selected words, else at the playhead.
+/// The sounds a video can place, by where they come from. A click on a name places the sound
+/// on the selected words, else at the playhead; the play button next to it plays it alone.
 pub fn sound_picker(this: &EditScreen, cx: &mut Context<EditScreen>) -> Div {
-    let mut panel = panel().child(
-        div()
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .font_weight(FontWeight::MEDIUM)
-            .child("Sound")
-            .child(div().flex_1())
-            .child(kbd("esc")),
-    );
+    let place = &this.place;
+    let playing = place.audition.as_ref().and_then(Audition::playing);
+    let hint = match &place.blocked {
+        Some(blocked) => div().text_color(WARN).child(blocked.clone()),
+        None => div().text_color(MUTED).child(match this.selection {
+            Some(_) => "Click a sound to place it on the selected words",
+            None => "Click a sound to place it on the word at the playhead",
+        }),
+    };
+    let mut panel = panel()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .font_weight(FontWeight::MEDIUM)
+                .child("Sound")
+                .child(div().flex_1())
+                .child(kbd("esc")),
+        )
+        .child(hint.text_size(TEXT_XS));
     for origin in [SoundOrigin::Video, SoundOrigin::Brand, SoundOrigin::Bundled] {
         let names: Vec<&Id> = this
             .place
@@ -265,13 +358,71 @@ pub fn sound_picker(this: &EditScreen, cx: &mut Context<EditScreen>) -> Div {
         panel = panel
             .child(label(origin.label()).text_size(TEXT_XS))
             .child(chips().children(names.into_iter().map(|name| {
-                let sound = name.clone();
-                chip(format!("sound-{name}"), name.to_string()).on_click(
-                    cx.listener(move |this, _, _, cx| this.place_sound(sound.clone(), cx)),
+                sound_chip(
+                    name,
+                    playing.as_ref() == Some(name),
+                    place.blocked.is_none(),
+                    cx,
                 )
             })));
     }
-    panel.children(note(this))
+    let warnings = [
+        this.sound.warning(),
+        place.audition.as_ref().and_then(Audition::error),
+    ];
+    panel.children(note(this)).children(
+        warnings
+            .into_iter()
+            .flatten()
+            .map(|w| div().text_size(TEXT_XS).text_color(WARN).child(w)),
+    )
+}
+
+/// A sound's chip: a play button that plays it alone, lit while it plays, and its name, which
+/// places it when `placeable`.
+fn sound_chip(name: &Id, playing: bool, placeable: bool, cx: &mut Context<EditScreen>) -> Div {
+    let (listen, place) = (name.clone(), name.clone());
+    let play = div()
+        .id(gpui::ElementId::Name(format!("play-{name}").into()))
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(px(28.))
+        .rounded_l(RADIUS_SM)
+        .cursor_pointer()
+        .hover(|s| s.bg(FLOAT_ON))
+        .child(ui::icon(
+            if playing { "pause" } else { "play" },
+            ICON_SM,
+            if playing { ACCENT } else { MUTED },
+        ))
+        .on_click(cx.listener(move |this, _, _, cx| this.audition(listen.clone(), cx)));
+    let label = div()
+        .id(gpui::ElementId::Name(format!("sound-{name}").into()))
+        .flex()
+        .items_center()
+        .h_full()
+        .pl(px(2.))
+        .pr(px(10.))
+        .rounded_r(RADIUS_SM)
+        .child(name.to_string())
+        .when(placeable, |label| {
+            label
+                .cursor_pointer()
+                .hover(|s| s.bg(FLOAT_ON))
+                .on_click(cx.listener(move |this, _, _, cx| this.place_sound(place.clone(), cx)))
+        })
+        .when(!placeable, |label| label.text_color(MUTED));
+    div()
+        .flex()
+        .items_center()
+        .h(px(28.))
+        .rounded(RADIUS_SM)
+        .bg(if playing { FLOAT_ON } else { RAISED })
+        .border_1()
+        .border_color(if playing { ACCENT } else { RAISED })
+        .child(play)
+        .child(label)
 }
 
 /// The bundled animated emoji and the brand's stickers, placed at the playhead, and the
