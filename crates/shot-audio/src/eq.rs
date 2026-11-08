@@ -37,14 +37,12 @@ impl Biquad {
         )
     }
 
-    fn process(&mut self, samples: &mut [f32]) {
-        for s in samples {
-            let x = f64::from(*s);
-            let y = self.b[0] * x + self.z[0];
-            self.z[0] = self.b[1] * x - self.a[0] * y + self.z[1];
-            self.z[1] = self.b[2] * x - self.a[1] * y;
-            *s = y as f32;
-        }
+    fn step(&mut self, x: f32) -> f32 {
+        let x = f64::from(x);
+        let y = self.b[0] * x + self.z[0];
+        self.z[0] = self.b[1] * x - self.a[0] * y + self.z[1];
+        self.z[1] = self.b[2] * x - self.a[1] * y;
+        y as f32
     }
 }
 
@@ -59,9 +57,11 @@ impl Eq {
         ])
     }
 
+    /// Runs the stages one sample at a time, so the processor overlaps their dependency chains.
     pub(crate) fn process(&mut self, samples: &mut [f32]) {
-        for stage in &mut self.0 {
-            stage.process(samples);
+        let [first, second, third] = &mut self.0;
+        for s in samples {
+            *s = third.step(second.step(first.step(*s)));
         }
     }
 }

@@ -139,9 +139,8 @@ fn encoded_speech_stays_under_the_ceiling_at_the_target() {
         let loudness = meter.loudness().unwrap();
         let peak = meter.true_peak();
         println!(
-            "{name}: before encode {:.2} LUFS {:.2} dBTP, encoded {loudness:.2} LUFS {peak:.2} dBTP",
+            "{name}: before encode {:.2} LUFS, encoded {loudness:.2} LUFS {peak:.2} dBTP",
             finished.after.unwrap(),
-            finished.true_peak
         );
         if peak > CEILING_DBTP || (loudness - TARGET_LUFS).abs() > 0.5 {
             failures.push(name);

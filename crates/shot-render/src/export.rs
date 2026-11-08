@@ -14,13 +14,14 @@
 //!   thread while video renders. One continuous AAC stream has no encoder delay or padding at the
 //!   joins, so they cannot click or drift. Where the source jumps, the cut fades over 5 ms. The
 //!   voice chain, music bed and loudness of [`crate::voice`] finish it, and the encoded stream
-//!   is measured and finished again lower when it peaks over -1 dBTP.
+//!   is measured and finished again lower, from the same mix, when it peaks over -1 dBTP.
 //! - **Captions** of the main cut go next to the output as a WebVTT sidecar, `<out>.vtt`.
 //! - **Derived cuts** render in two passes, see [`crate::derived`]: the main chunks they draw
 //!   from first, then their own chunks from those.
 //! - **The join** runs alongside both. It writes one init segment, then copies each chunk's
-//!   fragments with shifted decode times as soon as the chunk is cached, with the audio packets
-//!   for the same span after each one as they come out of the encoder.
+//!   fragments with shifted decode times as soon as the chunk is cached, each followed by room
+//!   for the audio of the same span. The audio fills its room once it is encoded, so the video
+//!   is copied while the audio finishes.
 //!
 //! [0004]: ../../../docs/decisions/0004-proposals-as-branches.md
 
@@ -1647,36 +1648,45 @@ fn video_track(hvcc: Vec<u8>, canvas: Canvas) -> Track {
     })
 }
 
-/// The mic audio of every segment, in output order, as one AAC stream sent to `out` piece by
-/// piece. The first piece carries the format and no packets.
+/// The mic audio of every segment, in output order, as one AAC stream sent to `out`: first a
+/// piece with the format and no packets, at once, then the packets when they are final.
 ///
 /// The encoder's output peaks higher than its input, most on hard-limited transients such as
-/// many loud sound effects, by more than the limiter's codec headroom. So the stream is decoded
-/// and measured before it is sent, and finished again with the limiter lower by what it overshot
-/// until it is under [`CHECKED_CEILING_DBTP`].
+/// many loud sound effects, at times by more than the limiter's codec headroom. So the stream is
+/// decoded and measured before it is sent, and finished again with the limiter lower by what it
+/// overshot until it is under [`CHECKED_CEILING_DBTP`]. The chain and score run once; another
+/// attempt only finishes and encodes again.
 fn encode_audio(
     plan: &ExportPlan,
     media: &Media,
     score: &voice::Score,
     out: &mpsc::Sender<AacStream>,
 ) -> Result<(), ExportError> {
+    let encoder = || AacEncoder::new(SAMPLE_RATE, AUDIO_BITRATE).map_err(ExportError::AudioEncode);
+    // The format is the same for every attempt: the join starts with it.
+    let mut first = encoder()?;
+    let format = first.take();
+    out.send(format.clone())
+        .map_err(|_| ExportError::Cancelled)?;
+    let mut first = Some(first);
+
     let mut audio = plan_audio(&media.dir, plan);
+    let mut mixed = voice::Mixed::new(&mut audio, score)?;
     let mut ceiling = shot_audio::CEILING_DBTP;
-    for attempt in 0.. {
-        let mut encoder =
-            AacEncoder::new(SAMPLE_RATE, AUDIO_BITRATE).map_err(ExportError::AudioEncode)?;
-        let mut pieces = vec![encoder.take()];
-        voice::finish_under(&mut audio, score, ceiling, |samples| {
-            encoder.push(samples).map_err(ExportError::AudioEncode)?;
-            pieces.push(encoder.take());
-            Ok::<_, ExportError>(())
-        })?;
-        pieces.push(encoder.finish().map_err(ExportError::AudioEncode)?);
-        let peak = encoded_true_peak(&pieces, &media.dir)?;
+    for attempt in 0..ENCODE_ATTEMPTS {
+        let finished = mixed.finish(ceiling);
+        let mut encoder = match first.take() {
+            Some(first) => first,
+            None => encoder()?,
+        };
+        for block in finished.samples.chunks(SAMPLE_RATE as usize) {
+            encoder.push(block).map_err(ExportError::AudioEncode)?;
+        }
+        drop(finished);
+        let stream = encoder.finish().map_err(ExportError::AudioEncode)?;
+        let peak = encoded_true_peak(&stream, &media.dir)?;
         if peak <= CHECKED_CEILING_DBTP || attempt == ENCODE_ATTEMPTS - 1 {
-            return pieces
-                .into_iter()
-                .try_for_each(|piece| out.send(piece).map_err(|_| ExportError::Cancelled));
+            return out.send(stream).map_err(|_| ExportError::Cancelled);
         }
         ceiling -= peak - CHECKED_CEILING_DBTP + 0.1;
     }
@@ -1689,9 +1699,9 @@ const CHECKED_CEILING_DBTP: f64 = shot_audio::CEILING_DBTP - 0.2;
 /// Encodes at most, the last one sent whatever it measures.
 const ENCODE_ATTEMPTS: usize = 3;
 
-/// The true peak of the AAC `pieces` decoded, in dBTP. The stream is written to a scratch file
+/// The true peak of the AAC `stream` decoded, in dBTP. The stream is written to a scratch file
 /// in the video's cache for the system decoder to read, and removed.
-fn encoded_true_peak(pieces: &[AacStream], video_dir: &Path) -> Result<f64, ExportError> {
+fn encoded_true_peak(stream: &AacStream, video_dir: &Path) -> Result<f64, ExportError> {
     use std::io::Write;
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let path = video_dir.join(".shot/cache").join(format!(
@@ -1702,29 +1712,26 @@ fn encoded_true_peak(pieces: &[AacStream], video_dir: &Path) -> Result<f64, Expo
     let written = (|| {
         fs::create_dir_all(path.parent().expect("a parent"))?;
         let mut file = BufWriter::new(File::create(&path)?);
-        for piece in pieces {
-            let mut offset = 0;
-            for &size in &piece.sizes {
-                // An ADTS header: AAC-LC, 48 kHz (index 3), mono, no CRC.
-                let length = size as usize + 7;
-                file.write_all(&[
-                    0xff,
-                    0xf1,
-                    (1 << 6) | (3 << 2),
-                    (1 << 6) | (length >> 11) as u8,
-                    (length >> 3) as u8,
-                    ((length & 7) << 5) as u8 | 0x1f,
-                    0xfc,
-                ])?;
-                file.write_all(&piece.data[offset..offset + size as usize])?;
-                offset += size as usize;
-            }
+        let mut offset = 0;
+        for &size in &stream.sizes {
+            // An ADTS header: AAC-LC, 48 kHz (index 3), mono, no CRC.
+            let length = size as usize + 7;
+            file.write_all(&[
+                0xff,
+                0xf1,
+                (1 << 6) | (3 << 2),
+                (1 << 6) | (length >> 11) as u8,
+                (length >> 3) as u8,
+                ((length & 7) << 5) as u8 | 0x1f,
+                0xfc,
+            ])?;
+            file.write_all(&stream.data[offset..offset + size as usize])?;
+            offset += size as usize;
         }
         file.flush()
     })();
     let measured = written.map_err(io_error(&path)).and_then(|()| {
-        let packets: usize = pieces.iter().map(|p| p.sizes.len()).sum();
-        let total = (packets * AAC_PACKET_SAMPLES as usize) as u64;
+        let total = (stream.sizes.len() * AAC_PACKET_SAMPLES as usize) as u64;
         let mut reader =
             shot_media::audio::PcmReader::open(&path).map_err(|source| TimelineAudioError {
                 path: path.clone(),
@@ -1752,8 +1759,9 @@ fn encoded_true_peak(pieces: &[AacStream], video_dir: &Path) -> Result<f64, Expo
 }
 
 /// Writes the output: one init segment, then every chunk's video fragments by stream copy,
-/// each followed by the audio for the same span. Waits for chunks still rendering and for audio
-/// still encoding.
+/// each followed by room for the audio of the same span ([`AudioRoom`]). So the video is copied
+/// while the audio still finishes, and the audio goes into its room once it is encoded. Waits
+/// for chunks still rendering and for the audio.
 fn join(
     plan: &ExportPlan,
     cache: &Cache,
@@ -1807,7 +1815,7 @@ fn join(
     let file = File::create(&partial).map_err(io_error(&partial))?;
     let mut joiner =
         Joiner::new(BufWriter::with_capacity(1 << 22, file), &movie).map_err(io_error(&partial))?;
-    let mut packets = AudioPackets::new(format, audio, pending);
+    let mut room = AudioRoom::new(&movie, format.priming).map_err(io_error(&partial))?;
     for (output_frame, chunk) in plan.output_chunks() {
         let file = read(chunk)?;
         let path = cache.path(chunk.hash);
@@ -1819,101 +1827,172 @@ fn join(
         for fragment in &file.fragments {
             let base = start + fragment.base_time;
             joiner.copy(&mut source, fragment, 1, base)?;
-            packets.write_until(&mut joiner, Some(base + fragment.duration), &partial)?;
+            room.copied(fragment);
+            room.reserve(&mut joiner, base + fragment.duration)
+                .map_err(io_error(&partial))?;
         }
     }
-    packets.write_until(&mut joiner, None, &partial)?;
     let file = joiner
         .finish()
         .map_err(io_error(&partial))?
         .into_inner()
         .map_err(|error| io_error(&partial)(error.into_error()))?;
+
+    let mut stream = AacStream::default();
+    loop {
+        match audio.recv() {
+            Ok(piece) => {
+                stream.data.extend_from_slice(&piece.data);
+                stream.sizes.extend_from_slice(&piece.sizes);
+            }
+            // The encoder hung up: at the end of the stream, or because it failed.
+            Err(_) if pending.failed() => return Err(ExportError::Cancelled),
+            Err(_) => break,
+        }
+    }
+    room.fill(&file, &stream, &partial)?;
     file.sync_all().map_err(io_error(&partial))?;
     fs::rename(&partial, out).map_err(io_error(out))
 }
 
-/// Hands out the AAC stream in fragments that line up with the video, receiving packets from the
-/// encoder as they are needed.
-struct AudioPackets<'a> {
-    /// Every packet received so far.
-    stream: AacStream,
-    incoming: mpsc::Receiver<AacStream>,
-    ended: bool,
-    pending: &'a Pending,
-    /// The first packet not written yet, and its byte offset.
+/// The largest AAC-LC packet of one channel: 6144 bits.
+const MAX_AAC_PACKET: u32 = 768;
+
+/// The audio fragments of the output, placed before their packets are encoded: after each video
+/// fragment, a fragment for the packets that start before it ends, which only their timing
+/// decides. Each is written first with room for packets of [`MAX_AAC_PACKET`], then rewritten in
+/// place with the real packets; the unused room stays zeros at the end of its `mdat`. That room
+/// is about 0.3 % of a 4K export. The packets after the last video fragment are appended.
+struct AudioRoom {
+    priming: u32,
+    slots: Vec<Slot>,
+    /// The first packet without a slot, the next fragment's sequence number and where it
+    /// starts in the file.
     next: usize,
-    offset: usize,
+    sequence: u32,
+    offset: u64,
 }
 
-impl<'a> AudioPackets<'a> {
-    fn new(format: AacStream, incoming: mpsc::Receiver<AacStream>, pending: &'a Pending) -> Self {
-        Self {
-            stream: format,
-            incoming,
-            ended: false,
-            pending,
+/// An audio fragment written as room: where, its sequence number and its packets.
+struct Slot {
+    offset: u64,
+    sequence: u32,
+    packets: Range<usize>,
+}
+
+impl AudioRoom {
+    /// Room in a file the joiner starts with `movie`'s init segment.
+    fn new(movie: &Movie, priming: u32) -> io::Result<Self> {
+        let mut init = Vec::new();
+        mux::write_init(&mut init, movie)?;
+        Ok(Self {
+            priming,
+            slots: Vec::new(),
             next: 0,
-            offset: 0,
-        }
+            // The joiner numbers fragments from 1.
+            sequence: 1,
+            offset: init.len() as u64,
+        })
     }
 
-    /// Writes the packets that start before `video_time` on the output timeline, or all the
-    /// rest for `None`.
-    fn write_until<W: io::Write>(
-        &mut self,
-        joiner: &mut Joiner<W>,
-        video_time: Option<u64>,
-        path: &Path,
-    ) -> Result<(), ExportError> {
-        let priming = self.stream.priming;
-        // Presentation time of a packet: its media time minus the encoder delay.
-        let starts_before = |packet: usize| match video_time {
-            None => true,
-            Some(time) => {
-                let start = packet as i64 * i64::from(AAC_PACKET_SAMPLES) - i64::from(priming);
-                (start as i128) * i128::from(TIMESCALE) < (time as i128) * i128::from(SAMPLE_RATE)
-            }
-        };
+    /// Counts a fragment the joiner copied.
+    fn copied(&mut self, fragment: &mux::FragmentSpan) {
+        self.sequence += 1;
+        self.offset += u64::from(fragment.moof_size) + u64::from(fragment.mdat_size);
+    }
+
+    /// Whether packet `packet` starts before `video_time` on the output timeline: its media
+    /// time less the encoder delay.
+    fn starts_before(&self, packet: usize, video_time: u64) -> bool {
+        let start = packet as i64 * i64::from(AAC_PACKET_SAMPLES) - i64::from(self.priming);
+        (start as i128) * i128::from(TIMESCALE) < (video_time as i128) * i128::from(SAMPLE_RATE)
+    }
+
+    /// Writes room for the packets that start before `video_time` and have none yet.
+    fn reserve<W: io::Write>(&mut self, joiner: &mut Joiner<W>, video_time: u64) -> io::Result<()> {
         let first = self.next;
-        loop {
-            while self.next < self.stream.sizes.len() && starts_before(self.next) {
-                self.next += 1;
-            }
-            if self.next < self.stream.sizes.len() || self.ended {
-                break;
-            }
-            match self.incoming.recv() {
-                Ok(piece) => {
-                    self.stream.data.extend_from_slice(&piece.data);
-                    self.stream.sizes.extend_from_slice(&piece.sizes);
-                }
-                // The encoder hung up: at the end of the stream, or because it failed.
-                Err(_) if self.pending.failed() => return Err(ExportError::Cancelled),
-                Err(_) => self.ended = true,
-            }
+        let mut end = first;
+        while self.starts_before(end, video_time) {
+            end += 1;
         }
-        if self.next == first {
+        if end == first {
             return Ok(());
         }
-        let sizes = &self.stream.sizes[first..self.next];
-        let length: usize = sizes.iter().map(|&s| s as usize).sum();
-        let samples: Vec<mux::Sample> = sizes
-            .iter()
-            .map(|&size| mux::Sample {
-                size,
+        let samples = vec![
+            mux::Sample {
+                size: MAX_AAC_PACKET,
                 duration: AAC_PACKET_SAMPLES,
                 sync: true,
-            })
-            .collect();
-        joiner
-            .write(
+            };
+            end - first
+        ];
+        let base = first as u64 * u64::from(AAC_PACKET_SAMPLES);
+        let zeros = vec![0; (end - first) * MAX_AAC_PACKET as usize];
+        let mut room = Vec::with_capacity(zeros.len() + 128);
+        mux::write_fragment(&mut room, self.sequence, 2, base, &samples, &zeros)?;
+        joiner.write(2, base, &samples, &zeros)?;
+        self.slots.push(Slot {
+            offset: self.offset,
+            sequence: self.sequence,
+            packets: first..end,
+        });
+        self.sequence += 1;
+        self.offset += room.len() as u64;
+        self.next = end;
+        Ok(())
+    }
+
+    /// Writes `stream`'s packets into their room in `file`, and the rest at the end.
+    fn fill(&self, file: &File, stream: &AacStream, path: &Path) -> Result<(), ExportError> {
+        use std::os::unix::fs::FileExt;
+        let too_short = || MuxError::Format(path.display().to_string(), "audio ends before video");
+        let mut offsets = Vec::with_capacity(stream.sizes.len() + 1);
+        offsets.push(0usize);
+        for &size in &stream.sizes {
+            offsets.push(offsets.last().copied().unwrap_or(0) + size as usize);
+        }
+        let fragment = |packets: Range<usize>, sequence: u32| -> Result<Vec<u8>, ExportError> {
+            let sizes = stream.sizes.get(packets.clone()).ok_or_else(too_short)?;
+            let samples: Vec<mux::Sample> = sizes
+                .iter()
+                .map(|&size| mux::Sample {
+                    size,
+                    duration: AAC_PACKET_SAMPLES,
+                    sync: true,
+                })
+                .collect();
+            let mut bytes = Vec::new();
+            mux::write_fragment(
+                &mut bytes,
+                sequence,
                 2,
-                first as u64 * u64::from(AAC_PACKET_SAMPLES),
+                packets.start as u64 * u64::from(AAC_PACKET_SAMPLES),
                 &samples,
-                &self.stream.data[self.offset..self.offset + length],
+                &stream.data[offsets[packets.start]..offsets[packets.end]],
             )
             .map_err(io_error(path))?;
-        self.offset += length;
+            Ok(bytes)
+        };
+        for slot in &self.slots {
+            let mut bytes = fragment(slot.packets.clone(), slot.sequence)?;
+            let room = slot.packets.len() as u32 * MAX_AAC_PACKET;
+            let data = offsets[slot.packets.end] - offsets[slot.packets.start];
+            if data > room as usize {
+                return Err(
+                    MuxError::Format(path.display().to_string(), "AAC packet too large").into(),
+                );
+            }
+            // The `mdat` keeps the size of its room.
+            let mdat = bytes.len() - data - 8;
+            bytes[mdat..mdat + 4].copy_from_slice(&(room + 8).to_be_bytes());
+            file.write_all_at(&bytes, slot.offset)
+                .map_err(io_error(path))?;
+        }
+        if self.next < stream.sizes.len() {
+            let bytes = fragment(self.next..stream.sizes.len(), self.sequence)?;
+            file.write_all_at(&bytes, self.offset)
+                .map_err(io_error(path))?;
+        }
         Ok(())
     }
 }

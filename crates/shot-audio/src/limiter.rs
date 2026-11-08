@@ -4,8 +4,10 @@
 //! reconstructs count too. The gain reaches what a peak needs by the time the peak plays, over a
 //! linear attack of [`LOOKAHEAD`] samples, and recovers with an exponential release. The output
 //! runs [`LATENCY`] samples behind the input.
-
-use std::collections::VecDeque;
+//!
+//! The interpolation runs on blocks of [`BLOCK`] samples, eight outputs at a time with every
+//! phase in registers, so it vectorizes. Each value is summed in tap order as one sample at a
+//! time would, so the output does not depend on how the input is split.
 
 use crate::SAMPLE_RATE;
 
@@ -18,23 +20,32 @@ const LOOKAHEAD: usize = SAMPLE_RATE as usize / 200;
 const RELEASE_S: f32 = 0.050;
 /// Samples the output is delayed against the input.
 pub const LATENCY: usize = TAPS / 2 + LOOKAHEAD;
+/// Samples interpolated at a time.
+const BLOCK: usize = 1024;
+/// Interpolated values computed side by side.
+const LANES: usize = 8;
+/// Room for the sliding window's `LOOKAHEAD + 1` needed gains, a power of two to wrap cheaply.
+const NEEDED: usize = (LOOKAHEAD + 1).next_power_of_two();
 
 pub struct TruePeakLimiter {
     limit: f32,
     /// `phases[p][k]` weighs window sample `k` for the value `(p + 1) / 4` past the window's
     /// middle sample.
     phases: [[f32; TAPS]; PHASES],
-    /// The last `TAPS` inputs, written twice so the window is one slice.
-    window: [f32; 2 * TAPS],
-    head: usize,
+    /// The last `TAPS - 1` inputs, then the block being processed.
+    input: Box<[f32; TAPS - 1 + BLOCK]>,
+    /// Peak of the stretch from each block sample's window middle to the next.
+    peaks: Box<[f32; BLOCK]>,
     /// Peak of the stretch from the middle sample to the next, from the previous input.
     last_peak: f32,
     /// Gain each sample needs, as the lowest of a sliding window: (sample, gain) pairs with
-    /// rising gains.
-    needed: VecDeque<(u64, f32)>,
-    /// Inputs and held gains waiting for their turn, `LATENCY` and `LOOKAHEAD` long.
-    delay: VecDeque<f32>,
-    held: VecDeque<f32>,
+    /// rising gains, in a ring of `needed_len` from `needed_head`.
+    needed: Box<[(u64, f32); NEEDED]>,
+    needed_head: usize,
+    needed_len: usize,
+    /// Held gains of the last `LOOKAHEAD` samples and inputs of the last `LATENCY`, as rings.
+    held: Box<[f32; LOOKAHEAD]>,
+    delay: Box<[f32; LATENCY]>,
     held_sum: f64,
     released: f32,
     release: f32,
@@ -59,12 +70,14 @@ impl TruePeakLimiter {
         Self {
             limit: ceiling,
             phases,
-            window: [0.0; 2 * TAPS],
-            head: 0,
+            input: Box::new([0.0; TAPS - 1 + BLOCK]),
+            peaks: Box::new([0.0; BLOCK]),
             last_peak: 0.0,
-            needed: VecDeque::with_capacity(LOOKAHEAD + 2),
-            delay: VecDeque::from(vec![0.0; LATENCY]),
-            held: VecDeque::from(vec![1.0; LOOKAHEAD]),
+            needed: Box::new([(0, 1.0); NEEDED]),
+            needed_head: 0,
+            needed_len: 0,
+            held: Box::new([1.0; LOOKAHEAD]),
+            delay: Box::new([0.0; LATENCY]),
             held_sum: LOOKAHEAD as f64,
             released: 1.0,
             release: 1.0 - (-1.0 / (RELEASE_S * SAMPLE_RATE as f32)).exp(),
@@ -75,47 +88,128 @@ impl TruePeakLimiter {
     /// Limits `samples` in place; state carries across calls. Output sample `i` is input sample
     /// `i - LATENCY`.
     pub fn process(&mut self, samples: &mut [f32]) {
-        for s in samples {
-            *s = self.step(*s);
+        for block in samples.chunks_mut(BLOCK) {
+            let len = block.len();
+            self.input[TAPS - 1..TAPS - 1 + len].copy_from_slice(block);
+            interpolate(
+                &self.phases,
+                &self.input[..TAPS - 1 + len],
+                &mut self.peaks[..len],
+            );
+            for (j, s) in block.iter_mut().enumerate() {
+                *s = self.step(*s, self.peaks[j]);
+            }
+            self.input.copy_within(len..len + TAPS - 1, 0);
         }
     }
 
-    fn step(&mut self, x: f32) -> f32 {
-        self.window[self.head] = x;
-        self.window[self.head + TAPS] = x;
-        self.head = (self.head + 1) % TAPS;
-        let window = &self.window[self.head..self.head + TAPS];
-        let middle = window[TAPS / 2 - 1];
-        let mut peak = middle.abs().max(window[TAPS / 2].abs());
-        for phase in &self.phases {
-            let value: f32 = window.iter().zip(phase).map(|(x, w)| x * w).sum();
-            peak = peak.max(value.abs());
-        }
+    /// Takes input `x`, whose window peaks at `peak`, and returns the input `LATENCY` samples
+    /// back at the gain it needs.
+    fn step(&mut self, x: f32, peak: f32) -> f32 {
         // The middle sample touches the stretches before and after it.
         let need = (self.limit / peak.max(self.last_peak).max(f32::MIN_POSITIVE)).min(1.0);
         self.last_peak = peak;
 
-        while self.needed.back().is_some_and(|(_, g)| *g >= need) {
-            self.needed.pop_back();
-        }
-        self.needed.push_back((self.count, need));
-        while self
-            .needed
-            .front()
-            .is_some_and(|(at, _)| *at + (LOOKAHEAD as u64) < self.count)
+        let wrap = |i: usize| i & (NEEDED - 1);
+        while self.needed_len > 0
+            && self.needed[wrap(self.needed_head + self.needed_len - 1)].1 >= need
         {
-            self.needed.pop_front();
+            self.needed_len -= 1;
         }
-        self.count += 1;
-        let hold = self.needed.front().map_or(1.0, |(_, g)| *g);
+        self.needed[wrap(self.needed_head + self.needed_len)] = (self.count, need);
+        self.needed_len += 1;
+        while self.needed[self.needed_head].0 + (LOOKAHEAD as u64) < self.count {
+            self.needed_head = wrap(self.needed_head + 1);
+            self.needed_len -= 1;
+        }
+        let hold = self.needed[self.needed_head].1;
         self.released = hold.min(self.released + self.release * (1.0 - self.released));
 
-        self.held_sum += f64::from(self.released) - f64::from(self.held.pop_front().unwrap_or(1.0));
-        self.held.push_back(self.released);
+        let slot = (self.count % LOOKAHEAD as u64) as usize;
+        self.held_sum += f64::from(self.released) - f64::from(self.held[slot]);
+        self.held[slot] = self.released;
         let gain = (self.held_sum / LOOKAHEAD as f64) as f32;
 
-        self.delay.push_back(x);
-        self.delay.pop_front().unwrap_or(0.0) * gain
+        let slot = (self.count % LATENCY as u64) as usize;
+        let out = std::mem::replace(&mut self.delay[slot], x) * gain;
+        self.count += 1;
+        out
+    }
+}
+
+/// Fills `peaks`: for sample `j`, whose window is `input[j..j + TAPS]`, the largest of the
+/// window's two middle samples and the values interpolated between them.
+fn interpolate(phases: &[[f32; TAPS]; PHASES], input: &[f32], peaks: &mut [f32]) {
+    assert_eq!(
+        input.len(),
+        peaks.len() + TAPS - 1,
+        "a window for every peak"
+    );
+    #[cfg(target_arch = "aarch64")]
+    let done = {
+        let (lanes, _) = peaks.as_chunks_mut::<LANES>();
+        for (c, out) in lanes.iter_mut().enumerate() {
+            let window = input[c * LANES..][..TAPS + LANES - 1]
+                .try_into()
+                .expect("a window for every lane");
+            neon::lanes(phases, window, out);
+        }
+        lanes.len() * LANES
+    };
+    #[cfg(not(target_arch = "aarch64"))]
+    let done = 0;
+    for (j, peak) in peaks.iter_mut().enumerate().skip(done) {
+        let window = &input[j..j + TAPS];
+        let middle = window[TAPS / 2 - 1].abs().max(window[TAPS / 2].abs());
+        *peak = phases.iter().fold(middle, |peak, phase| {
+            let value = window
+                .iter()
+                .zip(phase)
+                .fold(0f32, |sum, (x, w)| sum + x * w);
+            peak.max(value.abs())
+        });
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+mod neon {
+    use std::arch::aarch64::*;
+
+    use super::{LANES, PHASES, TAPS};
+
+    /// [`super::interpolate`] for `LANES` peaks side by side, every phase in registers. Each
+    /// value is summed in tap order without fused multiply-adds, as the scalar path does.
+    pub(super) fn lanes(
+        phases: &[[f32; TAPS]; PHASES],
+        window: &[f32; TAPS + LANES - 1],
+        out: &mut [f32; LANES],
+    ) {
+        let x = window.as_ptr();
+        // SAFETY: NEON is part of every aarch64 target. Each load reads 4 samples from at most
+        // `TAPS - 1 + 4`, so the last one read is the window's last, `TAPS + LANES - 2`, and the
+        // stores write the `LANES` outputs.
+        unsafe {
+            let mut acc = [[vdupq_n_f32(0.0); 2]; PHASES];
+            for k in 0..TAPS {
+                let lo = vld1q_f32(x.add(k));
+                let hi = vld1q_f32(x.add(k + 4));
+                for (acc, phase) in acc.iter_mut().zip(phases) {
+                    acc[0] = vaddq_f32(acc[0], vmulq_n_f32(lo, phase[k]));
+                    acc[1] = vaddq_f32(acc[1], vmulq_n_f32(hi, phase[k]));
+                }
+            }
+            for half in 0..2 {
+                let at = half * 4;
+                let mut peak = vmaxq_f32(
+                    vabsq_f32(vld1q_f32(x.add(at + TAPS / 2 - 1))),
+                    vabsq_f32(vld1q_f32(x.add(at + TAPS / 2))),
+                );
+                for acc in &acc {
+                    peak = vmaxq_f32(peak, vabsq_f32(acc[half]));
+                }
+                vst1q_f32(out.as_mut_ptr().add(at), peak);
+            }
+        }
     }
 }
 

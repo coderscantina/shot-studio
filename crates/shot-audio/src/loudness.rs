@@ -7,16 +7,27 @@ use ebur128::{EbuR128, Mode};
 pub const TARGET_LUFS: f64 = -14.0;
 pub const CEILING_DBTP: f64 = -1.0;
 
-/// Margin under the ceiling for the AAC encode, whose output peaks higher than its input.
-pub const CODEC_HEADROOM_DB: f64 = 1.0;
+/// Margin under the ceiling for the AAC encode, whose output peaks higher than its input: by up
+/// to about 1 dB where many loud sound effects are held at the ceiling, so an export rarely
+/// needs a second encode.
+pub const CODEC_HEADROOM_DB: f64 = 1.5;
 
 /// Integrated loudness and true peak of a stream, EBU R128.
 pub struct Meter(EbuR128);
 
 impl Meter {
     pub fn new() -> Self {
+        Self::with(Mode::I | Mode::TRUE_PEAK)
+    }
+
+    /// A meter of integrated loudness alone, faster: its [`Meter::true_peak`] reads -inf.
+    pub fn loudness_only() -> Self {
+        Self::with(Mode::I)
+    }
+
+    fn with(mode: Mode) -> Self {
         Self(
-            EbuR128::new(1, SAMPLE_RATE, Mode::I | Mode::TRUE_PEAK)
+            EbuR128::new(1, SAMPLE_RATE, mode)
                 .expect("mono 48 kHz is a valid ebur128 configuration"),
         )
     }
