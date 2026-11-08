@@ -22,7 +22,8 @@ mod video;
 
 pub use brand::{
     Bookend, Brand, BundledFont, Camera, CameraShape, Colors, Font, Fonts, Import, LottieTemplate,
-    Motion, Phase, Preset, PresetName, Slot, SlotType, SoundEffect, SoundKey, Stinger,
+    Motion, OverlayPreset, Phase, Preset, PresetName, Slot, SlotType, SoundEffect, SoundKey,
+    Stinger,
 };
 pub use cut::{
     CaptionFix, Chapter, Clip, Cut, DerivedCut, DerivedKind, LayoutChange, Music, Overlay,

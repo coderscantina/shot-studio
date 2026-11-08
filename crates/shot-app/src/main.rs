@@ -22,6 +22,7 @@ mod about;
 mod agent;
 mod bench;
 mod board;
+mod brand;
 mod cut;
 mod edit;
 mod edit_bench;
@@ -115,6 +116,7 @@ fn init(cx: &mut gpui::App) {
     about::init(cx);
     welcome::init(cx);
     studio::bind_keys(cx);
+    brand::bind_keys(cx);
 }
 
 fn parse_args(args: impl Iterator<Item = String>) -> Result<Options, String> {

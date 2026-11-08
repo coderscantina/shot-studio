@@ -159,12 +159,27 @@ impl BoardWindow {
     }
 }
 
+impl BoardWindow {
+    /// Opens the channel's theme window on `section`.
+    fn open_brand(&mut self, section: crate::brand::Section, cx: &mut Context<Self>) {
+        if let Err(error) = crate::brand::open(&self.repo, section, cx) {
+            eprintln!("{}: {error}", self.repo.display());
+        }
+    }
+}
+
 impl Render for BoardWindow {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .size_full()
             .flex()
             .flex_col()
+            .on_action(cx.listener(|this, _: &crate::brand::OpenTheme, _, cx| {
+                this.open_brand(crate::brand::Section::Colors, cx)
+            }))
+            .on_action(cx.listener(|this, _: &crate::brand::OpenOverlays, _, cx| {
+                this.open_brand(crate::brand::Section::Overlays, cx)
+            }))
             .bg(FRAME)
             .text_color(TEXT)
             .font_family(SANS)
@@ -182,6 +197,21 @@ impl Render for BoardWindow {
                         div()
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(channel::name(&self.repo)),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        proposal_action(
+                            "open-theme",
+                            "Theme",
+                            None,
+                            Some("⌘⇧B"),
+                            ActionLook::Plain,
+                        )
+                        .h(px(30.))
+                        .flex_none()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.open_brand(crate::brand::Section::Colors, cx)
+                        })),
                     ),
             )
             .child(
