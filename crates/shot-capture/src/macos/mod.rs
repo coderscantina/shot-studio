@@ -8,27 +8,33 @@ mod tap;
 mod writer;
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use objc2::rc::Retained;
 use objc2_core_graphics::{CGGetActiveDisplayList, CGMainDisplayID};
-use objc2_core_media::{CMClock, CMSyncConvertTime};
+use objc2_core_media::{CMClock, CMSampleBuffer, CMSyncConvertTime};
 use shot_core::{Id, Micros};
 
 use self::av::{AvCapture, Kind};
 use self::event_tap::EventTap;
 pub use self::event_tap::Marks;
 use self::screen::Screen;
+use self::sink::Handler;
 use self::tap::Sources;
 pub use self::tap::{Preview, PreviewFrame};
 use self::writer::{Spec, Track};
-use crate::{CaptureError, Devices, Display, SessionConfig, Take};
+use crate::clock::nanos;
+use crate::{
+    Access, CaptureError, Devices, Display, Permission, SessionConfig, Source, Take, peak_dbfs,
+};
 
 /// HEVC bits per pixel per frame. Screen text needs more than camera footage.
 const SCREEN_BPP: f64 = 0.1;
 const CAMERA_BPP: f64 = 0.08;
 const CAMERA_FPS: u32 = 30;
+/// The screen's frame rate before a take: enough to check it, at half the cost.
+const STANDBY_FPS: u32 = 30;
 
 /// A recording in progress. Dropping it without [`Session::stop`] leaves the files as a crash
 /// would: playable up to the last fragment.
@@ -100,6 +106,31 @@ impl Session {
             .map(|(_, t, _)| t.clone())
             .chain(mic.iter().map(|(_, t, _)| t.clone()))
             .collect();
+        let camera = camera.map(|(device, track, latest)| {
+            let handler: Handler = Box::new(move |sample: &CMSampleBuffer| {
+                if let Some(image) = unsafe { sample.image_buffer() } {
+                    latest.store(image);
+                }
+                track.push(sample)
+            });
+            (device, handler)
+        });
+        let mic = mic.map(|(device, track, tap)| {
+            let tap = tap.map(Mutex::new);
+            let handler: Handler = Box::new(move |sample: &CMSampleBuffer| {
+                track.push(sample);
+                if let (Some(tap), Some(clock)) = (&tap, track.clock()) {
+                    let pts = unsafe { sample.presentation_time_stamp() };
+                    if let (Some(at), Some((samples, rate))) = (
+                        clock.media_time(nanos(pts.value, pts.timescale)),
+                        av::mono(sample),
+                    ) {
+                        (tap.lock().expect("mic tap poisoned"))(at, &samples, rate);
+                    }
+                }
+            });
+            (device, handler)
+        });
 
         let started = (|| {
             let mut screen =
@@ -219,6 +250,117 @@ impl Session {
             events,
             duration,
         })
+    }
+}
+
+/// The selected sources running without recording, so the Record screen can show them before
+/// a take: the screen at [`STANDBY_FPS`] and scaled to the preview's size, the camera, and the
+/// mic's peak level. Nothing is written. A source that fails is left out and its error kept, so
+/// a denied camera still shows the screen. Dropping it stops every source.
+///
+/// A [`Session`] can start while a standby runs on the same devices, so the preview can hand
+/// over to the recording without a gap.
+pub struct Standby {
+    screen: Option<screen::Stream>,
+    av: Option<AvCapture>,
+    frames: Sources,
+    errors: Vec<CaptureError>,
+}
+
+impl Standby {
+    /// Starts `display` (the main one for `None`), `camera` and `mic`. Asks for camera and mic
+    /// access when macOS has not asked yet, which waits for the answer. `on_peak` gets the
+    /// mic's peak of each buffer in dBFS, on the mic's capture queue.
+    pub fn start(
+        display: Option<u32>,
+        camera: &Source,
+        mic: &Source,
+        on_peak: impl Fn(f32) + Send + Sync + 'static,
+    ) -> Self {
+        let frames = Sources::default();
+        let mut errors = Vec::new();
+        let screen = (|| {
+            screen::check_permission()?;
+            let display = screen::display_id(display);
+            let (width, height, _) =
+                screen::pixel_mode(display).ok_or(CaptureError::NoDisplay(display))?;
+            let size = tap::fit(width, height, tap::SCREEN_MAX);
+            screen::Stream::start(display, size, STANDBY_FPS, frames.screen.clone(), None)
+        })();
+        let screen = screen.map_err(|e| errors.push(e)).ok();
+        let mut device = |kind, source| {
+            av::resolve(kind, source)
+                .and_then(|device| {
+                    if device.is_some() {
+                        av::authorize(kind)?;
+                    }
+                    Ok(device)
+                })
+                .map_err(|e| errors.push(e))
+                .ok()
+                .flatten()
+        };
+        let camera = device(Kind::Camera, camera).map(|device| {
+            let latest = frames.camera.clone();
+            let handler: Handler = Box::new(move |sample: &CMSampleBuffer| {
+                if let Some(image) = unsafe { sample.image_buffer() } {
+                    latest.store(image);
+                }
+            });
+            (device, handler)
+        });
+        let mic = device(Kind::Mic, mic).map(|device| {
+            let handler: Handler = Box::new(move |sample: &CMSampleBuffer| {
+                if let Some((samples, _)) = av::mono(sample) {
+                    on_peak(peak_dbfs(&samples));
+                }
+            });
+            (device, handler)
+        });
+        let av = match (camera.is_some(), mic.is_some()) {
+            (false, false) => None,
+            _ => AvCapture::start(camera, mic)
+                .map_err(|e| errors.push(e))
+                .ok(),
+        };
+        Self {
+            screen,
+            av,
+            frames,
+            errors,
+        }
+    }
+
+    /// A live preview of the screen and the camera, like [`Session::preview`].
+    pub fn preview(&self) -> Preview {
+        Preview::start(self.frames.clone())
+    }
+
+    /// Why a source did not start.
+    pub fn errors(&self) -> &[CaptureError] {
+        &self.errors
+    }
+}
+
+impl Drop for Standby {
+    fn drop(&mut self) {
+        if let Some(screen) = &self.screen {
+            screen.stop();
+        }
+        if let Some(av) = &self.av {
+            av.stop();
+        }
+    }
+}
+
+/// Whether the app may use what `permission` guards, without asking.
+pub fn access(permission: Permission) -> Access {
+    let allowed = |yes| if yes { Access::Allowed } else { Access::Denied };
+    match permission {
+        Permission::ScreenRecording => screen::access(),
+        Permission::InputMonitoring => allowed(event_tap::allowed()),
+        Permission::Camera => av::access(Kind::Camera),
+        Permission::Microphone => av::access(Kind::Mic),
     }
 }
 

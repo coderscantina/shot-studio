@@ -1,8 +1,13 @@
-//! The Record screen: device pickers, tracks with live levels, the transcript as stable words
-//! arrive from the mic, elapsed time, start and stop.
+//! The Record screen: device pickers, tracks with live levels and their privacy access, the
+//! transcript as stable words arrive from the mic, elapsed time, start and stop.
 //!
-//! A recorder thread owns the capture session from start to stop, so the session never moves
-//! between threads. Starting loads the speech model first (downloading it on first use), then
+//! While the screen shows, the selected inputs run on standby: the stage previews them (styled
+//! by a [`Rehearsal`] or raw) and the mic drives the meter, so everything can be checked before
+//! a take. Leaving the screen or closing the window stops them, and the camera light with them.
+//!
+//! A recorder thread owns the standby and the capture session from start to stop, so neither
+//! moves between threads. The standby keeps the stage live while the models load and hands
+//! over once the take's own preview shows, so recording starts without a gap. Starting loads the speech model first (downloading it on first use), then
 //! starts capture with a mic tap feeding the transcriber, and the live take ([`crate::live`]),
 //! which streams the take's elements and paints the styled monitor. A switch shows the raw feed
 //! instead. Stopping finishes the take, flushes the transcript to the cache, writes the take's
@@ -27,12 +32,13 @@ use shot_analyze::elements::{self, Depth};
 use shot_analyze::{SpeechDetector, Transcriber, cache, models};
 use shot_capture::events::Hotkey;
 use shot_capture::{
-    CaptureError, Devices, Permission, Preview, PreviewFrame, Session, SessionConfig, Source,
+    Access, CaptureError, Devices, Permission, Preview, PreviewFrame, Session, SessionConfig,
+    Source, Standby,
 };
 use shot_core::{Id, Micros, Transcript};
 
 use crate::folder::VideoFolder;
-use crate::live::{Feeds, Heard, LiveTake, Setup, View};
+use crate::live::{Feeds, Heard, LiveTake, Rehearsal, Setup, View};
 use crate::prompter::{Live, PrompterPane, TogglePrompter};
 use crate::theme::*;
 use crate::ui::{self, alert, hint, icon, label, mono};
@@ -128,8 +134,18 @@ struct Choice {
 }
 
 enum Command {
+    /// Runs the chosen inputs on standby for the next take, replacing any standby.
+    Watch(Box<Setup>, Id, Choice),
+    /// Stops the standby.
+    Rest,
     Start(Box<Setup>, Choice, Arc<Live>, Vec<Hotkey>),
     Stop,
+}
+
+/// The inputs on standby and the style painted over them. The painter stops first.
+struct Inputs {
+    _rehearsal: Rehearsal,
+    _capture: Standby,
 }
 
 /// State the recorder thread shares with the screen.
@@ -137,11 +153,13 @@ struct Shared {
     phase: Mutex<Phase>,
     words: Mutex<Vec<String>>,
     /// Mic peak of the last buffer in dBFS, as f32 bits.
-    level: AtomicU32,
-    /// The running session's live frames, while there is one.
+    level: Arc<AtomicU32>,
+    /// The live frames of the standby or the running session, while there is one.
     preview: Mutex<Option<Preview>>,
-    /// The styled monitor of the running take, while there is one.
+    /// The styled monitor of the standby or the running take, while there is one.
     monitor: Mutex<Option<Arc<View>>>,
+    /// Why an input on standby did not start, other than a missing permission.
+    standby_error: Mutex<Option<String>>,
     /// Whether the monitor shows the style or the raw feed.
     styled: Arc<AtomicBool>,
 }
@@ -149,6 +167,35 @@ struct Shared {
 impl Shared {
     fn set(&self, phase: Phase) {
         *self.phase.lock().expect("recorder phase") = phase;
+    }
+
+    /// Shows `preview` and `monitor` on the stage, or nothing.
+    fn show(&self, live: Option<(Preview, Arc<View>)>) {
+        let (preview, monitor) = live.unzip();
+        *self.preview.lock().expect("preview") = preview;
+        *self.monitor.lock().expect("monitor") = monitor;
+        self.level
+            .store(f32::NEG_INFINITY.to_bits(), Ordering::Relaxed);
+    }
+}
+
+/// The privacy access of each source, read again while the screen shows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Permissions {
+    screen: Access,
+    camera: Access,
+    mic: Access,
+    events: Access,
+}
+
+impl Permissions {
+    fn read() -> Self {
+        Self {
+            screen: shot_capture::access(Permission::ScreenRecording),
+            camera: shot_capture::access(Permission::Camera),
+            mic: shot_capture::access(Permission::Microphone),
+            events: shot_capture::access(Permission::InputMonitoring),
+        }
     }
 }
 
@@ -174,6 +221,9 @@ pub struct RecordScreen {
     display_names: Vec<(u32, String)>,
     /// The screen is showing: set on its first render, cleared when focus leaves it.
     on_screen: bool,
+    /// The redraw loop of the standby runs.
+    ticking: bool,
+    permissions: Permissions,
     _focus_out: Option<Subscription>,
 }
 
@@ -199,9 +249,10 @@ impl RecordScreen {
         let shared = Arc::new(Shared {
             phase: Mutex::new(Phase::Idle),
             words: Mutex::new(Vec::new()),
-            level: AtomicU32::new(f32::NEG_INFINITY.to_bits()),
+            level: Arc::new(AtomicU32::new(f32::NEG_INFINITY.to_bits())),
             preview: Mutex::new(None),
             monitor: Mutex::new(None),
+            standby_error: Mutex::new(None),
             styled: Arc::new(AtomicBool::new(true)),
         });
         let (commands, rx) = mpsc::channel();
@@ -226,8 +277,69 @@ impl RecordScreen {
             prompter,
             display_names: crate::prompter::display_names(),
             on_screen: false,
+            ticking: false,
+            permissions: Permissions::read(),
             _focus_out: None,
         }
+    }
+
+    fn setup(&self, cx: &App) -> Setup {
+        let folder = self.folder.read(cx);
+        Setup {
+            dir: folder.dir.clone(),
+            project: folder.project.clone(),
+            migrated: folder.is_migrated(),
+        }
+    }
+
+    /// Runs the chosen inputs on standby, and redraws the stage while the screen shows.
+    fn watch(&mut self, cx: &mut Context<Self>) {
+        self.permissions = Permissions::read();
+        self.restart(cx);
+        if self.ticking {
+            return;
+        }
+        self.ticking = true;
+        cx.spawn(async move |this, cx| {
+            let mut tick = 0u32;
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(33))
+                    .await;
+                tick += 1;
+                let Ok(on_screen) = this.update(cx, |this, cx| {
+                    // While a take runs, its own poll redraws.
+                    if this.on_screen && matches!(this.phase(), Phase::Idle | Phase::Failed(_)) {
+                        // Access changes in System Settings; a granted source starts.
+                        if tick.is_multiple_of(30) {
+                            let now = Permissions::read();
+                            if now != this.permissions {
+                                this.permissions = now;
+                                this.restart(cx);
+                            }
+                        }
+                        cx.notify();
+                    }
+                    this.on_screen
+                }) else {
+                    break;
+                };
+                if !on_screen {
+                    this.update(cx, |this, _| this.ticking = false).ok();
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Starts the standby with the current choice.
+    fn restart(&mut self, cx: &mut Context<Self>) {
+        let setup = self.setup(cx);
+        let take = self.next_take(cx);
+        let _ = self
+            .commands
+            .send(Command::Watch(Box::new(setup), take, self.choice.clone()));
     }
 
     fn phase(&self) -> Phase {
@@ -248,12 +360,7 @@ impl RecordScreen {
             Phase::Idle | Phase::Failed(_) | Phase::Finished { .. } => {
                 self.shared.words.lock().expect("words").clear();
                 self.error = None;
-                let folder = self.folder.read(cx);
-                let setup = Setup {
-                    dir: folder.dir.clone(),
-                    project: folder.project.clone(),
-                    migrated: folder.is_migrated(),
-                };
+                let setup = self.setup(cx);
                 self.shared.set(Phase::Loading);
                 let (live, hotkeys) = self.prompter.update(cx, |prompter, cx| {
                     prompter.reset(cx);
@@ -313,14 +420,30 @@ impl RecordScreen {
                                     this.shared.set(Phase::Idle);
                                     cx.emit(Recorded);
                                 }
-                                Err(error) => this.error = Some(error.into()),
+                                Err(error) => {
+                                    this.error = Some(error.into());
+                                    this.shared.set(Phase::Idle);
+                                    this.restart(cx);
+                                }
                             }
                             cx.notify();
                         })
                         .ok();
                         break;
                     }
-                    Phase::Idle | Phase::Failed(_) => break,
+                    Phase::Failed(_) => {
+                        // A take that failed before capture keeps the standby; one that failed later starts it again.
+                        this.update(cx, |this, cx| {
+                            if this.on_screen
+                                && this.shared.preview.lock().expect("preview").is_none()
+                            {
+                                this.restart(cx);
+                            }
+                        })
+                        .ok();
+                        break;
+                    }
+                    Phase::Idle => break,
                     _ => {}
                 }
             }
@@ -355,18 +478,88 @@ fn free_space(dir: &std::path::Path) -> Option<u64> {
 }
 
 fn recorder(commands: Receiver<Command>, shared: &Shared) {
+    let mut standby: Option<Inputs> = None;
     while let Ok(command) = commands.recv() {
-        let Command::Start(setup, choice, live, hotkeys) = command else {
-            continue;
-        };
-        match record(*setup, choice, &live, hotkeys, &commands, shared) {
-            Ok((take, duration)) => shared.set(Phase::Finished { take, duration }),
-            Err(error) => shared.set(Phase::Failed(error)),
+        match command {
+            Command::Watch(setup, take, choice) => {
+                // The old inputs stop before the new ones start on the same devices.
+                drop(standby.take());
+                shared.show(None);
+                standby = Some(watch(*setup, take, &choice, shared));
+            }
+            Command::Rest => {
+                standby = None;
+                shared.show(None);
+                shared.standby_error.lock().expect("standby error").take();
+            }
+            Command::Start(setup, choice, live, hotkeys) => {
+                let result = record(
+                    *setup,
+                    choice,
+                    &live,
+                    hotkeys,
+                    &commands,
+                    shared,
+                    &mut standby,
+                );
+                match result {
+                    Ok((take, duration)) => shared.set(Phase::Finished { take, duration }),
+                    Err(error) => shared.set(Phase::Failed(error)),
+                }
+            }
+            Command::Stop => {}
         }
     }
 }
 
-/// Records one take, from loading the model to the cached transcript.
+/// Starts `choice` on standby and shows it on the stage.
+fn watch(setup: Setup, take: Id, choice: &Choice, shared: &Shared) -> Inputs {
+    let level = shared.level.clone();
+    let capture = Standby::start(
+        choice.display,
+        &choice.camera.clone().map_or(Source::Off, Source::Named),
+        &choice.mic.clone().map_or(Source::Off, Source::Named),
+        move |peak| level.store(peak.to_bits(), Ordering::Relaxed),
+    );
+    // Missing permissions show in Tracks; anything else above the stage.
+    *shared.standby_error.lock().expect("standby error") = capture
+        .errors()
+        .iter()
+        .find(|e| !matches!(e, CaptureError::Permission(_)))
+        .map(ToString::to_string);
+    let preview = capture.preview();
+    let rehearsal = Rehearsal::start(
+        setup,
+        take,
+        preview.clone(),
+        screen_size(choice.display),
+        shared.styled.clone(),
+    );
+    shared.show(Some((preview, rehearsal.view())));
+    Inputs {
+        _rehearsal: rehearsal,
+        _capture: capture,
+    }
+}
+
+/// The pixel size of `display`, or of the main display.
+fn screen_size(display: Option<u32>) -> (u32, u32) {
+    shot_capture::list_devices()
+        .displays
+        .iter()
+        .find(|d| display.map_or(d.main, |id| d.id == id))
+        .map_or((16, 9), |d| (d.width as u32, d.height as u32))
+}
+
+/// Whether the take's own preview shows what the standby showed, so the standby can stop.
+fn caught_up(preview: &Preview, view: &View, camera: bool, styled: bool) -> bool {
+    preview.screen().is_some()
+        && (!camera || preview.camera().is_some())
+        && (!styled || view.frame().is_some() || view.error().is_some())
+}
+
+/// Records one take, from loading the model to the cached transcript. The standby keeps the
+/// stage live until the take's preview catches up, and stops then.
 fn record(
     setup: Setup,
     choice: Choice,
@@ -374,6 +567,7 @@ fn record(
     hotkeys: Vec<Hotkey>,
     commands: &Receiver<Command>,
     shared: &Shared,
+    standby: &mut Option<Inputs>,
 ) -> Result<(Id, Micros), Failure> {
     let dir = setup.dir.clone();
     let dir = dir.as_path();
@@ -434,21 +628,24 @@ fn record(
         None => None,
     };
 
+    let camera_on = choice.camera.is_some();
     let mut config = SessionConfig::new(dir);
     config.display = choice.display;
     config.camera = choice.camera.map_or(Source::Off, Source::Named);
     config.mic = choice.mic.map_or(Source::Off, Source::Named);
     config.system_audio = choice.system_audio;
     config.hotkeys = hotkeys;
-    let level = Arc::new(AtomicU32::new(f32::NEG_INFINITY.to_bits()));
+    let level = shared.level.clone();
     let transcriber = transcriber.map(|(transcriber, sink, listener)| {
         let tap = transcriber.clone();
         let speech = speech.clone();
         let level = level.clone();
         // The tap owns the listener, so voice follow stops with the mic.
         config.mic_tap = Some(Box::new(move |t, samples, rate| {
-            let peak = samples.iter().fold(0f32, |p, s| p.max(s.abs()));
-            level.store((20.0 * peak.max(1e-6).log10()).to_bits(), Ordering::Relaxed);
+            level.store(
+                shot_capture::peak_dbfs(samples).to_bits(),
+                Ordering::Relaxed,
+            );
             tap.feed(t, samples, rate);
             listener.feed(samples, rate);
             if let Some(speech) = &speech {
@@ -457,26 +654,25 @@ fn record(
         }));
         (transcriber, sink)
     });
-    let screen_size = shot_capture::list_devices()
-        .displays
-        .iter()
-        .find(|d| choice.display.map_or(d.main, |id| d.id == id))
-        .map_or((16, 9), |d| (d.width as u32, d.height as u32));
+    let screen_size = screen_size(choice.display);
     let session = Session::start(config)?;
     let origin = Instant::now() - Duration::from_micros(session.elapsed().0);
     live.set_marks(Some(session.marks()));
     let preview = session.preview();
-    *shared.preview.lock().expect("preview") = Some(preview.clone());
     live_take.record(Feeds {
         take: session.id().clone(),
         origin,
-        preview,
+        preview: preview.clone(),
         screen_size,
         heard: heard_rx,
         styled: shared.styled.clone(),
         prompter: live.clone(),
     });
-    *shared.monitor.lock().expect("monitor") = Some(live_take.view());
+    let view = live_take.view();
+    let switched = Instant::now();
+    if standby.is_none() {
+        shared.show(Some((preview.clone(), view.clone())));
+    }
     shared.set(Phase::Recording {
         take: session.id().clone(),
         started: Instant::now(),
@@ -486,17 +682,25 @@ fn record(
     loop {
         match commands.recv_timeout(Duration::from_millis(16)) {
             Ok(Command::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            Ok(Command::Start(..)) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+            // Leaving the screen waits for the take: the title bar stays put while recording.
+            Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
         if let Some((_, sink)) = &transcriber {
             sink.drain_into(&shared.words);
         }
         live.lock().tick(last.elapsed());
         last = Instant::now();
-        shared
-            .level
-            .store(level.load(Ordering::Relaxed), Ordering::Relaxed);
+        let styled = shared.styled.load(Ordering::Relaxed);
+        if standby.is_some()
+            && (caught_up(&preview, &view, camera_on, styled)
+                || switched.elapsed() > Duration::from_secs(2))
+        {
+            *shared.preview.lock().expect("preview") = Some(preview.clone());
+            *shared.monitor.lock().expect("monitor") = Some(view.clone());
+            *standby = None;
+        }
     }
+    *standby = None;
     shared.set(Phase::Finishing);
     live.set_marks(None);
     shared.preview.lock().expect("preview").take();
@@ -605,10 +809,7 @@ impl Render for RecordScreen {
         if let Phase::Failed(error) = &phase {
             self.error.get_or_insert_with(|| error.clone());
         }
-        let busy = !matches!(
-            phase,
-            Phase::Idle | Phase::Failed(_) | Phase::Finished { .. }
-        );
+        let busy = busy_stage(&phase);
         let has_beats = self
             .folder
             .read(cx)
@@ -657,10 +858,12 @@ impl RecordScreen {
             self._focus_out = Some(cx.on_focus_out(&self.focus, window, |this, _, window, cx| {
                 if window.is_window_active() {
                     this.on_screen = false;
+                    let _ = this.commands.send(Command::Rest);
                     this.prompter.update(cx, |prompter, cx| prompter.leave(cx));
                 }
             }));
         }
+        self.watch(cx);
         if has_beats {
             let display = window
                 .display(cx)
@@ -709,8 +912,7 @@ impl RecordScreen {
                 .map_or("Off".to_owned(), |d| d.name.clone())
         };
         let level = f32::from_bits(self.shared.level.load(Ordering::Relaxed));
-        let recording = self.is_recording();
-        let camera_black = recording
+        let camera_black = self.choice.camera.is_some()
             && self
                 .shared
                 .monitor
@@ -736,15 +938,18 @@ impl RecordScreen {
             .p(px(12.))
             .overflow_y_scroll()
             .child(label("Tracks").px(px(4.)).pt(px(2.)).pb(px(6.)))
-            .child(self.source(
-                Picker::Display,
-                "display",
-                "Screen",
-                display.map_or(String::new(), |d| format!("{}x{}", d.width, d.height)),
-                display.map_or("No display".into(), |d| self.screen_name(d)),
-                busy,
-                cx,
-            ))
+            .child(
+                self.source(
+                    Picker::Display,
+                    "display",
+                    "Screen",
+                    display.map_or(String::new(), |d| format!("{}x{}", d.width, d.height)),
+                    display.map_or("No display".into(), |d| self.screen_name(d)),
+                    busy,
+                    cx,
+                )
+                .child(access(Permission::ScreenRecording, self.permissions.screen)),
+            )
             .child(
                 self.source(
                     Picker::Camera,
@@ -755,6 +960,9 @@ impl RecordScreen {
                     busy,
                     cx,
                 )
+                .when(self.choice.camera.is_some(), |card| {
+                    card.child(access(Permission::Camera, self.permissions.camera))
+                })
                 .when(camera_black, |card| {
                     card.child(
                         div()
@@ -769,7 +977,7 @@ impl RecordScreen {
                     Picker::Mic,
                     "mic",
                     "Mic",
-                    if recording && level.is_finite() {
+                    if level.is_finite() {
                         format!("{level:.0} dB")
                     } else {
                         String::new()
@@ -778,7 +986,10 @@ impl RecordScreen {
                     busy,
                     cx,
                 )
-                .child(meter(if recording { level } else { f32::NEG_INFINITY })),
+                .when(self.choice.mic.is_some(), |card| {
+                    card.child(meter(level))
+                        .child(access(Permission::Microphone, self.permissions.mic))
+                }),
             )
             .child(
                 card().child(
@@ -805,7 +1016,8 @@ impl RecordScreen {
             .child(
                 card()
                     .child(card_head("cursor", "Cursor and keys", "events".into()))
-                    .child(card_value("Zooms and ripples stay editable")),
+                    .child(card_value("Zooms and ripples stay editable"))
+                    .child(access(Permission::InputMonitoring, self.permissions.events)),
             )
             .child(
                 div()
@@ -922,6 +1134,7 @@ impl RecordScreen {
                                     Picker::Camera => this.choice.camera = id.clone(),
                                     Picker::Mic => this.choice.mic = id.clone(),
                                 }
+                                this.restart(cx);
                                 this.open = None;
                                 cx.stop_propagation();
                                 cx.notify();
@@ -1009,6 +1222,15 @@ impl RecordScreen {
                     ),
             )
             .children(self.failure())
+            .children(
+                self.shared
+                    .standby_error
+                    .lock()
+                    .expect("standby error")
+                    .clone()
+                    .filter(|_| !busy_stage(phase))
+                    .map(|e| alert(format!("The preview could not start: {e}"))),
+            )
             .children(monitor_error.map(|e| alert(format!("The monitor shows the raw feed: {e}"))))
             .child(
                 div()
@@ -1216,6 +1438,13 @@ fn live_screen(screen: PreviewFrame, camera: Option<PreviewFrame>) -> Div {
         }))
 }
 
+fn busy_stage(phase: &Phase) -> bool {
+    !matches!(
+        phase,
+        Phase::Idle | Phase::Failed(_) | Phase::Finished { .. }
+    )
+}
+
 fn card() -> Div {
     div()
         .flex()
@@ -1243,6 +1472,40 @@ fn card_value(text: impl Into<gpui::SharedString>) -> Div {
         .text_color(MUTED)
         .truncate()
         .child(text.into())
+}
+
+/// A track's privacy access: ready, waiting for the macOS prompt, or how to allow it.
+fn access(permission: Permission, access: Access) -> Div {
+    let row = div().flex().items_center().gap(px(6.)).text_size(TEXT_SM);
+    match access {
+        Access::Allowed => row
+            .text_color(MUTED)
+            .child(icon("check", ICON_SM, ACCENT))
+            .child("Ready"),
+        Access::NotAsked => row.text_color(MUTED).child("Answer the macOS prompt."),
+        Access::Denied => {
+            // Screen and event access only apply after a restart.
+            let fix = match permission {
+                Permission::ScreenRecording | Permission::InputMonitoring => {
+                    "No access. Allow it and reopen."
+                }
+                Permission::Camera | Permission::Microphone => "No access. Allow it in Settings.",
+            };
+            let url = settings_url(permission);
+            div()
+                .flex()
+                .flex_col()
+                .items_start()
+                .gap(px(8.))
+                .child(div().text_size(TEXT_SM).text_color(WARN).child(fix))
+                .child(
+                    Button::new(("open-privacy", permission as usize))
+                        .small()
+                        .label("Open Privacy & Security")
+                        .on_click(move |_, _, cx| cx.open_url(url)),
+                )
+        }
+    }
 }
 
 /// A level meter from -60 to 0 dBFS, lime up to -6 dB and yellow above.

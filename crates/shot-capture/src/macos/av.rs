@@ -1,6 +1,6 @@
 //! Camera and mic through one AVCaptureSession.
 
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::mpsc;
 use std::time::Duration;
 
 use block2::RcBlock;
@@ -31,11 +31,9 @@ use objc2_core_video::{
 };
 use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString};
 
-use super::sink::SampleSink;
-use super::tap::Latest;
-use super::writer::{AUDIO_RATE, Track};
-use crate::clock::nanos;
-use crate::{CaptureError, Device, MicTap, Permission, Source};
+use super::sink::{Handler, SampleSink};
+use super::writer::AUDIO_RATE;
+use crate::{Access, CaptureError, Device, Permission, Source};
 
 const PERMISSION_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -132,6 +130,15 @@ pub fn resolve(
     }
 }
 
+/// Whether the app may use the camera or the mic, without asking.
+pub fn access(kind: Kind) -> Access {
+    match unsafe { AVCaptureDevice::authorizationStatusForMediaType(kind.media_type()) } {
+        AVAuthorizationStatus::Authorized => Access::Allowed,
+        AVAuthorizationStatus::NotDetermined => Access::NotAsked,
+        _ => Access::Denied,
+    }
+}
+
 /// Asks for camera or mic access when macOS has not asked yet, and fails when it is denied.
 pub fn authorize(kind: Kind) -> Result<(), CaptureError> {
     let denied = Err(CaptureError::Permission(kind.permission()));
@@ -165,9 +172,11 @@ pub struct AvCapture {
 }
 
 impl AvCapture {
+    /// Starts the camera and the mic, each handing its samples to its handler on a capture
+    /// queue of its own. The camera delivers `420v` frames, the mic mono f32 at 48 kHz.
     pub fn start(
-        camera: Option<(Retained<AVCaptureDevice>, Arc<Track>, Arc<Latest>)>,
-        mic: Option<(Retained<AVCaptureDevice>, Arc<Track>, Option<MicTap>)>,
+        camera: Option<(Retained<AVCaptureDevice>, Handler)>,
+        mic: Option<(Retained<AVCaptureDevice>, Handler)>,
     ) -> Result<Self, CaptureError> {
         let fail = |message: String| CaptureError::Source {
             what: "camera and mic capture",
@@ -178,7 +187,7 @@ impl AvCapture {
         let mut queues = Vec::new();
         unsafe { session.beginConfiguration() };
 
-        if let Some((device, track, latest)) = camera {
+        if let Some((device, handler)) = camera {
             let preset = unsafe { AVCaptureSessionPreset1920x1080 };
             unsafe {
                 session.setSessionPreset(if session.canSetSessionPreset(preset) {
@@ -194,13 +203,8 @@ impl AvCapture {
                 &[ns(unsafe { kCVPixelBufferPixelFormatTypeKey })],
                 &[&*pixel_format],
             );
-            let sink = SampleSink::new(Box::new(move |sample: &CMSampleBuffer| {
-                if let Some(image) = unsafe { sample.image_buffer() } {
-                    latest.store(image);
-                }
-                track.push(sample)
-            }));
-            let queue = DispatchQueue::new("camera.mp4", None);
+            let sink = SampleSink::new(handler);
+            let queue = DispatchQueue::new("camera", None);
             unsafe {
                 output.setVideoSettings(Some(&settings));
                 output.setAlwaysDiscardsLateVideoFrames(true);
@@ -217,7 +221,7 @@ impl AvCapture {
             queues.push(queue);
         }
 
-        if let Some((device, track, tap)) = mic {
+        if let Some((device, handler)) = mic {
             add_input(&session, &device).map_err(fail)?;
             let output = unsafe { AVCaptureAudioDataOutput::new() };
             let settings = unsafe {
@@ -243,20 +247,8 @@ impl AvCapture {
                     ],
                 )
             };
-            let tap = tap.map(Mutex::new);
-            let sink = SampleSink::new(Box::new(move |sample: &CMSampleBuffer| {
-                track.push(sample);
-                if let (Some(tap), Some(clock)) = (&tap, track.clock()) {
-                    let pts = unsafe { sample.presentation_time_stamp() };
-                    if let (Some(at), Some((samples, rate))) = (
-                        clock.media_time(nanos(pts.value, pts.timescale)),
-                        mono(sample),
-                    ) {
-                        (tap.lock().expect("mic tap poisoned"))(at, &samples, rate);
-                    }
-                }
-            }));
-            let queue = DispatchQueue::new("mic.mp4", None);
+            let sink = SampleSink::new(handler);
+            let queue = DispatchQueue::new("mic", None);
             unsafe {
                 output.setAudioSettings(Some(&settings));
                 output.setSampleBufferDelegate_queue(
@@ -315,7 +307,7 @@ fn ns(s: &CFString) -> &NSString {
 
 /// The samples of a float PCM buffer as mono, and their sample rate. Interleaved channels are
 /// averaged, of planar ones the first is used.
-fn mono(sample: &CMSampleBuffer) -> Option<(Vec<f32>, u32)> {
+pub fn mono(sample: &CMSampleBuffer) -> Option<(Vec<f32>, u32)> {
     let format = unsafe { sample.format_description() }?;
     let asbd = unsafe { CMAudioFormatDescriptionGetStreamBasicDescription(&format).as_ref() }?;
     if asbd.mFormatFlags & kAudioFormatFlagIsFloat == 0 || asbd.mBitsPerChannel != 32 {

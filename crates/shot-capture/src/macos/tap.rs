@@ -24,7 +24,7 @@ use objc2_video_toolbox::{
     kVTPixelTransferPropertyKey_DestinationYCbCrMatrix, kVTPixelTransferPropertyKey_RealTime,
 };
 
-const SCREEN_MAX: (usize, usize) = (1920, 1080);
+pub(super) const SCREEN_MAX: (usize, usize) = (1920, 1080);
 const CAMERA_MAX: (usize, usize) = (640, 360);
 const REFRESH: Duration = Duration::from_micros(16_667);
 
@@ -218,7 +218,7 @@ impl Converter {
 
 /// The largest size inside `max` with the aspect of `width` x `height`, never above the source
 /// and with even sides, which 4:2:0 needs.
-fn fit(width: usize, height: usize, max: (usize, usize)) -> (usize, usize) {
+pub(super) fn fit(width: usize, height: usize, max: (usize, usize)) -> (usize, usize) {
     let scale = (max.0 as f64 / width as f64)
         .min(max.1 as f64 / height as f64)
         .min(1.0);
