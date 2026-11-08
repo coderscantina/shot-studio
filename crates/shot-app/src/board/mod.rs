@@ -21,7 +21,7 @@ use gpui_component::Root;
 use gpui_component::input::{Escape, Input, InputEvent, InputState};
 use shot_board::{Activity, Board, Card, ReleaseTag};
 use shot_core::{Cut, FormatKind, Lock, Project, Script, Status, Timeline, Video};
-use shot_mcp::bridge::Claude;
+use shot_mcp::bridge::{Claude, Reach};
 use shot_ship::lock::LOCK_FILE;
 use shot_ship::script_check;
 
@@ -483,6 +483,7 @@ impl BoardScreen {
             &self.repo,
             "Plan the week".to_owned(),
             shot_mcp::agents::plan_week(CADENCE),
+            Reach::Project,
         ) {
             Ok(run) => {
                 self.plan = Some(run);

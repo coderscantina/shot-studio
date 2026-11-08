@@ -2,7 +2,7 @@
 
 use std::os::unix::fs::PermissionsExt;
 
-use shot_mcp::bridge::{Claude, Session, Step};
+use shot_mcp::bridge::{Claude, Reach, Session, Step};
 use tempfile::TempDir;
 
 const FAKE: &str = r#"#!/bin/sh
@@ -27,7 +27,7 @@ fn session(dir: &TempDir) -> Session {
         repo: dir.path().join("channel"),
         shot: "/usr/local/bin/shot".into(),
         prompt: "Which videos are ideas?".to_owned(),
-        frame_task: false,
+        reach: Reach::Project,
         log_dir: dir.path().join("log"),
     }
 }
@@ -76,6 +76,7 @@ fn streams_steps_from_a_text_only_session_and_logs_what_was_sent() {
     assert!(args.contains(&"--strict-mcp-config"));
     assert!(after("--mcp-config").contains("\"--log\""));
     assert!(!after("--mcp-config").contains("--frame-task"));
+    assert!(!after("--append-system-prompt").contains("WebFetch"));
     assert!(
         std::fs::read_to_string(log.join("sent.txt"))
             .unwrap()
@@ -88,6 +89,21 @@ fn streams_steps_from_a_text_only_session_and_logs_what_was_sent() {
             .count(),
         5
     );
+}
+
+#[test]
+fn a_web_session_adds_only_web_search_and_fetch() {
+    let dir = TempDir::new().unwrap();
+    let session = Session {
+        reach: Reach::Web,
+        ..session(&dir)
+    };
+    let args = session.args();
+    let after = |flag: &str| &args[args.iter().position(|a| a == flag).unwrap() + 1];
+    assert_eq!(after("--tools"), "WebSearch,WebFetch");
+    assert_eq!(after("--allowedTools"), "mcp__shot,WebSearch,WebFetch");
+    assert!(after("--append-system-prompt").contains("WebFetch"));
+    assert!(!after("--mcp-config").contains("--frame-task"));
 }
 
 #[test]

@@ -7,7 +7,7 @@ use clap::Args;
 use shot_analyze::elements::{self, BY_CLAUDE, Depth};
 use shot_analyze::{SpeechDetector, Transcriber, cache, decode_mono, models};
 use shot_core::{Element, ElementKind, Id, Transcript};
-use shot_mcp::bridge::{Claude, Session, new_log_dir};
+use shot_mcp::bridge::{Claude, Reach, Session, new_log_dir};
 
 #[derive(Args)]
 pub struct AnalyzeArgs {
@@ -133,7 +133,7 @@ fn ask_claude(video: &Path, transcript: &Transcript) -> Result<Vec<Element>, Str
         repo: video,
         shot: std::env::current_exe().map_err(|e| e.to_string())?,
         prompt: elements::claude::prompt(transcript),
-        frame_task: false,
+        reach: Reach::Project,
     };
     let answer = session.run(&claude, |_| {}).map_err(|e| e.to_string())?;
     Ok(elements::claude::read_answer(transcript, &answer))

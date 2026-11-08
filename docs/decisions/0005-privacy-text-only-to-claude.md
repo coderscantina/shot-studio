@@ -15,6 +15,8 @@ Recordings contain faces, voices and screens. Some judgement tasks could use ima
 
 Claude receives transcripts, scripts, project files and the sources you attach. Single still frames go only when you trigger a frame task (thumbnail pick, Shorts reframe check). Raw audio and video never leave the machine. There is no telemetry. The YouTube OAuth token lives in Keychain.
 
+The script agent may also search the web and fetch pages through Claude Code's WebSearch and WebFetch, so a script can react to an article or check a fact. Mike asked for this on 2026-11-08. It sends search queries and fetches URLs that Claude picks, and adds no local data to what Claude already receives. Every other session keeps Claude Code's built-in tools off. What the agent keeps from the web goes into `sources/` as text in its proposal, and every result is in the session's `steps.jsonl`.
+
 ## Rejected alternatives
 
 - Text only, never frames: weaker thumbnail and reframe checks for little gain.

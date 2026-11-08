@@ -2,11 +2,12 @@
 //! server attached and turns its stream into [`Step`]s for the app or the terminal.
 //!
 //! Shot Studio stores no API key: Claude Code signs in on its own. The session is fenced to text
-//! ([0005]). Claude Code's built-in tools are off (`--tools ""`), so it cannot read files or run
-//! commands, only the `shot` tools; other MCP servers, settings files and slash commands are
-//! ignored, it runs in an empty folder, and its telemetry is off. Every byte that goes to Claude
-//! is logged in the session folder: the prompt in `sent.txt`, every MCP reply in `mcp.jsonl`
-//! (written by the server itself), and Claude's stream in `steps.jsonl`.
+//! ([0005]). Claude Code's built-in tools are off, so it cannot read files or run commands, only
+//! the `shot` tools, plus web search and fetch for a [`Reach::Web`] session; other MCP servers,
+//! settings files and slash commands are ignored, it runs in an empty folder, and its telemetry
+//! is off. Every byte that goes to Claude is logged in the session folder: the prompt in
+//! `sent.txt`, every MCP reply in `mcp.jsonl` (written by the server itself), and Claude's stream,
+//! web results included, in `steps.jsonl`.
 //!
 //! [0003]: ../../docs/decisions/0003-claude-through-local-cli.md
 //! [0005]: ../../docs/decisions/0005-privacy-text-only-to-claude.md
@@ -72,10 +73,31 @@ pub struct Session {
     /// The `shot` executable that runs the MCP server.
     pub shot: PathBuf,
     pub prompt: String,
-    /// Starts the server with the frame task tools. Only for a run a person started on purpose.
-    pub frame_task: bool,
+    pub reach: Reach,
     /// A new, empty folder for the session's logs. Claude runs in it.
     pub log_dir: PathBuf,
+}
+
+/// What a session may use besides the `shot` tools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reach {
+    /// The `shot` tools only.
+    Project,
+    /// Also Claude Code's web search and fetch, to research a script.
+    Web,
+    /// Also the frame task tools ([0005]). Only for a run a person started on purpose, such as
+    /// a thumbnail pick.
+    FrameTask,
+}
+
+impl Reach {
+    /// Claude Code's built-in tools the session gets.
+    fn builtin_tools(self) -> &'static [&'static str] {
+        match self {
+            Self::Web => &["WebSearch", "WebFetch"],
+            Self::Project | Self::FrameTask => &[],
+        }
+    }
 }
 
 /// What Claude does, as it happens.
@@ -114,7 +136,7 @@ impl Session {
             "--log".to_owned(),
             self.log_dir.join("mcp.jsonl").display().to_string(),
         ];
-        if self.frame_task {
+        if self.reach == Reach::FrameTask {
             server_args.push("--frame-task".to_owned());
         }
         let config = json!({
@@ -126,6 +148,12 @@ impl Session {
                 }
             }
         });
+        let builtin = self.reach.builtin_tools();
+        let system = crate::agents::system(self.reach);
+        let allowed = std::iter::once("mcp__shot")
+            .chain(builtin.iter().copied())
+            .collect::<Vec<_>>()
+            .join(",");
         [
             "--print",
             "--output-format",
@@ -139,13 +167,13 @@ impl Session {
             "--mcp-config",
             &config.to_string(),
             "--tools",
-            "",
+            &builtin.join(","),
             "--allowedTools",
-            "mcp__shot",
+            &allowed,
             "--permission-mode",
             "dontAsk",
             "--append-system-prompt",
-            crate::agents::SYSTEM,
+            &system,
         ]
         .map(str::to_owned)
         .to_vec()

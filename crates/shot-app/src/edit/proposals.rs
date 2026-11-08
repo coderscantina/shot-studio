@@ -29,6 +29,7 @@ use shot_core::{
     Cut, Id, Lock, Micros, Project, RangeEdit, TakeAt, TimeRange, Transcript, WordState,
 };
 use shot_mcp::agents::ScriptCommand;
+use shot_mcp::bridge::Reach;
 use shot_mcp::style::{self, Disk, Patched};
 
 use super::{EditScreen, Workspace};
@@ -549,6 +550,7 @@ impl EditScreen {
             &repo,
             "Another take".to_owned(),
             command.prompt(&slug),
+            Reach::Project,
         ) {
             Ok(run) => {
                 self.run = Some(run);

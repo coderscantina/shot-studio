@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use clap::Args;
 use shot_mcp::agents::{ScriptCommand, plan_week};
-use shot_mcp::bridge::{Claude, Session, Step, new_log_dir};
+use shot_mcp::bridge::{Claude, Reach, Session, Step, new_log_dir};
 
 #[derive(Args)]
 pub struct McpArgs {
@@ -51,10 +51,11 @@ pub fn run(repo: &Path, args: AgentArgs) -> Result<(), String> {
     let claude = Claude::find().ok_or(
         "Claude Code is not installed: install it from https://claude.com/claude-code and sign in, then run this again",
     )?;
-    let prompt = match (&args.video, args.request) {
-        _ if args.plan_week => plan_week(args.cadence),
-        (Some(slug), Some(request)) => ScriptCommand::parse(&request).prompt(slug),
-        (None, Some(request)) => request,
+    // A request about one video is the script agent, which may research on the web.
+    let (prompt, reach) = match (&args.video, args.request) {
+        _ if args.plan_week => (plan_week(args.cadence), Reach::Project),
+        (Some(slug), Some(request)) => (ScriptCommand::parse(&request).prompt(slug), Reach::Web),
+        (None, Some(request)) => (request, Reach::Project),
         (_, None) => return Err("say what to ask, or use --plan-week".to_owned()),
     };
     let repo = std::path::absolute(repo).map_err(|e| e.to_string())?;
@@ -63,7 +64,7 @@ pub fn run(repo: &Path, args: AgentArgs) -> Result<(), String> {
         repo,
         shot: std::env::current_exe().map_err(|e| e.to_string())?,
         prompt,
-        frame_task: false,
+        reach,
     };
     eprintln!("log: {}", session.log_dir.display());
     let answer = session

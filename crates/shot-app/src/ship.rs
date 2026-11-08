@@ -21,7 +21,7 @@ use gpui::{
     ObjectFit, PathPromptOptions, SharedString, Window, actions, div, img, prelude::*, px,
 };
 use shot_core::{Cut, DerivedKind, OutputKind};
-use shot_mcp::bridge::Claude;
+use shot_mcp::bridge::{Claude, Reach};
 use shot_ship::check::{CheckKind, Problem};
 use shot_ship::diff::{self, Change, Line};
 use shot_ship::media::{self, MediaError};
@@ -622,11 +622,12 @@ impl ShipScreen {
              sentence why.",
             slug = channel.slug
         );
-        match AgentRun::start_frame_task(
+        match AgentRun::start(
             claude,
             &channel.repo,
             "Pick a thumbnail".to_owned(),
             prompt,
+            Reach::FrameTask,
         ) {
             Ok(run) => {
                 self.claude_pick = Some(run);

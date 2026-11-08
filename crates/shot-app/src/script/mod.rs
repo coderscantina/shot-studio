@@ -22,7 +22,7 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use shot_board::Board;
 use shot_core::{Micros, Script};
 use shot_mcp::agents::ScriptCommand;
-use shot_mcp::bridge::Claude;
+use shot_mcp::bridge::{Claude, Reach};
 use shot_ship::script_check::{self, ScriptFinding, ScriptReport};
 
 use crate::agent::{self, AgentRun};
@@ -216,7 +216,13 @@ impl ScriptScreen {
         if self.run.as_ref().is_some_and(AgentRun::running) {
             return;
         }
-        match AgentRun::start(claude, &self.repo, request, command.prompt(&self.slug)) {
+        match AgentRun::start(
+            claude,
+            &self.repo,
+            request,
+            command.prompt(&self.slug),
+            Reach::Web,
+        ) {
             Ok(run) => {
                 self.run = Some(run);
                 agent::watch(

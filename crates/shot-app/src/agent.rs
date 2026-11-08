@@ -6,7 +6,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::Duration;
 
 use gpui::{Context, Div, FontWeight, SharedString, div, prelude::*, px};
-use shot_mcp::bridge::{Claude, Session, Step, new_log_dir};
+use shot_mcp::bridge::{Claude, Reach, Session, Step, new_log_dir};
 
 use crate::theme::*;
 use crate::ui::{icon, mono};
@@ -31,41 +31,20 @@ pub struct AgentRun {
 
 impl AgentRun {
     /// Starts `prompt` against the channel repo `repo`. `request` is how the screen shows it.
+    /// A [`Reach::FrameTask`] only starts from an explicit action of the person.
     pub fn start(
         claude: Claude,
         repo: &Path,
         request: String,
         prompt: String,
-    ) -> Result<Self, String> {
-        Self::start_with(claude, repo, request, prompt, false)
-    }
-
-    /// Starts a frame task ([0005]): the one kind of run whose tools may return still frames.
-    /// Only call it from an explicit action of the person, such as a thumbnail pick.
-    ///
-    /// [0005]: ../../../docs/decisions/0005-privacy-text-only-to-claude.md
-    pub fn start_frame_task(
-        claude: Claude,
-        repo: &Path,
-        request: String,
-        prompt: String,
-    ) -> Result<Self, String> {
-        Self::start_with(claude, repo, request, prompt, true)
-    }
-
-    fn start_with(
-        claude: Claude,
-        repo: &Path,
-        request: String,
-        prompt: String,
-        frame_task: bool,
+        reach: Reach,
     ) -> Result<Self, String> {
         let session = Session {
             log_dir: new_log_dir(repo),
             repo: repo.to_owned(),
             shot: shot_executable()?,
             prompt,
-            frame_task,
+            reach,
         };
         let (send, events) = mpsc::channel();
         std::thread::spawn(move || {
@@ -174,6 +153,8 @@ fn describe_tool(name: &str) -> String {
         "review_queue" => "Read the review queue",
         "caption_fixes" => "Read the caption fixes",
         "describe" => "Drafted the description",
+        "WebSearch" => "Searched the web",
+        "WebFetch" => "Read a web page",
         other => other,
     }
     .to_owned()

@@ -1,6 +1,8 @@
 //! What the app asks Claude: the script agent's commands and "Plan the week with Claude", as
 //! prompts over the `shot` MCP tools. The CLI and the app send the same words.
 
+use crate::bridge::Reach;
+
 /// Appended to Claude Code's system prompt for every bridge session.
 pub const SYSTEM: &str = "You work inside Shot Studio through the `shot` MCP tools only. \
 Read with them, and change a video only by proposing: propose_script for script.md, propose_cut \
@@ -10,6 +12,25 @@ just propose. Name proposals with lowercase words and dashes. Keep the speaker's
 their other scripts with read_video before writing. Never invent facts; say what you are unsure \
 about. End with two or three sentences on what you proposed and why, in plain text without \
 Markdown.";
+
+/// Added to [`SYSTEM`] for a [`Reach::Web`] session.
+pub const WEB: &str = "You can also search the web with WebSearch and read pages with WebFetch. \
+Use them when the request names a URL or needs facts the project does not have. Ask WebFetch for \
+a page's full text, not a summary, and quote it word for word. Save the text the script builds \
+on with propose_script's sources, one Markdown file per page: its title, URL and the date you \
+read it, then the text. Link beats to it as sources/<name>.md. For a reaction to an article, \
+follow the article in order: a chapter per section, a beat per passage worth reacting to with a \
+short quote of it as the bullet, and as the beat's script the quote read out, then the speaker's \
+reaction: agree, push back, add their own experience, never just restate it. Open with a hook \
+on the article's boldest claim and close with the speaker's verdict.";
+
+/// The system prompt addition for a session of `reach`.
+pub fn system(reach: Reach) -> String {
+    match reach {
+        Reach::Web => format!("{SYSTEM} {WEB}"),
+        Reach::Project | Reach::FrameTask => SYSTEM.to_owned(),
+    }
+}
 
 /// A request to the script agent, typed in the Script screen's prompt box.
 #[derive(Debug, Clone, PartialEq, Eq)]
