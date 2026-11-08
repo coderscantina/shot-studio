@@ -45,6 +45,10 @@ use crate::ui::{self, alert, hint, icon, label, mono};
 
 const CONTEXT: &str = "RecordScreen";
 
+/// How long a started input may send nothing before the stage says so. The camera and the
+/// screen send their first frame well within it.
+const SILENT_AFTER: Duration = Duration::from_secs(4);
+
 actions!(record, [ToggleRecording]);
 
 pub fn bind_keys(cx: &mut App) {
@@ -160,6 +164,8 @@ struct Shared {
     monitor: Mutex<Option<Arc<View>>>,
     /// Why an input on standby did not start, other than a missing permission.
     standby_error: Mutex<Option<String>>,
+    /// When the standby's inputs started, while it runs. `None` while they start or rest.
+    standby_since: Mutex<Option<Instant>>,
     /// Whether the monitor shows the style or the raw feed.
     styled: Arc<AtomicBool>,
 }
@@ -253,6 +259,7 @@ impl RecordScreen {
             preview: Mutex::new(None),
             monitor: Mutex::new(None),
             standby_error: Mutex::new(None),
+            standby_since: Mutex::new(None),
             styled: Arc::new(AtomicBool::new(true)),
         });
         let (commands, rx) = mpsc::channel();
@@ -485,12 +492,14 @@ fn recorder(commands: Receiver<Command>, shared: &Shared) {
                 // The old inputs stop before the new ones start on the same devices.
                 drop(standby.take());
                 shared.show(None);
+                shared.standby_since.lock().expect("standby start").take();
                 standby = Some(watch(*setup, take, &choice, shared));
             }
             Command::Rest => {
                 standby = None;
                 shared.show(None);
                 shared.standby_error.lock().expect("standby error").take();
+                shared.standby_since.lock().expect("standby start").take();
             }
             Command::Start(setup, choice, live, hotkeys) => {
                 let result = record(
@@ -536,6 +545,7 @@ fn watch(setup: Setup, take: Id, choice: &Choice, shared: &Shared) -> Inputs {
         shared.styled.clone(),
     );
     shared.show(Some((preview, rehearsal.view())));
+    *shared.standby_since.lock().expect("standby start") = Some(Instant::now());
     Inputs {
         _rehearsal: rehearsal,
         _capture: capture,
@@ -701,6 +711,7 @@ fn record(
         }
     }
     *standby = None;
+    shared.standby_since.lock().expect("standby start").take();
     shared.set(Phase::Finishing);
     live.set_marks(None);
     shared.preview.lock().expect("preview").take();
@@ -860,6 +871,8 @@ impl RecordScreen {
                     this.on_screen = false;
                     let _ = this.commands.send(Command::Rest);
                     this.prompter.update(cx, |prompter, cx| prompter.leave(cx));
+                    // Renders only while the screen still shows, which starts the inputs again.
+                    cx.notify();
                 }
             }));
         }
@@ -885,6 +898,47 @@ impl RecordScreen {
         } else {
             name.to_owned()
         }
+    }
+
+    /// Whether the standby's inputs are still starting, with nothing to show or report yet.
+    fn standby_starting(&self) -> bool {
+        let shared = &self.shared;
+        shared
+            .standby_since
+            .lock()
+            .expect("standby start")
+            .is_none()
+            && shared
+                .standby_error
+                .lock()
+                .expect("standby error")
+                .is_none()
+    }
+
+    /// Why the stage shows no live picture before a take: an input that did not start, or one
+    /// that started but sends nothing, which another app holding the device can cause.
+    /// A missing permission shows in Tracks instead.
+    fn preview_problem(&self, screen: bool, camera: bool) -> Option<String> {
+        let shared = &self.shared;
+        if let Some(error) = shared.standby_error.lock().expect("standby error").clone() {
+            return Some(format!("The preview could not start: {error}"));
+        }
+        let since = (*shared.standby_since.lock().expect("standby start"))?;
+        if since.elapsed() < SILENT_AFTER {
+            return None;
+        }
+        let screen_silent = self.permissions.screen == Access::Allowed && !screen;
+        let camera_silent =
+            self.choice.camera.is_some() && self.permissions.camera == Access::Allowed && !camera;
+        let (silent, it) = match (screen_silent, camera_silent) {
+            (true, true) => ("The screen and the camera send", "them"),
+            (true, false) => ("The screen sends", "it"),
+            (false, true) => ("The camera sends", "it"),
+            (false, false) => return None,
+        };
+        Some(format!(
+            "{silent} no picture yet. Another app may be using {it}, or starting takes longer than usual."
+        ))
     }
 
     /// The error of the last take, with a way to the setting that fixes a missing permission.
@@ -921,10 +975,6 @@ impl RecordScreen {
                 .as_ref()
                 .is_some_and(|view| view.camera_black());
         let dir = self.folder.read(cx).dir.clone();
-        let take = match self.phase() {
-            Phase::Recording { take, .. } => take,
-            _ => self.next_take(cx),
-        };
         let free = free_space(&dir).map_or(String::new(), |bytes| {
             format!(", {} GB free", bytes / 1_000_000_000)
         });
@@ -1027,11 +1077,6 @@ impl RecordScreen {
                     .flex()
                     .flex_col()
                     .gap(px(4.))
-                    .child(
-                        mono(format!("media/{take}/"))
-                            .text_size(TEXT_SM)
-                            .text_color(KBD_TEXT),
-                    )
                     .child(
                         div()
                             .text_size(TEXT_SM)
@@ -1148,7 +1193,11 @@ impl RecordScreen {
         let (title, detail): (String, String) = match phase {
             Phase::Idle | Phase::Failed(_) | Phase::Finished { .. } => (
                 format!("Take {}", self.next_take(cx)),
-                "Press Space or the record button to start.".into(),
+                if self.standby_starting() {
+                    "Starting the preview.".into()
+                } else {
+                    "Press Space or the record button to start.".into()
+                },
             ),
             Phase::Downloading { .. } => (
                 "Downloading the speech model".into(),
@@ -1221,16 +1270,21 @@ impl RecordScreen {
                         .w(px(180.)),
                     ),
             )
+            .children(monitor_error.map(|e| {
+                div()
+                    .ml_auto()
+                    .mt(px(-6.))
+                    .text_size(TEXT_SM)
+                    .text_color(MUTED)
+                    .truncate()
+                    .child(format!("Showing the raw feed: {e}"))
+            }))
             .children(self.failure())
             .children(
-                self.shared
-                    .standby_error
-                    .lock()
-                    .expect("standby error")
-                    .clone()
+                self.preview_problem(screen.is_some(), camera.is_some())
                     .filter(|_| !busy_stage(phase))
-                    .map(|e| {
-                        alert(format!("The preview could not start: {e}")).child(
+                    .map(|problem| {
+                        alert(problem).child(
                             Button::new("retry-preview")
                                 .small()
                                 .label("Try again")
@@ -1238,7 +1292,6 @@ impl RecordScreen {
                         )
                     }),
             )
-            .children(monitor_error.map(|e| alert(format!("The monitor shows the raw feed: {e}"))))
             .child(
                 div()
                     .flex_1()
