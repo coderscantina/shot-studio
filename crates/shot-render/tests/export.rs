@@ -4,7 +4,9 @@
 
 use std::path::PathBuf;
 
+use shot_audio::{CEILING_DBTP, Meter, TARGET_LUFS};
 use shot_core::{Cut, Format, Project, Script, Video};
+use shot_media::audio::PcmReader;
 use shot_render::export::{ExportOptions, export};
 
 fn project(cut: &str) -> (tempfile::TempDir, Project) {
@@ -56,5 +58,18 @@ fn re_export_renders_only_the_chunks_that_changed() {
     .unwrap();
     // The old last chunk 5850..5868 becomes 5850..5880, and 5880..5898 is new.
     assert_eq!((report.chunks, report.rendered, report.frames), (7, 2, 150));
-    assert!(out.metadata().unwrap().len() > 0);
+
+    // The audio joined into its room after the video reads back finished.
+    let mut reader = PcmReader::open(&out).unwrap();
+    let mut samples = Vec::new();
+    reader.read(0, 150 * 800, &mut samples).unwrap();
+    let mut meter = Meter::new();
+    meter.add(&samples);
+    let loudness = meter.loudness().unwrap();
+    assert!((loudness - TARGET_LUFS).abs() <= 0.5, "{loudness} LUFS");
+    assert!(
+        meter.true_peak() <= CEILING_DBTP,
+        "{} dBTP",
+        meter.true_peak()
+    );
 }
