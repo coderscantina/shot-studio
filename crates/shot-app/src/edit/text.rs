@@ -1031,8 +1031,8 @@ fn zoom_section(
                     "Length",
                     div().text_color(TEXT).child(seconds(zoom.range.duration())),
                 ))
-                .child(super::zoom::controls(this, at, index, zoom, cx))
         })
+        .child(super::zoom::controls(this, at, index, zoom, cx))
         .child(
             div().flex().items_center().gap(px(10.)).child(
                 tool("close", "Remove", "⌫")

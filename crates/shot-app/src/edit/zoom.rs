@@ -130,14 +130,19 @@ impl EditScreen {
         match knob {
             Knob::RampIn(at, index) => self.set_ramp(at, index, End::In, Some(Micros(value)), cx),
             Knob::RampOut(at, index) => self.set_ramp(at, index, End::Out, Some(Micros(value)), cx),
-            Knob::Handheld => {
-                let strength = u8::try_from(value).unwrap_or(100);
-                let result = self
-                    .folder
-                    .update(cx, |folder, _| folder.set_handheld(Some(strength)));
-                self.wrote(result, cx);
-            }
+            Knob::Handheld => self.set_handheld(Some(u8::try_from(value).unwrap_or(100)), cx),
         }
+    }
+
+    /// Sets the camera's hand-held strength in the video's brand layer, or with `None` leaves
+    /// it to the channel's brand.
+    pub(super) fn set_handheld(&mut self, strength: Option<u8>, cx: &mut Context<Self>) {
+        let result = self.folder.update(cx, |folder, cx| {
+            let result = folder.set_handheld(strength);
+            cx.notify();
+            result
+        });
+        self.wrote(result, cx);
     }
 
     /// A knob's value as the files have it.
@@ -213,16 +218,26 @@ impl EditScreen {
         let (ramp_in, ramp_out) = ramps(&zoom, motion);
         let to_frames = |d: Duration| d.as_micros() as u64 * u64::from(FPS) / 1_000_000;
         let lead = to_frames(REPLAY_LEAD);
-        let (from, ramp) = match end {
-            End::In => (frames.start.saturating_sub(lead), ramp_in),
-            End::Out => (
-                frames
-                    .end
-                    .saturating_sub(to_frames(Duration::from_micros(ramp_out.0)) + lead),
-                ramp_out,
-            ),
+        let ramp = match end {
+            End::In => ramp_in,
+            End::Out => ramp_out,
         };
-        let length = REPLAY_LEAD + Duration::from_micros(ramp.0) + REPLAY_TAIL;
+        let from = match end {
+            End::In => frames.start.saturating_sub(lead),
+            End::Out => frames
+                .end
+                .saturating_sub(to_frames(Duration::from_micros(ramp.0)) + lead),
+        };
+        // The replay stays inside the zoom's chapter, so Text keeps showing it.
+        let chapter = self
+            .map
+            .chapters
+            .get(at.chapter)
+            .map_or(0..self.map.frames, |c| c.frames.clone());
+        let from = from.max(chapter.start);
+        let played = REPLAY_LEAD + Duration::from_micros(ramp.0) + REPLAY_TAIL;
+        let until = (from + to_frames(played)).min(chapter.end.saturating_sub(1));
+        let length = Duration::from_micros(until.saturating_sub(from) * 1_000_000 / u64::from(FPS));
         self.seek(from);
         self.set_playing(true);
         self.knobs.replay += 1;
@@ -401,7 +416,9 @@ fn framing_picker(
                         .bg(KBD),
                 )
                 .child(
+                    // Over the quarters, so it takes the click alone.
                     cell(Framing::Center, 1)
+                        .occlude()
                         .left(relative(0.32))
                         .top(relative(0.3))
                         .w(relative(0.36))

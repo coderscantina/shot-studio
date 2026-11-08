@@ -36,12 +36,7 @@ pub(super) fn section(this: &EditScreen, cx: &mut Context<EditScreen>) -> Div {
             .map(ui::keyboard_reachable)
             .child("Reset")
             .tooltip(|window, cx| Tooltip::new("Back to the channel's brand").build(window, cx))
-            .on_click(cx.listener(|this, _, _, cx| {
-                let result = this
-                    .folder
-                    .update(cx, |folder, _| folder.set_handheld(None));
-                this.wrote(result, cx);
-            }))
+            .on_click(cx.listener(|this, _, _, cx| this.set_handheld(None, cx)))
     });
     div()
         .flex()
