@@ -374,6 +374,40 @@ fn a_server_error_mid_upload_resumes_from_what_arrived() {
 }
 
 #[test]
+fn a_stopped_upload_keeps_its_session_and_resumes_from_it() {
+    let google = serve();
+    let (mut client, _) = youtube(&google, Some("r1"));
+    let dir = tempfile::tempdir().unwrap();
+    let cancel = client.cancel.clone();
+    let mut session = None;
+    let stopped = client.upload(
+        &file(dir.path()),
+        &metadata(),
+        None,
+        &mut |uri| session = Some(uri.to_owned()),
+        &mut |_| cancel.store(true, std::sync::atomic::Ordering::Relaxed),
+    );
+    assert!(matches!(stopped, Err(YouTubeError::Cancelled)));
+    assert_eq!(google.lock().unwrap().received, FILE[..8]);
+    client
+        .cancel
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    let id = client
+        .upload(
+            &file(dir.path()),
+            &metadata(),
+            session.as_deref(),
+            &mut |_| {},
+            &mut |_| {},
+        )
+        .unwrap();
+    assert_eq!(id, "vid-1");
+    let google = google.lock().unwrap();
+    assert_eq!(google.received, FILE);
+    assert_eq!(google.metadata.len(), 1, "no second session");
+}
+
+#[test]
 fn a_saved_session_continues_without_a_new_one() {
     let google = serve();
     let (mut client, _) = youtube(&google, Some("r1"));

@@ -110,6 +110,21 @@ impl Client {
     }
 }
 
+/// Checks that `from` is a Desktop app OAuth client and copies it to `to`, usually
+/// [`client_path`], creating its folder.
+pub fn install_client(from: &Path, to: &Path) -> Result<Client, AuthError> {
+    let client = Client::load(from)?;
+    let failed = |e: std::io::Error| AuthError::BadClient {
+        path: to.to_owned(),
+        message: e.to_string(),
+    };
+    if let Some(dir) = to.parent() {
+        std::fs::create_dir_all(dir).map_err(failed)?;
+    }
+    std::fs::copy(from, to).map_err(failed)?;
+    Ok(client)
+}
+
 /// Keeps the refresh token between runs.
 pub trait TokenStore: Send {
     fn load(&self) -> Result<Option<String>, AuthError>;
@@ -398,6 +413,28 @@ mod tests {
                 client_secret: "s".to_owned()
             }
         );
+    }
+
+    #[test]
+    fn installs_only_a_desktop_client_and_creates_its_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let (from, to) = (
+            dir.path().join("download.json"),
+            dir.path().join("a/b/client.json"),
+        );
+        std::fs::write(&from, r#"{"web":{"client_id":"id","client_secret":"s"}}"#).unwrap();
+        assert!(matches!(
+            install_client(&from, &to),
+            Err(AuthError::BadClient { .. })
+        ));
+        assert!(!to.exists());
+        std::fs::write(
+            &from,
+            r#"{"installed":{"client_id":"id","client_secret":"s"}}"#,
+        )
+        .unwrap();
+        assert_eq!(install_client(&from, &to).unwrap().client_id, "id");
+        assert_eq!(Client::load(&to).unwrap().client_id, "id");
     }
 
     // Writes to the login Keychain of whoever runs it, under a test account it removes again.

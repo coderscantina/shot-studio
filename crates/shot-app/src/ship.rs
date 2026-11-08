@@ -1,35 +1,53 @@
-//! The Ship screen: every cut of the video and where it goes, the `cut.kdl` diff against the
-//! video branch, `shot check` per cut, a still of each export in its aspect ratio, the thumbnail
-//! pick, and the button that runs `shot ship`.
+//! The Ship screen: every cut of the video and where it goes, its export with progress, `shot
+//! check` per cut, the `cut.kdl` diff against the video branch, a still of each export, the
+//! thumbnail pick, title and description, and the button that runs `shot ship`.
 //!
-//! The work is `shot_ship`'s: [`ship::plan`] lists the cuts, [`ship::prepare`] renders and
-//! checks, [`ship::publish`] uploads and tags. Renders, checks and uploads run on threads and
-//! report back over a channel the screen polls.
+//! The work is `shot_ship`'s: [`ship::plan`] lists the cuts, [`ship::export_cut`] renders and
+//! checks one, [`ship::publish`] uploads and tags. Exports, checks, the thumbnail search and
+//! uploads run on threads and report back over a channel the screen polls. One run, an export
+//! or a ship, goes at a time; Esc stops it.
+
+mod words;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime};
 
 use gpui::{
-    App, Context, Div, Entity, FocusHandle, Focusable, FontWeight, Hsla, KeyBinding, ObjectFit,
-    SharedString, Window, actions, div, img, prelude::*, px,
+    App, ClipboardItem, Context, Div, Entity, FocusHandle, Focusable, FontWeight, Hsla, KeyBinding,
+    ObjectFit, PathPromptOptions, SharedString, Window, actions, div, img, prelude::*, px,
 };
 use shot_core::{Cut, DerivedKind, OutputKind};
 use shot_mcp::bridge::Claude;
 use shot_ship::check::{CheckKind, Problem};
 use shot_ship::diff::{self, Change, Line};
-use shot_ship::oauth::{self, Client, Endpoints, Keychain};
+use shot_ship::media::{self, MediaError};
+use shot_ship::oauth::{self, AuthError, Client, Endpoints, Keychain};
 use shot_ship::record::Record;
-use shot_ship::ship::{self, Channel, Destination, Options, PlannedCut, Shipped, Step};
-use shot_ship::youtube::{Privacy, YouTube};
+use shot_ship::ship::{self, Channel, Destination, Options, PlannedCut, ShipError, Step};
+use shot_ship::thumbnails::{self, Scored, ThumbnailError};
+use shot_ship::youtube::{Privacy, YouTube, YouTubeError};
 
 use crate::agent::{self, AgentRun};
 use crate::folder::VideoFolder;
 use crate::theme::*;
-use crate::ui::{Segment, icon, kbd, label, mono, pane, segmented};
+use crate::ui::{ActionLook, Segment, icon, kbd, label, mono, pane, proposal_action, segmented};
+use words::*;
 
-actions!(ship, [ShipVideo]);
+actions!(
+    ship,
+    [
+        ShipVideo,
+        ExportCut,
+        FindThumbnails,
+        Stop,
+        NextCut,
+        PreviousCut
+    ]
+);
 
 const CONTEXT: &str = "ShipScreen";
 /// How often background work is picked up.
@@ -38,20 +56,37 @@ const POLL: Duration = Duration::from_millis(150);
 const CANDIDATES: usize = 4;
 /// Unchanged lines around each change of the diff.
 const DIFF_CONTEXT: usize = 2;
+/// Encoder sessions of an export, as `shot export` runs them.
+const JOBS: usize = 3;
+/// Where a Desktop app OAuth client is created.
+const CREDENTIALS_URL: &str = "https://console.cloud.google.com/apis/credentials";
 
 pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys([KeyBinding::new("cmd-enter", ShipVideo, Some(CONTEXT))]);
+    let context = Some(CONTEXT);
+    cx.bind_keys([
+        KeyBinding::new("cmd-enter", ShipVideo, context),
+        KeyBinding::new("e", ExportCut, context),
+        KeyBinding::new("t", FindThumbnails, context),
+        KeyBinding::new("escape", Stop, context),
+        KeyBinding::new("down", NextCut, context),
+        KeyBinding::new("up", PreviousCut, context),
+    ]);
 }
 
 enum Event {
-    Rendering {
-        cut: String,
-        rendered: usize,
-        to_render: usize,
-    },
+    Step(Step),
+    /// The run waits for the person to sign in to YouTube in the browser.
+    SigningIn,
+    /// Checks of an unchanged export, from the check worker.
     Checked {
         cut: String,
         /// The [`check_stamp`] of what was checked.
+        stamp: Option<u64>,
+        result: Result<Vec<Problem>, String>,
+    },
+    /// A run exported a cut and checked it, or failed to.
+    Exported {
+        cut: String,
         stamp: Option<u64>,
         result: Result<Vec<Problem>, String>,
     },
@@ -59,21 +94,33 @@ enum Event {
         cut: String,
         path: PathBuf,
     },
-    Candidates(Result<Vec<PathBuf>, String>),
-    Step(Step),
-    /// A step of the run that is not a ship step, such as signing in.
-    Status(String),
-    Shipped(Result<Shipped, String>),
+    Scored(Scored),
+    Searched(Result<(), String>),
+    Finished(Outcome),
 }
 
 #[derive(Default)]
 enum Checks {
     /// No export to check yet.
     #[default]
-    NotRendered,
+    NotExported,
     Running,
     Done(Vec<Problem>),
     Failed(String),
+}
+
+/// The checks that read the export itself, kept while the file is unchanged.
+struct Measured {
+    modified: SystemTime,
+    problems: Vec<Problem>,
+}
+
+/// The export file of a cut.
+struct Exported {
+    size: u64,
+    modified: SystemTime,
+    /// A project file changed after the export.
+    stale: bool,
 }
 
 #[derive(Default)]
@@ -81,35 +128,80 @@ struct CutState {
     checks: Checks,
     /// What the checks were run on, see [`check_stamp`]. Unchanged inputs are not checked again.
     stamp: Option<u64>,
-    rendering: Option<(usize, usize)>,
+    measured: Option<Measured>,
+    export: Option<Exported>,
+    /// A run is exporting this cut, so the check worker's results for it are old.
+    exporting: bool,
     preview: Option<PathBuf>,
 }
 
-/// A ship run in progress or finished.
+/// An export or ship in progress.
 struct Run {
-    /// The latest step worth a line, such as "Uploading main 42%".
-    status: String,
-    outcome: Option<Result<Shipped, String>>,
+    /// Uploads and tags after the exports.
+    ship: bool,
+    /// The cuts it exports, in order.
+    cuts: Vec<String>,
+    step: Option<Step>,
+    signing_in: bool,
+    /// When the cut being rendered started, for the time left.
+    since: Instant,
+    cancel: Arc<AtomicBool>,
+    /// Things the person has to do by hand afterwards.
+    notes: Vec<String>,
+}
+
+enum Outcome {
+    Exported(usize),
+    /// `shot check` found problems the person had not seen yet.
+    Problems(usize),
+    Shipped(String),
+    Stopped,
+    Failed(String),
+}
+
+/// The last run, until the next one starts.
+struct Finished {
+    ship: bool,
+    outcome: Outcome,
+    notes: Vec<String>,
+}
+
+/// A thumbnail search in progress.
+struct Search {
+    scored: Option<Scored>,
+    cancel: Arc<AtomicBool>,
 }
 
 pub struct ShipScreen {
     folder: Entity<VideoFolder>,
-    channel: Option<Channel>,
+    channel: Result<Channel, String>,
+    client: Result<Client, AuthError>,
+    /// Why the chosen client file was not taken.
+    client_note: Option<String>,
     cuts: Vec<PlannedCut>,
+    /// Why the cuts could not be planned.
+    plan_error: Option<String>,
     states: HashMap<String, CutState>,
     selected: usize,
     privacy: Privacy,
     record: Record,
     /// The working `cut.kdl` against the video branch's, `None` outside a channel repo.
     branch_diff: Option<Vec<Line>>,
+    /// Bytes free on the video folder's disk.
+    free: Option<u64>,
     candidates: Vec<PathBuf>,
     /// The candidate the thumbnail was picked from.
     picked: Option<PathBuf>,
-    finding: bool,
+    search: Option<Search>,
+    search_note: Option<String>,
     claude: Option<Claude>,
     claude_pick: Option<AgentRun>,
     run: Option<Run>,
-    error: Option<String>,
+    finished: Option<Finished>,
+    /// Stops the check worker, when a newer one replaces it.
+    checking: Arc<AtomicBool>,
+    /// What was just copied, for a moment.
+    copied: Option<&'static str>,
     send: Sender<Event>,
     events: Receiver<Event>,
     polling: bool,
@@ -125,23 +217,35 @@ impl Focusable for ShipScreen {
 impl ShipScreen {
     pub fn new(folder: Entity<VideoFolder>, cx: &mut Context<Self>) -> Self {
         let (send, events) = mpsc::channel();
-        let channel = Channel::of(&folder.read(cx).dir).ok();
+        let channel = Channel::of(&folder.read(cx).dir).map_err(|e| match e {
+            ShipError::NoChannel(_) => {
+                "This folder is not videos/<slug> in a channel repo.".to_owned()
+            }
+            e => capitalized(&e.to_string()),
+        });
         Self {
             folder,
             channel,
+            client: Client::load(&oauth::client_path()),
+            client_note: None,
             cuts: Vec::new(),
+            plan_error: None,
             states: HashMap::new(),
             selected: 0,
             privacy: Privacy::Private,
             record: Record::default(),
             branch_diff: None,
+            free: None,
             candidates: Vec::new(),
             picked: None,
-            finding: false,
+            search: None,
+            search_note: None,
             claude: Claude::find(),
             claude_pick: None,
             run: None,
-            error: None,
+            finished: None,
+            checking: Arc::default(),
+            copied: None,
             send,
             events,
             polling: false,
@@ -149,21 +253,27 @@ impl ShipScreen {
         }
     }
 
-    /// Reads the cuts, the record and the diff again, and checks every rendered cut.
+    /// Reads the cuts, the record, the diff and the OAuth client again, and checks every export
+    /// whose inputs changed.
     pub fn reload(&mut self, cx: &mut Context<Self>) {
-        if self.run.as_ref().is_some_and(|r| r.outcome.is_none()) {
+        if self.run.is_some() {
             return;
         }
         let folder = self.folder.read(cx);
         let dir = folder.dir.clone();
         match ship::plan(&dir, &folder.project, &folder.transcripts, self.options()) {
-            Ok(cuts) => self.cuts = cuts,
-            Err(e) => self.error = Some(e.to_string()),
+            Ok(cuts) => {
+                self.cuts = cuts;
+                self.plan_error = None;
+            }
+            Err(e) => self.plan_error = Some(e.to_string()),
         }
         self.selected = self.selected.min(self.cuts.len().saturating_sub(1));
         self.record = Record::load(&dir).unwrap_or_default();
+        self.client = Client::load(&oauth::client_path());
+        self.free = ship::free_space(&dir).ok();
         let working = folder.project.cut.to_kdl();
-        self.branch_diff = self.channel.as_ref().and_then(|channel| {
+        self.branch_diff = self.channel.as_ref().ok().and_then(|channel| {
             let board = shot_board::Board::open(&channel.repo).ok()?;
             let committed = board.read_file(&channel.slug, "cut.kdl").ok()?;
             Some(diff::diff(
@@ -175,33 +285,67 @@ impl ShipScreen {
         self.load_candidates(&dir);
         let names: Vec<&String> = self.cuts.iter().map(|c| &c.name).collect();
         self.states.retain(|name, _| names.contains(&name));
-        let mut cuts = Vec::new();
+        let mut queue = Vec::new();
         for cut in &self.cuts {
             let state = self.states.entry(cut.name.clone()).or_default();
-            let stamp = check_stamp(&dir, cut, &working);
-            if !cut.export.exists() {
+            state.export = exported(&dir, &cut.export);
+            let Some(export) = &state.export else {
                 *state = CutState::default();
-            } else if state.stamp != stamp || matches!(state.checks, Checks::NotRendered) {
+                continue;
+            };
+            let stamp = check_stamp(&dir, cut, &working);
+            if state.stamp != stamp || matches!(state.checks, Checks::NotExported | Checks::Running)
+            {
                 state.checks = Checks::Running;
                 state.stamp = stamp;
-                cuts.push((cut.clone(), stamp));
+                let known = state
+                    .measured
+                    .as_ref()
+                    .filter(|m| m.modified == export.modified)
+                    .map(|m| m.problems.clone());
+                queue.push((cut.clone(), stamp, known));
             }
         }
-        let project = folder.project.clone();
-        let send = self.send.clone();
-        std::thread::spawn(move || {
-            for (cut, stamp) in cuts {
-                preview(&dir, &cut, &send);
-                let result = shot_ship::media::check_cut(&dir, &project, &cut.name, &cut.export)
-                    .map_err(|e| e.to_string());
-                let _ = send.send(Event::Checked {
-                    cut: cut.name,
-                    stamp,
-                    result,
-                });
-            }
-        });
+        if !queue.is_empty() {
+            self.checking.store(true, Ordering::Relaxed);
+            self.checking = Arc::default();
+            let cancel = self.checking.clone();
+            let project = folder.project.clone();
+            let send = self.send.clone();
+            std::thread::spawn(move || {
+                let cancelled = || cancel.load(Ordering::Relaxed);
+                for (cut, stamp, known) in queue {
+                    preview(&dir, &cut, &send);
+                    let result = match known {
+                        Some(mut measured) => {
+                            media::check_files(&dir, &project, &cut.name, &cut.export).map(|p| {
+                                measured.extend(p);
+                                measured.sort_by_key(|p| p.check);
+                                measured
+                            })
+                        }
+                        None => media::check_cut_until(
+                            &dir,
+                            &project,
+                            &cut.name,
+                            &cut.export,
+                            &cancelled,
+                        ),
+                    };
+                    let result = match result {
+                        Err(MediaError::Cancelled) => return,
+                        result => result.map_err(|e| e.to_string()),
+                    };
+                    let _ = send.send(Event::Checked {
+                        cut: cut.name,
+                        stamp,
+                        result,
+                    });
+                }
+            });
+        }
         self.poll(cx);
+        cx.notify();
     }
 
     fn options(&self) -> Options {
@@ -218,6 +362,7 @@ impl ShipScreen {
             .filter_map(|e| Some(e.ok()?.path()))
             .filter(|p| p.extension().is_some_and(|e| e == "png"))
             .collect();
+        // The search names the stills by rank.
         found.sort();
         found.truncate(CANDIDATES);
         let current = ship::thumbnail(dir).and_then(|p| std::fs::read(p).ok());
@@ -259,125 +404,191 @@ impl ShipScreen {
     }
 
     fn busy(&self) -> bool {
-        self.finding
-            || self.run.as_ref().is_some_and(|r| r.outcome.is_none())
+        self.run.is_some()
+            || self.search.is_some()
             || self
                 .states
                 .values()
-                .any(|s| matches!(s.checks, Checks::Running) || s.rendering.is_some())
+                .any(|s| matches!(s.checks, Checks::Running))
     }
 
     fn apply(&mut self, event: Event, cx: &mut Context<Self>) {
         match event {
-            Event::Rendering {
-                cut,
-                rendered,
-                to_render,
-            } => {
-                let state = self.states.entry(cut.clone()).or_default();
-                state.rendering = Some((rendered, to_render));
+            Event::Step(step) => {
+                let Some(run) = &mut self.run else {
+                    return;
+                };
+                if let Step::Rendering { cut, .. } = &step
+                    && !matches!(&run.step, Some(Step::Rendering { cut: c, .. }) if c == cut)
+                {
+                    run.since = Instant::now();
+                }
+                if let Step::ThumbnailRefused { cut, reason } = &step {
+                    run.notes.push(format!(
+                        "YouTube refused the thumbnail of {cut} ({reason}). Set it in YouTube \
+                         Studio, or ship again once the channel may use custom thumbnails."
+                    ));
+                }
+                run.signing_in = false;
+                run.step = Some(step);
+            }
+            Event::SigningIn => {
                 if let Some(run) = &mut self.run {
-                    run.status = format!("Rendering {} {rendered} of {to_render}", cut);
+                    run.signing_in = true;
                 }
             }
             Event::Checked { cut, stamp, result } => {
-                let state = self.states.entry(cut).or_default();
-                state.rendering = None;
+                if let Some(state) = self.states.get_mut(&cut)
+                    && !state.exporting
+                    && state.stamp == stamp
+                {
+                    state.set_checks(result);
+                }
+            }
+            Event::Exported { cut, stamp, result } => {
+                let dir = self.folder.read(cx).dir.clone();
+                let export = self.cuts.iter().find(|c| c.name == cut);
+                let state = self.states.entry(cut.clone()).or_default();
+                state.exporting = false;
                 state.stamp = stamp;
-                state.checks = match result {
-                    Ok(problems) => Checks::Done(problems),
-                    Err(e) => Checks::Failed(e),
-                };
+                state.export = export.and_then(|c| exported(&dir, &c.export));
+                state.set_checks(result);
             }
             Event::Preview { cut, path } => {
                 self.states.entry(cut).or_default().preview = Some(path);
             }
-            Event::Candidates(result) => {
-                self.finding = false;
-                match result {
-                    Ok(_) => self.load_candidates(&self.folder.read(cx).dir.clone()),
-                    Err(e) => self.error = Some(e),
+            Event::Scored(scored) => {
+                if let Some(search) = &mut self.search {
+                    search.scored = Some(scored);
                 }
             }
-            Event::Step(step) => {
-                if let Some(run) = &mut self.run {
-                    run.status = step_line(&step);
-                }
+            Event::Searched(result) => {
+                self.search = None;
+                self.search_note = result.err();
+                self.load_candidates(&self.folder.read(cx).dir.clone());
             }
-            Event::Status(status) => {
-                if let Some(run) = &mut self.run {
-                    run.status = status;
+            Event::Finished(outcome) => {
+                let Some(run) = self.run.take() else {
+                    return;
+                };
+                for state in self.states.values_mut() {
+                    state.exporting = false;
                 }
-            }
-            Event::Shipped(result) => {
-                if let Some(run) = &mut self.run {
-                    run.outcome = Some(result);
-                }
-                self.record = Record::load(&self.folder.read(cx).dir).unwrap_or_default();
+                self.finished = Some(Finished {
+                    ship: run.ship,
+                    outcome,
+                    notes: run.notes,
+                });
+                self.reload(cx);
             }
         }
     }
 
-    fn render_and_check(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(cut) = self.cuts.get(index).cloned() else {
+    /// Exports `cuts` and checks each, then, given a channel and a client, uploads and tags.
+    fn start(
+        &mut self,
+        cuts: Vec<PlannedCut>,
+        ship_to: Option<(Channel, Client)>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.run.is_some() || cuts.is_empty() {
             return;
-        };
+        }
+        // Problems already shown count as seen: shipping with them is the person's call.
+        let force = self.problems() > 0;
+        for cut in &cuts {
+            let state = self.states.entry(cut.name.clone()).or_default();
+            state.exporting = true;
+            state.checks = Checks::Running;
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.finished = None;
+        self.run = Some(Run {
+            ship: ship_to.is_some(),
+            cuts: cuts.iter().map(|c| c.name.clone()).collect(),
+            step: None,
+            signing_in: false,
+            since: Instant::now(),
+            cancel: cancel.clone(),
+            notes: Vec::new(),
+        });
         let folder = self.folder.read(cx);
         let (dir, project) = (folder.dir.clone(), folder.project.clone());
-        self.states.entry(cut.name.clone()).or_default().rendering = Some((0, 0));
         let send = self.send.clone();
         std::thread::spawn(move || {
-            let progress = |p: shot_render::export::Progress| {
-                let _ = send.send(Event::Rendering {
-                    cut: cut.name.clone(),
-                    rendered: p.rendered,
-                    to_render: p.to_render,
-                });
-            };
-            let rendered = shot_render::export::export(
-                &dir,
-                &project,
-                &cut.name,
-                &cut.export,
-                shot_render::export::ExportOptions::default(),
-                &progress,
-            )
-            .map_err(|e| e.to_string());
-            let result = rendered.and_then(|_| {
-                preview(&dir, &cut, &send);
-                shot_ship::media::check_cut(&dir, &project, &cut.name, &cut.export)
-                    .map_err(|e| e.to_string())
-            });
-            let stamp = check_stamp(&dir, &cut, &project.cut.to_kdl());
-            let _ = send.send(Event::Checked {
-                cut: cut.name,
-                stamp,
-                result,
-            });
+            let outcome = run(&dir, &project, &cuts, ship_to, force, &cancel, &send);
+            let _ = send.send(Event::Finished(outcome));
         });
         self.poll(cx);
         cx.notify();
     }
 
-    fn find_candidates(&mut self, cx: &mut Context<Self>) {
-        if self.finding {
+    /// ⌘⏎: ship when YouTube is set up, otherwise export every cut.
+    fn primary(&mut self, _: &ShipVideo, _: &mut Window, cx: &mut Context<Self>) {
+        if self.shipped() {
             return;
         }
-        self.finding = true;
+        let ship_to = match (&self.channel, &self.client) {
+            (Ok(channel), Ok(client)) => Some((channel.clone(), client.clone())),
+            _ => None,
+        };
+        self.start(self.cuts.clone(), ship_to, cx);
+    }
+
+    fn export_selected(&mut self, _: &ExportCut, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(cut) = self.cuts.get(self.selected).cloned() {
+            self.start(vec![cut], None, cx);
+        }
+    }
+
+    fn stop(&mut self, _: &Stop, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(run) = &self.run {
+            run.cancel.store(true, Ordering::Relaxed);
+        } else if let Some(search) = &self.search {
+            search.cancel.store(true, Ordering::Relaxed);
+        }
+        cx.notify();
+    }
+
+    fn select(&mut self, by: isize, cx: &mut Context<Self>) {
+        let last = self.cuts.len().saturating_sub(1);
+        self.selected = self.selected.saturating_add_signed(by).min(last);
+        cx.notify();
+    }
+
+    fn find_candidates(&mut self, _: &FindThumbnails, _: &mut Window, cx: &mut Context<Self>) {
+        if self.search.is_some() {
+            return;
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.search = Some(Search {
+            scored: None,
+            cancel: cancel.clone(),
+        });
+        self.search_note = None;
         let folder = self.folder.read(cx);
         let (dir, project) = (folder.dir.clone(), folder.project.clone());
         let send = self.send.clone();
         std::thread::spawn(move || {
-            let found = shot_ship::thumbnails::find(&dir, &project, CANDIDATES)
-                .map_err(|e| e.to_string())
-                .and_then(|found| {
-                    if found.is_empty() {
-                        Err("no face found in the camera frames the main cut shows".to_owned())
-                    } else {
-                        Ok(found.into_iter().filter_map(|c| c.path).collect())
-                    }
-                });
-            let _ = send.send(Event::Candidates(found));
+            let found = thumbnails::find_with(
+                &dir,
+                &project,
+                CANDIDATES,
+                &|scored| {
+                    let _ = send.send(Event::Scored(scored));
+                },
+                &|| cancel.load(Ordering::Relaxed),
+            );
+            let result = match found {
+                Ok(found) if found.is_empty() => Err(
+                    "No face in the camera frames the main cut shows, so there is nothing to \
+                     suggest. Pick a frame in YouTube Studio after the upload."
+                        .to_owned(),
+                ),
+                Ok(_) | Err(ThumbnailError::Cancelled) => Ok(()),
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = send.send(Event::Searched(result));
         });
         self.poll(cx);
         cx.notify();
@@ -390,14 +601,17 @@ impl ShipScreen {
                 self.picked = Some(still);
                 self.reload(cx);
             }
-            Err(e) => self.error = Some(format!("{}: {e}", still.display())),
+            Err(e) => self.search_note = Some(format!("Could not use {}: {e}", still.display())),
         }
         cx.notify();
     }
 
     /// The thumbnail frame task: Claude sees the candidate stills, because the person asked.
     fn ask_claude(&mut self, cx: &mut Context<Self>) {
-        let (Some(claude), Some(channel)) = (self.claude.clone(), self.channel.clone()) else {
+        if self.claude_pick.as_ref().is_some_and(AgentRun::running) {
+            return;
+        }
+        let (Some(claude), Ok(channel)) = (self.claude.clone(), self.channel.clone()) else {
             return;
         };
         let title = self.folder.read(cx).project.video.title.clone();
@@ -418,7 +632,7 @@ impl ShipScreen {
                 self.claude_pick = Some(run);
                 agent::watch(cx, |this: &mut Self| this.claude_pick.as_mut(), |_, _| {});
             }
-            Err(e) => self.error = Some(e),
+            Err(e) => self.search_note = Some(e),
         }
         cx.notify();
     }
@@ -433,6 +647,55 @@ impl ShipScreen {
         })
     }
 
+    /// Asks for the downloaded OAuth client file and keeps a copy where `shot ship` reads it.
+    fn choose_client(&mut self, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Use this client".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                match oauth::install_client(&path, &oauth::client_path()) {
+                    Ok(client) => {
+                        this.client = Ok(client);
+                        this.client_note = None;
+                    }
+                    Err(e) => this.client_note = Some(e.to_string()),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn copy(&mut self, what: &'static str, text: String, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.copied = Some(what);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(1500))
+                .await;
+            this.update(cx, |this, cx| {
+                if this.copied == Some(what) {
+                    this.copied = None;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn problems(&self) -> usize {
         self.states
             .values()
@@ -443,124 +706,38 @@ impl ShipScreen {
             .sum()
     }
 
-    fn ship(&mut self, _: &ShipVideo, _: &mut Window, cx: &mut Context<Self>) {
-        if self.busy() || self.shipped() {
-            return;
-        }
-        let Some(channel) = self.channel.clone() else {
-            self.error =
-                Some(ship::ShipError::NoChannel(self.folder.read(cx).dir.clone()).to_string());
-            cx.notify();
-            return;
-        };
-        let client = match Client::load(&oauth::client_path()) {
-            Ok(client) => client,
-            Err(e) => {
-                self.error = Some(e.to_string());
-                cx.notify();
-                return;
-            }
-        };
-        // Problems already shown count as seen: shipping with them is the person's call.
-        let force = self.problems() > 0;
-        let folder = self.folder.read(cx);
-        let (dir, project, transcripts) = (
-            folder.dir.clone(),
-            folder.project.clone(),
-            folder.transcripts.clone(),
-        );
-        let options = self.options();
-        self.error = None;
-        self.run = Some(Run {
-            status: "Rendering".to_owned(),
-            outcome: None,
-        });
-        let send = self.send.clone();
-        std::thread::spawn(move || {
-            let result = (|| {
-                let step = |step: Step| {
-                    let event = match step {
-                        Step::Rendering {
-                            cut,
-                            rendered,
-                            to_render,
-                        } => Event::Rendering {
-                            cut,
-                            rendered,
-                            to_render,
-                        },
-                        step => Event::Step(step),
-                    };
-                    let _ = send.send(event);
-                };
-                let prepared = ship::prepare(&dir, &project, &transcripts, options, 3, &step)
-                    .map_err(|e| e.to_string())?;
-                for cut in &prepared.cuts {
-                    let _ = send.send(Event::Checked {
-                        cut: cut.name.clone(),
-                        stamp: check_stamp(&dir, cut, &project.cut.to_kdl()),
-                        result: Ok(prepared
-                            .problems
-                            .iter()
-                            .filter(|(name, _)| *name == cut.name)
-                            .map(|(_, p)| p.clone())
-                            .collect()),
-                    });
-                }
-                if !prepared.problems.is_empty() && !force {
-                    return Err(format!(
-                        "shot check found {} problems. Ship again to publish anyway.",
-                        prepared.problems.len()
-                    ));
-                }
-                let store = Box::new(Keychain::new(&client));
-                let mut youtube = YouTube::new(client, store, Endpoints::default());
-                if !youtube.signed_in().map_err(|e| e.to_string())? {
-                    let _ = send.send(Event::Status(
-                        "Sign in to YouTube in the browser".to_owned(),
-                    ));
-                    youtube
-                        .sign_in(&mut |url| {
-                            std::process::Command::new("open")
-                                .arg(url)
-                                .status()
-                                .map(drop)
-                        })
-                        .map_err(|e| e.to_string())?;
-                }
-                let mut step = |s: Step| {
-                    let _ = send.send(Event::Step(s));
-                };
-                ship::publish(
-                    &dir,
-                    &channel,
-                    &prepared.cuts,
-                    &mut youtube,
-                    ship::today(),
-                    &mut step,
-                )
-                .map_err(|e| e.to_string())
-            })();
-            let _ = send.send(Event::Shipped(result));
-        });
-        self.poll(cx);
-        cx.notify();
-    }
-
     fn shipped(&self) -> bool {
         self.record.release.is_some()
+    }
+
+    /// What a cut's row says about it, and in which color.
+    fn status(&self, cut: &PlannedCut) -> (String, Hsla) {
+        let state = self.states.get(&cut.name);
+        if state.is_some_and(|s| s.exporting) {
+            return ("exporting".to_owned(), ACCENT.into());
+        }
+        if self.record.video_id(&cut.name).is_some() {
+            return ("uploaded".to_owned(), MUTED.into());
+        }
+        if state
+            .and_then(|s| s.export.as_ref())
+            .is_some_and(|e| e.stale)
+        {
+            return ("export is out of date".to_owned(), WARN.into());
+        }
+        match state.map(|s| &s.checks) {
+            None | Some(Checks::NotExported) => ("not exported".to_owned(), MUTED.into()),
+            Some(Checks::Running) => ("checking".to_owned(), MUTED.into()),
+            Some(Checks::Failed(_)) => ("check failed".to_owned(), WARN.into()),
+            Some(Checks::Done(p)) if p.is_empty() => ("ready".to_owned(), TEXT.into()),
+            Some(Checks::Done(p)) => (format!("{} to look at", p.len()), WARN.into()),
+        }
     }
 
     fn cut_list(&self, cx: &mut Context<Self>) -> Div {
         let rows = self.cuts.iter().enumerate().map(|(index, cut)| {
             let on = index == self.selected;
-            let uploaded = self.record.video_id(&cut.name).is_some();
-            let meta = format!(
-                "{} · {}{}",
-                aspect(cut.kind),
-                destination(cut),
-                if uploaded { " · uploaded" } else { "" }
-            );
+            let (status, color) = self.status(cut);
             div()
                 .id(("ship-cut", index))
                 .flex()
@@ -585,7 +762,15 @@ impl ShipScreen {
                                 .font_weight(FontWeight::MEDIUM)
                                 .child(cut_title(cut)),
                         )
-                        .child(div().text_size(TEXT_SM).text_color(MUTED).child(meta)),
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(5.))
+                                .text_size(TEXT_SM)
+                                .text_color(MUTED)
+                                .child(format!("{} · {} ·", aspect(cut.kind), destination(cut)))
+                                .child(div().truncate().text_color(color).child(status)),
+                        ),
                 )
                 .child(
                     mono(shot_ship::clock(cut.length))
@@ -604,7 +789,17 @@ impl ShipScreen {
             .flex_col()
             .gap(px(2.))
             .p(px(12.))
-            .child(div().px(px(12.)).pt(px(4.)).pb(px(8.)).child(label("Cuts")))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px(px(12.))
+                    .pt(px(4.))
+                    .pb(px(8.))
+                    .child(label("Cuts"))
+                    .child(div().flex().gap(px(4.)).child(kbd("↑")).child(kbd("↓"))),
+            )
             .children(rows)
             .child(div().flex_1())
             .child(
@@ -629,20 +824,299 @@ impl ShipScreen {
             )
     }
 
+    fn export_pane(&self, cut: &PlannedCut, cx: &mut Context<Self>) -> Div {
+        let state = self.states.get(&cut.name);
+        let export = state.and_then(|s| s.export.as_ref());
+        let room = ship::export_room(cut.length);
+        let file = cut
+            .export
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let header = div()
+            .flex()
+            .items_baseline()
+            .gap(px(10.))
+            .child(div().font_weight(FontWeight::SEMIBOLD).child("Export"))
+            .child(mono(file).text_size(TEXT_SM).text_color(MUTED))
+            .child(div().flex_1())
+            .when_some(self.free, |this, free| {
+                this.child(
+                    div()
+                        .text_size(TEXT_SM)
+                        .text_color(MUTED)
+                        .child(format!("{} free", bytes(free))),
+                )
+            });
+        let running = self
+            .run
+            .as_ref()
+            .filter(|run| run.cuts.contains(&cut.name) && state.is_some_and(|s| s.exporting));
+        let body = if let Some(run) = running {
+            let now = run.step.as_ref().and_then(step_cut);
+            let line = match (&run.step, now) {
+                (Some(step), Some(now)) if now == cut.name => {
+                    let mut line = step_line(step);
+                    if let Step::Rendering {
+                        rendered,
+                        to_render,
+                        ..
+                    } = step
+                        && let Some(left) = left(run.since.elapsed(), *rendered, *to_render)
+                    {
+                        line = format!("{line}, {left}");
+                    }
+                    line
+                }
+                (_, Some(now)) => format!("Waits for {now} to export"),
+                _ => "Starting".to_owned(),
+            };
+            let fraction = run
+                .step
+                .as_ref()
+                .filter(|step| step_cut(step) == Some(cut.name.as_str()))
+                .and_then(step_fraction);
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(10.))
+                .child(progress(fraction))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(12.))
+                        .child(div().flex_1().text_color(BODY).child(line))
+                        .child(self.stop_button("ship-export-stop", run, cx)),
+                )
+        } else {
+            let (line, again) = match export {
+                Some(e) => (
+                    format!(
+                        "{}, exported {}",
+                        bytes(e.size),
+                        ago(SystemTime::now()
+                            .duration_since(e.modified)
+                            .unwrap_or_default())
+                    ),
+                    true,
+                ),
+                None => (
+                    format!(
+                        "Not exported yet. The {} cut takes about {} of disk while it renders.",
+                        shot_ship::clock(cut.length),
+                        bytes(room)
+                    ),
+                    false,
+                ),
+            };
+            let stale = export.is_some_and(|e| e.stale);
+            let busy = self.run.is_some();
+            let path = cut.export.clone();
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(div().flex_1().min_w_0().text_color(BODY).child(line))
+                .when(export.is_some(), |this| {
+                    this.child(
+                        proposal_action(
+                            "ship-reveal",
+                            "Show in Finder",
+                            Some("folder"),
+                            None,
+                            ActionLook::Quiet,
+                        )
+                        .on_click(cx.listener(move |_, _, _, cx| cx.reveal_path(&path))),
+                    )
+                })
+                .when(!busy, |this| {
+                    this.child(
+                        proposal_action(
+                            "ship-export",
+                            if again { "Export again" } else { "Export" },
+                            Some(if again { "again" } else { "export" }),
+                            Some("E"),
+                            if again && !stale {
+                                ActionLook::Plain
+                            } else {
+                                ActionLook::Accent
+                            },
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.export_selected(&ExportCut, window, cx)
+                        })),
+                    )
+                })
+        };
+        let stale = running.is_none() && export.is_some_and(|e| e.stale);
+        let short = running.is_none()
+            && (export.is_none() || stale)
+            && self.free.is_some_and(|free| free < room);
+        pane()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .px(px(16.))
+            .pt(px(14.))
+            .pb(px(14.))
+            .child(header)
+            .child(body)
+            .when(stale, |this| {
+                this.child(note(
+                    "A project file changed after this export. Export again to ship what you \
+                     see in the editor.",
+                ))
+            })
+            .when(short, |this| {
+                this.child(note(format!(
+                    "Only {} free on this disk, and the export needs about {}. Free some space \
+                     first, or the export stops when the disk is full.",
+                    bytes(self.free.unwrap_or_default()),
+                    bytes(room)
+                )))
+            })
+    }
+
+    fn stop_button(&self, id: &'static str, run: &Run, cx: &mut Context<Self>) -> impl IntoElement {
+        let stopping = run.cancel.load(Ordering::Relaxed);
+        if stopping {
+            let text = match &run.step {
+                Some(Step::Rendering { cut, .. }) => format!("Stops after {cut} renders"),
+                _ => "Stopping".to_owned(),
+            };
+            return div()
+                .text_size(TEXT_SM)
+                .text_color(MUTED)
+                .child(text)
+                .into_any_element();
+        }
+        proposal_action(id, "Stop", None, Some("Esc"), ActionLook::Plain)
+            .on_click(cx.listener(|this, _, window, cx| this.stop(&Stop, window, cx)))
+            .into_any_element()
+    }
+
+    fn checks_pane(&self, cut: &PlannedCut) -> Div {
+        let state = self.states.get(&cut.name);
+        let checks = state.map_or(&Checks::NotExported, |s| &s.checks);
+        let summary = match checks {
+            Checks::NotExported => "they run on the export".to_owned(),
+            Checks::Running if state.is_some_and(|s| s.exporting) => {
+                "they run after the export".to_owned()
+            }
+            Checks::Running => "checking".to_owned(),
+            Checks::Failed(_) => "could not check".to_owned(),
+            Checks::Done(p) if p.is_empty() => "all passed".to_owned(),
+            Checks::Done(p) => format!(
+                "{} passed, {} to look at",
+                CheckKind::ALL.len() - kinds(p),
+                p.len()
+            ),
+        };
+        let row = |kind: CheckKind| {
+            let found = match checks {
+                Checks::Done(p) => Some(p.iter().filter(|p| p.check == kind).count()),
+                _ => None,
+            };
+            let (value, color, glyph) = match found {
+                Some(0) => ("ok".to_owned(), Hsla::from(TEXT), Some(("check", MUTED))),
+                Some(n) => (n.to_string(), WARN.into(), Some(("alert", WARN))),
+                None => ("–".to_owned(), FAINT.into(), None),
+            };
+            div()
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .py(px(8.))
+                .px(px(2.))
+                .text_color(if found.is_some() { BODY } else { MUTED })
+                .child(match glyph {
+                    Some((name, color)) => icon(name, ICON, color).into_any_element(),
+                    None => div()
+                        .size(ICON)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(div().size(px(5.)).rounded_full().bg(FAINT))
+                        .into_any_element(),
+                })
+                .child(div().flex_1().child(check_name(kind)))
+                .child(mono(value).text_size(px(14.)).text_color(color))
+        };
+        let (left, right) = CheckKind::ALL.split_at(CheckKind::ALL.len().div_ceil(2));
+        let column = |kinds: &[CheckKind]| {
+            div()
+                .flex_1()
+                .flex_basis(px(0.))
+                .flex()
+                .flex_col()
+                .children(kinds.iter().map(|&k| row(k)))
+        };
+        let messages: Vec<String> = match checks {
+            Checks::Done(p) => p.iter().map(ToString::to_string).collect(),
+            Checks::Failed(e) => vec![e.clone()],
+            Checks::NotExported | Checks::Running => Vec::new(),
+        };
+        pane()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .px(px(16.))
+            .pt(px(12.))
+            .pb(px(14.))
+            .child(
+                div()
+                    .flex()
+                    .items_baseline()
+                    .justify_between()
+                    .px(px(2.))
+                    .pt(px(2.))
+                    .pb(px(6.))
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child("Checks"))
+                    .child(div().text_size(TEXT_SM).text_color(MUTED).child(summary)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap(px(24.))
+                    .child(column(left))
+                    .child(column(right)),
+            )
+            .when(!messages.is_empty(), |this| {
+                this.child(
+                    div()
+                        .mt(px(10.))
+                        .px(px(14.))
+                        .py(px(12.))
+                        .rounded(RADIUS_MD)
+                        .bg(WARN_TINT)
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.))
+                        .text_color(WARN)
+                        .children(messages.into_iter().map(|m| div().child(m))),
+                )
+            })
+    }
+
     fn diff_pane(&self, cut: &PlannedCut, cx: &App) -> Div {
         let (subtitle, lines) = match cut.kind {
             OutputKind::Main => match (&self.branch_diff, &self.channel) {
-                (Some(lines), Some(channel)) if lines.is_empty() => {
+                (Some(lines), Ok(channel)) if lines.is_empty() => {
                     (format!("same as video/{}", channel.slug), Vec::new())
                 }
-                (Some(lines), Some(channel)) => (
+                (Some(lines), Ok(channel)) => (
                     format!(
                         "not yet on video/{}, so not in the release tag",
                         channel.slug
                     ),
                     lines.clone(),
                 ),
-                _ => ("not in a channel repo".to_owned(), Vec::new()),
+                _ => (
+                    "not in a channel repo, so there is no branch to compare".to_owned(),
+                    Vec::new(),
+                ),
             },
             OutputKind::Derived(_) => {
                 let derived = self
@@ -666,18 +1140,10 @@ impl ShipScreen {
             }
         };
         let (added, removed) = diff::stat(&lines);
-        let body = div()
-            .id("ship-diff")
-            .max_h(px(300.))
-            .overflow_y_scroll()
-            .mx(px(10.))
-            .mb(px(10.))
-            .py(px(8.))
-            .rounded(RADIUS_MD)
-            .bg(WELL)
-            .children(lines.into_iter().map(diff_line));
+        let changed = added + removed > 0;
         pane()
-            .flex_none()
+            .when(changed, |this| this.flex_1())
+            .when(!changed, |this| this.flex_none())
             .flex()
             .flex_col()
             .child(
@@ -686,12 +1152,17 @@ impl ShipScreen {
                     .items_center()
                     .gap(px(10.))
                     .px(px(16.))
-                    .pt(px(14.))
-                    .pb(px(8.))
+                    .py(px(12.))
                     .child(div().font_weight(FontWeight::SEMIBOLD).child("cut.kdl"))
-                    .child(div().text_size(TEXT_SM).text_color(MUTED).child(subtitle))
-                    .child(div().flex_1())
-                    .when(added + removed > 0, |this| {
+                    .child(
+                        div()
+                            .flex_1()
+                            .truncate()
+                            .text_size(TEXT_SM)
+                            .text_color(MUTED)
+                            .child(subtitle),
+                    )
+                    .when(changed, |this| {
                         this.child(
                             mono(format!("+{added} −{removed}"))
                                 .text_size(TEXT_SM)
@@ -699,130 +1170,24 @@ impl ShipScreen {
                         )
                     }),
             )
-            .when(added + removed > 0, |this| this.child(body))
-    }
-
-    fn checks_pane(&self, index: usize, cx: &mut Context<Self>) -> Div {
-        let cut = &self.cuts[index];
-        let state = self.states.get(&cut.name);
-        let checks = state.map_or(&Checks::NotRendered, |s| &s.checks);
-        let rendering = state.and_then(|s| s.rendering);
-        let summary = match (rendering, checks) {
-            (Some((done, total)), _) if total > 0 => format!("rendering {done} of {total} chunks"),
-            (Some(_), _) => "rendering".to_owned(),
-            (_, Checks::NotRendered) => "not rendered yet".to_owned(),
-            (_, Checks::Running) => "checking".to_owned(),
-            (_, Checks::Failed(_)) => "could not check".to_owned(),
-            (_, Checks::Done(p)) if p.is_empty() => "all passed".to_owned(),
-            (_, Checks::Done(p)) => format!(
-                "{} passed, {} to look at",
-                CheckKind::ALL.len() - kinds(p),
-                p.len()
-            ),
-        };
-        let rows = CheckKind::ALL.iter().map(|&kind| {
-            let found: Vec<&Problem> = match checks {
-                Checks::Done(p) => p.iter().filter(|p| p.check == kind).collect(),
-                _ => Vec::new(),
-            };
-            let (value, color, glyph) = match checks {
-                Checks::Done(_) if found.is_empty() => ("ok".to_owned(), TEXT, "check"),
-                Checks::Done(_) => (format!("{}", found.len()), WARN, "alert"),
-                _ => ("–".to_owned(), MUTED, "check"),
-            };
-            div()
-                .flex()
-                .items_center()
-                .gap(px(10.))
-                .py(px(8.))
-                .px(px(2.))
-                .text_color(BODY)
-                .child(icon(
-                    glyph,
-                    ICON,
-                    if found.is_empty() { MUTED } else { WARN },
-                ))
-                .child(div().flex_1().child(check_name(kind)))
-                .child(mono(value).text_size(px(14.)).text_color(color))
-        });
-        let messages: Vec<String> = match checks {
-            Checks::Done(p) => p.iter().map(ToString::to_string).collect(),
-            Checks::Failed(e) => vec![e.clone()],
-            Checks::NotRendered => {
-                vec!["Render this cut to check its loudness, frames and captions.".to_owned()]
-            }
-            Checks::Running => Vec::new(),
-        };
-        let busy = rendering.is_some() || matches!(checks, Checks::Running);
-        let action = match checks {
-            Checks::NotRendered => "Render and check",
-            _ => "Render again",
-        };
-        let column = |range: std::ops::Range<usize>| {
-            div()
-                .flex_1()
-                .flex_basis(px(0.))
-                .flex()
-                .flex_col()
-                .children(rows.clone().skip(range.start).take(range.len()))
-        };
-        pane()
-            .flex_1()
-            .flex()
-            .flex_col()
-            .px(px(16.))
-            .pt(px(12.))
-            .pb(px(14.))
-            .child(
-                div()
-                    .flex()
-                    .items_baseline()
-                    .justify_between()
-                    .px(px(2.))
-                    .pt(px(2.))
-                    .pb(px(6.))
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child("Checks"))
-                    .child(div().text_size(TEXT_SM).text_color(MUTED).child(summary)),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap(px(24.))
-                    .child(column(0..3))
-                    .child(column(3..6)),
-            )
-            .when(!messages.is_empty(), |this| {
+            .when(changed, |this| {
                 this.child(
                     div()
-                        .id("ship-problems")
-                        .mt(px(10.))
-                        .px(px(14.))
-                        .py(px(12.))
+                        .id("ship-diff")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .mx(px(10.))
+                        .mb(px(10.))
+                        .py(px(8.))
                         .rounded(RADIUS_MD)
-                        .bg(WARN_TINT)
-                        .flex()
-                        .items_start()
-                        .gap(px(12.))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .flex()
-                                .flex_col()
-                                .gap(px(4.))
-                                .text_color(WARN)
-                                .children(messages.into_iter().map(|m| div().child(m))),
-                        )
-                        .when(!busy, |this| {
-                            this.child(button(("ship-render", index), action).h(px(30.)).on_click(
-                                cx.listener(move |this, _, _, cx| this.render_and_check(index, cx)),
-                            ))
-                        }),
+                        .bg(WELL)
+                        .children(lines.into_iter().map(diff_line)),
                 )
             })
     }
 
-    fn preview_pane(&self, cut: &PlannedCut, cx: &mut Context<Self>) -> impl IntoElement {
+    fn side(&self, cut: &PlannedCut, cx: &mut Context<Self>) -> impl IntoElement {
         let (w, h) = match cut.kind {
             OutputKind::Main => (340., 191.),
             OutputKind::Derived(DerivedKind::Short) => (176., 313.),
@@ -837,9 +1202,6 @@ impl ShipScreen {
         };
         let format = format!("{} · {}", aspect(cut.kind), shot_ship::clock(cut.length));
         let mut side = div()
-            .w(px(400.))
-            .min_h_full()
-            .flex_none()
             .flex()
             .flex_col()
             .gap(px(14.))
@@ -867,37 +1229,141 @@ impl ShipScreen {
                             .bg(BLOCK)
                             .overflow_hidden()
                             .shadow_lg()
-                            .when_some(still, |this, still| {
-                                this.child(img(still).size_full().object_fit(ObjectFit::Cover))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .map(|this| match still {
+                                Some(still) => {
+                                    this.child(img(still).size_full().object_fit(ObjectFit::Cover))
+                                }
+                                None => this.child(
+                                    div()
+                                        .w_full()
+                                        .px(px(16.))
+                                        .text_size(TEXT_SM)
+                                        .text_color(MUTED)
+                                        .text_center()
+                                        .child("A frame shows here once the cut is exported"),
+                                ),
                             }),
                     ),
             );
         if cut.kind == OutputKind::Main {
             side = side.child(self.thumbnails(cx));
         }
-        if let Some(metadata) = &cut.metadata {
-            side = side
-                .child(field("Title", div().child(metadata.title.clone())))
-                .child(field(
-                    "Description",
-                    mono(metadata.description.clone())
-                        .text_size(TEXT_SM)
-                        .line_height(px(20.))
-                        .text_color(BODY),
-                ));
-        } else {
-            side = side.child(field(
-                "File",
-                mono(cut.export.display().to_string())
-                    .text_size(TEXT_SM)
-                    .text_color(BODY),
-            ));
+        match &cut.metadata {
+            Some(metadata) => {
+                let problems = metadata.problems();
+                let title = metadata.title.clone();
+                let description = metadata.description.clone();
+                side = side
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.))
+                            .child(field_header(
+                                "Title",
+                                Some(format!(
+                                    "{}/{}",
+                                    title.chars().count(),
+                                    shot_ship::youtube::TITLE_MAX
+                                )),
+                                self.copy_button("title", title.clone(), cx),
+                            ))
+                            .child(field(div().child(title)))
+                            .children(problems.into_iter().map(|p| {
+                                div()
+                                    .text_size(TEXT_SM)
+                                    .text_color(WARN)
+                                    .child(capitalized(&p))
+                            })),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.))
+                            .child(field_header(
+                                "Description",
+                                None,
+                                self.copy_button("description", description.clone(), cx),
+                            ))
+                            .child(field(
+                                div()
+                                    .text_size(TEXT_SM)
+                                    .line_height(px(20.))
+                                    .text_color(BODY)
+                                    .child(description),
+                            )),
+                    );
+            }
+            None => {
+                let path = cut.export.clone();
+                side = side.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.))
+                        .child(field_header(
+                            "File",
+                            None,
+                            proposal_action(
+                                "ship-file-reveal",
+                                "Show in Finder",
+                                Some("folder"),
+                                None,
+                                ActionLook::Quiet,
+                            )
+                            .on_click(cx.listener(move |_, _, _, cx| cx.reveal_path(&path)))
+                            .into_any_element(),
+                        ))
+                        .child(field(
+                            mono(cut.export.display().to_string())
+                                .text_size(TEXT_SM)
+                                .text_color(BODY),
+                        ))
+                        .child(
+                            div()
+                                .text_size(TEXT_SM)
+                                .text_color(MUTED)
+                                .child("Not uploaded: post this file by hand."),
+                        ),
+                );
+            }
         }
         pane()
+            .w(px(400.))
             .flex_none()
-            .id("ship-side")
-            .overflow_y_scroll()
-            .child(side.child(self.publish(cx)))
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .id("ship-side")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(side),
+            )
+            .child(self.publish(cx).px(px(14.)).pt(px(4.)).pb(px(14.)))
+    }
+
+    fn copy_button(
+        &self,
+        what: &'static str,
+        text: String,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let copied = self.copied == Some(what);
+        proposal_action(
+            SharedString::from(format!("ship-copy-{what}")),
+            if copied { "Copied" } else { "Copy" },
+            Some(if copied { "check" } else { "copy" }),
+            None,
+            ActionLook::Quiet,
+        )
+        .on_click(cx.listener(move |this, _, _, cx| this.copy(what, text.clone(), cx)))
+        .into_any_element()
     }
 
     fn thumbnails(&self, cx: &mut Context<Self>) -> Div {
@@ -923,12 +1389,13 @@ impl ShipScreen {
                 } else {
                     gpui::transparent_black()
                 })
+                .hover(|s| s.border_color(Hsla::from(ACCENT).opacity(0.3)))
                 .child(img(still.clone()).size_full().object_fit(ObjectFit::Cover))
                 .on_click(cx.listener(move |this, _, _, cx| this.pick(still.clone(), cx)))
         });
-        let running = self.claude_pick.as_ref().is_some_and(AgentRun::running);
-        let note = match &self.claude_pick {
-            Some(run) if run.running() => Some("Claude is looking at the four stills".to_owned()),
+        let asking = self.claude_pick.as_ref().is_some_and(AgentRun::running);
+        let claude_note = match &self.claude_pick {
+            Some(run) if run.running() => Some("Claude is looking at the stills".to_owned()),
             Some(run) => match &run.outcome {
                 Some(Ok(answer)) => Some(answer.lines().skip(1).collect::<Vec<_>>().join(" ")),
                 Some(Err(e)) => Some(e.clone()),
@@ -936,83 +1403,279 @@ impl ShipScreen {
             },
             None => None,
         };
+        let hint = match (&self.search, self.candidates.is_empty(), &self.picked) {
+            (Some(_), _, _) => None,
+            (None, true, _) => Some(
+                "Scores the camera frames of the main cut by expression and suggests four."
+                    .to_owned(),
+            ),
+            (None, false, None) => Some("Click one to make it the thumbnail.".to_owned()),
+            (None, false, Some(_)) => None,
+        };
         let header = div()
             .flex()
             .items_center()
-            .justify_between()
-            .child(label("Thumbnail candidates"))
-            .when(self.candidates.is_empty(), |this| {
-                this.child(
-                    button(
-                        "ship-find",
-                        if self.finding {
-                            "Finding"
-                        } else {
-                            "Find candidates"
+            .gap(px(6.))
+            .child(div().flex_1().child(label("Thumbnail")))
+            .map(|this| match &self.search {
+                Some(search) => this
+                    .child(
+                        proposal_action(
+                            "ship-find-stop",
+                            "Stop",
+                            None,
+                            Some("Esc"),
+                            ActionLook::Quiet,
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| this.stop(&Stop, window, cx))),
+                    )
+                    .when(search.cancel.load(Ordering::Relaxed), |this| {
+                        this.child(div().text_size(TEXT_SM).text_color(MUTED).child("Stopping"))
+                    }),
+                None => this
+                    .when(
+                        !self.candidates.is_empty()
+                            && self.claude.is_some()
+                            && self.channel.is_ok(),
+                        |this| {
+                            this.child(
+                                proposal_action(
+                                    "ship-ask",
+                                    if asking {
+                                        "Asking Claude"
+                                    } else {
+                                        "Ask Claude"
+                                    },
+                                    Some("spark"),
+                                    None,
+                                    ActionLook::Quiet,
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| this.ask_claude(cx))),
+                            )
                         },
                     )
-                    .h(px(28.))
-                    .on_click(cx.listener(|this, _, _, cx| this.find_candidates(cx))),
-                )
-            })
-            .when(
-                !self.candidates.is_empty() && self.claude.is_some() && self.channel.is_some(),
-                |this| {
-                    this.child(
-                        button(
-                            "ship-ask",
-                            if running {
-                                "Asking Claude"
+                    .child(
+                        proposal_action(
+                            "ship-find",
+                            if self.candidates.is_empty() {
+                                "Find candidates"
                             } else {
-                                "Ask Claude"
+                                "Find again"
                             },
+                            None,
+                            Some("T"),
+                            ActionLook::Plain,
                         )
-                        .h(px(28.))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if !this.claude_pick.as_ref().is_some_and(AgentRun::running) {
-                                this.ask_claude(cx)
-                            }
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.find_candidates(&FindThumbnails, window, cx)
                         })),
-                    )
-                },
-            );
+                    ),
+            });
+        let scoring = self.search.as_ref().map(|search| {
+            let (line, fraction) = match search.scored {
+                Some(Scored { done, total }) if total > 0 => (
+                    format!("Scoring camera frames, {done} of {total}"),
+                    Some(done as f32 / total as f32),
+                ),
+                _ => ("Reading the main cut".to_owned(), None),
+            };
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .child(progress(fraction))
+                .child(div().text_size(TEXT_SM).text_color(MUTED).child(line))
+        });
         div()
             .flex()
             .flex_col()
             .gap(px(8.))
             .child(header)
+            .children(scoring)
             .when(!self.candidates.is_empty(), |this| {
                 this.child(div().flex().gap(px(8.)).children(tiles))
             })
-            .when_some(note.filter(|n| !n.is_empty()), |this, note| {
+            .when_some(self.search_note.clone(), |this, note| {
+                this.child(div().text_size(TEXT_SM).text_color(WARN).child(note))
+            })
+            .when_some(claude_note.filter(|n| !n.is_empty()), |this, note| {
                 this.child(div().text_size(TEXT_SM).text_color(MUTED).child(note))
+            })
+            .when_some(hint, |this, hint| {
+                this.child(div().text_size(TEXT_SM).text_color(MUTED).child(hint))
             })
     }
 
     fn publish(&self, cx: &mut Context<Self>) -> Div {
-        let entity = cx.entity();
-        let privacy = Privacy::ALL
-            .into_iter()
-            .map(|p| {
-                let entity = entity.clone();
-                let name = match p {
-                    Privacy::Private => "Private",
-                    Privacy::Unlisted => "Unlisted",
-                    Privacy::Public => "Public",
-                };
-                Segment::new(name, self.privacy == p, move |_, _, cx| {
-                    entity.update(cx, |this, cx| {
-                        this.privacy = p;
-                        this.reload(cx);
-                    })
+        let mut out = div().flex().flex_col().gap(px(10.));
+        let ready = self.channel.is_ok() && self.client.is_ok();
+        if self.shipped() {
+            out = out.child(self.shipped_card(cx));
+        } else {
+            out = match (&self.channel, &self.client) {
+                (Err(e), _) => out.child(card(
+                    "Uploads need a channel repo",
+                    vec![
+                        div().text_size(TEXT_SM).text_color(BODY).child(format!(
+                            "{e} Shipping moves the video's card to shipped and tags the \
+                             release, so open the video from its channel repo to upload from \
+                             here."
+                        )),
+                        div()
+                            .text_size(TEXT_SM)
+                            .text_color(MUTED)
+                            .child("⌘⏎ exports every cut, so you can upload the files by hand."),
+                    ],
+                )),
+                (Ok(_), Err(e)) => out.child(self.setup_card(e, cx)),
+                (Ok(_), Ok(_)) => {
+                    let entity = cx.entity();
+                    let segments = Privacy::ALL
+                        .into_iter()
+                        .map(|p| {
+                            let entity = entity.clone();
+                            Segment::new(privacy(p), self.privacy == p, move |_, _, cx| {
+                                entity.update(cx, |this, cx| {
+                                    this.privacy = p;
+                                    this.reload(cx);
+                                })
+                            })
+                        })
+                        .collect();
+                    out.child(segmented("ship-privacy", WELL, segments)).child(
+                        div()
+                            .text_size(TEXT_SM)
+                            .text_color(MUTED)
+                            .child(self.summary()),
+                    )
+                }
+            };
+        }
+        // A single cut's export shows its progress in the export pane only.
+        if let Some(run) = self.run.as_ref().filter(|r| r.ship || r.cuts.len() > 1) {
+            let line = if run.signing_in {
+                "Sign in to YouTube in your browser. The ship waits up to 5 minutes.".to_owned()
+            } else {
+                run.step.as_ref().map_or("Starting".to_owned(), step_line)
+            };
+            out = out.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .child(progress(run.step.as_ref().and_then(step_fraction)))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(10.))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(TEXT_SM)
+                                    .text_color(BODY)
+                                    .child(line),
+                            )
+                            .child(self.stop_button("ship-run-stop", run, cx)),
+                    ),
+            );
+        }
+        if let Some(finished) = &self.finished {
+            let (text, color) = match &finished.outcome {
+                Outcome::Exported(n) => (
+                    format!("Exported {} to .shot/export.", plural(*n, "cut")),
+                    Hsla::from(BODY),
+                ),
+                Outcome::Problems(n) => (
+                    format!(
+                        "shot check found {}. Look at them in each cut, then ship anyway with \
+                         ⌘⏎ or fix them first.",
+                        plural(*n, "problem")
+                    ),
+                    WARN.into(),
+                ),
+                Outcome::Shipped(tag) => (format!("Shipped and tagged {tag}."), TEXT.into()),
+                Outcome::Stopped if finished.ship => (
+                    "Stopped. The next ship continues where this one stopped.".to_owned(),
+                    MUTED.into(),
+                ),
+                Outcome::Stopped => ("Stopped.".to_owned(), MUTED.into()),
+                Outcome::Failed(e) => (capitalized(e), WARN.into()),
+            };
+            out = out.child(div().text_size(TEXT_SM).text_color(color).child(text));
+            out = out.children(
+                finished
+                    .notes
+                    .iter()
+                    .map(|n| div().text_size(TEXT_SM).text_color(WARN).child(n.clone())),
+            );
+        }
+        let (cta, enabled) = if self.shipped() {
+            (
+                format!(
+                    "Shipped as {}",
+                    self.record.release.clone().unwrap_or_default()
+                ),
+                false,
+            )
+        } else if let Some(run) = &self.run {
+            let doing = if run.ship { "Shipping" } else { "Exporting" };
+            (doing.to_owned(), false)
+        } else if !ready {
+            (
+                if self.cuts.len() == 1 {
+                    "Export the cut".to_owned()
+                } else {
+                    "Export every cut".to_owned()
+                },
+                !self.cuts.is_empty(),
+            )
+        } else if self.problems() > 0 {
+            (
+                format!("Ship with {} and tag", plural(self.problems(), "problem")),
+                true,
+            )
+        } else if self.record.uploads.values().any(|u| u.video_id.is_some()) {
+            ("Finish shipping and tag".to_owned(), true)
+        } else {
+            ("Ship to YouTube and tag".to_owned(), true)
+        };
+        out.child(
+            div()
+                .id("ship-go")
+                .h(px(44.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap(px(8.))
+                .rounded(px(9.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .when(enabled, |this| {
+                    this.bg(ACCENT)
+                        .text_color(ON_ACCENT)
+                        .cursor_pointer()
+                        .hover(|s| s.bg(INSERTED))
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.primary(&ShipVideo, window, cx)),
+                        )
                 })
-            })
-            .collect();
-        let shorts = self
-            .cuts
-            .iter()
-            .filter(|c| c.kind == OutputKind::Derived(DerivedKind::Short))
-            .count();
+                .when(!enabled, |this| this.bg(RAISED).text_color(MUTED))
+                .child(cta)
+                .when(enabled, |this| {
+                    this.child(
+                        kbd("⌘⏎")
+                            .bg(Hsla::from(ON_ACCENT).opacity(0.14))
+                            .text_color(ON_ACCENT),
+                    )
+                }),
+        )
+    }
+
+    /// What a ship sends where, such as "Uploads main and 1 Short as private videos".
+    fn summary(&self) -> String {
+        let count = |kind| self.cuts.iter().filter(|c| c.kind == kind).count();
+        let shorts = count(OutputKind::Derived(DerivedKind::Short));
         let files = self
             .cuts
             .iter()
@@ -1022,86 +1685,196 @@ impl ShipScreen {
         if shorts > 0 {
             what.push(plural(shorts, "Short"));
         }
-        let mut summary = format!("Uploads {} to YouTube", what.join(" and "));
+        let mut summary = format!(
+            "Uploads {} to YouTube as {}",
+            what.join(" and "),
+            privacy(self.privacy).to_lowercase()
+        );
         if files > 0 {
             summary.push_str(&format!(", keeps {} as a file", plural(files, "X clip")));
         }
-        let running = self.run.as_ref().is_some_and(|r| r.outcome.is_none());
-        let problems = self.problems();
-        let cta = if self.shipped() {
-            format!(
-                "Shipped as {}",
-                self.record.release.clone().unwrap_or_default()
-            )
-        } else if running {
-            "Shipping".to_owned()
-        } else if problems > 0 {
-            format!("Ship with {} and tag", plural(problems, "problem"))
-        } else {
-            "Ship to YouTube and tag".to_owned()
-        };
-        let status = match &self.run {
-            Some(Run {
-                outcome: Some(Err(e)),
-                ..
-            }) => Some((e.clone(), WARN)),
-            Some(Run {
-                outcome: Some(Ok(shipped)),
-                ..
-            }) => Some((
-                shipped
-                    .videos
-                    .iter()
-                    .map(|(cut, id)| format!("{cut} {}", shot_ship::youtube::watch_url(id)))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-                TEXT,
+        summary.push_str(", then tags the release.");
+        summary
+    }
+
+    fn setup_card(&self, error: &AuthError, cx: &mut Context<Self>) -> Div {
+        let path = oauth::client_path();
+        let problem = match error {
+            AuthError::Setup(_) => None,
+            other => Some(format!(
+                "The client file can't be used: {other}. Choose the downloaded Desktop app \
+                 JSON again."
             )),
-            Some(run) => Some((run.status.clone(), MUTED)),
-            None => self.error.clone().map(|e| (e, WARN)),
         };
-        let enabled = !running && !self.shipped();
-        div()
-            .mt_auto()
-            .flex()
-            .flex_col()
-            .gap(px(10.))
-            .child(segmented("ship-privacy", WELL, privacy))
-            .child(div().text_size(TEXT_SM).text_color(MUTED).child(summary))
-            .when_some(status, |this, (text, color)| {
-                this.child(div().text_size(TEXT_SM).text_color(color).child(text))
-            })
-            .child(
+        let step = |n: &'static str, text: String| {
+            div()
+                .flex()
+                .gap(px(8.))
+                .text_size(TEXT_SM)
+                .text_color(BODY)
+                .child(mono(n).text_color(MUTED))
+                .child(div().flex_1().min_w_0().child(text))
+        };
+        card(
+            "Connect YouTube",
+            vec![
                 div()
-                    .id("ship-go")
-                    .h(px(44.))
+                    .text_size(TEXT_SM)
+                    .text_color(MUTED)
+                    .child("Uploads use your own Google Cloud OAuth client. Set it up once:"),
+                step(
+                    "1",
+                    "In Google Cloud, create a project and enable the YouTube Data API v3."
+                        .to_owned(),
+                ),
+                step(
+                    "2",
+                    "Under Credentials, create an OAuth client ID of type Desktop app and \
+                     download its JSON. While the consent screen is in testing, add your \
+                     Google account as a test user."
+                        .to_owned(),
+                ),
+                step(
+                    "3",
+                    format!(
+                        "Choose the downloaded file. A copy goes to {}.",
+                        home_relative(&path)
+                    ),
+                ),
+                div()
+                    .flex()
+                    .gap(px(8.))
+                    .pt(px(2.))
+                    .child(
+                        proposal_action(
+                            "ship-console",
+                            "Open Google Cloud",
+                            Some("link"),
+                            None,
+                            ActionLook::Plain,
+                        )
+                        .on_click(|_, _, cx| cx.open_url(CREDENTIALS_URL)),
+                    )
+                    .child(
+                        proposal_action(
+                            "ship-client",
+                            "Choose client file",
+                            Some("folder"),
+                            None,
+                            ActionLook::Plain,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.choose_client(cx))),
+                    ),
+            ]
+            .into_iter()
+            .chain(
+                problem
+                    .into_iter()
+                    .chain(self.client_note.clone())
+                    .map(|p| div().text_size(TEXT_SM).text_color(WARN).child(p)),
+            )
+            .chain([div().text_size(TEXT_SM).text_color(MUTED).child(
+                "Until then, ⌘⏎ exports every cut, so you can upload the files by hand. The \
+                 first ship signs you in to YouTube in the browser.",
+            )])
+            .collect(),
+        )
+    }
+
+    fn shipped_card(&self, cx: &mut Context<Self>) -> Div {
+        let tag = self.record.release.clone().unwrap_or_default();
+        let rows = self.record.uploads.iter().filter_map(|(cut, upload)| {
+            let url = shot_ship::youtube::watch_url(upload.video_id.as_deref()?);
+            let open = url.clone();
+            Some(
+                div()
                     .flex()
                     .items_center()
-                    .justify_center()
                     .gap(px(8.))
-                    .rounded(px(9.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .when(enabled, |this| {
-                        this.bg(ACCENT)
-                            .text_color(ON_ACCENT)
-                            .cursor_pointer()
-                            .hover(|s| s.bg(INSERTED))
-                            .on_click(
-                                cx.listener(|this, _, window, cx| {
-                                    this.ship(&ShipVideo, window, cx)
-                                }),
-                            )
-                    })
-                    .when(!enabled, |this| this.bg(RAISED).text_color(MUTED))
-                    .child(cta)
-                    .when(enabled, |this| {
-                        this.child(
-                            kbd("⌘⏎")
-                                .bg(Hsla::from(ON_ACCENT).opacity(0.14))
-                                .text_color(ON_ACCENT),
+                    .child(
+                        div()
+                            .w(px(70.))
+                            .truncate()
+                            .text_color(BODY)
+                            .child(cut.clone()),
+                    )
+                    .child(
+                        mono(url.clone())
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(TEXT_SM)
+                            .text_color(MUTED),
+                    )
+                    .child(
+                        proposal_action(
+                            SharedString::from(format!("ship-open-{cut}")),
+                            "Open",
+                            Some("link"),
+                            None,
+                            ActionLook::Quiet,
                         )
-                    }),
+                        .on_click(move |_, _, cx| cx.open_url(&open)),
+                    ),
             )
+        });
+        let files: Vec<PathBuf> = self
+            .cuts
+            .iter()
+            .filter(|c| c.destination == Destination::File)
+            .map(|c| c.export.clone())
+            .collect();
+        card(
+            "Shipped",
+            vec![div().text_size(TEXT_SM).text_color(MUTED).child(format!(
+                "Tagged {tag}. The videos keep the privacy they went up with."
+            ))]
+            .into_iter()
+            .chain(rows)
+            .chain(files.into_iter().enumerate().map(|(index, file)| {
+                let name = file
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(mono(name).flex_1().text_size(TEXT_SM).text_color(BODY))
+                    .child(
+                        proposal_action(
+                            SharedString::from(format!("ship-shipped-file-{index}")),
+                            "Show in Finder",
+                            Some("folder"),
+                            None,
+                            ActionLook::Quiet,
+                        )
+                        .on_click(cx.listener(move |_, _, _, cx| cx.reveal_path(&file))),
+                    )
+            }))
+            .collect(),
+        )
+    }
+}
+
+impl CutState {
+    fn set_checks(&mut self, result: Result<Vec<Problem>, String>) {
+        self.checks = match result {
+            Ok(problems) => {
+                if let Some(export) = &self.export {
+                    self.measured = Some(Measured {
+                        modified: export.modified,
+                        problems: problems
+                            .iter()
+                            .filter(|p| measured_from_export(p.check))
+                            .cloned()
+                            .collect(),
+                    });
+                }
+                Checks::Done(problems)
+            }
+            Err(e) => Checks::Failed(e),
+        };
     }
 }
 
@@ -1120,21 +1893,30 @@ impl Render for ShipScreen {
                         .flex()
                         .flex_col()
                         .gap(px(8.))
-                        .child(self.diff_pane(&cut, cx))
-                        .child(self.checks_pane(self.selected, cx)),
+                        .child(self.export_pane(&cut, cx))
+                        .child(self.checks_pane(&cut))
+                        .child(self.diff_pane(&cut, cx)),
                 )
-                .child(self.preview_pane(&cut, cx)),
-            None => pane()
-                .flex_1()
-                .p(px(16.))
-                .text_color(MUTED)
-                .child("The cut has no chapters yet, so there is nothing to ship."),
+                .child(self.side(&cut, cx)),
+            None => pane().flex_1().p(px(16.)).text_color(MUTED).child(
+                self.plan_error
+                    .clone()
+                    .map(|e| capitalized(&e))
+                    .unwrap_or_else(|| {
+                        "The cut has no chapters yet, so there is nothing to ship.".to_owned()
+                    }),
+            ),
         };
         div()
             .id("ship")
             .key_context(CONTEXT)
             .track_focus(&self.focus)
-            .on_action(cx.listener(Self::ship))
+            .on_action(cx.listener(Self::primary))
+            .on_action(cx.listener(Self::export_selected))
+            .on_action(cx.listener(Self::find_candidates))
+            .on_action(cx.listener(Self::stop))
+            .on_action(cx.listener(|this, _: &NextCut, _, cx| this.select(1, cx)))
+            .on_action(cx.listener(|this, _: &PreviousCut, _, cx| this.select(-1, cx)))
             .size_full()
             .flex()
             .gap(px(8.))
@@ -1143,6 +1925,135 @@ impl Render for ShipScreen {
             .child(self.cut_list(cx))
             .child(main)
     }
+}
+
+/// Exports `cuts` and checks each, then uploads and tags when `ship_to` is given. Runs on its
+/// own thread and reports to `send`.
+fn run(
+    dir: &Path,
+    project: &shot_core::Project,
+    cuts: &[PlannedCut],
+    ship_to: Option<(Channel, Client)>,
+    force: bool,
+    cancel: &Arc<AtomicBool>,
+    send: &Sender<Event>,
+) -> Outcome {
+    let cancelled = || cancel.load(Ordering::Relaxed);
+    let step = |step: Step| {
+        let _ = send.send(Event::Step(step));
+    };
+    let cut_kdl = project.cut.to_kdl();
+    let mut problems = 0;
+    for cut in cuts {
+        step(Step::Rendering {
+            cut: cut.name.clone(),
+            rendered: 0,
+            to_render: 0,
+        });
+        let result = match ship::export_cut(dir, project, cut, JOBS, &step, &cancelled) {
+            Err(ShipError::Cancelled) => return Outcome::Stopped,
+            result => result.map_err(|e| e.to_string()),
+        };
+        if result.is_ok() {
+            preview(dir, cut, send);
+        }
+        let failed = result.as_ref().err().cloned();
+        problems += result.as_ref().map_or(0, Vec::len);
+        let _ = send.send(Event::Exported {
+            cut: cut.name.clone(),
+            stamp: check_stamp(dir, cut, &cut_kdl),
+            result,
+        });
+        if let Some(e) = failed {
+            return Outcome::Failed(e);
+        }
+    }
+    let Some((channel, client)) = ship_to else {
+        return Outcome::Exported(cuts.len());
+    };
+    if problems > 0 && !force {
+        return Outcome::Problems(problems);
+    }
+    let store = Box::new(Keychain::new(&client));
+    let mut youtube = YouTube::new(client, store, Endpoints::default());
+    youtube.cancel = cancel.clone();
+    let sign_in = |youtube: &mut YouTube| {
+        let _ = send.send(Event::SigningIn);
+        youtube
+            .sign_in(&mut |url| {
+                std::process::Command::new("open")
+                    .arg(url)
+                    .status()
+                    .map(drop)
+            })
+            .map_err(|e| e.to_string())
+    };
+    match youtube.signed_in() {
+        Ok(true) => {}
+        Ok(false) => {
+            if let Err(e) = sign_in(&mut youtube) {
+                return Outcome::Failed(e);
+            }
+        }
+        Err(e) => return Outcome::Failed(e.to_string()),
+    }
+    let mut on_step = |s: Step| {
+        let _ = send.send(Event::Step(s));
+    };
+    let mut result = ship::publish(
+        dir,
+        &channel,
+        cuts,
+        &mut youtube,
+        ship::today(),
+        &mut on_step,
+    );
+    // A revoked sign-in: the record keeps what already went up, so the second try continues.
+    if matches!(
+        result,
+        Err(ShipError::YouTube(YouTubeError::Auth(AuthError::Expired)))
+    ) {
+        if let Err(e) = sign_in(&mut youtube) {
+            return Outcome::Failed(e);
+        }
+        result = ship::publish(
+            dir,
+            &channel,
+            cuts,
+            &mut youtube,
+            ship::today(),
+            &mut on_step,
+        );
+    }
+    match result {
+        Ok(shipped) => Outcome::Shipped(shipped.tag),
+        Err(ShipError::YouTube(YouTubeError::Cancelled)) => Outcome::Stopped,
+        Err(e) => Outcome::Failed(e.to_string()),
+    }
+}
+
+/// Whether a check reads the export itself rather than the project files.
+fn measured_from_export(kind: CheckKind) -> bool {
+    matches!(kind, CheckKind::Loudness | CheckKind::Frames)
+}
+
+/// The export of a cut, when there is one.
+fn exported(dir: &Path, export: &Path) -> Option<Exported> {
+    let meta = std::fs::metadata(export).ok()?;
+    let modified = meta.modified().ok()?;
+    let edited = ["cut.kdl", "format.kdl", shot_ship::lock::LOCK_FILE]
+        .iter()
+        .filter_map(|f| {
+            std::fs::metadata(dir.join(f))
+                .and_then(|m| m.modified())
+                .ok()
+        })
+        .max();
+    Some(Exported {
+        size: meta.len(),
+        modified,
+        stale: edited.is_some_and(|e| e > modified),
+    })
 }
 
 /// A hash of what a cut's checks read: its export, the thumbnail and `cut.kdl`.
@@ -1171,14 +2082,57 @@ fn preview(dir: &Path, cut: &PlannedCut, send: &Sender<Event>) {
         .map_or(0, |d| d.as_secs());
     // The modification time is in the name, so gpui's image cache never shows an old render.
     let out = dir.join(format!(".shot/cache/ship/{}-{stamp}.png", cut.name));
-    if out.exists()
-        || shot_ship::media::still(&cut.export, shot_core::Micros(cut.length.0 / 3), &out).is_ok()
+    if out.exists() || media::still(&cut.export, shot_core::Micros(cut.length.0 / 3), &out).is_ok()
     {
         let _ = send.send(Event::Preview {
             cut: cut.name.clone(),
             path: out,
         });
     }
+}
+
+/// The cut a step is about, when it is about one.
+fn step_cut(step: &Step) -> Option<&str> {
+    match step {
+        Step::Rendering { cut, .. }
+        | Step::Checking { cut }
+        | Step::Uploading { cut, .. }
+        | Step::Uploaded { cut, .. }
+        | Step::AlreadyUploaded { cut, .. }
+        | Step::Thumbnail { cut }
+        | Step::ThumbnailRefused { cut, .. }
+        | Step::File { cut, .. } => Some(cut),
+        Step::Moved { .. } | Step::Tagged { .. } => None,
+    }
+}
+
+/// `path` with the home folder written as `~`.
+fn home_relative(path: &Path) -> String {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    match home
+        .as_deref()
+        .and_then(|home| path.strip_prefix(home).ok())
+    {
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    }
+}
+
+/// How many check kinds have a problem.
+fn kinds(problems: &[Problem]) -> usize {
+    CheckKind::ALL
+        .iter()
+        .filter(|k| problems.iter().any(|p| p.check == **k))
+        .count()
+}
+
+/// `text` with its first letter capitalized, for the lowercase messages of `shot_ship` errors.
+fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
 }
 
 fn diff_line(line: Line) -> Div {
@@ -1203,105 +2157,58 @@ fn diff_line(line: Line) -> Div {
         .child(text)
 }
 
-fn field(name: &'static str, value: Div) -> Div {
+/// A progress bar, filled to `fraction`, or a quiet full track while there is no measure.
+fn progress(fraction: Option<f32>) -> Div {
+    div()
+        .h(px(4.))
+        .w_full()
+        .rounded_full()
+        .bg(RAISED)
+        .overflow_hidden()
+        .child(div().h_full().rounded_full().map(|this| match fraction {
+            Some(f) => this.w(gpui::relative(f.clamp(0.0, 1.0))).bg(ACCENT),
+            None => this.w_full().bg(FLOAT),
+        }))
+}
+
+/// A field's label with an optional count and an action on the right.
+fn field_header(name: &'static str, count: Option<String>, action: gpui::AnyElement) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .child(div().flex_1().child(label(name)))
+        .when_some(count, |this, count| {
+            this.child(mono(count).text_size(TEXT_XS).text_color(MUTED))
+        })
+        .child(action)
+}
+
+fn field(value: Div) -> Div {
+    value.px(px(11.)).py(px(9.)).rounded(px(9.)).bg(SUNK)
+}
+
+/// A raised block with a title, for the upload setup and the shipped links.
+fn card(title: &'static str, rows: Vec<Div>) -> Div {
     div()
         .flex()
         .flex_col()
-        .gap(px(6.))
-        .child(label(name))
-        .child(value.px(px(11.)).py(px(9.)).rounded(px(9.)).bg(SUNK))
+        .gap(px(8.))
+        .p(px(14.))
+        .rounded(RADIUS_MD)
+        .bg(CARD)
+        .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
+        .children(rows)
 }
 
-fn button(id: impl Into<gpui::ElementId>, text: &'static str) -> gpui::Stateful<Div> {
+/// A warning under a pane's content.
+fn note(text: impl Into<SharedString>) -> Div {
     div()
-        .id(id)
-        .flex_none()
-        .h(px(34.))
-        .px(px(14.))
-        .flex()
-        .items_center()
-        .rounded(px(9.))
-        .bg(RAISED)
-        .font_weight(FontWeight::MEDIUM)
-        .text_size(px(14.))
-        .cursor_pointer()
-        .hover(|s| s.bg(FLOAT))
-        .child(text)
-}
-
-fn cut_title(cut: &PlannedCut) -> SharedString {
-    match cut.kind {
-        OutputKind::Main => "Main video".into(),
-        OutputKind::Derived(DerivedKind::Short) => format!("Short: {}", cut.name).into(),
-        OutputKind::Derived(DerivedKind::XClip) => format!("Clip for X: {}", cut.name).into(),
-    }
-}
-
-fn aspect(kind: OutputKind) -> &'static str {
-    match kind {
-        OutputKind::Main => "16:9",
-        OutputKind::Derived(DerivedKind::Short) => "9:16",
-        OutputKind::Derived(DerivedKind::XClip) => "1:1",
-    }
-}
-
-fn destination(cut: &PlannedCut) -> &'static str {
-    match (cut.destination, cut.kind) {
-        (Destination::File, _) => "File",
-        (_, OutputKind::Main) => "YouTube",
-        _ => "Shorts",
-    }
-}
-
-fn check_name(kind: CheckKind) -> &'static str {
-    match kind {
-        CheckKind::Loudness => "Loudness",
-        CheckKind::Captions => "Captions",
-        CheckKind::Frames => "No black or frozen frames",
-        CheckKind::Links => "Links have cards",
-        CheckKind::Chapters => "Chapters",
-        CheckKind::Thumbnail => "Thumbnail",
-        CheckKind::Overrides => "Overrides find their element",
-    }
-}
-
-/// How many check kinds have a problem.
-fn kinds(problems: &[Problem]) -> usize {
-    CheckKind::ALL
-        .iter()
-        .filter(|k| problems.iter().any(|p| p.check == **k))
-        .count()
-}
-
-fn plural(n: usize, word: &str) -> String {
-    if n == 1 {
-        format!("1 {word}")
-    } else {
-        format!("{n} {word}s")
-    }
-}
-
-fn step_line(step: &Step) -> String {
-    match step {
-        Step::Rendering {
-            cut,
-            rendered,
-            to_render,
-        } => format!("Rendering {cut} {rendered} of {to_render}"),
-        Step::Checking { cut } => format!("Checking {cut}"),
-        Step::Uploading { cut, sent } => format!(
-            "Uploading {cut} {:.0}%",
-            sent.bytes as f64 * 100.0 / sent.total.max(1) as f64
-        ),
-        Step::Uploaded { cut, .. } | Step::AlreadyUploaded { cut, .. } => {
-            format!("Uploaded {cut}")
-        }
-        Step::Thumbnail { cut } => format!("Set the thumbnail of {cut}"),
-        Step::ThumbnailRefused { cut, .. } => {
-            format!("YouTube refused the thumbnail of {cut}, set it in YouTube Studio")
-        }
-        Step::File { cut, .. } => format!("{cut} is ready as a file"),
-        Step::Moved { slug } => format!("Moved {slug} to shipped"),
-        Step::Tagged { tag } => format!("Tagged {tag}"),
-    }
+        .px(px(12.))
+        .py(px(10.))
+        .rounded(RADIUS_MD)
+        .bg(WARN_TINT)
+        .text_size(TEXT_SM)
+        .text_color(WARN)
+        .child(text.into())
 }

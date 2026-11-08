@@ -11,6 +11,8 @@
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -124,6 +126,9 @@ pub enum YouTubeError {
     Unavailable { attempts: u32, last: String },
     #[error("{0}")]
     Io(#[from] std::io::Error),
+    /// [`YouTube::cancel`] was set. The session is kept, so the next upload resumes it.
+    #[error("the upload was stopped, the next ship continues it")]
+    Cancelled,
 }
 
 /// How often and how patiently a failing request is tried again.
@@ -159,6 +164,8 @@ pub struct YouTube {
     access: Option<String>,
     pub retry: Retry,
     pub chunk: usize,
+    /// Set to stop an upload between chunks.
+    pub cancel: Arc<AtomicBool>,
 }
 
 /// One answer of the API, read whole. Upload responses are small JSON documents.
@@ -268,6 +275,7 @@ impl YouTube {
             access: None,
             retry: Retry::default(),
             chunk: CHUNK,
+            cancel: Arc::default(),
         }
     }
 
@@ -325,6 +333,9 @@ impl YouTube {
         let mut chunk = vec![0; self.chunk];
         let mut failures = 0;
         loop {
+            if self.cancel.load(Ordering::Relaxed) {
+                return Err(YouTubeError::Cancelled);
+            }
             let len = (total - at).min(self.chunk as u64) as usize;
             source.seek(SeekFrom::Start(at))?;
             source.read_exact(&mut chunk[..len])?;
