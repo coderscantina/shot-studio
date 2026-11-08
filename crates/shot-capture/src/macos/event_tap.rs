@@ -21,6 +21,11 @@ use crate::clock::{MediaClock, nanos};
 use crate::events::{Button, DisplayGeometry, Event, EventKind, Hotkey, Mark, key_name, modifiers};
 use crate::{CaptureError, Permission};
 
+/// Whether the app may read cursor and key events.
+pub fn allowed() -> bool {
+    CGPreflightListenEventAccess()
+}
+
 pub fn check_permission() -> Result<(), CaptureError> {
     if CGPreflightListenEventAccess() {
         return Ok(());

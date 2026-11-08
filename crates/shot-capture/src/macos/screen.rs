@@ -26,7 +26,7 @@ use super::sink::SampleSink;
 use super::tap::Latest;
 use super::writer::{AUDIO_RATE, Track};
 use crate::events::DisplayGeometry;
-use crate::{CaptureError, Permission};
+use crate::{Access, CaptureError, Permission};
 
 pub const FPS: u32 = 60;
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -37,9 +37,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 /// newest frame on a fixed 60 fps grid instead, so `screen.mp4` is constant frame rate and gets
 /// a keyframe and a fragment every 0.5 s even while the screen is idle.
 pub struct Screen {
-    stream: Retained<SCStream>,
-    _sinks: Vec<Retained<SampleSink>>,
-    _queues: Vec<DispatchRetained<DispatchQueue>>,
+    stream: Stream,
     pub geometry: DisplayGeometry,
     track: Arc<Track>,
     latest: Arc<Latest>,
@@ -51,6 +49,15 @@ struct Handoff<T>(T);
 // SAFETY: the object is created on ScreenCaptureKit's queue and only used by the receiving thread
 // after the handler returned.
 unsafe impl<T> Send for Handoff<T> {}
+
+/// Whether the app may record the screen. macOS does not tell "not asked" from "denied".
+pub fn access() -> Access {
+    if CGPreflightScreenCaptureAccess() {
+        Access::Allowed
+    } else {
+        Access::Denied
+    }
+}
 
 pub fn check_permission() -> Result<(), CaptureError> {
     if CGPreflightScreenCaptureAccess() {
@@ -84,94 +91,13 @@ impl Screen {
         system: Option<Arc<Track>>,
         latest: Arc<Latest>,
     ) -> Result<Self, CaptureError> {
-        let fail = |message: String| CaptureError::Source {
-            what: "screen capture",
-            message,
-        };
-        let content = shareable_content()?;
-        let target = unsafe { content.displays() }
-            .iter()
-            .find(|d| unsafe { d.displayID() } == display)
-            .ok_or(CaptureError::NoDisplay(display))?;
         let (width, height, _) = pixel_mode(display).ok_or(CaptureError::NoDisplay(display))?;
         let bounds = CGDisplayBounds(display);
         let geometry = DisplayGeometry {
             origin: (bounds.origin.x, bounds.origin.y),
             scale: width as f64 / bounds.size.width,
         };
-
-        let filter = unsafe {
-            SCContentFilter::initWithDisplay_excludingWindows(
-                SCContentFilter::alloc(),
-                &target,
-                &NSArray::new(),
-            )
-        };
-        let config = unsafe { SCStreamConfiguration::new() };
-        unsafe {
-            config.setWidth(width);
-            config.setHeight(height);
-            config.setMinimumFrameInterval(CMTime::new(1, FPS as i32));
-            config.setPixelFormat(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
-            config.setShowsCursor(false);
-            config.setQueueDepth(8);
-            config.setColorMatrix(kCGDisplayStreamYCbCrMatrix_ITU_R_709_2);
-            config.setColorSpaceName(kCGColorSpaceSRGB);
-            config.setCapturesAudio(system.is_some());
-            config.setSampleRate(AUDIO_RATE as isize);
-            config.setChannelCount(2);
-            config.setExcludesCurrentProcessAudio(true);
-        }
-        let stream = unsafe {
-            SCStream::initWithFilter_configuration_delegate(
-                SCStream::alloc(),
-                &filter,
-                &config,
-                None,
-            )
-        };
-
-        let mut sinks = Vec::new();
-        let mut queues = Vec::new();
-        let video_sink = {
-            let latest = latest.clone();
-            SampleSink::new(Box::new(move |sample: &CMSampleBuffer| {
-                // Samples without an image are status updates for an unchanged screen.
-                if let Some(image) = unsafe { sample.image_buffer() } {
-                    latest.store(image);
-                }
-            }))
-        };
-        let outputs = std::iter::once((SCStreamOutputType::Screen, screen.file, video_sink)).chain(
-            system.map(|track| {
-                let file = track.file;
-                let sink =
-                    SampleSink::new(Box::new(move |sample: &CMSampleBuffer| track.push(sample)));
-                (SCStreamOutputType::Audio, file, sink)
-            }),
-        );
-        for (kind, file, sink) in outputs {
-            let queue = DispatchQueue::new(file, None);
-            unsafe {
-                stream.addStreamOutput_type_sampleHandlerQueue_error(
-                    ProtocolObject::from_ref(&*sink),
-                    kind,
-                    Some(&queue),
-                )
-            }
-            .map_err(|e| fail(e.localizedDescription().to_string()))?;
-            sinks.push(sink);
-            queues.push(queue);
-        }
-
-        wait_for(|handler| unsafe { stream.startCaptureWithCompletionHandler(Some(handler)) })
-            .map_err(|e| match e {
-                Some(_) if !CGPreflightScreenCaptureAccess() => {
-                    CaptureError::Permission(Permission::ScreenRecording)
-                }
-                Some(message) => fail(message),
-                None => fail("starting timed out".into()),
-            })?;
+        let stream = Stream::start(display, (width, height), FPS, latest.clone(), system)?;
         // Open the writer on the first frame now, so the pacer starts on schedule.
         let first_frame = Instant::now() + TIMEOUT;
         while Instant::now() < first_frame {
@@ -183,8 +109,6 @@ impl Screen {
         }
         Ok(Self {
             stream,
-            _sinks: sinks,
-            _queues: queues,
             geometry,
             track: screen,
             latest,
@@ -194,7 +118,7 @@ impl Screen {
 
     /// The clock ScreenCaptureKit stamps samples with.
     pub fn clock(&self) -> Option<Retained<CMClock>> {
-        unsafe { self.stream.synchronizationClock() }
+        unsafe { self.stream.stream.synchronizationClock() }
     }
 
     /// Starts writing frames, frame `k` at media time `k / FPS` after `origin`.
@@ -231,13 +155,120 @@ impl Screen {
     }
 
     pub fn stop(&mut self) {
-        let _ = wait_for(|handler| unsafe {
-            self.stream.stopCaptureWithCompletionHandler(Some(handler))
-        });
+        self.stream.stop();
         if let Some((stop, thread)) = self.pacer.take() {
             stop.store(true, Ordering::Relaxed);
             let _ = thread.join();
         }
+    }
+}
+
+/// A running ScreenCaptureKit stream: the display's changed frames into `latest`, system audio
+/// into its track. It writes no video itself.
+pub struct Stream {
+    stream: Retained<SCStream>,
+    _sinks: Vec<Retained<SampleSink>>,
+    _queues: Vec<DispatchRetained<DispatchQueue>>,
+}
+
+impl Stream {
+    /// Starts streaming `display` scaled to `size` pixels at up to `fps`.
+    pub fn start(
+        display: u32,
+        size: (usize, usize),
+        fps: u32,
+        latest: Arc<Latest>,
+        system: Option<Arc<Track>>,
+    ) -> Result<Self, CaptureError> {
+        let fail = |message: String| CaptureError::Source {
+            what: "screen capture",
+            message,
+        };
+        let content = shareable_content()?;
+        let target = unsafe { content.displays() }
+            .iter()
+            .find(|d| unsafe { d.displayID() } == display)
+            .ok_or(CaptureError::NoDisplay(display))?;
+        let filter = unsafe {
+            SCContentFilter::initWithDisplay_excludingWindows(
+                SCContentFilter::alloc(),
+                &target,
+                &NSArray::new(),
+            )
+        };
+        let config = unsafe { SCStreamConfiguration::new() };
+        unsafe {
+            config.setWidth(size.0);
+            config.setHeight(size.1);
+            config.setMinimumFrameInterval(CMTime::new(1, fps as i32));
+            config.setPixelFormat(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
+            config.setShowsCursor(false);
+            config.setQueueDepth(8);
+            config.setColorMatrix(kCGDisplayStreamYCbCrMatrix_ITU_R_709_2);
+            config.setColorSpaceName(kCGColorSpaceSRGB);
+            config.setCapturesAudio(system.is_some());
+            config.setSampleRate(AUDIO_RATE as isize);
+            config.setChannelCount(2);
+            config.setExcludesCurrentProcessAudio(true);
+        }
+        let stream = unsafe {
+            SCStream::initWithFilter_configuration_delegate(
+                SCStream::alloc(),
+                &filter,
+                &config,
+                None,
+            )
+        };
+
+        let mut sinks = Vec::new();
+        let mut queues = Vec::new();
+        let video_sink = SampleSink::new(Box::new(move |sample: &CMSampleBuffer| {
+            // Samples without an image are status updates for an unchanged screen.
+            if let Some(image) = unsafe { sample.image_buffer() } {
+                latest.store(image);
+            }
+        }));
+        let outputs = std::iter::once((SCStreamOutputType::Screen, "screen", video_sink)).chain(
+            system.map(|track| {
+                let file = track.file;
+                let sink =
+                    SampleSink::new(Box::new(move |sample: &CMSampleBuffer| track.push(sample)));
+                (SCStreamOutputType::Audio, file, sink)
+            }),
+        );
+        for (kind, label, sink) in outputs {
+            let queue = DispatchQueue::new(label, None);
+            unsafe {
+                stream.addStreamOutput_type_sampleHandlerQueue_error(
+                    ProtocolObject::from_ref(&*sink),
+                    kind,
+                    Some(&queue),
+                )
+            }
+            .map_err(|e| fail(e.localizedDescription().to_string()))?;
+            sinks.push(sink);
+            queues.push(queue);
+        }
+
+        wait_for(|handler| unsafe { stream.startCaptureWithCompletionHandler(Some(handler)) })
+            .map_err(|e| match e {
+                Some(_) if !CGPreflightScreenCaptureAccess() => {
+                    CaptureError::Permission(Permission::ScreenRecording)
+                }
+                Some(message) => fail(message),
+                None => fail("starting timed out".into()),
+            })?;
+        Ok(Self {
+            stream,
+            _sinks: sinks,
+            _queues: queues,
+        })
+    }
+
+    pub fn stop(&self) {
+        let _ = wait_for(|handler| unsafe {
+            self.stream.stopCaptureWithCompletionHandler(Some(handler))
+        });
     }
 }
 

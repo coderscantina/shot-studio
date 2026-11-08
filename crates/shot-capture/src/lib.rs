@@ -15,6 +15,9 @@
 //! Input Monitoring permission, plus Camera and Microphone for those sources; a missing one is a
 //! [`CaptureError::Permission`].
 //!
+//! [`Standby`] runs the same sources without writing anything, so the Record screen can show
+//! them before a take, and [`access`] tells which permissions are missing.
+//!
 //! [`Session::preview`] gives the Record screen the newest screen and camera frames as
 //! IOSurface-backed `420f` buffers, converted and scaled in hardware on a thread of their own, so
 //! the recording never waits for the preview.
@@ -48,7 +51,7 @@ use std::path::PathBuf;
 use shot_core::{Id, Micros};
 
 #[cfg(target_os = "macos")]
-pub use macos::{Marks, Preview, PreviewFrame, Session, list_devices};
+pub use macos::{Marks, Preview, PreviewFrame, Session, Standby, access, list_devices};
 
 /// Receives mic samples during a recording: the media time of the first sample, mono samples
 /// and their sample rate. It runs on the mic's capture queue, so it must return quickly; hand
@@ -137,6 +140,21 @@ pub struct Device {
     pub name: String,
     pub unique_id: String,
     pub default: bool,
+}
+
+/// The peak of `samples` in dBFS, -120 for silence.
+pub fn peak_dbfs(samples: &[f32]) -> f32 {
+    let peak = samples.iter().fold(0f32, |p, s| p.max(s.abs()));
+    20.0 * peak.max(1e-6).log10()
+}
+
+/// Whether the app may use a privacy-guarded source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Access {
+    Allowed,
+    Denied,
+    /// macOS asks the first time a source starts.
+    NotAsked,
 }
 
 /// The macOS privacy permissions capture needs.

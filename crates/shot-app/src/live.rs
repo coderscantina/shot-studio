@@ -2,6 +2,8 @@
 //! keys and markers arrive ([`Stream`]), and while the monitor is styled rebuilds the take's
 //! style from them and paints capture's newest frames with shot-render's [`Monitor`] at 60 Hz.
 //!
+//! Before a take, [`Rehearsal`] paints the same style over the standby inputs with no elements.
+//!
 //! The thread starts with the recorder and makes the style and the GPU monitor while the models
 //! load and capture starts, so the first styled frame follows the first captured one.
 //!
@@ -185,6 +187,128 @@ impl LiveTake {
         self.feeds.take();
         self.quit.store(true, Ordering::Relaxed);
         let _ = self.thread.join();
+    }
+}
+
+/// The monitor before a take: the style painted over the standby inputs, the way the take will
+/// start, so the stage shows what you will record. Nothing is written. Dropping it stops it.
+pub struct Rehearsal {
+    view: Arc<View>,
+    quit: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Rehearsal {
+    /// Paints `take`'s style over `preview` while `styled` is on, whenever a new frame arrives.
+    pub fn start(
+        setup: Setup,
+        take: Id,
+        preview: Preview,
+        screen_size: (u32, u32),
+        styled: Arc<AtomicBool>,
+    ) -> Self {
+        let view = Arc::new(View::default());
+        let quit = Arc::new(AtomicBool::new(false));
+        let thread = std::thread::Builder::new()
+            .name("shot-rehearsal".into())
+            .spawn({
+                let (view, quit) = (view.clone(), quit.clone());
+                move || rehearse(&setup, &take, &preview, screen_size, &styled, &view, &quit)
+            })
+            .expect("spawning the rehearsal thread");
+        Self {
+            view,
+            quit,
+            thread: Some(thread),
+        }
+    }
+
+    pub fn view(&self) -> Arc<View> {
+        self.view.clone()
+    }
+}
+
+impl Drop for Rehearsal {
+    fn drop(&mut self) {
+        self.quit.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn rehearse(
+    setup: &Setup,
+    take: &Id,
+    preview: &Preview,
+    screen_size: (u32, u32),
+    styled: &AtomicBool,
+    view: &View,
+    quit: &AtomicBool,
+) {
+    let started = Instant::now();
+    let mut painter: Option<(Styled, Monitor)> = None;
+    let mut failed = false;
+    let mut black = BlackWatch::default();
+    let mut seen = (0, 0);
+    let mut next = Instant::now();
+    while !quit.load(Ordering::Relaxed) {
+        next += REFRESH;
+        std::thread::sleep(next.saturating_duration_since(Instant::now()));
+        let camera = preview.camera();
+        let screen = preview.screen();
+        let frames = (
+            screen.as_ref().map_or(0, |s| s.sequence),
+            camera.as_ref().map_or(0, |c| c.sequence),
+        );
+        if frames == seen {
+            continue;
+        }
+        if let Some(camera) = &camera
+            && camera.sequence != seen.1
+        {
+            let luma = Planes::lock(&camera.buffer).mean();
+            view.camera_black
+                .store(black.frame(luma, Instant::now()), Ordering::Relaxed);
+        }
+        seen = frames;
+        if !styled.load(Ordering::Relaxed) {
+            view.frame.lock().expect("monitor frame").take();
+            continue;
+        }
+        let Some(screen) = screen.filter(|_| !failed) else {
+            continue;
+        };
+        if painter.is_none() {
+            let made = prepare(setup, take).and_then(|(mut live, monitor)| {
+                Ok((live.styled(&Elements::new(take.clone()), &[])?, monitor))
+            });
+            match made {
+                Ok(made) => painter = Some(made),
+                Err(error) => {
+                    failed = true;
+                    view.fail(error);
+                    continue;
+                }
+            }
+        }
+        let Some((styled, monitor)) = &mut painter else {
+            continue;
+        };
+        let feed = Feed {
+            time: Micros(started.elapsed().as_micros() as u64),
+            screen: &screen.buffer,
+            camera: camera.as_ref().map(|c| &*c.buffer),
+            screen_size,
+            events: None,
+        };
+        match monitor.paint(styled, &feed) {
+            Ok(frame) => *view.frame.lock().expect("monitor frame") = Some(frame),
+            Err(e) => {
+                failed = true;
+                view.fail(e.to_string());
+            }
+        }
     }
 }
 
