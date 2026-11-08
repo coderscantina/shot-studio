@@ -31,11 +31,11 @@ mod error;
 mod proposals;
 mod releases;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use git2::{BranchType, Commit, Oid, Repository, Signature, build::TreeUpdateBuilder};
-use shot_core::{Status, Video};
+use shot_core::{FormatKind, Status, Video};
 
 pub use error::{CardError, Error, Result};
 pub use proposals::{Accepted, FileDiff, Proposal};
@@ -44,6 +44,8 @@ pub use releases::ReleaseTag;
 const VIDEO_PREFIX: &str = "video/";
 const FALLBACK_NAME: &str = "Shot Studio";
 const FALLBACK_EMAIL: &str = "shot@localhost";
+/// Recordings and caches stay out of git.
+const GITIGNORE: &str = "media/\n.shot/\n";
 
 /// One card on the board.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,6 +79,79 @@ impl Board {
         Ok(Self {
             repo: Repository::open(path)?,
         })
+    }
+
+    /// Starts a channel repo at `path`, which must be missing or empty: `git init` on `main`,
+    /// a `.gitignore` for media and caches, the four format presets as `formats/<format>.kdl`,
+    /// committed as "🎉 start the channel". Unlike every other write, this one goes through the
+    /// working tree and index, so the new repo starts clean.
+    pub fn init(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let occupied = std::fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_some());
+        if occupied {
+            return Err(Error::NotEmpty(path.display().to_string()));
+        }
+        let repo = Repository::init_opts(
+            path,
+            git2::RepositoryInitOptions::new().initial_head("main"),
+        )?;
+        let mut files = vec![(".gitignore".to_owned(), GITIGNORE.to_owned())];
+        files.extend(
+            FormatKind::ALL
+                .iter()
+                .map(|f| (format!("formats/{f}.kdl"), f.preset_source().to_owned())),
+        );
+        let mut index = repo.index()?;
+        for (file, text) in &files {
+            let target = path.join(file);
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| Error::Io(e.to_string()))?;
+            }
+            std::fs::write(&target, text).map_err(|e| Error::Io(e.to_string()))?;
+            index.add_path(Path::new(file))?;
+        }
+        index.write()?;
+        let tree = index.write_tree()?;
+        let board = Self { repo };
+        let sig = board.signature();
+        let tree = board.repo.find_tree(tree)?;
+        board
+            .repo
+            .commit(Some("HEAD"), &sig, &sig, "🎉 start the channel", &tree, &[])?;
+        drop(tree);
+        Ok(board)
+    }
+
+    /// Adds video `slug` as a branch `video/<slug>` off the default branch with one commit that
+    /// writes `files`, a map of path relative to the video folder to contents. The working tree
+    /// is not touched. Errors if the channel already has a video `slug`.
+    pub fn add_video(&self, slug: &str, files: &BTreeMap<String, String>) -> Result<String> {
+        check_name(slug)?;
+        if self.has_video(slug)? {
+            return Err(Error::VideoExists(slug.to_owned()));
+        }
+        if let Some(path) = files.keys().find(|p| !proposals::is_inside(p)) {
+            return Err(Error::InvalidPath(path.clone()));
+        }
+        let tip = self.default_tip()?;
+        let tree = self.write_files(
+            &tip,
+            files
+                .iter()
+                .map(|(path, text)| (video_path(slug, path), text.clone())),
+        )?;
+        let sha = self.commit(&tip, tree, &format!("💡 add {slug}"))?;
+        self.set_branch(&branch_name(slug), sha)?;
+        Ok(sha.to_string())
+    }
+
+    /// True when the channel has a video `slug`, on its branch or on the default branch.
+    pub fn has_video(&self, slug: &str) -> Result<bool> {
+        match self.tip(slug) {
+            Ok(_) => Ok(true),
+            Err(Error::UnknownVideo(_)) => Ok(false),
+            Err(e) => Err(e),
+        }
     }
 
     /// All videos, sorted by slug: every folder under `videos/` on the default branch plus every

@@ -35,6 +35,12 @@ pub enum Error {
     Conflict { paths: Vec<String> },
     #[error("`{0}` is not shipped yet")]
     NotShipped(String),
+    #[error("the channel already has a video `{0}`")]
+    VideoExists(String),
+    #[error("{0} already has files in it, pick an empty folder")]
+    NotEmpty(String),
+    #[error("{0}")]
+    Io(String),
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
