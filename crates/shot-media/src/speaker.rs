@@ -9,7 +9,7 @@
 use std::ffi::c_void;
 use std::mem;
 use std::ptr::{self, NonNull};
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -67,7 +67,15 @@ struct Shared {
     stamps: Mutex<Stamps>,
     /// From the host time a sample reaches the device to the time it is heard, in nanoseconds.
     latency: u64,
+    /// Set by [`Speaker::stop`]: the callback fades the next [`FADE`] frames out, then plays
+    /// silence without taking samples, so stopping never clicks.
+    fading: AtomicBool,
+    /// Frames of the fade still to play.
+    fade_left: AtomicU32,
 }
+
+/// Frames a stop fades over, 5 ms at 48 kHz.
+const FADE: u32 = 240;
 
 #[derive(Debug, Clone, Copy, Default)]
 struct Stamp {
@@ -144,6 +152,8 @@ impl Speaker {
                 ring: Ring::new(CAPACITY),
                 stamps: Mutex::default(),
                 latency: 0,
+                fading: AtomicBool::new(false),
+                fade_left: AtomicU32::new(0),
             }),
             playing: false,
         };
@@ -209,11 +219,23 @@ impl Speaker {
         Ok(())
     }
 
-    /// Stops the device. When this returns the render callback no longer runs.
+    /// Fades out over 5 ms and stops the device. When this returns the render callback no
+    /// longer runs.
     pub fn stop(&mut self) {
         if self.playing {
+            let shared = &self.shared;
+            shared.fade_left.store(FADE, Ordering::Release);
+            shared.fading.store(true, Ordering::Release);
+            // The fade plays within a callback or two; a stalled device must not hang the caller.
+            for _ in 0..40 {
+                if shared.fade_left.load(Ordering::Acquire) == 0 {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
             // SAFETY: The unit is initialized. Stop waits for a running render to end.
             unsafe { AudioOutputUnitStop(self.unit) };
+            shared.fading.store(false, Ordering::Release);
             self.playing = false;
         }
     }
@@ -310,6 +332,29 @@ impl SpeakerClock {
     }
 }
 
+/// Fills `out` with the rest of the stop fade from the ring, then silence. Returns the frames
+/// taken from the ring, as [`Ring::pop_stereo`] does.
+fn fade_out(shared: &Shared, out: &mut [f32]) -> usize {
+    let left = shared.fade_left.load(Ordering::Acquire) as usize;
+    let frames = (out.len() / 2).min(left);
+    let count = shared.ring.pop_stereo(&mut out[..frames * 2]);
+    for (index, frame) in out[..frames * 2]
+        .as_chunks_mut::<2>()
+        .0
+        .iter_mut()
+        .enumerate()
+    {
+        let gain = (left - index) as f32 / FADE as f32;
+        frame[0] *= gain;
+        frame[1] *= gain;
+    }
+    out[frames * 2..].fill(0.0);
+    shared
+        .fade_left
+        .store((left - frames) as u32, Ordering::Release);
+    count
+}
+
 /// The device's render callback: fills the buffer from the ring and stamps its time.
 unsafe extern "C-unwind" fn render(
     refcon: NonNull<c_void>,
@@ -333,7 +378,11 @@ unsafe extern "C-unwind" fn render(
     // SAFETY: The buffer holds `mDataByteSize` bytes of interleaved floats.
     let out = unsafe { std::slice::from_raw_parts_mut(buffer.mData.cast::<f32>(), length) };
     let first = shared.ring.taken();
-    let count = shared.ring.pop_stereo(out);
+    let count = if shared.fading.load(Ordering::Acquire) {
+        fade_out(shared, out)
+    } else {
+        shared.ring.pop_stereo(out)
+    };
     if timestamp
         .mFlags
         .contains(AudioTimeStampFlags::HostTimeValid)
