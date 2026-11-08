@@ -281,6 +281,39 @@ impl VectorPass {
             .map_err(|e| RenderError::Gpu(e.to_string()))
     }
 
+    /// Renders groups of shapes, each under its own transform, into the `size` texels at the
+    /// top left of `view`, for a still such as a thumbnail (see [`crate::thumbnail`]).
+    pub(crate) fn render_groups(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        groups: &[(Affine, Vec<Shape>)],
+        (width, height): (u32, u32),
+        view: &wgpu::TextureView,
+    ) -> Result<(), RenderError> {
+        self.scene.reset();
+        keep_atlas(&mut self.scene);
+        for (transform, shapes) in groups {
+            for shape in shapes {
+                draw(&mut self.scene, &mut self.ink, *transform, shape);
+            }
+        }
+        self.vello
+            .render_to_texture(
+                device,
+                queue,
+                &self.scene,
+                view,
+                &RenderParams {
+                    base_color: Color::TRANSPARENT,
+                    width,
+                    height,
+                    antialiasing_method: AaConfig::Area,
+                },
+            )
+            .map_err(|e| RenderError::Gpu(e.to_string()))
+    }
+
     /// Composites one rendered half into the plane `pass` draws.
     pub(crate) fn draw(&self, pass: &mut wgpu::RenderPass, plane: Plane, bound: &Bound) {
         pass.set_pipeline(&self.pipelines[plane as usize]);
@@ -882,7 +915,7 @@ fn text_layout(
     layout
 }
 
-fn measure(
+pub(crate) fn measure(
     fonts: &mut FontContext,
     layouts: &mut LayoutContext<()>,
     text: &str,

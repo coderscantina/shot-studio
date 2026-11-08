@@ -1,0 +1,16 @@
+upload b
+variant a preset=face-right {
+    frame t01 at=184_200_000
+    background screen dim=45
+    face cutout size=110
+    headline "Stop deploying" "on Fridays" color=both style=outline
+    sticker arrow x=700 y=420 size=180 turn=-25
+}
+variant b preset=big-face {
+    frame t01 at=402_800_000
+    background camera dim=10
+    face off size=100
+    headline "Friday deploys?" color=accent style=shadow
+    sticker emoji "🔥" x=1120 y=130 size=150 turn=0
+    sticker ring x=520 y=300 size=220 turn=0
+}

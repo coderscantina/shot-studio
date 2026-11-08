@@ -80,6 +80,8 @@ mod sounds;
 #[cfg(target_os = "macos")]
 pub mod surface;
 #[cfg(target_os = "macos")]
+pub mod thumbnail;
+#[cfg(target_os = "macos")]
 mod vector;
 #[cfg(target_os = "macos")]
 pub mod voice;

@@ -15,6 +15,7 @@ mod lock;
 mod migrate;
 mod script;
 mod style;
+pub mod thumbnail;
 mod timeline;
 mod transcript;
 mod values;
