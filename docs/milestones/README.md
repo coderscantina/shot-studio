@@ -6,7 +6,7 @@ Mark a milestone complete only after its acceptance criteria pass and an evidenc
 
 | ID | Milestone | Dependencies | Owner | Status |
 | --- | --- | --- | --- | --- |
-| 01 | [Contracts, fixtures and workspace](01-contracts-and-fixtures.md) | None | Core | Done locally, CI run waits for the GitHub repo. [Evidence](../evidence/m01-contracts-and-fixtures.md) |
+| 01 | [Contracts, fixtures and workspace](01-contracts-and-fixtures.md) | None | Core | Complete, first CI run green on 2026-11-08. [Evidence](../evidence/m01-contracts-and-fixtures.md) |
 | 02 | [Preview spike](02-preview-spike.md) | 01 | Media, App | Complete, GO by Mike on 2026-11-07. [Evidence](../evidence/m02-preview-spike.md) |
 | 03 | [A usable opinion video](03-opinion-video.md) | 01, 02 | All roles | Complete. [Evidence](../evidence/m03-opinion-video.md) |
 | 04 | [Auto cut and finish](04-auto-cut-and-finish.md) | 03 | Analysis, Media | Complete. Burned-in caption drawing moved to 07. [Evidence](../evidence/m04-auto-cut-and-finish.md) |
@@ -38,7 +38,6 @@ Settled on 2026-11-08: every Proposed record (0011, 0013 to 0025) adopted, the l
 ## Prerequisites from Mike
 
 - Install the Xcode Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`) so gpui's shaders compile at build time instead of at app start.
-- Before 01 can close: create `github.com/coderscantina/shot-studio` and push, so CI runs once.
 
 - Before 08 ships to YouTube: a Google Cloud project with the YouTube Data API enabled and an OAuth client for a desktop app.
 - Before 09: the coderscantina org secrets Kessel signs with (`MACOS_CERTIFICATE`, `MACOS_CERTIFICATE_PASSWORD`, `MACOS_SIGN_IDENTITY`, `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_PASSWORD`) shared with `shot-studio`, and at the first release a `coderscantina/homebrew-tap` repo with `packaging/homebrew/shot-studio.rb` copied to `Casks/`.
