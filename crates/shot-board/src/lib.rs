@@ -107,7 +107,7 @@ impl Board {
             if let Some(parent) = target.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| Error::Io(e.to_string()))?;
             }
-            std::fs::write(&target, text).map_err(|e| Error::Io(e.to_string()))?;
+            shot_fs::write(&target, text).map_err(|e| Error::Io(e.to_string()))?;
             index.add_path(Path::new(file))?;
         }
         index.write()?;

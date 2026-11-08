@@ -31,14 +31,6 @@ fn parse_id(text: &str) -> Result<Id, String> {
 pub fn run(args: AutocutArgs) -> Result<(), String> {
     crate::migrate::refuse_if_migrated(&args.video, "cuts and review items")?;
     let fail = |e: shot_analyze::Error| e.to_string();
-    let format_path = args.video.join("format.kdl");
-    let format = Format::parse(&read(&format_path)?).map_err(|e| format!("format.kdl:{e}"))?;
-    let cut_path = args.video.join("cut.kdl");
-    let cut = match fs::read_to_string(&cut_path) {
-        Ok(text) => Cut::parse(&text).map_err(|e| format!("cut.kdl:{e}"))?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Cut::default(),
-        Err(e) => return Err(format!("{}: {e}", cut_path.display())),
-    };
     let take_dir = args.video.join("media").join(args.take.as_str());
     let mic = take_dir.join("mic.mp4");
     if shot_capture::take::not_recorded(&args.video, &args.take, "mic.mp4") {
@@ -101,6 +93,17 @@ pub fn run(args: AutocutArgs) -> Result<(), String> {
     };
     let analyzed = fed.elapsed();
 
+    // Locked only from reading the files to writing them: the analysis above can take minutes.
+    let _lock = crate::lock(&args.video)?;
+    let format_path = args.video.join("format.kdl");
+    let format = Format::parse(&read(&format_path)?).map_err(|e| format!("format.kdl:{e}"))?;
+    let cut_path = args.video.join("cut.kdl");
+    let cut = match fs::read_to_string(&cut_path) {
+        Ok(text) => Cut::parse(&text).map_err(|e| format!("cut.kdl:{e}"))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Cut::default(),
+        Err(e) => return Err(format!("{}: {e}", cut_path.display())),
+    };
+
     let files = TakeFiles::read(&take_dir, format.auto_cut.idle_screen.min).map_err(fail)?;
     let in_cut = cut
         .chapters
@@ -120,9 +123,7 @@ pub fn run(args: AutocutArgs) -> Result<(), String> {
         duration,
     };
     let rough = autocut::rough_cut(&cut, &format, &facts, &HashMap::new());
-    let tmp = args.video.join(".cut.kdl.tmp");
-    fs::write(&tmp, rough.to_kdl())
-        .and_then(|()| fs::rename(&tmp, &cut_path))
+    shot_fs::write(&cut_path, rough.to_kdl())
         .map_err(|e| format!("{}: {e}", cut_path.display()))?;
     let ready = fed.elapsed();
 

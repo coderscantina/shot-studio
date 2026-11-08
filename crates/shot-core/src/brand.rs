@@ -426,7 +426,7 @@ impl Brand {
             text,
         };
         let doc = src.parse()?;
-        Self::read(src.nodes(&doc), BrandScope::File)
+        Self::read(src.versioned(&doc)?, BrandScope::File)
     }
 
     /// A saved theme, `brand/themes/<id>.kdl`: the grammar of a format layer's `brand` block,
@@ -609,6 +609,7 @@ impl Brand {
 
     pub fn to_kdl(&self) -> String {
         let mut w = Writer::default();
+        w.version();
         self.write(&mut w);
         w.finish()
     }

@@ -18,6 +18,7 @@ pub struct RestyleArgs {
 }
 
 pub fn run(repo: PathBuf, args: RestyleArgs) -> Result<(), String> {
+    let _lock = crate::lock(&repo.join("videos").join(&args.slug))?;
     let disk = Disk::new(repo);
     let built = style::build_video(&disk, &args.slug)?;
     if !built.shipped() {
@@ -54,6 +55,7 @@ pub(crate) fn refresh(dir: &Path) -> Result<(), String> {
     let Ok((disk, slug)) = Disk::locate(dir) else {
         return Ok(());
     };
+    let _lock = crate::lock(dir)?;
     let built = style::build_video(&disk, &slug)?;
     if built.shipped() {
         return Ok(());

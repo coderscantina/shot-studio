@@ -18,6 +18,7 @@ pub struct CaptionFixArgs {
 }
 
 pub fn run(args: CaptionFixArgs) -> Result<(), String> {
+    let _lock = crate::lock(&args.video)?;
     let path = args.video.join("cut.kdl");
     let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut cut = Cut::parse(&text).map_err(|e| format!("cut.kdl:{e}"))?;
@@ -40,10 +41,7 @@ pub fn run(args: CaptionFixArgs) -> Result<(), String> {
             }
         }
     }
-    let tmp = args.video.join(".cut.kdl.tmp");
-    fs::write(&tmp, cut.to_kdl())
-        .and_then(|()| fs::rename(&tmp, &path))
-        .map_err(|e| format!("{}: {e}", path.display()))?;
+    shot_fs::write(&path, cut.to_kdl()).map_err(|e| format!("{}: {e}", path.display()))?;
     for fix in &cut.caption_fixes {
         println!("{:?} -> {:?}", fix.heard, fix.said);
     }

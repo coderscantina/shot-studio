@@ -23,6 +23,7 @@ shot-ship = { path = "../shot-ship" }
 # The thumbnail studio hands its renders to gpui as image frames.
 image = { workspace = true }
 shot-library = { path = "../shot-library" }
+shot-fs = { path = "../shot-fs" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { workspace = true }

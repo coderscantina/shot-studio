@@ -328,7 +328,7 @@ impl Studio {
         let path = self.folder.read(cx).dir.join("script.md");
         // A folder that cannot be written keeps prompting its own copy.
         if std::fs::read_to_string(&path).ok().as_deref() != Some(text.as_str())
-            && std::fs::write(&path, &text).is_err()
+            && shot_fs::write(&path, &text).is_err()
         {
             return;
         }

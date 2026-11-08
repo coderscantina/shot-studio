@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 shot-core = { path = "../shot-core" }
 shot-audio = { path = "../shot-audio" }
+shot-fs = { path = "../shot-fs" }
 kdl = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

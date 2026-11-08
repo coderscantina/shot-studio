@@ -6283,6 +6283,7 @@ dependencies = [
  "sha2 0.11.1",
  "shot-capture",
  "shot-core",
+ "shot-fs",
  "shot-media",
  "symphonia",
  "tempfile",
@@ -6314,6 +6315,7 @@ dependencies = [
  "shot-board",
  "shot-capture",
  "shot-core",
+ "shot-fs",
  "shot-library",
  "shot-mcp",
  "shot-media",
@@ -6341,6 +6343,7 @@ version = "26.11.7"
 dependencies = [
  "git2",
  "shot-core",
+ "shot-fs",
  "tempfile",
  "thiserror 2.0.21",
 ]
@@ -6382,6 +6385,7 @@ dependencies = [
  "shot-board",
  "shot-capture",
  "shot-core",
+ "shot-fs",
  "shot-mcp",
  "shot-render",
  "shot-ship",
@@ -6399,6 +6403,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "shot-fs"
+version = "26.11.7"
+dependencies = [
+ "tempfile",
+]
+
+[[package]]
 name = "shot-library"
 version = "26.11.7"
 dependencies = [
@@ -6407,6 +6418,7 @@ dependencies = [
  "serde_json",
  "shot-audio",
  "shot-core",
+ "shot-fs",
  "tempfile",
  "thiserror 2.0.21",
  "ureq",
@@ -6424,6 +6436,7 @@ dependencies = [
  "shot-analyze",
  "shot-board",
  "shot-core",
+ "shot-fs",
  "shot-ship",
  "tempfile",
  "thiserror 2.0.21",
@@ -6482,6 +6495,7 @@ dependencies = [
  "shot-audio",
  "shot-capture",
  "shot-core",
+ "shot-fs",
  "shot-media",
  "tempfile",
  "thiserror 2.0.21",
@@ -6514,6 +6528,7 @@ dependencies = [
  "shot-audio",
  "shot-board",
  "shot-core",
+ "shot-fs",
  "shot-media",
  "shot-render",
  "tempfile",

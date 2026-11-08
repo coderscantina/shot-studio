@@ -454,10 +454,7 @@ fn sniff(media: Media, bytes: &[u8]) -> bool {
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let part = path.with_extension("part");
-    fs::write(&part, bytes)
-        .and_then(|()| fs::rename(&part, path))
-        .map_err(|e| format!("{}: {e}", path.display()))
+    shot_fs::write(path, bytes).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// `path` relative to the video folder `video`, with `/` between folders and `..` up to the

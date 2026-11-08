@@ -170,10 +170,8 @@ fn sampled<T: Clone + Serialize + for<'de> Deserialize<'de>>(
         };
         let dir = cache_path.parent().expect("cache path has a parent");
         fs::create_dir_all(dir).map_err(io_error(dir))?;
-        let tmp = cache_path.with_extension("json.tmp");
         let json = serde_json::to_vec(&file).expect("samples serialize");
-        fs::write(&tmp, json).map_err(io_error(&tmp))?;
-        fs::rename(&tmp, &cache_path).map_err(io_error(&cache_path))?;
+        shot_fs::write(&cache_path, json).map_err(io_error(&cache_path))?;
     }
     Ok(Sampled {
         size: size.expect("read above"),

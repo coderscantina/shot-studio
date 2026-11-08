@@ -39,6 +39,8 @@ pub struct VideoFolder {
     undone: Vec<Snapshot>,
     /// Inside [`VideoFolder::as_one_change`]: writes join the change instead of each being one.
     batching: bool,
+    /// Inside [`VideoFolder::writing`]: this folder holds the video's writer lock.
+    writing: bool,
 }
 
 /// The files undo and redo step through.
@@ -101,10 +103,7 @@ fn read(dir: &Path, name: &str) -> Result<Option<String>, String> {
 }
 
 fn write(path: &Path, text: &str) -> Result<(), String> {
-    let tmp = path.with_extension("tmp");
-    fs::write(&tmp, text)
-        .and_then(|()| fs::rename(&tmp, path))
-        .map_err(|e| format!("{}: {e}", path.display()))
+    shot_fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 impl VideoFolder {
@@ -173,6 +172,7 @@ impl VideoFolder {
             history: Vec::new(),
             undone: Vec::new(),
             batching: false,
+            writing: false,
         };
         folder.load_transcripts()?;
         folder.rebuild_lock()?;
@@ -236,6 +236,10 @@ impl VideoFolder {
     /// unless the video shipped, then reads the elements and the theme again. Called after
     /// every write, and when analysis added elements.
     pub fn rebuild_lock(&mut self) -> Result<(), String> {
+        self.writing(Self::store_lock)
+    }
+
+    fn store_lock(&mut self) -> Result<(), String> {
         if let Some(styled) = &mut self.style
             && let Some((disk, slug)) = &styled.repo
         {
@@ -272,17 +276,36 @@ impl VideoFolder {
         if self.batching {
             return change(self);
         }
-        let before = self.snapshot();
-        self.batching = true;
-        let result = change(self);
-        self.batching = false;
-        if self.snapshot() != before {
-            if self.history.len() == HISTORY {
-                self.history.remove(0);
+        self.writing(|folder| {
+            let before = folder.snapshot();
+            folder.batching = true;
+            let result = change(folder);
+            folder.batching = false;
+            if folder.snapshot() != before {
+                if folder.history.len() == HISTORY {
+                    folder.history.remove(0);
+                }
+                folder.history.push(before);
+                folder.undone.clear();
             }
-            self.history.push(before);
-            self.undone.clear();
+            result
+        })
+    }
+
+    /// Runs `change` holding the video's writer lock, so `shot` and the MCP server wait for it
+    /// and it waits for them. Nested calls run inside the outer one's lock.
+    fn writing<T>(
+        &mut self,
+        change: impl FnOnce(&mut Self) -> Result<T, String>,
+    ) -> Result<T, String> {
+        if self.writing {
+            return change(self);
         }
+        let _lock = shot_fs::WriteLock::acquire(&self.dir)
+            .map_err(|e| format!("{}: {e}", self.dir.display()))?;
+        self.writing = true;
+        let result = change(self);
+        self.writing = false;
         result
     }
 
@@ -292,7 +315,7 @@ impl VideoFolder {
             return Ok(false);
         };
         let current = self.snapshot();
-        self.restore_snapshot(snapshot)?;
+        self.writing(|folder| folder.restore_snapshot(snapshot))?;
         self.undone.push(current);
         Ok(true)
     }
@@ -303,7 +326,7 @@ impl VideoFolder {
             return Ok(false);
         };
         let current = self.snapshot();
-        self.restore_snapshot(snapshot)?;
+        self.writing(|folder| folder.restore_snapshot(snapshot))?;
         self.history.push(current);
         Ok(true)
     }
@@ -433,6 +456,10 @@ impl VideoFolder {
         let Some(range) = TimeRange::new(Micros(0), duration) else {
             return Err(format!("take {take} is empty"));
         };
+        self.writing(|folder| folder.store_take(take, range))
+    }
+
+    fn store_take(&mut self, take: Id, range: TimeRange) -> Result<(), String> {
         if self.style.is_none() && self.project.cut.chapters.is_empty() {
             self.start_migrated()?;
         }
@@ -476,7 +503,10 @@ impl VideoFolder {
         disk.write(&path("format.kdl"), &migration.video.to_kdl())?;
         disk.write(&path("cut.kdl"), &migration.cut.to_kdl())?;
         disk.write(&path(LOCK_FILE), &migration.lock.to_kdl())?;
-        *self = Self::open(&self.dir)?;
+        *self = Self {
+            writing: self.writing,
+            ..Self::open(&self.dir)?
+        };
         Ok(())
     }
 
@@ -496,6 +526,10 @@ impl VideoFolder {
     /// Lays `look` over the channel brand's caption look in `brand/brand.kdl` and drops the
     /// video's own, so every video of the channel uses it. Brand files are not part of undo.
     pub fn set_brand_captions(&mut self, look: shot_core::CaptionLook) -> Result<(), String> {
+        self.writing(|folder| folder.store_brand_captions(look))
+    }
+
+    fn store_brand_captions(&mut self, look: shot_core::CaptionLook) -> Result<(), String> {
         let repo = Disk::locate(&self.dir)
             .ok()
             .and(shot_render::theme::channel_root(&self.dir))

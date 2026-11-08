@@ -390,7 +390,7 @@ impl ThumbnailStudio {
     /// Writes `thumbnail.kdl`.
     fn save(&mut self) {
         let path = self.dir.join(FILE);
-        if let Err(e) = std::fs::write(&path, self.design.to_kdl()) {
+        if let Err(e) = shot_fs::write(&path, self.design.to_kdl()) {
             self.note = Some(format!("The design could not be saved: {e}"));
         }
     }

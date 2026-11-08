@@ -39,6 +39,7 @@ Waiting for Mike. One line each with a recommendation and a link to its record. 
 - Themes ([0029](../decisions/0029-several-themes-per-channel.md)): the active theme lives in `brand.kdl`, others in `brand/themes/`; imports, rules, overlay presets and channel layouts stay with the channel. Recommended: adopt.
 - Captions ([0030](../decisions/0030-caption-presets-look-and-line-edits.md)): a line edit is a dictionary fix with a word of context, so it applies wherever the same words are said. Recommended: adopt.
 - Inputs and thumbnails ([0032](../decisions/0032-input-switches-and-thumbnail-designs.md)): input switches in `format.kdl`, thumbnail designs in `thumbnail.kdl`. Recommended: adopt.
+- Project file versions ([0033](../decisions/0033-project-file-versions.md)): an optional `version` node in `cut.kdl`, `format.kdl`, `video.kdl` and `brand.kdl`, missing means 1, written only once above 1, a newer file is refused naming both versions. Recommended: adopt.
 - Zoom ramps use the smooth zoom's spring, which reads shorter than the ramp's number (a 1.5 s ramp looks done in about 0.5 s). An ease over the whole ramp would also change today's smooth zooms. Recommended: watch one first, see `docs/evidence/m13/c-ramp-in-sequence.png`.
 - Milestone 10 item 7: a design-variants round for provenance, the scope choice and the rule editor, plus the transition mark style and Picture's placement buttons.
 

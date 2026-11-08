@@ -54,13 +54,10 @@ impl Disk {
         Self { root: root.into() }
     }
 
-    /// Replaces `path` with `text` in one rename, so a reader never sees half a lock.
+    /// Replaces `path` with `text` through [`shot_fs::write`], so a reader never sees half a lock.
     pub fn write(&self, path: &str, text: &str) -> Result<(), String> {
         let target = self.root.join(path);
-        let tmp = target.with_extension("tmp");
-        std::fs::write(&tmp, text)
-            .and_then(|()| std::fs::rename(&tmp, &target))
-            .map_err(|e| format!("{}: {e}", target.display()))
+        shot_fs::write(&target, text).map_err(|e| format!("{}: {e}", target.display()))
     }
 }
 

@@ -32,7 +32,7 @@ impl Video {
         };
         let doc = src.parse()?;
         let (mut title, mut status, mut format, mut target_date) = (None, None, None, None);
-        for node in src.nodes(&doc) {
+        for node in src.versioned(&doc)? {
             node.expect(1, &[])?;
             match node.name() {
                 "title" => node.set_once(&mut title, node.arg(0)?)?,
@@ -53,6 +53,7 @@ impl Video {
 
     pub fn to_kdl(&self) -> String {
         let mut w = Writer::default();
+        w.version();
         w.node("title").arg(&self.title).end();
         w.node("status").arg(&self.status).end();
         w.node("format").arg(&self.format).end();

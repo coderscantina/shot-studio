@@ -268,7 +268,7 @@ pub fn add_lottie(repo: &Path, source: &Path) -> Result<LottieImport, String> {
         return Err(format!("{file} already exists"));
     }
     fs::create_dir_all(repo.join("brand")).map_err(|e| e.to_string())?;
-    fs::write(&target, &bytes).map_err(|e| format!("{}: {e}", target.display()))?;
+    shot_fs::write(&target, &bytes).map_err(|e| format!("{}: {e}", target.display()))?;
     let slots = lottie::slots(&bytes)
         .map_err(|e| format!("{}: {e}", source.display()))?
         .into_iter()
@@ -291,9 +291,7 @@ pub fn add_lottie(repo: &Path, source: &Path) -> Result<LottieImport, String> {
         slots,
     });
     brand.templates.sort_by(|a, b| a.name.cmp(&b.name));
-    let tmp = brand_path.with_extension("tmp");
-    fs::write(&tmp, brand.to_kdl())
-        .and_then(|()| fs::rename(&tmp, &brand_path))
+    shot_fs::write(&brand_path, brand.to_kdl())
         .map_err(|e| format!("{}: {e}", brand_path.display()))?;
     Ok(LottieImport::Added { name, file })
 }

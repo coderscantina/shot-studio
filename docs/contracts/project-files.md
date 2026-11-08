@@ -67,6 +67,8 @@ formats/<f>.kdl ─┼─cascade─▶ style rules ──build──▶ cut.lock
 - `shot-core` parses and evaluates these files with no IO. Unknown nodes are an error with a line number, never silently dropped.
 - The cache is derived from these files and media only. Deleting `.shot/cache` loses nothing.
 - A rendered chunk's cache key is a hash of everything that affects its pixels: source media ids, ranges, effects, template parameters, format settings and renderer version.
+- A file is replaced whole: written to a uniquely named file beside it, flushed to disk, renamed over it, then the folder is flushed. A crash leaves the old file or the new one, never part of one.
+- The app, `shot` and the MCP server hold an advisory lock on `<video>/.shot/write.lock` while they read, change and write a video's files, so two writers wait for each other instead of losing an edit.
 
 ## Common rules for the KDL files
 
@@ -79,6 +81,14 @@ The `.kdl` files use [KDL v2](https://kdl.dev).
 - **Ids** (take ids, template and parameter names, derived cut names) are lowercase ASCII letters, digits and dashes, starting with a letter. They are written bare.
 - **Keywords** (statuses, layouts, styles, rule names) are written bare. Free text (titles, text parameters) is always quoted.
 - **No floats.** Percentages and other fractional values are integers in a stated unit, so every value round-trips exactly.
+- **Version.** `cut.kdl`, `format.kdl` (and `formats/<format>.kdl`), `video.kdl` and `brand/brand.kdl` may start with a `version` node. A file without one is version 1, the version this build reads and writes. A build writes `version` only once its version is above 1, so today's files keep their text. A file with a higher version than the build knows is refused before anything else in it is read, with an error naming both versions, instead of being half read and written back without the parts this build does not know ([0033](../decisions/0033-project-file-versions.md)).
+
+  ```kdl
+  version 2
+  title "Why we deploy on Fridays"
+  ```
+
+  Opened by a build that knows version 1: `video.kdl:1:1: this file is version 2, and this build reads up to version 1. Update Shot Studio to open it`.
 
 ## `video.kdl`
 
