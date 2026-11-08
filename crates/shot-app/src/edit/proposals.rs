@@ -499,7 +499,7 @@ impl EditScreen {
                     Ok(())
                 })
             });
-        self.error = result.err();
+        self.wrote(result, cx);
         self.proposal = None;
         self.reload_proposals(cx);
         cx.notify();

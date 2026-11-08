@@ -43,6 +43,15 @@ use crate::theme::*;
 
 const CONTEXT: &str = "EditScreen";
 
+/// Selected words in the transcript and the Words lane: lime, strong enough to read a short
+/// selection at a glance, faint enough for the text on it.
+fn word_selection() -> gpui::Hsla {
+    gpui::Hsla::from(ACCENT).opacity(0.32)
+}
+
+/// How long "Saved" shows after an edit is written.
+const SAVED_FOR: Duration = Duration::from_millis(1600);
+
 actions!(
     edit,
     [
@@ -62,6 +71,7 @@ actions!(
         ExtendPrevious,
         ExtendNext,
         AcceptProposal,
+        FocusPrevious,
         ShowProposal,
         PickSound,
         AddZoom,
@@ -93,6 +103,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-left", ExtendPrevious, context),
         KeyBinding::new("shift-right", ExtendNext, context),
         KeyBinding::new("tab", AcceptProposal, context),
+        KeyBinding::new("shift-tab", FocusPrevious, context),
         KeyBinding::new("g", ShowProposal, context),
         KeyBinding::new("s", PickSound, context),
         KeyBinding::new("z", AddZoom, context),
@@ -165,8 +176,12 @@ pub struct EditScreen {
     peaks: HashMap<Id, Option<Arc<Peaks>>>,
     export: Option<Arc<Mutex<ExportStatus>>>,
     error: Option<String>,
+    /// When the last edit was written, for the quiet "Saved" under the preview.
+    saved: Option<Instant>,
     focus: FocusHandle,
     scroll: ScrollHandle,
+    /// Where the Text workspace's document pane was last painted, for its columns.
+    document_bounds: Rc<Cell<Bounds<Pixels>>>,
     /// Where the overview bar was last painted, for mouse mapping.
     overview_bounds: Rc<Cell<Bounds<Pixels>>>,
     /// The Timeline lanes' view, drag and picked block.
@@ -228,8 +243,11 @@ impl EditScreen {
             peaks: HashMap::new(),
             export: None,
             error: None,
-            focus: cx.focus_handle(),
+            saved: None,
+            // One tab stop for the whole editor, so Tab comes back to it from the title bar.
+            focus: cx.focus_handle().tab_stop(true),
             scroll: ScrollHandle::new(),
+            document_bounds: Rc::default(),
             overview_bounds: Rc::default(),
             lanes: timeline::Lanes::default(),
             product: product::ProductState::default(),
@@ -452,7 +470,13 @@ impl EditScreen {
         }
     }
 
-    fn toggle_play(&mut self, _: &TogglePlay, _: &mut Window, cx: &mut Context<Self>) {
+    /// Space. A control inside the editor that has keyboard focus gets the key instead, so
+    /// Space presses it like Enter does.
+    fn toggle_play(&mut self, _: &TogglePlay, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus.is_focused(window) {
+            cx.propagate();
+            return;
+        }
         self.set_playing(!self.playing);
         cx.notify();
     }
@@ -528,7 +552,34 @@ impl EditScreen {
             cx.notify();
             Ok::<_, String>(())
         });
-        self.error = result.err();
+        self.wrote(result, cx);
+    }
+
+    /// After an edit was written or failed: a failure stays on screen until an edit works,
+    /// a success shows "Saved" for [`SAVED_FOR`].
+    fn wrote(&mut self, result: Result<(), String>, cx: &mut Context<Self>) {
+        match result {
+            Ok(()) => {
+                self.error = None;
+                let now = Instant::now();
+                self.saved = Some(now);
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(SAVED_FOR).await;
+                    this.update(cx, |this, cx| {
+                        if this.saved == Some(now) {
+                            this.saved = None;
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+            Err(error) => {
+                self.saved = None;
+                self.error = Some(error);
+            }
+        }
         cx.notify();
     }
 
@@ -567,8 +618,7 @@ impl EditScreen {
             cx.notify();
             result
         });
-        self.error = result.err();
-        cx.notify();
+        self.wrote(result, cx);
     }
 
     /// Sets the layout on key `key + 1` over the selected words, else the picked layout
@@ -733,7 +783,14 @@ impl Render for EditScreen {
             .on_action(cx.listener(|this, _: &PickSound, _, cx| {
                 this.toggle_picker(place::Picker::Sound, cx)
             }))
-            .on_action(cx.listener(|this, _: &AcceptProposal, _, cx| this.accept_selected(cx)))
+            .on_action(cx.listener(|this, _: &AcceptProposal, window, cx| {
+                if this.proposal.is_some() {
+                    this.accept_selected(cx);
+                } else {
+                    window.focus_next(cx);
+                }
+            }))
+            .on_action(cx.listener(|_, _: &FocusPrevious, window, cx| window.focus_prev(cx)))
             .on_action(cx.listener(|this, _: &ShowProposal, _, cx| this.show_next_proposal(cx)))
             .on_action(cx.listener(|this, _: &AddZoom, _, cx| this.add_zoom(cx)))
             .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom_lanes(0.5, None, cx)))

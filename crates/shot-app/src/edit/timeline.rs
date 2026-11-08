@@ -1456,13 +1456,7 @@ fn toolbar(
             let mut bar = bar.children(text.map(|(text, _)| what(text)));
             if let Placed::Zoom(index) = placed {
                 bar = bar
-                    .children(ZOOM_SCALES.into_iter().map(|option| {
-                        choice(("zoom-scale", option as usize), format!("{option}%"), None)
-                            .on(option == scale)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.set_zoom_scale(at, index, option, cx)
-                            }))
-                    }))
+                    .children(zoom_scales(at, index, scale, cx))
                     .child(div().w(px(8.)));
             }
             bar.child(
@@ -1519,6 +1513,25 @@ fn toolbar(
             .child(hint("1–4", "Layout"))
             .child(hint("⌘Z", "Undo")),
     }
+}
+
+/// The scales a zoom can take, `scale` lit, for the lanes' toolbar and the Text inspector.
+pub(super) fn zoom_scales(
+    at: TakeAt,
+    index: usize,
+    scale: u16,
+    cx: &mut Context<EditScreen>,
+) -> Vec<Stateful<Div>> {
+    ZOOM_SCALES
+        .into_iter()
+        .map(|option| {
+            choice(("zoom-scale", option as usize), format!("{option}%"), None)
+                .on(option == scale)
+                .on_click(
+                    cx.listener(move |this, _, _, cx| this.set_zoom_scale(at, index, option, cx)),
+                )
+        })
+        .collect()
 }
 
 /// The four layouts with their keys, `current` lit; a click does what the key does.
@@ -2243,7 +2256,9 @@ fn words_lane(
                     .when(word.state != WordState::Kept, |w| {
                         w.text_color(CUT_TEXT).line_through()
                     })
-                    .when(selected, |w| w.bg(SELECTION).text_color(STRONG))
+                    .when(selected, |w| {
+                        w.bg(super::word_selection()).text_color(STRONG)
+                    })
                     .child(word.text.clone())
                     .on_mouse_down(
                         MouseButton::Left,
