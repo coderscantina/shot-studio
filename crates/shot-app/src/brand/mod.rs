@@ -119,7 +119,8 @@ impl Section {
         match self {
             Self::Generate | Self::Colors => Moment::LowerThird,
             Self::Fonts => Moment::ChapterBand,
-            Self::Camera | Self::Captions => Moment::Captions,
+            Self::Camera => Moment::Camera,
+            Self::Captions => Moment::Captions,
             Self::Motion | Self::Sounds | Self::Overlays => Moment::LinkCard,
             Self::Logo | Self::Bookends | Self::EndCard => Moment::EndCard,
         }
@@ -132,15 +133,17 @@ pub enum Moment {
     ChapterBand,
     LowerThird,
     LinkCard,
+    Camera,
     Captions,
     EndCard,
 }
 
 impl Moment {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::ChapterBand,
         Self::LowerThird,
         Self::LinkCard,
+        Self::Camera,
         Self::Captions,
         Self::EndCard,
     ];
@@ -150,7 +153,8 @@ impl Moment {
             Self::ChapterBand => "Chapter band",
             Self::LowerThird => "Lower third",
             Self::LinkCard => "Link card",
-            Self::Captions => "Camera and captions",
+            Self::Camera => "Camera",
+            Self::Captions => "Captions",
             Self::EndCard => "End card",
         }
     }
@@ -161,19 +165,21 @@ impl Moment {
             Self::ChapterBand => (0, 3_500_000),
             Self::LowerThird => (3_500_000, 7_500_000),
             Self::LinkCard => (7_500_000, 11_500_000),
-            Self::Captions => (11_500_000, stage::CAPTIONS_UNTIL.0),
-            Self::EndCard => (stage::CAPTIONS_UNTIL.0, 19_500_000),
+            Self::Camera => (11_500_000, stage::CAPTIONS.start),
+            Self::Captions => (stage::CAPTIONS.start, stage::CAPTIONS.end),
+            Self::EndCard => (stage::CAPTIONS.end, SCENE.0),
         }
     }
 
     /// The frame to rest on: its overlay fully in.
     fn rest(self) -> Micros {
-        Micros(self.span().0 + 2_200_000)
+        let (from, to) = self.span();
+        Micros(from + 2_200_000.min((to - from) / 2))
     }
 }
 
 /// The length of the theme preview scene.
-const SCENE: Micros = Micros(19_500_000);
+const SCENE: Micros = Micros(21_000_000);
 
 /// A control of the theme window, for coalescing undo and keeping inputs.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -250,7 +256,7 @@ fn open_with(
         return Ok(());
     }
     let themes = Themes::open(&repo)?;
-    let bounds = Bounds::centered(None, size(px(1500.), px(940.)), cx);
+    let bounds = Bounds::centered(None, size(px(1600.), px(1000.)), cx);
     let mut opened = None;
     let window = cx
         .open_window(
@@ -387,6 +393,11 @@ impl ThemeEditor {
         self.renaming = false;
         if section != Section::Generate {
             self.trial = None;
+        } else if self.trial.is_none() {
+            // The generator starts from the theme's accent as it is now.
+            let accent = generate::Palette::of(&self.look().colors).accent;
+            self.seed = hex(accent);
+            self.proposals = generate::propose(accent);
         }
         if section == Section::Overlays && self.preset.is_none() {
             let first = self
@@ -550,6 +561,8 @@ impl ThemeEditor {
         }
         to.push(std::mem::replace(&mut self.themes, state));
         self.last = None;
+        // Fields show the files again instead of text typed before, which a blur would write back.
+        self.inputs.clear();
         self.after_write(cx);
     }
 
@@ -710,7 +723,8 @@ impl ThemeEditor {
                 let editor = cx.new(|cx| OverlayEditor::new(draft, preview, cx));
                 self._subscriptions
                     .push(cx.subscribe(&editor, |this, _, Commit(draft), cx| {
-                        this.write_preset(draft.clone(), cx);
+                        let old = this.preset.as_ref().and_then(|(n, _)| n.clone());
+                        this.write_preset(old, draft.clone(), cx);
                     }));
                 self.preset = Some((name, editor));
             }
@@ -735,16 +749,16 @@ impl ThemeEditor {
             .find(|n| !names.contains(n))
             .expect("some number is free");
         let draft = overlay::starter(Some(name.clone()), template);
-        self.write_preset(draft, cx);
+        self.write_preset(None, draft, cx);
         self.select_preset(Some(name), cx);
     }
 
-    /// Writes `draft` as the preset the editor shows, renaming it when its name changed.
-    fn write_preset(&mut self, draft: Draft, cx: &mut Context<Self>) {
+    /// Writes `draft` in place of the preset `old`, a rename when the names differ, or as a new
+    /// preset for `None`.
+    fn write_preset(&mut self, old: Option<Id>, draft: Draft, cx: &mut Context<Self>) {
         let Some(name) = draft.name.clone() else {
             return;
         };
-        let old = self.preset.as_ref().and_then(|(n, _)| n.clone());
         if old.as_ref() != Some(&name)
             && self
                 .themes
@@ -770,7 +784,9 @@ impl ThemeEditor {
             brand.overlay_presets.push(preset);
             brand.overlay_presets.sort_by(|a, b| a.name.cmp(&b.name));
         });
-        if let Some((selected, _)) = &mut self.preset {
+        if old.is_some()
+            && let Some((selected, _)) = &mut self.preset
+        {
             *selected = Some(name);
         }
         self.commit(next, None, cx);
@@ -979,8 +995,8 @@ impl ThemeEditor {
             .flex_col()
             .gap(px(12.))
             .p(px(20.))
-            .children(trying)
             .children(self.error.clone().map(crate::ui::alert))
             .child(body)
+            .children(trying)
     }
 }

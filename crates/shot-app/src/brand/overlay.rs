@@ -248,8 +248,9 @@ impl OverlayEditor {
 
     /// Shows `draft`, as written by the owner, with the preview's frame and theme.
     pub fn set_draft(&mut self, draft: Draft, preview: Option<Preview>, cx: &mut Context<Self>) {
-        let other = draft.name != self.draft.name || draft.template != self.draft.template;
-        if other {
+        // Files changed from outside (undo, another preset): fields show them again instead of
+        // keeping text typed before, which their next blur would write back.
+        if draft != self.draft {
             self.inputs.clear();
             self.refused.clear();
         }
@@ -334,7 +335,22 @@ impl OverlayEditor {
             .map(|e| e.to_string())
     }
 
+    /// Emits the draft with its parameters in the template's order, then `enter` and `exit`,
+    /// so refilling a cleared field does not move it in the file.
     fn commit(&mut self, cx: &mut Context<Self>) {
+        let order: Vec<String> = fields(self.draft.template.as_str(), &self.preview.brand)
+            .1
+            .into_iter()
+            .map(|f| f.name)
+            .chain(KEYFRAME_PARAMS.iter().map(|p| p.name.to_owned()))
+            .collect();
+        let rank = |name: &Id| {
+            order
+                .iter()
+                .position(|n| n == name.as_str())
+                .unwrap_or(order.len())
+        };
+        self.draft.params.sort_by_key(|(name, _)| rank(name));
         cx.emit(Commit(self.draft.clone()));
     }
 
@@ -482,7 +498,7 @@ impl OverlayEditor {
             .flex_col()
             .gap(px(2.))
             .child(fields::row(label, control))
-            .child(div().pl(px(108.)).text_size(TEXT_XS).child(note))
+            .child(div().pl(px(100.)).text_size(TEXT_XS).child(note))
     }
 
     /// The controls without the preview, for the theme window's Overlays section.
@@ -520,7 +536,7 @@ impl OverlayEditor {
             if let Some(why) = refused {
                 out = out.child(
                     div()
-                        .pl(px(108.))
+                        .pl(px(100.))
                         .text_size(TEXT_XS)
                         .text_color(CUT_TEXT)
                         .child(why),
@@ -537,10 +553,19 @@ impl OverlayEditor {
             "Length",
             fields::input(&state, refused.is_some()),
         ));
+        if refused.is_none() {
+            out = out.child(
+                div()
+                    .pl(px(100.))
+                    .text_size(TEXT_XS)
+                    .text_color(MUTED)
+                    .child("seconds it shows when placed"),
+            );
+        }
         if let Some(why) = refused {
             out = out.child(
                 div()
-                    .pl(px(108.))
+                    .pl(px(100.))
                     .text_size(TEXT_XS)
                     .text_color(CUT_TEXT)
                     .child(why),
@@ -623,14 +648,22 @@ struct PlacedWindow {
 }
 
 /// The placed overlay and the chapter title it shows under, if it is there.
-fn placed(folder: &VideoFolder, at: TakeAt, index: usize) -> Option<(Overlay, Id, String)> {
+/// The placed overlay, its take, the chapter title it shows under and the layout at its start.
+fn placed(
+    folder: &VideoFolder,
+    at: TakeAt,
+    index: usize,
+) -> Option<(Overlay, Id, String, shot_core::Layout)> {
     let chapter = folder.project.cut.chapters.get(at.chapter)?;
     let block = chapter.takes.get(at.take)?;
-    Some((
-        block.overlays.get(index)?.clone(),
-        block.take.clone(),
-        chapter.title.clone(),
-    ))
+    let overlay = block.overlays.get(index)?.clone();
+    let start = overlay.range.from();
+    let layout = block
+        .layouts
+        .iter()
+        .find(|l| l.range.from() <= start && start < l.range.to())
+        .map_or(folder.project.format.default_layout, |l| l.layout);
+    Some((overlay, block.take.clone(), chapter.title.clone(), layout))
 }
 
 fn draft_of(overlay: &Overlay) -> Draft {
@@ -642,14 +675,21 @@ fn draft_of(overlay: &Overlay) -> Draft {
     }
 }
 
-fn preview_of(folder: &VideoFolder, take: Id, overlay: &Overlay, chapter: String) -> Preview {
+fn preview_of(
+    folder: &VideoFolder,
+    (overlay, take, chapter, layout): (Overlay, Id, String, shot_core::Layout),
+) -> Preview {
     let brand = folder.lock().map(|l| l.brand.clone()).unwrap_or_default();
     Preview {
         sample: Sample::of_video(
             &folder.dir,
             take,
             Micros(overlay.range.from().0.saturating_sub(LEAD.0)),
-        ),
+        )
+        .map(|sample| Sample {
+            layout: Some(layout),
+            ..sample
+        }),
         brand,
         theme: folder.theme.clone(),
         chapter,
@@ -664,9 +704,9 @@ pub fn open_placed(
     index: usize,
     cx: &mut App,
 ) -> Result<(), String> {
-    let (overlay, take, chapter) =
-        placed(folder.read(cx), at, index).ok_or("That overlay is gone")?;
-    let preview = preview_of(folder.read(cx), take, &overlay, chapter);
+    let found = placed(folder.read(cx), at, index).ok_or("That overlay is gone")?;
+    let overlay = found.0.clone();
+    let preview = preview_of(folder.read(cx), found);
     let bounds = Bounds::centered(None, size(px(1240.), px(760.)), cx);
     cx.open_window(
         WindowOptions {
@@ -726,13 +766,13 @@ impl PlacedWindow {
 
     /// Shows the overlay as the files have it now, after an undo in the studio.
     fn follow(&mut self, cx: &mut Context<Self>) {
-        let Some((overlay, take, chapter)) = placed(self.folder.read(cx), self.at, self.index)
-        else {
+        let Some(found) = placed(self.folder.read(cx), self.at, self.index) else {
             self.error = Some("This overlay is no longer in the cut".into());
             cx.notify();
             return;
         };
-        let preview = preview_of(self.folder.read(cx), take, &overlay, chapter);
+        let overlay = found.0.clone();
+        let preview = preview_of(self.folder.read(cx), found);
         self.from = overlay.range.from();
         self.editor.update(cx, |editor, cx| {
             editor.set_draft(draft_of(&overlay), Some(preview), cx)

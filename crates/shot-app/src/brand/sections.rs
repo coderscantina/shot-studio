@@ -17,7 +17,7 @@ use super::fields::{self, button, chip, group, heading, parse_seconds, row, seco
 use super::generate::{self, Palette};
 use super::{Key, Moment, Section, ThemeEditor, hex, parse_hex, store, swatch};
 use crate::theme::*;
-use crate::ui::icon;
+use crate::ui::{Segment, icon, segmented};
 
 const FONTS: [(BundledFont, &str); 4] = [
     (BundledFont::Geist, "Geist"),
@@ -446,7 +446,7 @@ impl ThemeEditor {
                     .child(fields::input(&state, refused).flex_1()),
             ))
             .child(
-                div().pl(px(108.)).child(
+                div().pl(px(100.)).child(
                     button("from-logo", "From the logo")
                         .on_click(cx.listener(|this, _, _, cx| this.accent_from_logo(cx))),
                 ),
@@ -570,14 +570,14 @@ impl ThemeEditor {
                     ))
                     .child(
                         div()
-                            .pl(px(108.))
+                            .pl(px(100.))
                             .text_size(TEXT_XS)
                             .text_color(MUTED)
                             .child(about),
                     )
                     .children(warnings.iter().filter(|w| w.on == role).map(|w| {
                         div()
-                            .pl(px(108.))
+                            .pl(px(100.))
                             .flex()
                             .items_center()
                             .gap(px(6.))
@@ -604,49 +604,64 @@ impl ThemeEditor {
             "Fonts",
             "The bundled OFL fonts, or a font file of the channel. Headings are bold, body medium.",
         ));
-        for (role, title, current) in roles {
-            let mut chips = div().flex().flex_wrap().gap(px(4.));
-            for (font, name) in FONTS {
-                let on = current == Some(Font::Bundled(font));
-                chips = chips.child(
-                    chip(SharedString::from(format!("font-{role}-{name}")), name, on).on_click(
-                        cx.listener(move |this, _, _, cx| {
-                            this.change(None, cx, |look| {
-                                set_font(look, role, Some(Font::Bundled(font)))
-                            })
-                        }),
-                    ),
-                );
-            }
+        for (index, (role, title, current)) in roles.into_iter().enumerate() {
+            let default = if role == "mono" {
+                BundledFont::GeistMono
+            } else {
+                BundledFont::Geist
+            };
+            let shown = match &current {
+                Some(Font::Bundled(font)) => Some(*font),
+                Some(Font::File(_)) => None,
+                None => Some(default),
+            };
             let file = match &current {
                 Some(Font::File(path)) => Some(path.rsplit('/').next().unwrap_or(path).to_owned()),
                 _ => None,
             };
-            chips = chips.child(
-                chip(
-                    SharedString::from(format!("font-{role}-file")),
-                    file.clone().unwrap_or_else(|| "Font file…".into()),
-                    file.is_some(),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.pick_file("Use as font", "fonts", cx, move |look, path| {
-                        set_font(look, role, Some(Font::File(path)))
-                    })
-                })),
-            );
-            if current.is_some() {
-                chips = chips.child(
-                    chip(
-                        SharedString::from(format!("font-{role}-reset")),
-                        "Default",
-                        false,
-                    )
-                    .text_color(MUTED)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.change(None, cx, |look| set_font(look, role, None))
-                    })),
+            let chips = div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(choice(
+                    FONT_IDS[index],
+                    &FONTS,
+                    shown,
+                    cx,
+                    move |look, font| set_font(look, role, Some(Font::Bundled(font))),
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .child(
+                            button(
+                                SharedString::from(format!("font-{role}-file")),
+                                file.clone().unwrap_or_else(|| "Font file…".into()),
+                            )
+                            .when(file.is_some(), |b| b.text_color(ACCENT))
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    this.pick_file("Use as font", "fonts", cx, move |look, path| {
+                                        set_font(look, role, Some(Font::File(path)))
+                                    })
+                                },
+                            )),
+                        )
+                        .when(current.is_none(), |d| {
+                            d.child(div().text_size(TEXT_XS).text_color(MUTED).child("default"))
+                        })
+                        .when(current.is_some(), |d| {
+                            d.child(
+                                button(SharedString::from(format!("font-{role}-reset")), "Default")
+                                    .text_color(MUTED)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.change(None, cx, |look| set_font(look, role, None))
+                                    })),
+                            )
+                        }),
                 );
-            }
             out = out.child(group(title)).child(chips);
         }
         out
@@ -674,7 +689,7 @@ impl ThemeEditor {
             ))
             .child(
                 div()
-                    .pl(px(108.))
+                    .pl(px(100.))
                     .flex()
                     .gap(px(6.))
                     .child(button("logo-choose", "Choose…").on_click(cx.listener(
@@ -776,37 +791,25 @@ impl ThemeEditor {
         out = out
             .child(row(
                 "Shape",
-                div().flex().gap(px(4.)).children(shapes.map(|(shape, name)| {
-                    chip(SharedString::from(format!("shape-{name}")), name, camera.shape == shape).on_click(
-                        cx.listener(move |this, _, _, cx| {
-                            this.change(None, cx, |l| {
-                                if let Some(c) = &mut l.camera {
-                                    c.shape = shape;
-                                }
-                            })
-                        }),
-                    )
-                })),
+                choice("camera-shape", &shapes, Some(camera.shape), cx, |l, shape| {
+                    if let Some(c) = &mut l.camera {
+                        c.shape = shape;
+                    }
+                }),
             ))
             .child(row("Corners", fields::slider(&corners, "Corners", format!("{} px", camera.corners))))
             .child(row("Border", fields::slider(&border, "Border", format!("{} px", camera.border))))
             .child(row(
                 "Shadow",
-                div().flex().gap(px(4.)).children(shadows.map(|(shadow, name)| {
-                    chip(SharedString::from(format!("shadow-{name}")), name, camera.shadow == shadow).on_click(
-                        cx.listener(move |this, _, _, cx| {
-                            this.change(None, cx, |l| {
-                                if let Some(c) = &mut l.camera {
-                                    c.shadow = shadow;
-                                }
-                            })
-                        }),
-                    )
-                })),
+                choice("camera-shadow", &shadows, Some(camera.shadow), cx, |l, shadow| {
+                    if let Some(c) = &mut l.camera {
+                        c.shadow = shadow;
+                    }
+                }),
             ))
-            .child(div().pl(px(108.)).text_size(TEXT_XS).text_color(MUTED).child("Corners and border in pixels of the 4K output; the border is in the accent"))
+            .child(div().pl(px(100.)).text_size(TEXT_XS).text_color(MUTED).child("Corners and border in pixels of the 4K output; the border is in the accent"))
             .child(
-                div().pl(px(108.)).child(
+                div().pl(px(100.)).child(
                     button("camera-unframe", "Keep the layout's corners")
                         .text_color(MUTED)
                         .on_click(cx.listener(|this, _, _, cx| this.change(None, cx, |l| l.camera = None))),
@@ -823,28 +826,18 @@ impl ThemeEditor {
             "Motion",
             "The preset each format moves in, and how each preset feels. Play the entrance to see a card come in.",
         ));
-        for (format, title) in FORMATS {
+        for (index, (format, title)) in FORMATS.into_iter().enumerate() {
             let current = look.motion.get(format);
             let default = name_of(shot_render::theme::default_preset(format));
-            let chips =
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap(px(4.))
-                    .children(PRESETS.map(|(preset, name)| {
-                        let on = current.unwrap_or(default) == preset;
-                        chip(
-                            SharedString::from(format!("motion-{format}-{name}")),
-                            name,
-                            on,
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.change(None, cx, |l| {
-                                let value = (preset != default).then_some(preset);
-                                set_motion(&mut l.motion, format, value);
-                            })
-                        }))
-                    }));
+            let chips = choice(
+                MOTION_IDS[index],
+                &PRESETS,
+                Some(current.unwrap_or(default)),
+                cx,
+                move |l, preset| {
+                    set_motion(&mut l.motion, format, (preset != default).then_some(preset))
+                },
+            );
             out = out.child(row(title, chips));
         }
         let tuned = self
@@ -1234,7 +1227,7 @@ impl ThemeEditor {
             .child(row("Length", fields::input(&state, refused)))
             .child(
                 div()
-                    .pl(px(108.))
+                    .pl(px(100.))
                     .text_size(TEXT_XS)
                     .text_color(MUTED)
                     .child("Seconds, at least 1. Empty for no end card. YouTube allows 5 to 20"),
@@ -1381,6 +1374,38 @@ fn copy_into(repo: &Path, folder: &str, source: &Path) -> Result<String, String>
         .expect("copied into the repo")
         .to_string_lossy()
         .into_owned())
+}
+
+const FONT_IDS: [&str; 3] = ["font-heading", "font-body", "font-mono"];
+const MOTION_IDS: [&str; 4] = [
+    "motion-reaction",
+    "motion-opinion",
+    "motion-tour",
+    "motion-tutorial",
+];
+
+/// One value of a few as the app's segmented control; picking one sets it on the look.
+fn choice<T: Copy + PartialEq + 'static>(
+    id: &'static str,
+    options: &[(T, &'static str)],
+    current: Option<T>,
+    cx: &mut Context<ThemeEditor>,
+    set: impl Fn(&mut shot_core::Brand, T) + Clone + 'static,
+) -> gpui::Stateful<Div> {
+    let entity = cx.entity();
+    let segments = options
+        .iter()
+        .map(|&(value, label)| {
+            let (entity, set) = (entity.clone(), set.clone());
+            Segment::new(label, current == Some(value), move |_, _, cx| {
+                let set = set.clone();
+                entity.update(cx, |this, cx| {
+                    this.change(None, cx, move |look| set(look, value))
+                })
+            })
+        })
+        .collect();
+    segmented(id, WELL, segments)
 }
 
 const DEFAULT_CAMERA: Camera = Camera {

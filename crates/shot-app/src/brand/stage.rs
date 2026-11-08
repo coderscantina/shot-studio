@@ -35,6 +35,8 @@ pub struct Sample {
     pub at: Micros,
     /// Whether the take has a camera track, so the camera frame shows beside the screen.
     pub camera: bool,
+    /// The layout to show, `None` for the camera beside the screen when there is a camera.
+    pub layout: Option<Layout>,
 }
 
 fn read(path: &Path) -> Option<String> {
@@ -93,6 +95,7 @@ impl Sample {
             take,
             at,
             camera,
+            layout: None,
         }
     }
 
@@ -117,11 +120,11 @@ impl Sample {
             Cut::default().append_take(self.take.clone(), title, range(Micros(0), length));
         let block = &mut cut.chapters[0].takes[0];
         block.layouts.push(LayoutChange {
-            layout: if self.camera {
+            layout: self.layout.unwrap_or(if self.camera {
                 Layout::FaceContent
             } else {
                 Layout::Screen
-            },
+            }),
             range: range(Micros(0), length),
         });
         block.overlays = overlays
@@ -193,14 +196,15 @@ const CAPTION_WORDS: [&str; 6] = ["This", "is", "how", "your", "captions", "read
 /// How long each caption word stays lit.
 const CAPTION_STEP: u64 = 380_000;
 
-/// Burned-in captions as `shot-render` draws them on Shorts today, over the frames before
-/// [`CAPTIONS_UNTIL`]: one cue whose words light up in turn.
+/// Burned-in captions as `shot-render` draws them on Shorts today, over [`CAPTIONS`] of the
+/// scene, where no card covers them: one cue whose words light up in turn.
 fn captions(t: Micros, canvas: Canvas, frame: &mut Frame) {
-    if t >= CAPTIONS_UNTIL {
+    if !CAPTIONS.contains(&t.0) {
         return;
     }
-    let word = (t.0 / CAPTION_STEP) as usize % CAPTION_WORDS.len();
-    let since = Micros(t.0 % CAPTION_STEP);
+    let since_start = t.0 - CAPTIONS.start;
+    let word = (since_start / CAPTION_STEP) as usize % CAPTION_WORDS.len();
+    let since = Micros(since_start % CAPTION_STEP);
     frame.drawing.over.push(Shape::Caption {
         center: [canvas.width as f32 / 2.0, canvas.height as f32 * 0.83],
         width: canvas.width as f32 * 0.84,
@@ -214,8 +218,8 @@ fn captions(t: Micros, canvas: Canvas, frame: &mut Frame) {
     });
 }
 
-/// The end of the frames the sample captions draw on, set by the theme scene.
-pub const CAPTIONS_UNTIL: Micros = Micros(15_000_000);
+/// The stretch of the theme scene the sample captions draw on, in microseconds.
+pub const CAPTIONS: std::ops::Range<u64> = 13_500_000..16_500_000;
 
 /// A preview that shows one frame of a [`Scene`] and plays stretches of it.
 pub struct Stage {

@@ -151,7 +151,7 @@ pub fn row(label: impl Into<SharedString>, control: impl IntoElement) -> Div {
         .min_h(px(32.))
         .child(
             div()
-                .w(px(96.))
+                .w(px(88.))
                 .flex_none()
                 .text_size(TEXT_SM)
                 .text_color(MUTED)
