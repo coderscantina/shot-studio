@@ -14,6 +14,8 @@
 //! repeats it through the prompt.
 
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::JoinHandle;
 
@@ -59,6 +61,7 @@ enum Message {
 pub struct Transcriber {
     tx: Sender<Message>,
     worker: JoinHandle<Result<Transcript, Error>>,
+    stop: Arc<AtomicBool>,
 }
 
 impl Transcriber {
@@ -103,6 +106,8 @@ impl Transcriber {
         let state = context.create_state().map_err(whisper_error)?;
         let eot = context.token_eot();
         let (tx, rx) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = stop.clone();
         let worker = std::thread::Builder::new()
             .name("transcribe".into())
             .spawn(move || {
@@ -119,10 +124,11 @@ impl Transcriber {
                     window: Vec::new(),
                     window_start: 0,
                     decoded_len: 0,
+                    stop: stopped,
                 }
                 .run(rx)
             })?;
-        Ok(Self { tx, worker })
+        Ok(Self { tx, worker, stop })
     }
 
     /// Queues mono `samples` at `sample_rate` whose first sample is at media time `t`. Never
@@ -134,6 +140,12 @@ impl Transcriber {
             samples: samples.to_vec(),
             rate: sample_rate,
         });
+    }
+
+    /// A flag that, once set, ends the decoding thread after its current decode. `finish` then
+    /// returns only the words that were stable by then, so a stopped transcript is partial.
+    pub fn stopper(&self) -> Arc<AtomicBool> {
+        self.stop.clone()
     }
 
     /// Decodes the queued audio, commits the remaining words and returns the transcript.
@@ -166,12 +178,16 @@ struct Worker {
     window_start: u64,
     /// Window length at the last decode.
     decoded_len: usize,
+    stop: Arc<AtomicBool>,
 }
 
 impl Worker {
     fn run(mut self, rx: Receiver<Message>) -> Result<Transcript, Error> {
         let mut finishing = false;
         loop {
+            if self.stop.load(Ordering::Relaxed) {
+                return Ok(self.transcript);
+            }
             while !finishing && self.incoming.len() < MIN_STEP {
                 match rx.recv() {
                     Ok(Message::Audio { t, samples, rate }) => self.accept(t, &samples, rate),

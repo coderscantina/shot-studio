@@ -18,7 +18,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use gpui::{
     App, ClipboardItem, Context, Div, Entity, FocusHandle, Focusable, FontWeight, Hsla, KeyBinding,
-    ObjectFit, PathPromptOptions, SharedString, Window, actions, div, img, prelude::*, px,
+    ObjectFit, PathPromptOptions, ScrollHandle, SharedString, Window, actions, div, img,
+    prelude::*, px,
 };
 use shot_core::{Cut, DerivedKind, OutputKind};
 use shot_mcp::bridge::{Claude, Reach};
@@ -34,7 +35,9 @@ use shot_ship::youtube::{Privacy, YouTube, YouTubeError};
 use crate::agent::{self, AgentRun};
 use crate::folder::VideoFolder;
 use crate::theme::*;
-use crate::ui::{ActionLook, Segment, icon, kbd, label, mono, pane, proposal_action, segmented};
+use crate::ui::{
+    ActionLook, Segment, icon, kbd, label, mono, pane, proposal_action, scrolling_list, segmented,
+};
 use words::*;
 
 actions!(
@@ -206,6 +209,8 @@ pub struct ShipScreen {
     events: Receiver<Event>,
     polling: bool,
     focus: FocusHandle,
+    /// The side column above the pinned publish bar.
+    side_scroll: ScrollHandle,
 }
 
 impl Focusable for ShipScreen {
@@ -248,6 +253,7 @@ impl ShipScreen {
             events,
             polling: false,
             focus: cx.focus_handle(),
+            side_scroll: ScrollHandle::new(),
         }
     }
 
@@ -903,7 +909,6 @@ impl ShipScreen {
                     false,
                 ),
             };
-            let stale = export.is_some_and(|e| e.stale);
             let busy = self.run.is_some();
             let path = cut.export.clone();
             div()
@@ -930,11 +935,8 @@ impl ShipScreen {
                             if again { "Export again" } else { "Export" },
                             Some(if again { "again" } else { "export" }),
                             Some("E"),
-                            if again && !stale {
-                                ActionLook::Plain
-                            } else {
-                                ActionLook::Accent
-                            },
+                            // Lime belongs to the pinned main action below.
+                            ActionLook::Plain,
                         )
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.export_selected(&ExportCut, window, cx)
@@ -1326,15 +1328,14 @@ impl ShipScreen {
             .flex_none()
             .flex()
             .flex_col()
-            .child(
+            // The fade shows the column goes on under the pinned bar.
+            .child(scrolling_list(
+                "ship-side",
+                &self.side_scroll,
                 div()
-                    .id("ship-side")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
                     .child(side)
                     .child(self.destination(cx).px(px(14.)).pb(px(14.))),
-            )
+            ))
             .child(self.publish(cx).px(px(14.)).pt(px(4.)).pb(px(14.)))
     }
 
