@@ -241,6 +241,65 @@ impl Player {
         Ok(())
     }
 
+    /// Loads `cut`, a clip made elsewhere such as attempts of the Takes view, to play whole as
+    /// recorded, and shows its first frame. `key` names it for [`Player::loaded`]; nothing
+    /// changes when that key is loaded already.
+    pub fn load_clip(
+        &mut self,
+        folder: &VideoFolder,
+        key: ItemKey,
+        cut: Cut,
+    ) -> Result<(), String> {
+        if self
+            .loaded()
+            .is_some_and(|loaded| loaded == (&key, Hear::Around))
+        {
+            return Ok(());
+        }
+        let project = Project {
+            cut,
+            ..folder.shown.clone()
+        };
+        let map = EditMap::of(&project, View::Edited);
+        if map.frames == 0 {
+            return Err("there is nothing to play here".to_owned());
+        }
+        let engine = self.engine.get_or_insert_with(Engine::spawn);
+        engine.set_plan(
+            Plan {
+                map: map.clone(),
+                dir: folder.dir.clone(),
+                effects: folder.shown.format.effects(),
+                theme: folder.theme.clone(),
+            },
+            0,
+        );
+        if let Some(sound) = &self.sound {
+            sound.set_playing(false);
+            sound.set_plan(&map, folder.dir.clone(), project.clone(), 0);
+        }
+        self.loaded = Some(Loaded {
+            key,
+            hear: Hear::Around,
+            around: map.clone(),
+            item: 0..map.frames,
+            map,
+            dir: folder.dir.clone(),
+            project,
+        });
+        self.playhead = 0;
+        self.playing = false;
+        self.fresh = true;
+        self.clock = None;
+        self.seeking = true;
+        Ok(())
+    }
+
+    /// The block of the loaded clip and its media time under the playhead.
+    pub fn source(&self) -> Option<(TakeAt, Micros)> {
+        self.loaded.as_ref()?.map.source_at(self.playhead)
+    }
+
     /// The item loaded and how it plays.
     pub fn loaded(&self) -> Option<(&ItemKey, Hear)> {
         self.loaded.as_ref().map(|l| (&l.key, l.hear))

@@ -244,6 +244,7 @@ impl Studio {
         let ship = cx.new(|cx| ShipScreen::new(folder.clone(), cx));
         let recorded = cx.subscribe_in(&record, window, |this, _, _: &Recorded, window, cx| {
             this.edit.update(cx, |edit, cx| edit.show_last_chapter(cx));
+            this.cut.update(cx, |cut, cx| cut.recorded(cx));
             this.show(Screen::Cut, window, cx);
         });
         let continue_to_edit =
@@ -637,7 +638,10 @@ impl Studio {
                         .child("Recording")
                 })
                 .into_any_element(),
-            Screen::Cut | Screen::Board | Screen::Script | Screen::Ship => div().into_any_element(),
+            Screen::Cut => self
+                .cut
+                .update(cx, |cut, cx| cut.title_controls(cx).into_any_element()),
+            Screen::Board | Screen::Script | Screen::Ship => div().into_any_element(),
         };
         let step = self.step(cx);
         let nav =

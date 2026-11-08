@@ -239,6 +239,7 @@ The edit of the main cut as a list of chapters, followed by the derived cuts. To
 | `captions <style>` | optional, overrides the format's caption style. The main cut ships captions as a sidecar file |
 | `caption-fixes { fix "<heard>" "<said>" ... }` | optional. Each `fix` replaces a run of transcript words that reads `heard`, ignoring case, with `said` wherever captions are shown, and the replacement takes the matched words' timing. `heard` is unique ignoring case, neither text is empty. Claude proposes fixes as text and a person edits them in Caption fixes, never through a proposal |
 | `music "<file>" gain=<dB> duck=<dB>` | optional. A music bed under the main cut and its derived cuts: a file relative to the video folder, its gain, and the gain it drops to under speech. Both are at most 0 |
+| `takes { attempt ... }` | optional, see [takes](#takes). Ratings and picks of the takes' attempts at each beat |
 | `chapter "<title>" { ... }` | zero or more, in output order |
 | `override <take> <kind> at=<time> { ... }` | zero or more, see [overrides](#overrides). Canonical order: by take in cut order, then `at`, then kind |
 | `short <name> { ... }` | a 9:16 derived cut, reframed on the face |
@@ -402,6 +403,41 @@ override t02 filler at=30_000_000 {
 
 short friday-deploys {
     clip t01 from=5_100_000 to=12_000_000
+}
+```
+
+### Takes
+
+A video recorded in several takes has several attempts at a beat. The Takes view lines them up: a row per beat of `script.md`, with each take's attempt at it. An attempt comes from the take's `beat` [elements](#elements) when it was recorded with the prompter, from each beat the prompter showed to the next, trimmed to the words said in it; a take without them is aligned to the beats by the words its sentences share with them. Without beats in the script, the rows are the sentence groups of the first take. `shot-core` computes the attempts from the files, so they are not written down.
+
+The `takes` block holds what a person said about attempts, one `attempt <take> from=<time> to=<time>` each, in canonical order by take (`t9` before `t10`) and then `from`. The ranges of one take do not overlap.
+
+| Property | Meaning |
+| --- | --- |
+| `stars=<1 to 5>` | the attempt's rating |
+| `pick=#true` | circled: the attempt "Assemble picks" uses for its beat. The range is then the attempt, or the part of it the person marked |
+
+An `attempt` has `stars`, `pick` or both. It binds to the attempt of its take that holds the middle of its range, so it follows a re-alignment that moves the attempt's edges. A take that left the main cut keeps its ratings.
+
+"Use this" puts an attempt, or a marked part of one, into the main cut in place of every attempt at that beat, with the removes, reviews, layouts, zooms and overlays its take blocks have there. "Assemble picks" writes the chapters again from the script: per beat the circled attempt, else the best rated, else the one the cut keeps most of, else the newest take's, under the script's chapter titles. Consecutive beats from one take stay one block with the pause between them. Overrides of a take that left the cut go with it, and an edit that would take a take out of the cut that a derived cut uses is refused.
+
+The second take's opening is circled whole, and of its second attempt only the part from 14.1 s to 18.2 s:
+
+```kdl
+takes {
+    attempt t01 from=800_000 to=11_400_000 stars=3
+    attempt t01 from=13_000_000 to=21_500_000 stars=4
+    attempt t02 from=600_000 to=10_900_000 stars=5 pick=#true
+    attempt t02 from=14_100_000 to=18_200_000 pick=#true
+}
+
+chapter "Hook" {
+    take t02 {
+        keep from=600_000 to=10_900_000
+    }
+    take t02 {
+        keep from=14_100_000 to=18_200_000
+    }
 }
 ```
 

@@ -17,6 +17,9 @@ pub struct Cut {
     pub caption_fixes: Vec<CaptionFix>,
     /// The music bed under the whole cut and its derived cuts.
     pub music: Option<Music>,
+    /// Ratings and picks of the Takes view, by take (`t9` before `t10`), then `from`. The
+    /// ranges of one take do not overlap.
+    pub ratings: Vec<Rating>,
     /// The main cut, in output order.
     pub chapters: Vec<Chapter>,
     /// Changes to what the style rules gave single elements, in canonical order: by take in
@@ -70,6 +73,32 @@ impl OverrideEffect {
 pub struct CaptionFix {
     pub heard: String,
     pub said: String,
+}
+
+/// A person's verdict on one attempt of the Takes view: an `attempt` node of the `takes` block.
+/// It names the attempt by its take and range, and binds to the attempt of that take that holds
+/// the middle of its range ([`Cut::rating`]), so it follows a re-alignment that moves the
+/// attempt's edges a little.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Rating {
+    pub take: Id,
+    /// The attempt, or the part of it a person marked and circled.
+    pub range: TimeRange,
+    /// 1 to 5.
+    pub stars: Option<u8>,
+    /// Circled: the attempt, or part, that "Assemble picks" uses for its beat.
+    pub pick: bool,
+}
+
+impl Rating {
+    /// The canonical order: by take, shorter ids first so `t9` comes before `t10`, then `from`.
+    fn order(&self) -> (usize, &str, Micros) {
+        (
+            self.take.as_str().len(),
+            self.take.as_str(),
+            self.range.from(),
+        )
+    }
 }
 
 /// A music bed: a file relative to the video folder, its gain in dB (at most 0) and the gain
@@ -236,6 +265,7 @@ impl Cut {
         let doc = src.parse()?;
         let mut cut = Self::default();
         let (mut captions, mut fixes, mut music) = (None, None, None);
+        let mut ratings = None;
         let mut derived_clips = Vec::new();
         let mut overrides = Vec::new();
         for node in src.nodes(&doc) {
@@ -246,6 +276,7 @@ impl Cut {
                 }
                 "caption-fixes" => node.set_once(&mut fixes, CaptionFix::read_all(node)?)?,
                 "music" => node.set_once(&mut music, Music::read(node)?)?,
+                "takes" => node.set_once(&mut ratings, Rating::read_all(node)?)?,
                 "chapter" => cut.chapters.push(Chapter::read(node)?),
                 "override" => overrides.push((Override::read(node)?, node)),
                 name @ ("short" | "x-clip") => {
@@ -266,6 +297,7 @@ impl Cut {
         cut.captions = captions;
         cut.caption_fixes = fixes.unwrap_or_default();
         cut.music = music;
+        cut.ratings = ratings.unwrap_or_default();
         let takes: HashSet<&Id> = cut
             .chapters
             .iter()
@@ -336,6 +368,21 @@ impl Cut {
                 .prop("gain", &music.gain)
                 .prop("duck", &music.duck)
                 .end();
+        }
+        if !self.ratings.is_empty() {
+            separate(&mut w);
+            w.node("takes").open();
+            for rating in &self.ratings {
+                write_range(w.node("attempt").arg(&rating.take), rating.range);
+                if let Some(stars) = &rating.stars {
+                    w.prop("stars", stars);
+                }
+                if rating.pick {
+                    w.prop("pick", &true);
+                }
+                w.end();
+            }
+            w.close();
         }
         for chapter in &self.chapters {
             separate(&mut w);
@@ -538,6 +585,45 @@ impl CaptionFix {
             fixes.push(fix);
         }
         Ok(fixes)
+    }
+}
+
+impl Rating {
+    fn read_all(node: Node<'_>) -> Result<Vec<Self>, ParseError> {
+        node.expect_block(0, &[])?;
+        let mut ratings: Vec<(Self, Node<'_>)> = Vec::new();
+        for child in node.children() {
+            if child.name() != "attempt" {
+                return Err(child.unknown());
+            }
+            child.expect(1, &["from", "to", "stars", "pick"])?;
+            let rating = Self {
+                take: child.arg(0)?,
+                range: TimeRange::read(child)?,
+                stars: child.opt_prop("stars")?,
+                pick: child.opt_prop("pick")?.unwrap_or(false),
+            };
+            if rating.stars.is_some_and(|stars| !(1..=5).contains(&stars)) {
+                return Err(child.error("`stars` is 1 to 5"));
+            }
+            if rating.stars.is_none() && !rating.pick {
+                return Err(child.error("an `attempt` has `stars`, `pick=#true` or both"));
+            }
+            ratings.push((rating, child));
+        }
+        ratings.sort_by(|(a, _), (b, _)| a.order().cmp(&b.order()));
+        for pair in ratings.windows(2) {
+            let [(a, _), (b, node)] = pair else {
+                unreachable!("windows of two")
+            };
+            if a.take == b.take && a.range.overlaps(b.range) {
+                return Err(node.error(format!(
+                    "`attempt` ranges of take `{}` must not overlap",
+                    b.take
+                )));
+            }
+        }
+        Ok(ratings.into_iter().map(|(r, _)| r).collect())
     }
 }
 
