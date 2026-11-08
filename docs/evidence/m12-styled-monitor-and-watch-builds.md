@@ -8,7 +8,7 @@ Branch `task/m12-watch`, details in [m12/watch.md](m12/watch.md). Measured 2026-
 
 | Criterion | Result |
 | --- | --- |
-| `shot build --watch` re-exports one changed chapter of the 17 min fixture in under 20 s after a save | **FAIL, 31.4 to 32.8 s** from the write to `built`. The save is seen in under 1.5 s and 2 chunks render, but finishing the whole cut's audio (true-peak limiter and loudness passes) now takes about 22 s of every export, up from 2.2 s in milestone 03 |
+| `shot build --watch` re-exports one changed chapter of the 17 min fixture in under 20 s after a save | **PASS, 7.8 to 13.5 s** from the write to `built` in 5 of 6 saves on `task/m12-audioperf` (before: 29.8 to 32.8 s), 11.5 s for a save during a check, which now stops the check. One save took 65.1 s with a 9.7 s build, cause not found. The audio finishes in about 6 s instead of 26 s and the join copies the video meanwhile. Details in [m12/audio-speed.md](m12/audio-speed.md) |
 | A proposal preview plays without changing the video branch's lock or cache | **PASS**, `cut.lock` and the chunk folder listing have the same checksums before and after building the proposal (2.2 s, 4 chunks in its own space) and after playing it in the app |
 
 - `shot build --video <dir>` rebuilds the lock, exports every cut, prints one `built` line and then only the problems `shot check` finds. `--watch` rebuilds on changes to the video's files, its takes and the channel's style layers (FSEvents through `notify`), once per save.
@@ -17,4 +17,4 @@ Branch `task/m12-watch`, details in [m12/watch.md](m12/watch.md). Measured 2026-
 
 Screenshot of the Edit screen playing a proposal: `m12/watch-proposal-playing.png`.
 
-Open for the audio owner: the audio finish has to drop under about 12 s on the 17 min cut for the 20 s target. `shot check` takes about 43 s on the 5.8 GB export, which delays a save that arrives during it.
+The audio finish and the check were then sped up on `task/m12-audioperf` ([m12/audio-speed.md](m12/audio-speed.md)): an export with every chunk cached takes 6.5 to 7.4 s instead of 32 to 35 s, and a save during `shot check` stops it. The check takes 4.6 s on one 6.4 GB export but still about 40 s on another, open for shot-media.
