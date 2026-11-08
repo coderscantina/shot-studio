@@ -55,12 +55,15 @@ struct Varyings {
 }
 
 // A triangle strip over the layer's quad. Texture coordinates run on past the frame's edges.
+// Where the quad is the frame, `at` is exactly the corner, so a layer without a shadow samples
+// the very coordinates it would over its frame alone.
 @vertex
 fn vertex(@builtin(vertex_index) index: u32) -> Varyings {
     let corner = vec2<f32>(f32(index & 1u), f32((index >> 1u) & 1u));
     let canvas = mix(layer.quad.xy, layer.quad.zw, corner);
     let ndc = vec2<f32>(canvas.x / layer.canvas.x * 2.0 - 1.0, 1.0 - canvas.y / layer.canvas.y * 2.0);
-    let at = (canvas - layer.frame.xy) / (layer.frame.zw - layer.frame.xy);
+    let size = layer.frame.zw - layer.frame.xy;
+    let at = mix((layer.quad.xy - layer.frame.xy) / size, (layer.quad.zw - layer.frame.xy) / size, corner);
     let uv = mix(layer.crop.xy, layer.crop.zw, at);
     return Varyings(vec4<f32>(ndc, 0.0, 1.0), canvas, uv, mix(layer.shutter.xy, layer.shutter.zw, at));
 }
