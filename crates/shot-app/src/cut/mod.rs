@@ -1335,12 +1335,13 @@ impl CutScreen {
                 "All answered",
                 format!("You kept {kept} and cut {cuts}. The cut runs {runs}."),
             )
-        } else if removed == 0 && untranscribed {
+        } else if untranscribed {
             (
                 "text",
                 false,
                 "No transcript yet",
-                "The rules work from the words. Transcribe the take, and they make a rough cut of it."
+                "The rules and the text editor work from the words. Transcribe the take on the \
+                 left, and the rules make a rough cut."
                     .to_owned(),
             )
         } else if removed == 0 {
@@ -1420,7 +1421,8 @@ impl CutScreen {
                         )
                     })
                     .child(
-                        button("done-continue", Some(go_icon), go, "⌘↩", true)
+                        // Without words, Transcribe on the left is the main action.
+                        button("done-continue", Some(go_icon), go, "⌘↩", !untranscribed)
                             .on_click(cx.listener(|this, _, _, cx| this.go_on(cx))),
                     ),
             )
