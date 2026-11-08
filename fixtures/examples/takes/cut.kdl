@@ -1,0 +1,15 @@
+takes {
+    attempt t01 from=800_000 to=11_400_000 stars=3
+    attempt t01 from=13_000_000 to=21_500_000 stars=4
+    attempt t02 from=600_000 to=10_900_000 stars=5 pick=#true
+    attempt t02 from=14_100_000 to=18_200_000 pick=#true
+}
+
+chapter "Hook" {
+    take t02 {
+        keep from=600_000 to=10_900_000
+    }
+    take t02 {
+        keep from=14_100_000 to=18_200_000
+    }
+}

@@ -15,6 +15,7 @@ mod lock;
 mod migrate;
 mod script;
 mod style;
+mod takes;
 mod timeline;
 mod transcript;
 mod values;
@@ -26,8 +27,8 @@ pub use brand::{
 };
 pub use cut::{
     CaptionFix, Chapter, Clip, Cut, DerivedCut, DerivedKind, LayoutChange, Music, Overlay,
-    Override, OverrideEffect, ParamValue, Point, RangeEdit, RemovedBy, Review, TakeEdit, Zoom,
-    ZoomBy,
+    Override, OverrideEffect, ParamValue, Point, RangeEdit, Rating, RemovedBy, Review, TakeEdit,
+    Zoom, ZoomBy,
 };
 pub use edit::{Decision, EditError, Placed, TakeAt, WordState, WordView};
 pub use element::{Attr, AttrValue, DuplicateElement, Element, ElementKind, Elements};
@@ -51,6 +52,7 @@ pub use style::{
     ActiveRule, Effect, EffectKey, Filter, Layer, Rule, RuleBody, Selector, StyleSheet,
     TRANSITION_LENGTH, Target, TransitionKind,
 };
+pub use takes::{Attempt, Group, Lineup, Row, RowAt, TakeWords, word_diff, words_in};
 pub use timeline::{
     ChapterSegments, ContentHash, MediaId, Output, OutputKind, RENDERER_VERSION, Segment, Timeline,
 };
