@@ -63,8 +63,8 @@ fn credits() -> Credits {
     }
 }
 
-/// Sets the app menu with About, Welcome, Open (⌘O) and Quit (⌘Q). Call once at startup.
-        crate::prompter::menu(),
+/// Sets the menus: About, Welcome, Open (⌘O) and Quit (⌘Q), Undo and Redo, and the prompter.
+/// Call once at startup.
 pub fn init(cx: &mut App) {
     cx.on_action(|_: &About, cx| open(cx));
     cx.on_action(|_: &Quit, cx| cx.quit());
