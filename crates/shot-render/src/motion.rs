@@ -275,6 +275,15 @@ impl Motion {
         }
     }
 
+    /// `t`, or while all `count` parts of an element hold still, the moment the last came to
+    /// rest. Every frame of the hold then draws the same, so its textures are reused.
+    pub fn freeze(&self, range: TimeRange, count: usize, t: Micros) -> Micros {
+        let last = Part::new(count, count);
+        let rest = Micros(self.enter_start(range, last).0 + seconds_to_micros(self.enter.settle()));
+        let leave = self.exit_start(range, Part::new(0, count));
+        if rest <= t && t < leave { rest } else { t }
+    }
+
     /// Which phase `part` is in at `t`, for sounds that follow a move.
     pub fn phase(&self, range: TimeRange, part: Part, t: Micros) -> Phase {
         if t < range.from() || t >= range.to() {
@@ -429,6 +438,19 @@ mod tests {
         assert!((slow.travel - 0.3).abs() < 1e-6 && (fast.travel - 1.2).abs() < 1e-6);
         assert_eq!("launch".parse(), Ok(Preset::Launch));
         assert!("sparkly".parse::<Preset>().is_err());
+    }
+
+    #[test]
+    fn a_hold_freezes_on_the_moment_every_part_came_to_rest() {
+        let motion = Preset::Editorial.motion();
+        let on = range(0, 4_000_000);
+        let rest = motion.freeze(on, 3, Micros(2_000_000));
+        assert_eq!(motion.freeze(on, 3, Micros(2_500_000)), rest);
+        for part in 0..3 {
+            assert_eq!(motion.pose(on, Part::new(part, 3), rest), Pose::HELD);
+        }
+        assert_eq!(motion.freeze(on, 3, Micros(10_000)), Micros(10_000));
+        assert_eq!(motion.freeze(on, 3, Micros(3_990_000)), Micros(3_990_000));
     }
 
     #[test]

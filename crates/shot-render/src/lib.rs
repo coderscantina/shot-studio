@@ -19,6 +19,8 @@
 //! - [`motion`]: springs, presets and choreography over media time; [`kinetic`] moves text on
 //!   them, [`materials`] holds the light, parallax and motion blur rules that sheets, shadows and
 //!   glass follow, and [`lottie`] checks, fills and draws Lottie templates.
+//! - [`theme`]: what the brand gives the templates (preset, feel, colors, fonts, Lottie
+//!   templates), read from the lock; [`typeface`] holds the font files text draws in.
 
 pub mod assets;
 pub mod autozoom;
@@ -35,6 +37,8 @@ pub mod materials;
 pub mod motion;
 pub mod overlay;
 pub mod plan;
+pub mod theme;
+pub mod typeface;
 pub mod zoom;
 
 #[cfg(target_os = "macos")]

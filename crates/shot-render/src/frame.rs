@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use shot_core::{
-    DeviceFrame, Effects, Keystrokes, Layout, Micros, Overlay, Shadow, Zoom, ZoomMotion,
+    DeviceFrame, Effects, Id, Keystrokes, Layout, Micros, Overlay, Shadow, Zoom, ZoomMotion,
 };
 
 use vello::peniko::ImageData;
@@ -25,6 +25,7 @@ use crate::layout::{
 };
 use crate::materials;
 use crate::overlay::{self, Cutaway, Stage};
+use crate::theme::Theme;
 use crate::zoom::punch_at;
 
 /// The pointer's height at size 100, in pixels of a 2x screen track.
@@ -38,15 +39,18 @@ const TYPING_GAP: Micros = Micros(800_000);
 /// The longest run of typed text the label shows, its end.
 const RUN_CHARS: usize = 28;
 
-/// What a segment draws beyond its recorded tracks: the format's effects, the take's event log
-/// and the files its overlays name: code-diff snapshots and b-roll stills, by their path in the
-/// video folder.
+/// What a segment draws beyond its recorded tracks: the format's effects, the take's event log,
+/// the files its overlays name (code-diff snapshots and b-roll stills, by their path in the
+/// video folder) and the video's theme.
 #[derive(Debug, Clone, Default)]
 pub struct Look {
     pub effects: Effects,
     pub events: Option<Arc<EventLog>>,
     pub diffs: HashMap<String, Arc<CodeDiff>>,
     pub images: HashMap<String, ImageData>,
+    pub theme: Arc<Theme>,
+    /// The segment's take, which chapter titles and brand templates are looked up by.
+    pub take: Option<Id>,
 }
 
 /// One moment of a segment.
@@ -387,6 +391,7 @@ mod tests {
             events: Some(Arc::new(EventLog::parse(events).unwrap())),
             diffs: HashMap::new(),
             images: HashMap::new(),
+            ..Look::default()
         }
     }
 

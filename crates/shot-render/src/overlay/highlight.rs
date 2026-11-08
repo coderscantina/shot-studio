@@ -12,8 +12,9 @@ use shot_analyze::elements::ReadOut;
 use shot_core::{Micros, Overlay, ParamValue, TimeRange};
 
 use super::{ParamKind, ParamSpec, Params, Stage, TemplateSpec, overlay};
-use crate::drawing::{Rgba, Shape};
+use crate::drawing::Shape;
 use crate::layout::Rect;
+use crate::motion::{Part, Reveal};
 
 pub const TEMPLATE: &str = "highlight";
 
@@ -30,8 +31,6 @@ pub const SPEC: TemplateSpec = TemplateSpec {
     animated: true,
 };
 
-/// The default `enter` and `exit`.
-const DRAW_ON: Micros = Micros(200_000);
 /// How long a highlight stays after the last matched word.
 pub const AFTER: Micros = Micros(1_500_000);
 
@@ -43,12 +42,16 @@ pub fn rect(overlay: &Overlay) -> Option<Rect> {
     Some(Rect::new(x, y, x + w, y + h))
 }
 
+/// Draws the box on with the preset: it pops past full size and settles (reactive), wipes on
+/// from the left (editorial), or grows a little as it fades in (launch, calm).
 pub(crate) fn apply(overlay: &Overlay, stage: &mut Stage) {
     let (Some(box_), Some((layer, view))) = (rect(overlay), stage.screen.as_ref()) else {
         return;
     };
-    let presence = Params(overlay).presence(DRAW_ON).at(stage.t);
-    if presence <= 0.0 {
+    let theme = stage.theme();
+    let motion = Params(overlay).motion(theme);
+    let pose = motion.pose(overlay.range, Part::WHOLE, stage.t);
+    if !pose.visible() {
         return;
     }
     let pad = 10.0;
@@ -58,16 +61,41 @@ pub(crate) fn apply(overlay: &Overlay, stage: &mut Stage) {
         box_.right + pad,
         box_.bottom + pad,
     ));
-    // Draws on from the center outward.
-    let grow = 0.85 + 0.15 * presence;
     let (cx, cy) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
-    let r = Rect::new(
-        cx - r.width() / 2.0 * grow,
-        cy - r.height() / 2.0 * grow,
-        cx + r.width() / 2.0 * grow,
-        cy + r.height() / 2.0 * grow,
-    );
+    let scaled = |grow: f32| {
+        Rect::new(
+            cx - r.width() / 2.0 * grow,
+            cy - r.height() / 2.0 * grow,
+            cx + r.width() / 2.0 * grow,
+            cy + r.height() / 2.0 * grow,
+        )
+    };
+    let travel = motion.travel.min(1.0);
+    let (r, alpha) = match theme.moves.reveal {
+        Reveal::Pop => (
+            scaled(1.0 - 0.3 * travel * (1.0 - pose.enter) - 0.15 * pose.exit),
+            pose.presence(),
+        ),
+        Reveal::Mask => {
+            let w = r.width();
+            let shown = Rect::new(
+                r.left + w * pose.exit.clamp(0.0, 1.0),
+                r.top,
+                r.left + w * pose.enter.clamp(0.0, 1.0),
+                r.bottom,
+            );
+            (shown, if shown.width() > 0.0 { 1.0 } else { 0.0 })
+        }
+        Reveal::Rise | Reveal::Fade => (
+            scaled(1.0 - 0.15 * travel * pose.offset().max(0.0)),
+            pose.presence(),
+        ),
+    };
+    if r.width() <= 0.0 || alpha <= 0.0 {
+        return;
+    }
     let s = view.scale();
+    let accent = theme.palette.accent;
     stage.drawing.over.push(Shape::Clip {
         rect: layer.frame,
         radius: layer.radius,
@@ -75,13 +103,13 @@ pub(crate) fn apply(overlay: &Overlay, stage: &mut Stage) {
             Shape::Rect {
                 rect: r,
                 radius: 10.0 * s,
-                color: Rgba::hex(0xC8F25A, 0.16 * presence),
+                color: accent.faded(0.16 * alpha),
             },
             Shape::Outline {
                 rect: r,
                 radius: 10.0 * s,
                 width: (6.0 * s).max(2.0),
-                color: Rgba::hex(0xC8F25A, presence),
+                color: accent.faded(alpha),
             },
         ],
     });

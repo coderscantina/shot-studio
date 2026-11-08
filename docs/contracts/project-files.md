@@ -413,23 +413,29 @@ short friday-deploys {
 - A derived chunk renders in two passes. Its base is the main chunk that holds its frames, keyed as above and shared with the main export, so whichever export runs first renders it for both. The derived chunk's own key extends the hash above (with the derived aspect and burned-in captions) with the base chunk's key, which of its frames it shows, the window's position on every frame and the caption on screen on every frame with its highlighted word. A new transcript or a moved face re-renders only the derived chunks whose captions or window changed.
 - A take's media identity hashes the size and modification time of its video tracks and of its event log, since the cursor is drawn from events. A take recorded again under a reused id gets a new identity, so it never matches the old recording's chunks.
 - Audio is not cached. Export encodes the whole cut's audio as one AAC stream with the music bed mixed under the voice, so the joins have no encoder delay or padding.
-- Once a video is migrated, the pacing's cuts, zooms and overlays come from the [lock](#cutlock) instead of the take blocks: the timeline removes the union of the lock's `cut` instances from the kept ranges, and segments carry the lock's zooms and overlays next to a person's. The chunk hash then reads the same values from the lock. It adds the brand fields where something branded draws, font and Lottie files by content hash, the camera style where the camera shows and, at a chapter edge, both sides of the transition. Rule layer and element provenance are not part of it, like zoom provenance today. A video without a `cut.lock` is read from the take blocks as above. Nothing branded draws yet, so no brand field, font or Lottie hash enters a chunk; each enters with the renderer feature that draws it. The lock's `music` and `sfx` instances play in the export's audio at their moments' output time, mixed with the music bed before the loudness pass.
+- Once a video is migrated, the pacing's cuts, zooms and overlays come from the [lock](#cutlock) instead of the take blocks: the timeline removes the union of the lock's `cut` instances from the kept ranges, and segments carry the lock's zooms and overlays next to a person's. The chunk hash then reads the same values from the lock. It adds the brand fields where something branded draws, font and Lottie files by content hash, the camera style where the camera shows and, at a chapter edge, both sides of the transition. Rule layer and element provenance are not part of it, like zoom provenance today. A video without a `cut.lock` is read from the take blocks as above. A chunk where a template other than `blur`, `bleep`, a b-roll clip or an empty slot draws adds the motion preset with its feel controls, the four brand colors and the content hash and weight of each font; one where a brand Lottie draws (a declared template, a re-skin or a `pop` sticker) adds that file's content hash, and one where a `chapter-band` without `text` draws adds the chapter's number and title. Every other chunk keeps its key when the brand changes. The lock's `music` and `sfx` instances play in the export's audio at their moments' output time, mixed with the music bed before the loudness pass.
 
 ## Overlay templates
 
-An `overlay` node names a template, and the template owns its parameters ([0018](../decisions/0018-overlay-templates-as-typed-specs.md)). Each template is a typed spec in `shot-render`: parameter names, their kind (text, integer, boolean, time in microseconds) and which are required. A parameter of the wrong kind, an unknown one or a missing required one stops the export with the overlay's template and parameter. A spec only grows by optional parameters, and a renderer change bumps the renderer version without touching a spec, so a `cut.kdl` always reads the same.
+An `overlay` node names a template, and the template owns its parameters ([0018](../decisions/0018-overlay-templates-as-typed-specs.md), [0023](../decisions/0023-motion-system-and-lottie-templates.md)). Each template is a typed spec in `shot-render`: parameter names, their kind (text, integer, boolean, time in microseconds) and which are required. A parameter of the wrong kind, an unknown one or a missing required one stops the export with the overlay's template and parameter. A spec only grows by optional parameters, and a renderer change bumps the renderer version without touching a spec, so a `cut.kdl` always reads the same.
 
-Every template that draws also takes `enter` and `exit`: microseconds it takes to come in after `from` and go out before `to`, eased. `blur` and `bleep` take neither: a fade would reveal what they hide.
+Every template that draws moves on springs in the video's motion preset (the brand's `motion` node, by default reaction reactive, opinion editorial, product tour launch, tutorial calm) with the brand's feel controls, and draws in the brand's colors and fonts (by default the lime accent on dark cards, Geist and Geist Mono). Its parts come in one after another by the stagger, text in the preset's kinetic type, cards on frosted glass and tilting in the launch preset, with soft shadows that fall away from one light, motion blurred while they move. It also takes `enter` and `exit`: the microseconds its springs take to settle in after `from` and out before `to`, duration hints that fit the preset's springs. `blur` and `bleep` take neither and switch hard: a fade would reveal what they hide.
 
 | Template | Parameters | What it does |
 | --- | --- | --- |
 | `link-card` | `url`, `accent` (bool) | A card for a link at the bottom left: GitHub pull request, issue or repository, a post on X, a Hacker News item, an npm package, or any link by its host. The rule places one from the word where a URL is said, written or spoken, for 6 s |
 | `lower-third` | `text`, `subtitle` | A name or line at the bottom left |
-| `highlight` | `x`, `y`, `width`, `height` (screen pixels), `text` | A lime box around text on the screen recording, following the layout and zoom. The rule places one where at least three words you say are on screen as you say them, read with Vision |
-| `b-roll` | `file`, `start` (time) | A cutaway over the frame: a still (`.png`, `.jpg`) fading in with a slow push, a clip (`.mp4`, `.mov`) cut in hard from `start`, or a diff (`.diff`) typed out. The file is relative to the video folder. Without `file` it is an empty slot that draws nothing; the rule places slots over idle screen of at least 8 s and at every B marker |
+| `highlight` | `x`, `y`, `width`, `height` (screen pixels), `text` | An accent box around text on the screen recording, following the layout and zoom. The rule places one where at least three words you say are on screen as you say them, read with Vision |
+| `b-roll` | `file`, `start` (time) | A cutaway over the frame: a still (`.png`, `.jpg`) settling in with a slow push, a clip (`.mp4`, `.mov`) cut in hard from `start`, or a diff (`.diff`) typed out. The file is relative to the video folder. Without `file` it is an empty slot that draws nothing; the rule places slots over idle screen of at least 8 s and at every B marker |
 | `code-diff` | `diff`, `highlight-line`, `highlight-at` (time) | A diff snapshot typed out, see the product tour example |
+| `chapter-band` | `text`, `label` | The chapter's title on a band at the left as a chapter starts. Without `text` it shows the title of the chapter it opens, without `label` "Chapter" and the chapter's number |
+| `end-card` | `text`, `subtitle`, `videos` (0 to 2), `subscribe` (bool) | The end screen over the brand's background: a headline ("Thanks for watching" by default) and frames where YouTube Studio places its elements, inside the inner 90% of the frame: up to two 16:9 videos, 36% of the width, stacked at the right, and the round subscribe button under the headline. Two videos and the button by default |
+| `callout` | `x`, `y` (screen pixels), `width`, `height`, `text` | A ring on a point of the screen recording, or with `width` and `height` an outline around a box, with `text` on a label beside it towards the middle of the frame. Follows the layout and zoom. A rule copies `x` and `y` from a click or `x`, `y`, `width`, `height` and `text` from an OCR box; drawn by hand it snaps to the OCR box under the point or the nearest click within 160 screen pixels and 1.5 s |
+| `pop` | `text`, `sticker`, `x`, `y`, `size` (4K output pixels) | An emoji or a word popping in, by default right of the middle in the upper third and 360 pixels tall. An emoji plays its animation from the bundled Noto set (👍 👏 😍 🥳 ✅ ✨ ❤️ 🔥 😂 👀 🎉, other emoji are refused), a word sits on an accent pill. `sticker` names a brand Lottie template drawn instead, its `text` slot set to `text`. One of `text` and `sticker` is required |
 | `blur` | `x`, `y`, `width`, `height` (screen pixels), `strength` | The screen recording averaged over blocks of `strength` screen pixels (32 by default) inside the rectangle, following the layout and zoom |
 | `bleep` | none | The voice over the range replaced by a 1 kHz tone |
+
+A brand's `template` declarations ([brand.kdl](#brandkdl)) are templates too. A new name is a Lottie template: an overlay's parameters fill the slots of the same name (a `color` slot takes `"#rrggbb"`, a `time` slot microseconds), a color slot named `accent`, `text`, `card` or `background` defaults to the brand's color, and the composition draws over the whole frame, scaled to its width, from the overlay's start, holding its last frame. Declaring `link-card`, `lower-third`, `chapter-band` or `end-card` re-skins it: the overlay keeps the built-in parameters and the Lottie draws instead, its slots filled from what the template would show: `label`, `title`, `url` and `accent` for a link card, `text`, `subtitle` and `accent` for a lower third and an end card, `text`, `label` and `accent` for a chapter band. Declaring any other built-in name, or a slot the template does not fill, is an export error.
 
 ```kdl
 overlay link-card from=22_000_000 to=28_000_000 {
@@ -518,7 +524,7 @@ Each child of a rule is one effect, one per key (the node, plus the template for
 | `cut breath=<time> confidence=<0..100>` | both default 0 | Pacing. Removes the element's span, keeping `breath` on each side that borders material (none at the start of the take). An element less sure than `confidence` is not cut but listed in the lock's review queue. Breath is for gaps (silence, pause, idle); fillers and retakes are speech and are removed whole |
 | `layout <layout>` | | The layout over the element's span |
 | `zoom <percent> hold=<time> lead=<time>` | both default 0 | A punch-in from `lead` before the element to `hold` after its start or to its end, whichever is later, centered on the element's `x`, `y` when it has one |
-| `overlay <template> for=<time> { ... }` | `for` required on moment targets | A template overlay over the element's span, or for `for` from its start. A child with a value is a literal parameter; a bare child names an attribute of the element to copy into the parameter of that name (`url`, `text`, `x`, `y`, `width`, `height`). Templates are the [overlay templates](#overlay-templates) plus `chapter-band`, `end-card`, `callout` and `pop` and the brand's Lottie templates |
+| `overlay <template> for=<time> { ... }` | `for` required on moment targets | A template overlay over the element's span, or for `for` from its start. A child with a value is a literal parameter; a bare child names an attribute of the element to copy into the parameter of that name (`url`, `text`, `x`, `y`, `width`, `height`). Templates are the [overlay templates](#overlay-templates) and the brand's Lottie templates |
 | `sfx <sound> gain=<dB>` | gain default 0, at most 0 | A sound at the element's start, looked up in the video's `sounds/`, then `brand/sounds/`, then the bundled set |
 | `transition <kind> length=<time>` | length default 500 ms | How the chapter starting here joins the one before: `cut`, `dissolve`, `dip`, `stinger`, `mask-wipe` or `zoom-through`. Only on `chapter-start` and `video-start`, the join to the intro |
 | `music "<file>" gain=<dB> duck=<dB>` | both required, at most 0 | A music cue starting at the element, until the next cue |
@@ -545,12 +551,12 @@ Layers apply lowest first: the brand's imports, `brand.kdl`, the channel's `form
 | `end-card length=<time>` | the end card over the outro, or over the last seconds without one |
 | `camera shape=<rounded,circle,square> corners=<px> border=<px> shadow=<none,soft,hard>` | how the camera is framed |
 | `motion reaction=<preset> opinion=<preset> product-tour=<preset> tutorial=<preset>` | the motion preset of each format: `reactive`, `editorial`, `launch` or `calm` |
-| `preset <name> tempo= bounce= density= stagger= beat-sync=<bool>` | one per preset, feel controls 0 to 100, each optional |
+| `preset <name> tempo= bounce= density= stagger= beat-sync=<bool>` | one per preset, feel controls 0 to 100, each optional and defaulting to the preset's own, see [feel controls](#feel-controls) |
 | `transition stinger="<path>" peak=<time>` | the Lottie stinger and the time its frame fully covers the picture, where the cut happens |
 | `template <id> file="<path>" { slot <id> <text,color,integer,time> required=<bool> ... }` | a Lottie template with typed slots, the spec the renderer checks overlays against. Declaring a built-in template's name re-skins it |
 | `on ...` | the channel's rules |
 
-The lock lists every file the resolved brand names, by content hash, so a changed font or Lottie file changes the chunks it draws on. This is the example channel's brand:
+The lock lists every file the resolved brand names, by content hash, so a changed font or Lottie file changes the chunks it draws on. Font and Lottie paths are relative to the channel repo. This is the example channel's brand:
 
 ```kdl
 import "https://github.com/coderscantina/shot-styles" rev="3f2a91c" style=cantina
@@ -588,6 +594,26 @@ on punchline {
     }
 }
 ```
+
+### Feel controls
+
+Each control runs from 0 to 100 and maps to the springs every template moves on. Exits respond in 60% of the entrance's time, critically damped, and leave in the same order at half the stagger.
+
+| Control | 0 | 100 |
+| --- | --- | --- |
+| `tempo` | entrance response 900 ms | 225 ms, halving every 50 |
+| `bounce` | damping ratio 1, no overshoot | 0.4, about 25% overshoot |
+| `density` | 30% of a template's travel, tilt and scale | 120% |
+| `stagger` | parts move together | 120 ms between parts |
+
+Each preset's own values, and what it does besides its springs:
+
+| Preset | tempo | bounce | density | stagger | Text comes in | Cards |
+| --- | --- | --- | --- | --- | --- | --- |
+| `reactive` | 80 | 60 | 70 | 40 | word by word, popping past full size | pop in by scale |
+| `editorial` | 60 | 20 | 60 | 50 | word by word, rising out of a mask | slide in |
+| `launch` | 40 | 10 | 30 | 60 | glyph by glyph, rising | slide in on frosted glass, tilting up to 14 degrees |
+| `calm` | 30 | 0 | 10 | 20 | word by word, fading | fade with a short slide |
 
 ## `cut.lock`
 

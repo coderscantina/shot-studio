@@ -22,7 +22,7 @@ use std::io::{self, BufWriter};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Condvar, Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use shot_core::{ContentHash, Effects, Id, MediaId, Micros, OutputKind, Project};
@@ -36,11 +36,12 @@ use crate::assets::{AssetError, Assets, EVENTS_FILE};
 use crate::audio::{AudioSegment, TimelineAudio, TimelineAudioError};
 use crate::cursor::FrameCursor;
 use crate::derived::{DerivedInputs, DerivedPlan, FaceTrack};
-use crate::frame::{Frame, Shot, compose};
+use crate::frame::{Shot, compose};
 use crate::graph::Renderer;
 use crate::layout::{Canvas, LayoutSpec, Source, Sources, UnsupportedLayout};
 use crate::plan::{ExportPlan, PlannedChunk, PlannedSegment, frame_time};
 use crate::surface::size;
+use crate::theme::Theme;
 use crate::voice;
 
 /// Output frame rate.
@@ -136,6 +137,8 @@ pub enum ExportError {
     Mux(#[from] MuxError),
     #[error(transparent)]
     Lock(#[from] crate::lock::LockError),
+    #[error(transparent)]
+    Theme(#[from] crate::theme::ThemeError),
     #[error("{path}: {source}")]
     Io { path: PathBuf, source: io::Error },
     #[error("the encoder did not start a chunk with a keyframe")]
@@ -162,29 +165,6 @@ pub fn export(
     options: ExportOptions,
     progress: &(dyn Fn(Progress) + Sync),
 ) -> Result<ExportReport, ExportError> {
-    export_decorated(video_dir, project, cut, out, options, None, progress)
-}
-
-/// Draws on top of every frame of a main cut after the cut's own drawing, for reels and
-/// measurements of renderer features before a template uses them. Its name enters every chunk's
-/// key, so decorated chunks never stand in for plain ones.
-#[derive(Debug, Clone, Copy)]
-pub struct Decoration {
-    pub name: &'static str,
-    /// Called with the frame's media time and canvas.
-    pub draw: fn(Micros, Canvas, &mut Frame),
-}
-
-/// [`export`] with a [`Decoration`] on every frame of a main cut.
-pub fn export_decorated(
-    video_dir: &Path,
-    project: &Project,
-    cut: &str,
-    out: &Path,
-    options: ExportOptions,
-    decoration: Option<Decoration>,
-    progress: &(dyn Fn(Progress) + Sync),
-) -> Result<ExportReport, ExportError> {
     let lock = crate::lock::read(video_dir)?;
     let timeline = match &lock {
         Some(lock) => shot_core::Timeline::styled(project, lock),
@@ -195,6 +175,7 @@ pub fn export_decorated(
         .iter()
         .find(|output| output.name == cut)
         .ok_or_else(|| ExportError::UnknownCut(cut.to_owned()))?;
+    let theme = Arc::new(Theme::load(video_dir, project.video.format, &project.cut)?);
     let media = Media {
         root: video_dir.join("media"),
         music: project.cut.music.as_ref().map(|m| {
@@ -220,7 +201,7 @@ pub fn export_decorated(
         .collect();
     for segment in output.chapters.iter().flat_map(|c| &c.segments) {
         for overlay in &segment.overlays {
-            crate::overlay::check(overlay)?;
+            theme.check(overlay, &segment.take)?;
         }
     }
     let assets = |file: &str| media.asset_id(video_dir, file);
@@ -232,18 +213,14 @@ pub fn export_decorated(
             output,
             &|take| ids[take],
             &assets,
+            &theme,
         )?),
     };
     let plan = match &derived {
         Some(derived) => derived.plan.clone(),
         None => {
             let mut plan = ExportPlan::new(output, FPS, |take| ids[take]);
-            crate::overlay::key_assets(&mut plan, &assets);
-            if let Some(decoration) = decoration {
-                for chunk in plan.segments.iter_mut().flat_map(|s| &mut s.chunks) {
-                    chunk.hash = chunk.hash.extend(decoration.name.as_bytes());
-                }
-            }
+            crate::overlay::key_chunks(&mut plan, &assets, &theme);
             plan
         }
     };
@@ -290,7 +267,7 @@ pub fn export_decorated(
         &cache,
         out,
         options,
-        decoration,
+        &theme,
         progress,
     )?;
     if derived.is_none() {
@@ -318,6 +295,7 @@ fn plan_derived(
     output: &shot_core::Output,
     media: &dyn Fn(&Id) -> MediaId,
     assets: &dyn Fn(&str) -> Vec<u8>,
+    theme: &Theme,
 ) -> Result<DerivedPlan, ExportError> {
     let mut faces = HashMap::new();
     if output.kind == OutputKind::Derived(shot_core::DerivedKind::Short) {
@@ -358,6 +336,7 @@ fn plan_derived(
             fps: FPS,
             media,
             assets,
+            theme,
             faces: &faces,
             transcripts: &transcripts,
         },
@@ -710,7 +689,7 @@ fn run(
     cache: &Cache,
     out: &Path,
     options: ExportOptions,
-    decoration: Option<Decoration>,
+    theme: &Arc<Theme>,
     progress: &(dyn Fn(Progress) + Sync),
 ) -> Result<(Duration, Duration), ExportError> {
     let started = Instant::now();
@@ -728,7 +707,7 @@ fn run(
             .map(|_| {
                 scope.spawn(|| {
                     pending.guard(|| {
-                        let mut worker = Worker::new(media, effects, decoration)?;
+                        let mut worker = Worker::new(media, effects, theme.clone())?;
                         loop {
                             if pending.failed() {
                                 return Err(ExportError::Cancelled);
@@ -783,22 +762,16 @@ struct Worker {
     cursors: HashMap<PathBuf, FrameCursor>,
     assets: Assets,
     effects: Effects,
-    decoration: Option<Decoration>,
 }
 
 impl Worker {
-    fn new(
-        media: &Media,
-        effects: Effects,
-        decoration: Option<Decoration>,
-    ) -> Result<Self, ExportError> {
+    fn new(media: &Media, effects: Effects, theme: Arc<Theme>) -> Result<Self, ExportError> {
         let video_dir = media.root.parent().unwrap_or(&media.root);
         Ok(Self {
             renderer: Renderer::new()?,
             cursors: HashMap::new(),
-            assets: Assets::new(video_dir),
+            assets: Assets::with_theme(video_dir, theme),
             effects,
-            decoration,
         })
     }
 
@@ -895,9 +868,6 @@ impl Worker {
                     time: frame_time(frame, FPS),
                 };
                 let mut drawn = compose(&shot, &look, canvas, sizes)?;
-                if let Some(decoration) = self.decoration {
-                    (decoration.draw)(shot.time, canvas, &mut drawn);
-                }
                 let mut screen = paths.screen.clone();
                 if let Some(cutaway) = &drawn.cutaway {
                     let path = media

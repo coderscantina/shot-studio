@@ -177,6 +177,7 @@ fn reframing_keeps_the_face_inside_the_short() {
             fps: 60,
             media: &|_| shot_core::MediaId::default(),
             assets: &|_| Vec::new(),
+            theme: &shot_render::theme::Theme::default(),
             faces: &faces,
             transcripts: &std::collections::HashMap::new(),
         },
