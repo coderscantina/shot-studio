@@ -552,10 +552,15 @@ fn caption(
     c: &Caption,
 ) {
     let (size, font) = (c.size, c.font);
-    // A word space, widened so a highlight pill keeps clear of its neighbours.
+    // A word space, widened so a highlight pill, or an outline, keeps clear of its neighbours.
+    let outlined = if c.back == CaptionBack::Outline {
+        0.12
+    } else {
+        0.0
+    };
     let space = measure(fonts, layouts, "a b", size, font).0
         - measure(fonts, layouts, "ab", size, font).0
-        + size * 0.16;
+        + size * (0.16 + outlined);
     let widths: Vec<f32> = c
         .words
         .iter()

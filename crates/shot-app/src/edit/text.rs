@@ -729,9 +729,9 @@ fn paragraph_element(
             }
         }
     }
-    let key = paragraph.items.iter().find_map(|item| match item {
-        Item::Word(i) => Some(word_key(at, *i)),
-        Item::Cut(run) => Some(word_key(at, run.words.start)),
+    let key = paragraph.items.first().map(|item| match item {
+        Item::Word(i) => word_key(at, *i),
+        Item::Cut(run) => word_key(at, run.words.start),
     });
     div()
         .id(("paragraph-text", key.unwrap_or_default()))
@@ -876,6 +876,9 @@ fn word(
             cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                 this.dragging = true;
                 this.text.picked = None;
+                if !this.text.finding {
+                    this.text.note = None;
+                }
                 this.select_word(at, index, event.modifiers.shift, cx);
             }),
         )
@@ -1474,7 +1477,7 @@ fn mark_section(this: &EditScreen, mark: Mark, cx: &mut Context<EditScreen>) -> 
                 div().text_color(TEXT).child(seconds(mark.range.duration())),
             ))
         })
-        .children(mark.style.clone().map(|style| label(style)))
+        .children(mark.style.clone().map(label))
         .child(
             div()
                 .flex()

@@ -444,6 +444,9 @@ fn changed(old: &[&str], new: &[&str]) -> Option<(usize, usize, usize)> {
 
 // The panel.
 
+/// What a control does when clicked.
+type Click = Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)>;
+
 /// Text colors offered for the words.
 const COLORS: [(u32, &str); 4] = [
     (0xFFFFFF, "White"),
@@ -673,12 +676,7 @@ fn look(design: &CaptionDesign, accent: u32, screen: &Entity<EditScreen>) -> Div
             screen.update(cx, |this, cx| this.set_design(|d| change(d, value), cx));
         }
     };
-    let segments = |id: &'static str,
-                    options: Vec<(
-        &'static str,
-        bool,
-        Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)>,
-    )>| {
+    let segments = |id: &'static str, options: Vec<(&'static str, bool, Click)>| {
         ui::segmented(
             id,
             WELL,
@@ -699,7 +697,7 @@ fn look(design: &CaptionDesign, accent: u32, screen: &Entity<EditScreen>) -> Div
                     CaptionFont::Body => "Body",
                     CaptionFont::Mono => "Mono",
                 };
-                let click: Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)> = Box::new(set(
+                let click: Click = Box::new(set(
                     |d, i| {
                         d.font =
                             [CaptionFont::Heading, CaptionFont::Body, CaptionFont::Mono][i as usize]
@@ -722,8 +720,7 @@ fn look(design: &CaptionDesign, accent: u32, screen: &Entity<EditScreen>) -> Div
                     800 => "800",
                     _ => "900",
                 };
-                let click: Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)> =
-                    Box::new(set(|d, w| d.weight = w as u16, i32::from(w)));
+                let click: Click = Box::new(set(|d, w| d.weight = w as u16, i32::from(w)));
                 (text, design.weight == w, click)
             })
             .collect(),
@@ -738,7 +735,7 @@ fn look(design: &CaptionDesign, accent: u32, screen: &Entity<EditScreen>) -> Div
         .into_iter()
         .enumerate()
         .map(|(i, (b, text))| {
-            let click: Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)> = Box::new(set(
+            let click: Click = Box::new(set(
                 |d, i| {
                     d.back = [CaptionBack::Box, CaptionBack::Outline, CaptionBack::None][i as usize]
                 },
@@ -758,7 +755,7 @@ fn look(design: &CaptionDesign, accent: u32, screen: &Entity<EditScreen>) -> Div
         .into_iter()
         .enumerate()
         .map(|(i, (p, text))| {
-            let click: Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)> = Box::new(set(
+            let click: Click = Box::new(set(
                 |d, i| {
                     d.position = [
                         CaptionPosition::Bottom,
@@ -781,7 +778,7 @@ fn look(design: &CaptionDesign, accent: u32, screen: &Entity<EditScreen>) -> Div
         .into_iter()
         .enumerate()
         .map(|(i, (c, text))| {
-            let click: Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)> = Box::new(set(
+            let click: Click = Box::new(set(
                 |d, i| d.case = [CaptionCase::AsSaid, CaptionCase::Upper][i as usize],
                 i as i32,
             ));
@@ -866,6 +863,7 @@ fn look(design: &CaptionDesign, accent: u32, screen: &Entity<EditScreen>) -> Div
             .chain(
                 HIGHLIGHTS
                     .iter()
+                    .filter(|(c, _)| *c != accent)
                     .map(|(c, name)| (*c, *name, Some(color(*c)))),
             )
             .collect(),
@@ -895,23 +893,20 @@ fn stepper(
     less: Option<impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static>,
     more: Option<impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static>,
 ) -> Div {
-    let button =
-        |index: usize,
-         text: &'static str,
-         click: Option<Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)>>| {
-            let on = click.is_some();
-            div()
-                .id((id, index))
-                .flex()
-                .items_center()
-                .justify_center()
-                .size(px(28.))
-                .rounded(px(7.))
-                .text_color(if on { TEXT } else { FAINT })
-                .when(on, |b| b.cursor_pointer().hover(|s| s.bg(FLOAT)))
-                .child(text)
-                .when_some(click, |b, click| b.on_click(click))
-        };
+    let button = |index: usize, text: &'static str, click: Option<Click>| {
+        let on = click.is_some();
+        div()
+            .id((id, index))
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(px(28.))
+            .rounded(px(7.))
+            .text_color(if on { TEXT } else { FAINT })
+            .when(on, |b| b.cursor_pointer().hover(|s| s.bg(FLOAT)))
+            .child(text)
+            .when_some(click, |b, click| b.on_click(click))
+    };
     div()
         .flex()
         .items_center()
@@ -919,11 +914,7 @@ fn stepper(
         .p(px(3.))
         .rounded(RADIUS_MD)
         .bg(WELL)
-        .child(button(
-            0,
-            "−",
-            less.map(|f| Box::new(f) as Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)>),
-        ))
+        .child(button(0, "−", less.map(|f| Box::new(f) as Click)))
         .child(
             div()
                 .flex_1()
@@ -932,11 +923,7 @@ fn stepper(
                 .font_weight(FontWeight::MEDIUM)
                 .child(value),
         )
-        .child(button(
-            1,
-            "+",
-            more.map(|f| Box::new(f) as Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)>),
-        ))
+        .child(button(1, "+", more.map(|f| Box::new(f) as Click)))
 }
 
 /// The lines of the chapter on show, the one at the playhead lit; the picked line shows its
