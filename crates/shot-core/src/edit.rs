@@ -4,7 +4,7 @@
 use std::fmt;
 
 use crate::{
-    Chapter, Cut, Id, Layout, LayoutChange, Micros, RangeEdit, RemovedBy, Review, TakeEdit,
+    Chapter, Cut, Id, Layout, LayoutChange, Micros, Music, RangeEdit, RemovedBy, Review, TakeEdit,
     TimeRange, Transcript, Word, Zoom,
 };
 
@@ -288,6 +288,29 @@ impl Cut {
             }
             Placed::Overlay(index) => edit.overlays[index].range = range,
         }))
+    }
+
+    /// Sets the zoom `index` of the block at `at` to `scale` percent, at least 100. The zoom
+    /// becomes a person's.
+    pub fn set_zoom_scale(&self, at: TakeAt, index: usize, scale: u16) -> Result<Cut, EditError> {
+        self.placed(at, Placed::Zoom(index))?;
+        Ok(self.with_take(at, |edit| {
+            let zoom = &mut edit.zooms[index];
+            zoom.scale = scale.max(100);
+            zoom.by = None;
+        }))
+    }
+
+    /// Sets or, with `None`, removes the music bed. Gains above 0 dB are lowered to 0.
+    pub fn set_music(&self, music: Option<Music>) -> Cut {
+        Cut {
+            music: music.map(|m| Music {
+                gain: m.gain.min(0),
+                duck: m.duck.min(0),
+                ..m
+            }),
+            ..self.clone()
+        }
     }
 
     /// Removes the zoom or overlay `placed` of the block at `at`.
@@ -765,6 +788,38 @@ mod tests {
             c.remove_placed(AT, Placed::Overlay(0)),
             Err(EditError::UnknownPlaced(AT, Placed::Overlay(0)))
         );
+    }
+
+    #[test]
+    fn a_zoom_takes_a_new_scale_and_becomes_a_persons() {
+        let mut c = cut(vec![keep(0, 100)])
+            .add_zoom(AT, range(10, 20), 130)
+            .unwrap();
+        c.chapters[0].takes[0].zooms[0].by = Some(crate::ZoomBy::Emphasis);
+        let scaled = c.set_zoom_scale(AT, 0, 200).unwrap();
+        assert_eq!(zooms(&scaled), [(200, 10, 20, true)]);
+        assert_eq!(zooms(&c.set_zoom_scale(AT, 0, 50).unwrap())[0].0, 100);
+        assert_eq!(
+            c.set_zoom_scale(AT, 1, 150),
+            Err(EditError::UnknownPlaced(AT, Placed::Zoom(1)))
+        );
+    }
+
+    #[test]
+    fn the_music_bed_is_set_with_gains_at_most_0_and_removed() {
+        let c = cut(vec![keep(0, 100)]);
+        let bed = c.set_music(Some(Music {
+            file: "sources/bed.wav".into(),
+            gain: 3,
+            duck: -12,
+        }));
+        let music = bed.music.as_ref().unwrap();
+        assert_eq!((music.gain, music.duck), (0, -12));
+        assert!(
+            bed.to_kdl()
+                .starts_with("music \"sources/bed.wav\" gain=0 duck=-12\n")
+        );
+        assert_eq!(bed.set_music(None), c);
     }
 
     #[test]
