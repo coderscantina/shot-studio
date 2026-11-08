@@ -137,8 +137,25 @@ pub fn burned_cues(
     breaks: &[CaptionBreak],
     most: usize,
 ) -> Vec<Cue> {
-    let words = words(plan, transcripts, fixes);
+    burned_lines(plan, transcripts, fixes, breaks, most)
+        .into_iter()
+        .map(|line| Cue {
+            words: line.into_iter().map(|w| w.word).collect(),
+        })
+        .collect()
+}
+
+/// [`burned_cues`] with where each word starts in its take, for editing them.
+pub fn burned_lines(
+    plan: &ExportPlan,
+    transcripts: &HashMap<Id, Transcript>,
+    fixes: &[CaptionFix],
+    breaks: &[CaptionBreak],
+    most: usize,
+) -> Vec<Vec<SourceWord>> {
+    let mut words = words(plan, transcripts, fixes).into_iter();
     let forced: Vec<Option<bool>> = words
+        .as_slice()
         .iter()
         .map(|w| {
             breaks
@@ -147,7 +164,14 @@ pub fn burned_cues(
                 .map(|b| b.split)
         })
         .collect();
-    group_with(words.into_iter().map(|w| w.word).collect(), most, &forced)
+    let cues = group_with(
+        words.as_slice().iter().map(|w| w.word.clone()).collect(),
+        most,
+        &forced,
+    );
+    cues.iter()
+        .map(|cue| words.by_ref().take(cue.words.len()).collect())
+        .collect()
 }
 
 /// A cue stays up this long after its last word, unless the next one starts.

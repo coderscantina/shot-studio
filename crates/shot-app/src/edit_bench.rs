@@ -80,6 +80,7 @@ pub fn run(dir: &std::path::Path, options: &BenchOptions) -> Result<bool, String
             dir: dir.to_owned(),
             effects: project.format.effects(),
             theme: folder.theme.clone(),
+            captions: None,
         },
         0,
     );

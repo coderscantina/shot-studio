@@ -217,6 +217,7 @@ impl Player {
                 dir: folder.dir.clone(),
                 effects: shown.format.effects(),
                 theme: folder.theme.clone(),
+                captions: None,
             },
             poster,
         );

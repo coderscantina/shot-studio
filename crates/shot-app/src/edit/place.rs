@@ -92,7 +92,7 @@ impl EditScreen {
     }
 
     /// Plays `sound` on its own, or stops it when it is the one playing. Pauses the preview.
-    fn audition(&mut self, sound: Id, cx: &mut Context<Self>) {
+    pub(super) fn audition(&mut self, sound: Id, cx: &mut Context<Self>) {
         let place = &mut self.place;
         let audition = place.audition.get_or_insert_with(Audition::spawn);
         if audition.playing().as_ref() == Some(&sound) {
@@ -190,7 +190,7 @@ impl EditScreen {
     }
 
     pub(super) fn place_pop(&mut self, pop: Pop, cx: &mut Context<Self>) {
-        let Some((at, t)) = self.map.source_at(self.playhead) else {
+        let Some((at, t)) = self.moment() else {
             return;
         };
         self.place.picker = None;

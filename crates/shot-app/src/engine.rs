@@ -18,6 +18,7 @@ use objc2_core_video::CVPixelBuffer;
 use shot_core::{Effects, Micros};
 use shot_media::videotoolbox::Decoder;
 use shot_render::assets::Assets;
+use shot_render::captions::{Cue, Design};
 use shot_render::drawing::Drawing;
 use shot_render::frame::{Frame, Shot, compose};
 use shot_render::graph::Renderer;
@@ -98,6 +99,15 @@ pub struct Plan {
     /// The [`Painter`] is made again whenever this changes, that is when `cut.kdl` or
     /// `cut.lock` changed, and kept across plans that only move the playhead or the view.
     pub theme: Result<Arc<Theme>, String>,
+    /// Burned-in captions drawn over every frame, while the Captions panel is open.
+    pub captions: Option<Arc<PreviewCaptions>>,
+}
+
+/// The cues of the edit in output time and the design they burn in with, drawn as export
+/// draws them into a Short.
+pub struct PreviewCaptions {
+    pub design: Design,
+    pub cues: Vec<Cue>,
 }
 
 #[derive(Default)]
@@ -305,6 +315,30 @@ fn render_loop(shared: &Shared) {
                 .painter
                 .paint(renderer, &plan.map.plan, frame, &target)
                 .map_err(|e| e.to_string())?;
+            let caption = plan.captions.as_ref().and_then(|c| {
+                let shown = c.design.shown(&c.cues, frame_time(frame, FPS))?;
+                Some(c.design.shape(&c.cues[shown.cue], shown, CANVAS))
+            });
+            if let Some(caption) = caption {
+                let over = Frame {
+                    scene: Scene {
+                        background: [0.0; 3],
+                        layers: Vec::new(),
+                    },
+                    drawing: Drawing {
+                        over: vec![caption],
+                        ..Drawing::default()
+                    },
+                    cutaway: None,
+                };
+                let none = Sources {
+                    screen: None,
+                    camera: None,
+                };
+                renderer
+                    .draw_over(&over, none, &target)
+                    .map_err(|e| e.to_string())?;
+            }
             if let Some(decorate) = decoration {
                 let mut over = Frame {
                     scene: Scene {
@@ -552,6 +586,7 @@ mod tests {
                     dir: dir.clone(),
                     effects: folder.project.format.effects(),
                     theme: folder.theme.clone(),
+                    captions: None,
                 },
                 0,
             );

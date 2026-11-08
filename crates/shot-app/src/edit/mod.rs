@@ -6,6 +6,7 @@
 
 mod captions;
 mod lane_menu;
+mod marks;
 mod music;
 mod overlays;
 mod parts;
@@ -88,6 +89,10 @@ actions!(
         GoToStart,
         GoToEnd,
         RecordTake,
+        EditCaption,
+        AddHighlight,
+        PickPop,
+        PickLayout,
     ]
 );
 
@@ -122,6 +127,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("home", GoToStart, context),
         KeyBinding::new("end", GoToEnd, context),
         KeyBinding::new("cmd-enter", RecordTake, context),
+        KeyBinding::new("enter", EditCaption, context),
+        KeyBinding::new("h", AddHighlight, context),
+        KeyBinding::new("p", PickPop, context),
+        KeyBinding::new("l", PickLayout, context),
     ]);
 }
 
@@ -227,6 +236,10 @@ pub struct EditScreen {
     claude: Option<Claude>,
     /// Claude writing another take.
     run: Option<AgentRun>,
+    /// The Captions panel.
+    captions: captions::CaptionsState,
+    /// The Text workspace's hovered and picked effect and its pickers.
+    text: text::TextState,
 }
 
 impl EditScreen {
@@ -291,6 +304,8 @@ impl EditScreen {
             scroll_to_card: false,
             claude: Claude::find(),
             run: None,
+            captions: captions::CaptionsState::default(),
+            text: text::TextState::default(),
         };
         this.rebuild(cx);
         this
@@ -328,15 +343,18 @@ impl EditScreen {
         self.playhead = frame;
         self.sound
             .set_plan(&self.map, folder.dir.clone(), project.clone(), frame);
-        self.engine.set_plan(
-            Plan {
-                map: self.map.clone(),
-                dir: folder.dir.clone(),
-                effects: project.format.effects(),
-                theme: folder.theme.clone(),
-            },
-            frame,
-        );
+        let plan = Plan {
+            map: self.map.clone(),
+            dir: folder.dir.clone(),
+            effects: project.format.effects(),
+            theme: folder.theme.clone(),
+            captions: None,
+        };
+        let plan = Plan {
+            captions: self.preview_captions(cx),
+            ..plan
+        };
+        self.engine.set_plan(plan, frame);
         self.seeking = true;
         self.clock = None;
         self.repick_layout();
@@ -613,7 +631,8 @@ impl EditScreen {
     }
 
     fn delete_selection(&mut self, _: &DeleteSelection, _: &mut Window, cx: &mut Context<Self>) {
-        if self.remove_picked(cx) {
+        if self.remove_picked(cx) || self.remove_picked_sound(cx) {
+            self.text.picked = None;
             return;
         }
         let Some((at, range, true, _)) = self.selected() else {
@@ -800,7 +819,10 @@ impl Render for EditScreen {
         };
         div()
             .id("edit")
-            .key_context(CONTEXT)
+            // A caption line being edited takes the letter keys.
+            .when(!self.captions.is_editing(), |edit| {
+                edit.key_context(CONTEXT)
+            })
             .track_focus(&self.focus)
             .size_full()
             .flex()
@@ -811,6 +833,8 @@ impl Render for EditScreen {
             .on_action(cx.listener(Self::restore_selection))
             .on_action(cx.listener(|this, _: &ClearSelection, _, cx| {
                 if !this.close_picker()
+                    && !std::mem::take(&mut this.text.layouts_open)
+                    && !this.drop_text_pick()
                     && !this.stop_proposal(cx)
                     && !this.reject_selected(cx)
                     && this.lanes.picked.take().is_none()
@@ -841,6 +865,14 @@ impl Render for EditScreen {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &RecordTake, _, cx| this.go_record(cx)))
+            .on_action(
+                cx.listener(|this, _: &EditCaption, window, cx| this.edit_caption_line(window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &AddHighlight, _, cx| this.add_highlight(cx)))
+            .on_action(
+                cx.listener(|this, _: &PickPop, _, cx| this.toggle_picker(place::Picker::Pop, cx)),
+            )
+            .on_action(cx.listener(|this, _: &PickLayout, _, cx| this.toggle_layouts(cx)))
             .on_action(cx.listener(|this, _: &GoToEnd, _, cx| {
                 this.seek(this.map.frames);
                 cx.notify();
