@@ -456,8 +456,8 @@ pub fn prepare(
 }
 
 /// Renders one cut to its export path, reusing cached chunks, then runs `shot check` on it.
-/// Stops with [`ShipError::Cancelled`] before the render or during the checks once `cancelled`
-/// returns true.
+/// Stops with [`ShipError::Cancelled`] before the next chunk or during the checks once
+/// `cancelled` returns true.
 #[cfg(target_os = "macos")]
 pub fn export_cut(
     video_dir: &Path,
@@ -467,7 +467,7 @@ pub fn export_cut(
     step: &(dyn Fn(Step) + Sync),
     cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<Vec<crate::check::Problem>, ShipError> {
-    use shot_render::export::{ExportOptions, export};
+    use shot_render::export::{ExportError, ExportOptions, export_until};
     if cancelled() {
         return Err(ShipError::Cancelled);
     }
@@ -478,15 +478,19 @@ pub fn export_cut(
             to_render: p.to_render,
         })
     };
-    export(
+    match export_until(
         video_dir,
         project,
         &cut.name,
         &cut.export,
         ExportOptions { jobs },
         &progress,
-    )
-    .map_err(|e| ShipError::Render(format!("{}: {e}", cut.name)))?;
+        cancelled,
+    ) {
+        Ok(_) => {}
+        Err(ExportError::Cancelled) if cancelled() => return Err(ShipError::Cancelled),
+        Err(e) => return Err(ShipError::Render(format!("{}: {e}", cut.name))),
+    }
     step(Step::Checking {
         cut: cut.name.clone(),
     });

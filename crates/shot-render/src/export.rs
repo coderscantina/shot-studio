@@ -182,6 +182,20 @@ pub fn export(
     options: ExportOptions,
     progress: &(dyn Fn(Progress) + Sync),
 ) -> Result<ExportReport, ExportError> {
+    export_until(video_dir, project, cut, out, options, progress, &|| false)
+}
+
+/// [`export`], stopping with [`ExportError::Cancelled`] before the next chunk once `cancelled`
+/// returns true. Chunks already rendered stay in the cache for the next export.
+pub fn export_until(
+    video_dir: &Path,
+    project: &Project,
+    cut: &str,
+    out: &Path,
+    options: ExportOptions,
+    progress: &(dyn Fn(Progress) + Sync),
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<ExportReport, ExportError> {
     let lock = crate::lock::read(video_dir)?;
     let cache = |plan: &ExportPlan| Cache::new(video_dir, plan);
     render(
@@ -193,6 +207,7 @@ pub fn export(
         Some(out),
         options,
         progress,
+        cancelled,
     )
 }
 
@@ -226,6 +241,7 @@ pub fn render_proposal(
         None,
         options,
         progress,
+        &|| false,
     )
 }
 
@@ -241,6 +257,7 @@ fn render(
     out: Option<&Path>,
     options: ExportOptions,
     progress: &(dyn Fn(Progress) + Sync),
+    cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<ExportReport, ExportError> {
     let timeline = match lock {
         Some(lock) => shot_core::Timeline::styled(project, lock),
@@ -362,6 +379,7 @@ fn render(
         options,
         &theme,
         progress,
+        cancelled,
     )?;
     if let Some(out) = out
         && derived.is_none()
@@ -1338,6 +1356,7 @@ fn run(
     options: ExportOptions,
     theme: &Arc<Theme>,
     progress: &(dyn Fn(Progress) + Sync),
+    cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<(Duration, Duration), ExportError> {
     let started = Instant::now();
     let to_render = jobs.iter().map(|job| job.chunks.len()).sum();
@@ -1369,6 +1388,9 @@ fn run(
                     pending.guard(|| {
                         let mut worker = Worker::new(media, effects, theme.clone())?;
                         loop {
+                            if cancelled() {
+                                pending.fail();
+                            }
                             if pending.failed() {
                                 return Err(ExportError::Cancelled);
                             }

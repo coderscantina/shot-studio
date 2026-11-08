@@ -982,14 +982,10 @@ impl ShipScreen {
     fn stop_button(&self, id: &'static str, run: &Run, cx: &mut Context<Self>) -> impl IntoElement {
         let stopping = run.cancel.load(Ordering::Relaxed);
         if stopping {
-            let text = match &run.step {
-                Some(Step::Rendering { cut, .. }) => format!("Stops after {cut} renders"),
-                _ => "Stopping".to_owned(),
-            };
             return div()
                 .text_size(TEXT_SM)
                 .text_color(MUTED)
-                .child(text)
+                .child("Stopping")
                 .into_any_element();
         }
         proposal_action(id, "Stop", None, Some("Esc"), ActionLook::Plain)
