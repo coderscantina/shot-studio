@@ -1136,9 +1136,9 @@ impl TakesView {
             })
             .count();
         let summary = match twice {
-            0 => format!("{takes} takes, {} beats, {picked} picked", self.rows.len()),
+            0 => format!("{takes}, {} beats, {picked} picked", self.rows.len()),
             n => format!(
-                "{takes} takes, {} beats, {picked} picked, {n} in the cut more than once",
+                "{takes}, {} beats, {picked} picked, {n} in the cut more than once",
                 self.rows.len()
             ),
         };
