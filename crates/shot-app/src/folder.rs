@@ -412,6 +412,27 @@ impl VideoFolder {
         self.as_one_change(|folder| folder.store_brand(brand))
     }
 
+    /// Whether the video's own layer cuts the camera out, `None` when it leaves it to the
+    /// channel's brand.
+    pub fn own_cutout(&self) -> Option<bool> {
+        self.layer_brand().and_then(|b| b.cutout)
+    }
+
+    /// Turns the camera's cut-out on or off in the video's layer, or with `None` leaves it to
+    /// the channel's brand. Only a migrated video has a brand to set it in. A change can be
+    /// undone.
+    pub fn set_cutout(&mut self, on: Option<bool>) -> Result<(), String> {
+        if self.style.is_none() {
+            return Err(
+                "The camera is styled by the channel's brand, migrate the video first".into(),
+            );
+        }
+        let mut brand = self.layer_brand().unwrap_or_default();
+        brand.cutout = on;
+        let brand = (!brand.is_empty()).then_some(brand);
+        self.as_one_change(|folder| folder.store_brand(brand))
+    }
+
     fn store_brand(&mut self, brand: Option<Brand>) -> Result<(), String> {
         let styled = self
             .style

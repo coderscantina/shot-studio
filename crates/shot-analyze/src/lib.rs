@@ -9,6 +9,7 @@
 //! - [`again_markers`]: the `again` hotkey presses of a take's event log.
 //! - [`autocut`]: the rough cut, rules and pacing written into `cut.kdl`.
 //! - [`vision`]: faces and on-screen text with Apple Vision, for reframing and highlights.
+//! - [`masks`]: person masks of the camera, for the cut-out camera.
 //! - [`elements`]: the facts of a take in `elements/<take>.jsonl`, from all of the above.
 
 mod audio;
@@ -17,6 +18,7 @@ pub mod cache;
 pub mod elements;
 mod events;
 pub mod idle;
+pub mod masks;
 pub mod models;
 mod resample;
 mod speech;

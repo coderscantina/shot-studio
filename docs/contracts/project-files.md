@@ -192,6 +192,14 @@ A format file is one layer of the style cascade. The shipped presets above set e
 record screen=#false camera=#true mic=#true system-audio=#false
 ```
 
+A video that cuts the person out of the camera, whatever the channel's brand says (proposed in [0034](../decisions/0034-cut-out-camera-from-person-masks.md)):
+
+```kdl
+brand {
+    camera cutout=#true
+}
+```
+
 The resolved settings are the preset with the channel's layer and then the video's laid over it, setting by setting. A `layouts` node replaces the whole list. The brand fields and the rules are not part of the resolved settings; the [cascade](#style-rules) orders those. This is the channel's opinion format, the preset plus the rules that replace the preset's auto-cut and auto-zoom behavior:
 
 ```kdl
@@ -705,7 +713,7 @@ chapter "Intro" {
 | `sounds <key>=<sound> ...` | the sound for each automatic effect: a key is `zoom`, `card`, `click`, `transition` or `pop`, alone or with a phase `-travel`, `-impact`, `-settle` or `-exit`. The value is a sound name looked up like `sfx` |
 | `intro bumper="<path>" title=<bool>`, `outro ...` | a bumper in `brand/media/` (ignored by git, missing is an export error), a generated title, or both |
 | `end-card length=<time>` | the end card over the outro, or over the last seconds without one |
-| `camera shape=<rounded,circle,square> corners=<px> border=<px> shadow=<none,soft,hard> handheld=<0..100>` | how the camera is framed, and how strongly it drifts as if hand-held wherever it shows. The four frame properties come together or not at all, so a layer can set `camera handheld=40` alone; frame and strength each replace a lower layer's. `handheld` is 0, off, by default: a slow drift with a little rotation and now and then a small settle, from noise seeded by the take and its media time, so a frame draws the same every time. The camera is overscaled just enough that no edge shows, at most about 6 percent at 100 |
+| `camera shape=<rounded,circle,square> corners=<px> border=<px> shadow=<none,soft,hard> handheld=<0..100> cutout=<bool>` | how the camera is framed, how strongly it drifts as if hand-held wherever it shows, and whether the person is cut out of their background (proposed in [0034](../decisions/0034-cut-out-camera-from-person-masks.md)). The four frame properties come together or not at all, so a layer can set `camera handheld=40` or `camera cutout=#true` alone; frame, strength and cut-out each replace a lower layer's. `handheld` is 0, off, by default: a slow drift with a little rotation and now and then a small settle, from noise seeded by the take and its media time, so a frame draws the same every time. The camera is overscaled just enough that no edge shows, at most about 6 percent at 100. `cutout` is off by default. When on, the camera draws through the take's person mask wherever it shows: over the screen in a layout that shows both, over the brand's background in the face layout. The frame's corners, border and shadow fade out as the person comes in. A frame whose mask is missing or not confident shows the plain camera, crossfading over 200 ms. Masks come from `shot analyze` (which the app runs after each take) into `.shot/cache/masks/<take>.bin`, see [ship artifacts](#ship-artifacts); without them the camera shows plain |
 | `captions <look>` | how burned-in captions change their preset for every video of the channel, at least one of the [look properties](#caption-look) |
 | `layout <name> { screen ... camera ... }` | zero or more, by name: a [channel layout](#scene-switches-and-channel-layouts) |
 | `motion reaction=<preset> opinion=<preset> product-tour=<preset> tutorial=<preset>` | the motion preset of each format: `reactive`, `editorial`, `launch` or `calm` |
@@ -1081,6 +1089,7 @@ variant b preset=big-face {
 | `.shot/ship/record.json` | `shot ship` | the upload record, below |
 | `.shot/cache/thumbnails/`, `.shot/cache/ship/` | `shot thumbnails`, the Ship screen | thumbnail candidates and preview stills, safe to delete |
 | `.shot/cache/thumbnail-studio/` | the thumbnail studio | frames, cutouts and renders of the variants, safe to delete |
+| `.shot/cache/masks/<take>.bin` | `shot analyze` when the brand cuts the camera out | the camera's person masks, about 30 a second, 256 pixels wide, each with a confidence, keyed to the size and modification time of `camera.mp4`. Proposed in [0034](../decisions/0034-cut-out-camera-from-person-masks.md), format in `shot_analyze::masks`, safe to delete |
 
 The title and description are not stored. `shot ship` drafts them from the project files on every run, as `shot describe` prints them: the title from `video.kdl`, then the hook beat of `script.md`, the chapters at their first spoken word and the links. A Short gets the hook and a link to the main video.
 

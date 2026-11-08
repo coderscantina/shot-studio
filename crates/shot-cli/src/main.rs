@@ -125,7 +125,8 @@ enum Command {
     Transcribe(transcribe::TranscribeArgs),
     /// Run the auto-cut rules on a take and write the rough cut into cut.kdl.
     Autocut(autocut::AutocutArgs),
-    /// Run a take's analysis again and rewrite its elements file.
+    /// Run a take's analysis again and rewrite its elements file, and compute the camera's
+    /// person masks when the brand cuts the camera out.
     Analyze(analyze::AnalyzeArgs),
     /// Add, change or remove a caption fix: words the transcript mishears and what captions show.
     CaptionFix(caption_fix::CaptionFixArgs),

@@ -179,7 +179,7 @@ fn sampled<T: Clone + Serialize + for<'de> Deserialize<'de>>(
     })
 }
 
-fn identity(path: &Path) -> Result<(u64, u128), VisionError> {
+pub(crate) fn identity(path: &Path) -> Result<(u64, u128), VisionError> {
     let metadata = fs::metadata(path).map_err(|source| VisionError::Io {
         path: path.to_owned(),
         source,

@@ -8,7 +8,9 @@
 //! - **Window**: the window layout's shadow and device frame under the window.
 //! - **Camera**: the brand's frame around the camera beside the screen, see
 //!   [`crate::layout::LayoutSpec::with_camera`], and its hand-held drift wherever it shows, see
-//!   [`crate::handheld`].
+//!   [`crate::handheld`]. With the brand's cut-out the take's person mask of the moment goes
+//!   with the frame, and the camera's frame fades out as far as the cut-out fades in, see
+//!   [`shot_analyze::masks`].
 //! - **Overlays**: the templates of [`crate::overlay`], in file order, later ones on top.
 //! - **Scene switch**: inside a morph's window the layout is the old one sprung into the new
 //!   ([`crate::layout::LayoutSpec::morph`]), its moving slots motion blurred like a smooth zoom. A dissolve or
@@ -22,6 +24,7 @@ use shot_core::{
     Zoom,
 };
 
+use shot_analyze::masks::{Cutout, PersonMasks};
 use vello::peniko::ImageData;
 
 use crate::code_diff::CodeDiff;
@@ -57,6 +60,8 @@ pub struct Look {
     pub theme: Arc<Theme>,
     /// The segment's take, which chapter titles and brand templates are looked up by.
     pub take: Option<Id>,
+    /// The take's person masks, when the theme cuts the camera out and they were computed.
+    pub masks: Option<Arc<PersonMasks>>,
 }
 
 /// One moment of a segment.
@@ -118,6 +123,8 @@ pub struct Frame {
     /// When a b-roll clip covers the frame, the file and time its screen layer shows instead
     /// of the take's screen.
     pub cutaway: Option<Cutaway>,
+    /// The person mask the camera layer draws through.
+    pub cutout: Option<Cutout>,
 }
 
 /// The frame `shot` shows on `canvas`, for sources of `sizes`.
@@ -160,6 +167,14 @@ pub fn compose(
     }
     let seed = crate::handheld::seed(look.take.as_ref());
     crate::handheld::apply(&mut scene, look.theme.handheld, seed, shot.time, sizes);
+    let cutout = look
+        .masks
+        .as_ref()
+        .filter(|_| look.theme.cutout)
+        .and_then(|masks| masks.cutout(shot.time));
+    if let Some(cutout) = &cutout {
+        fade_frame(&mut scene, cutout.weight);
+    }
     let s = canvas.width as f32 / 3840.0;
     let mut drawing = Drawing::default();
     let screen = scene.layers.iter().find(|l| l.source == Source::Screen);
@@ -202,7 +217,27 @@ pub fn compose(
         scene,
         drawing,
         cutaway,
+        cutout,
     })
+}
+
+/// Fades the camera's frame, its corners, border and shadow, out by `weight`: a cut-out person
+/// stands free.
+fn fade_frame(scene: &mut Scene, weight: f32) {
+    let keep = 1.0 - weight;
+    for layer in scene
+        .layers
+        .iter_mut()
+        .filter(|l| l.source == Source::Camera)
+    {
+        layer.radius *= keep;
+        if let Some(border) = &mut layer.border {
+            border.width *= keep;
+        }
+        if let Some(shadow) = &mut layer.shadow {
+            shadow.alpha *= keep;
+        }
+    }
 }
 
 /// Maps points of the screen track to the canvas through the screen's layer.
@@ -528,6 +563,64 @@ mod tests {
         };
         assert_eq!(rings(100_000), 1);
         assert_eq!(rings(600_000), 0);
+    }
+
+    #[test]
+    fn the_camera_cuts_the_person_out_and_falls_back_on_a_frame_without_one() {
+        let brand = shot_core::Brand::parse(
+            "camera shape=circle corners=0 border=8 shadow=soft cutout=#true\n",
+        )
+        .unwrap();
+        let theme = Arc::new(
+            Theme::new(&brand, shot_core::FormatKind::Opinion, None, &|_| {
+                unreachable!("the brand names no files")
+            })
+            .unwrap(),
+        );
+        // A person at 0 and 1 s, none at 2 s.
+        let masks = PersonMasks::new(
+            2,
+            1,
+            [(0, 255), (1, 255), (2, 0)].map(|(s, c)| (Micros(s * 1_000_000), c, vec![255, 0])),
+        );
+        let look = |masks: Option<PersonMasks>| Look {
+            theme: theme.clone(),
+            masks: masks.map(Arc::new),
+            ..Look::default()
+        };
+        let at = |look: &Look, s: u64| {
+            let shot = Shot {
+                layout: Layout::FaceContent,
+                zooms: &[],
+                overlays: &[],
+                time: Micros(s * 1_000_000),
+                switch: None,
+            };
+            compose(&shot, look, Canvas::UHD, SIZES).unwrap()
+        };
+        let camera = |frame: &Frame| {
+            *frame
+                .scene
+                .layers
+                .iter()
+                .find(|l| l.source == Source::Camera)
+                .unwrap()
+        };
+        let plain = at(&look(None), 1);
+        assert_eq!(plain.cutout, None);
+        assert!(camera(&plain).border.is_some_and(|b| b.width > 0.0));
+
+        let cut = at(&look(Some(masks.clone())), 1);
+        let cutout = cut.cutout.as_ref().unwrap();
+        assert_eq!((cutout.weight, &*cutout.alpha), (1.0, &[255, 0][..]));
+        let free = camera(&cut);
+        assert_eq!(free.radius, 0.0);
+        assert!(free.border.is_none_or(|b| b.width == 0.0));
+        assert!(free.shadow.is_none_or(|s| s.alpha == 0.0));
+
+        // No person: the plain camera, frame and all.
+        let fallback = at(&look(Some(masks)), 2);
+        assert_eq!(fallback, at(&look(None), 2));
     }
 
     #[test]

@@ -273,6 +273,7 @@ mod tests {
             },
             drawing,
             cutaway: None,
+            cutout: None,
         };
         renderer
             .draw(

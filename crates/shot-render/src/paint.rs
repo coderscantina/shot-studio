@@ -220,6 +220,7 @@ impl Painter {
                     },
                     drawing: Drawing::default(),
                     cutaway: None,
+                    cutout: None,
                 };
                 renderer.draw_over(&over, only_screen(&scratch), target)?;
             }
@@ -263,6 +264,7 @@ impl Painter {
                 },
                 drawing: Drawing::default(),
                 cutaway: None,
+                cutout: None,
             };
             return Ok(renderer.draw_over(&over, only_screen(&scratch), target)?);
         }
@@ -430,6 +432,7 @@ impl Painter {
             },
             drawing: Drawing::default(),
             cutaway: None,
+            cutout: None,
         };
         let mut screen = None;
         if let Some(bumper) = &bookend.bumper {
@@ -512,6 +515,7 @@ impl Painter {
             },
             drawing: Drawing::default(),
             cutaway: None,
+            cutout: None,
         };
         let t = frame_time(at, plan.fps);
         crate::overlay::draw_alone(&overlay, t, canvas, &look, &mut card);
@@ -686,6 +690,7 @@ fn zoom_through(
         },
         drawing: Drawing::default(),
         cutaway: None,
+        cutout: None,
     };
     renderer.draw(&zoomed, only_screen(scratch), target)
 }

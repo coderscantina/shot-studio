@@ -16,17 +16,13 @@ use std::time::Duration;
 
 use objc2::AnyThread;
 use objc2::rc::{Retained, autoreleasepool};
-use objc2_core_video::{
-    CVPixelBuffer, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow,
-    CVPixelBufferGetHeight, CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress,
-    CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress, kCVPixelFormatType_OneComponent8,
-};
+use objc2_core_video::CVPixelBuffer;
 use objc2_foundation::{NSArray, NSDictionary};
 use objc2_vision::{
     VNDetectFaceCaptureQualityRequest, VNDetectFaceLandmarksRequest, VNFaceObservation,
-    VNGeneratePersonSegmentationRequest, VNGeneratePersonSegmentationRequestQualityLevel,
-    VNImageRequestHandler, VNRequest,
+    VNGeneratePersonSegmentationRequestQualityLevel, VNImageRequestHandler, VNRequest,
 };
+use shot_analyze::masks::PersonSegmenter;
 use shot_core::{Id, Layout, Micros, Project, TimeRange};
 use shot_media::videotoolbox::Decoder;
 use shot_render::layout::Rect;
@@ -435,46 +431,12 @@ fn picture(buffer: &CVPixelBuffer) -> Picture {
     }
 }
 
-/// Vision's person segmentation of a camera frame: 0 for background to 255 for the person.
+/// Vision's person segmentation of a camera frame at its finest: 0 for background to 255 for
+/// the person.
 fn person_mask(buffer: &CVPixelBuffer) -> Option<image::GrayImage> {
-    autoreleasepool(|_| {
-        // SAFETY: a plain initializer and setters on a request this thread owns.
-        let request = unsafe { VNGeneratePersonSegmentationRequest::new() };
-        unsafe {
-            request.setQualityLevel(VNGeneratePersonSegmentationRequestQualityLevel::Accurate);
-            request.setOutputPixelFormat(kCVPixelFormatType_OneComponent8);
-        }
-        // SAFETY: an empty options dictionary is valid, and the buffer is a decoded frame.
-        let handler = unsafe {
-            VNImageRequestHandler::initWithCVPixelBuffer_options(
-                VNImageRequestHandler::alloc(),
-                buffer,
-                &NSDictionary::new(),
-            )
-        };
-        let as_request: &VNRequest = &request;
-        handler
-            .performRequests_error(&NSArray::from_slice(&[as_request]))
-            .ok()?;
-        // SAFETY: read after the request ran on this thread.
-        let mask = unsafe { request.results() }?.firstObject()?;
-        let mask = unsafe { mask.pixelBuffer() };
-        // SAFETY: a one-component 8-bit buffer, locked read-only while its rows are copied.
-        unsafe {
-            CVPixelBufferLockBaseAddress(&mask, CVPixelBufferLockFlags::ReadOnly);
-            let (width, height) = (CVPixelBufferGetWidth(&mask), CVPixelBufferGetHeight(&mask));
-            let stride = CVPixelBufferGetBytesPerRow(&mask);
-            let base = CVPixelBufferGetBaseAddress(&mask) as *const u8;
-            let rows = std::slice::from_raw_parts(base, stride * height);
-            let pixels: Vec<u8> = rows
-                .chunks(stride)
-                .flat_map(|row| &row[..width])
-                .copied()
-                .collect();
-            CVPixelBufferUnlockBaseAddress(&mask, CVPixelBufferLockFlags::ReadOnly);
-            image::GrayImage::from_raw(width as u32, height as u32, pixels)
-        }
-    })
+    let segmenter = PersonSegmenter::new(VNGeneratePersonSegmentationRequestQualityLevel::Accurate);
+    let (pixels, (width, height), _) = segmenter.mask(buffer).ok()??;
+    image::GrayImage::from_raw(width, height, pixels)
 }
 
 /// The person of `frame` under `mask`, cropped to them with room for the outline, or `None`

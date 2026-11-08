@@ -4,6 +4,7 @@
 // rounded corners give coverage, and the color goes back to YCbCr in the target's range and
 // matrix. Blending in YCbCr equals blending in RGB, because the conversion is affine. A layer can
 // carry a border inside its edge and a drop shadow outside it, and an opacity over everything.
+// The camera layer can draw through a person mask, which cuts the person out of the frame.
 
 struct Layer {
     // Destination in canvas pixels: left, top, right, bottom.
@@ -32,7 +33,7 @@ struct Layer {
     // What the draw covers in canvas pixels: the frame, grown to hold the shadow.
     quad: vec4<f32>,
     // In x, how far the source turns around the crop's center, in radians; in yz the source's
-    // size in pixels.
+    // size in pixels; in w how far the person mask cuts the source out, 0 for not at all.
     turn: vec4<f32>,
 }
 
@@ -48,6 +49,8 @@ fn to_rgb(y: f32, c: vec2<f32>, k: vec2<f32>) -> vec3<f32> {
 @group(0) @binding(1) var chroma: texture_2d<f32>;
 @group(0) @binding(2) var bilinear: sampler;
 @group(0) @binding(3) var<uniform> layer: Layer;
+// The person mask over the whole source, 1 for the person, scaled up bilinearly for a soft edge.
+@group(0) @binding(4) var person: texture_2d<f32>;
 
 struct Varyings {
     @builtin(position) position: vec4<f32>,
@@ -158,7 +161,8 @@ fn edge_distance(canvas: vec2<f32>) -> f32 {
 // through the logistic approximation of the normal distribution.
 fn shaded(input: Varyings) -> vec4<f32> {
     let distance = edge_distance(input.canvas);
-    let inside = clamp(0.5 - distance, 0.0, 1.0);
+    let mask = mix(1.0, textureSample(person, bilinear, input.uv).r, layer.turn.w);
+    let inside = clamp(0.5 - distance, 0.0, 1.0) * mask;
     var rgb = layer_rgb(input.uv, input.motion);
     if layer.border.w > 0.0 {
         rgb = mix(layer.border.rgb, rgb, clamp(0.5 - (distance + layer.border.w), 0.0, 1.0));

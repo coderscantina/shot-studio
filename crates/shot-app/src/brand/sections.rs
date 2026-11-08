@@ -773,9 +773,19 @@ impl ThemeEditor {
             .gap(px(10.))
             .child(heading(
                 "Camera",
-                "How the camera is framed beside the screen, and whether it drifts as if hand-held. Without a frame it keeps the layout's corners.",
+                "How the camera is framed beside the screen, whether it drifts as if hand-held, and whether the person stands cut out over the screen or the background. Without a frame it keeps the layout's corners.",
             ))
-            .child(row("Hand-held", fields::slider(&handheld, "Hand-held", shown)));
+            .child(row("Hand-held", fields::slider(&handheld, "Hand-held", shown)))
+            .child(row(
+                "Cut out",
+                Switch::new("camera-cutout")
+                    .checked(look.cutout.unwrap_or(false))
+                    .accessibility_label("Cut the person out of the camera")
+                    .on_click(cx.listener(|this, on: &bool, _, cx| {
+                        let on = *on;
+                        this.change(None, cx, |l| l.cutout = on.then_some(true))
+                    })),
+            ));
         let Some(camera) = camera else {
             return out.child(
                 button("camera-frame", "Frame the camera").on_click(cx.listener(
