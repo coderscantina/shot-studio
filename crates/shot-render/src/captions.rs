@@ -234,7 +234,7 @@ pub(crate) fn apply_fixes(transcript: &Transcript, fixes: &[CaptionFix]) -> Vec<
 }
 
 /// Breaks words into cues at sentence ends, pauses and the cue limits.
-fn group(words: Vec<CaptionWord>) -> Vec<Cue> {
+pub(crate) fn group(words: Vec<CaptionWord>) -> Vec<Cue> {
     let mut cues: Vec<Cue> = Vec::new();
     let mut current: Vec<CaptionWord> = Vec::new();
     for word in words {

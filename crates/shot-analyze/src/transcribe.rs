@@ -3,9 +3,10 @@
 //! Capture feeds mic audio as it arrives. A background thread resamples it to 16 kHz and decodes
 //! a sliding window of up to 28 s whenever at least 1 s of new audio is in, taking up to 8 s at a
 //! time when it falls behind. A word is stable once two consecutive decodes agree on it (local
-//! agreement), and only stable words reach the transcript and the `on_word` callback. Once the
-//! window passes 15 s it is cut at the end of the last stable word, and the stable text before
-//! the window is the decoder's prompt.
+//! agreement), and only stable words reach the transcript and the `on_word` callback. The words
+//! after them, which the next decode may still change, go to an `on_tentative` callback after
+//! every decode, for readers that cannot wait. Once the window passes 15 s it is cut at the end
+//! of the last stable word, and the stable text before the window is the decoder's prompt.
 //!
 //! Silero voice activity detection runs on the window before each decode. A window without
 //! speech is dropped undecoded, silence in front of the first speech is cut off, and words that
@@ -70,6 +71,18 @@ impl Transcriber {
         take: Id,
         on_word: impl FnMut(&Word) + Send + 'static,
     ) -> Result<Self, Error> {
+        Self::with_tentative(whisper, vad, take, on_word, |_| {})
+    }
+
+    /// [`Transcriber::new`] that also hands `on_tentative` the words after the stable ones,
+    /// after every decode and on that thread: empty once they are all stable.
+    pub fn with_tentative(
+        whisper: &Path,
+        vad: &Path,
+        take: Id,
+        on_word: impl FnMut(&Word) + Send + 'static,
+        on_tentative: impl FnMut(&[Word]) + Send + 'static,
+    ) -> Result<Self, Error> {
         whisper_rs::install_logging_hooks();
         let mut params = WhisperContextParameters::default();
         // Word times come from DTW on the alignment heads, which rules out flash attention.
@@ -98,6 +111,7 @@ impl Transcriber {
                     vad,
                     eot,
                     on_word: Box::new(on_word),
+                    on_tentative: Box::new(on_tentative),
                     transcript: Transcript::new(take),
                     agreement: Agreement::default(),
                     timeline: Timeline16k::default(),
@@ -135,11 +149,14 @@ fn whisper_error(e: whisper_rs::WhisperError) -> Error {
     Error::Whisper(e.to_string())
 }
 
+type OnTentative = dyn FnMut(&[Word]) + Send;
+
 struct Worker {
     state: WhisperState,
     vad: WhisperVadContext,
     eot: i32,
     on_word: Box<dyn FnMut(&Word) + Send>,
+    on_tentative: Box<OnTentative>,
     transcript: Transcript,
     agreement: Agreement,
     timeline: Timeline16k,
@@ -186,6 +203,7 @@ impl Worker {
             if last {
                 let rest = self.agreement.flush();
                 self.commit(rest);
+                (self.on_tentative)(&[]);
                 return Ok(self.transcript);
             }
         }
@@ -197,7 +215,10 @@ impl Worker {
         let speech = self.speech()?;
         let Some(first) = speech.first() else {
             let rest = self.agreement.flush();
-            self.commit(rest);
+            if !rest.is_empty() {
+                self.commit(rest);
+                (self.on_tentative)(&[]);
+            }
             self.keep_from(self.window_end().saturating_sub(LEAD));
             return Ok(());
         };
@@ -214,6 +235,8 @@ impl Worker {
         let stable = self.agreement.agree(hypothesis);
         self.commit(stable);
         self.trim();
+        let tentative = self.agreement.tentative();
+        (self.on_tentative)(&tentative);
         Ok(())
     }
 
@@ -442,18 +465,39 @@ impl Agreement {
     }
 
     fn stable(&mut self, h: Hyp) -> Word {
-        let from = self.last_end.map_or(h.from, |end| h.from.max(end));
-        let to = h.to.max(Micros(from.0 + 10_000));
-        self.last_end = Some(to);
-        self.tail.push(normalize(&h.text));
+        let word = h.word(self.last_end);
+        self.last_end = Some(word.range.to());
+        self.tail.push(normalize(&word.text));
         if self.tail.len() > 5 {
             self.tail.remove(0);
         }
+        word
+    }
+
+    /// The last decode's words after the stable ones, as they would commit now.
+    fn tentative(&self) -> Vec<Word> {
+        let mut last_end = self.last_end;
+        self.previous
+            .iter()
+            .map(|h| {
+                let word = h.clone().word(last_end);
+                last_end = Some(word.range.to());
+                word
+            })
+            .collect()
+    }
+}
+
+impl Hyp {
+    /// The word, starting no earlier than `after`.
+    fn word(self, after: Option<Micros>) -> Word {
+        let from = after.map_or(self.from, |end| self.from.max(end));
+        let to = self.to.max(Micros(from.0 + 10_000));
         Word {
-            confidence: (h.p_sum / h.tokens as f32 * 100.0)
+            confidence: (self.p_sum / self.tokens as f32 * 100.0)
                 .round()
                 .clamp(0.0, 100.0) as u8,
-            text: h.text,
+            text: self.text,
             range: TimeRange::new(from, to).expect("to is after from"),
         }
     }
@@ -497,7 +541,9 @@ mod tests {
         assert_eq!(stable[0].confidence, 90);
         let stable = agreement.agree(hyp(&[("it", 400), ("then", 800), ("test", 1200)]));
         assert_eq!(texts(&stable), ["then"]);
+        assert_eq!(texts(&agreement.tentative()), ["test"]);
         assert_eq!(texts(&agreement.flush()), ["test"]);
+        assert!(agreement.tentative().is_empty());
     }
 
     #[test]
