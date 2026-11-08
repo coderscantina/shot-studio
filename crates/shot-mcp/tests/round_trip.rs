@@ -318,6 +318,34 @@ async fn scripts_are_checked_and_proposed_only_when_they_parse() {
     )
     .await;
     assert!(!error);
+
+    let script = "# Beta\n\n## Hook\n\n- Fridays are fine [the post](sources/post.md)\n";
+    let (error, text) = call(
+        &client,
+        "propose_script",
+        json!({ "slug": "beta", "name": "react", "subject": "react to the post",
+                "script": script, "sources": { "../escape.md": "x" } }),
+    )
+    .await;
+    assert!(error && text.contains("not a plain file name"), "{text}");
+    let (error, _) = call(
+        &client,
+        "propose_script",
+        json!({ "slug": "beta", "name": "react", "subject": "react to the post",
+                "script": script, "sources": { "post.md": "# The post\n" } }),
+    )
+    .await;
+    assert!(!error);
+    let (_, diff) = call(
+        &client,
+        "proposal_diff",
+        json!({ "slug": "beta", "name": "react" }),
+    )
+    .await;
+    assert!(
+        diff.contains("sources/post.md") && diff.contains("+# The post"),
+        "{diff}"
+    );
 }
 
 #[tokio::test]

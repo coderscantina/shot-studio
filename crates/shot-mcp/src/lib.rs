@@ -175,6 +175,10 @@ struct ProposeScriptArgs {
     subject: String,
     /// The whole new script.md: `# title`, `## chapter`, `- beat` with `[label](source)` links.
     script: String,
+    /// Text files to add to the video's `sources/` with the script, by file name, for example
+    /// a snapshot of an article the beats link to as `sources/article.md`.
+    #[serde(default)]
+    sources: BTreeMap<String, String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -381,8 +385,7 @@ impl ShotServer {
             &args.slug,
             &args.name,
             &args.subject,
-            "cut.kdl",
-            cut.to_kdl(),
+            BTreeMap::from([("cut.kdl".to_owned(), cut.to_kdl())]),
         )?;
         let mut out = created;
         for change in changes {
@@ -444,8 +447,7 @@ impl ShotServer {
             &args.slug,
             &args.name,
             &args.subject,
-            "cut.kdl",
-            cut.to_kdl(),
+            BTreeMap::from([("cut.kdl".to_owned(), cut.to_kdl())]),
         )
     }
 
@@ -499,20 +501,23 @@ impl ShotServer {
     }
 
     #[tool(
-        description = "Propose a new script.md as a branch. The script must follow the script.md shape. Name alternatives you offer side by side alike, for example hook-a, hook-b and hook-c; the person accepts one."
+        description = "Propose a new script.md as a branch, optionally with text files for sources/ that its beats link to. The script must follow the script.md shape. Name alternatives you offer side by side alike, for example hook-a, hook-b and hook-c; the person accepts one."
     )]
     fn propose_script(
         &self,
         Parameters(args): Parameters<ProposeScriptArgs>,
     ) -> Result<String, String> {
         validate("script.md", &args.script)?;
-        self.propose(
-            &args.slug,
-            &args.name,
-            &args.subject,
-            "script.md",
-            args.script,
-        )
+        let mut files = BTreeMap::new();
+        for (name, text) in args.sources {
+            let plain = !name.is_empty() && !name.starts_with('.') && !name.contains(['/', '\\']);
+            if !plain {
+                return Err(format!("`{name}` is not a plain file name for sources/"));
+            }
+            files.insert(format!("sources/{name}"), text);
+        }
+        files.insert("script.md".to_owned(), args.script);
+        self.propose(&args.slug, &args.name, &args.subject, files)
     }
 
     #[tool(
@@ -768,10 +773,8 @@ impl ShotServer {
         slug: &str,
         name: &str,
         subject: &str,
-        file: &str,
-        text: String,
+        files: BTreeMap<String, String>,
     ) -> Result<String, String> {
-        let files = BTreeMap::from([(file.to_owned(), text)]);
         let proposal = self
             .board()?
             .create_proposal(slug, name, subject, &files)
