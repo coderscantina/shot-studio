@@ -4,8 +4,6 @@
 //! [`VideoFolder`]. Only for a video before migration: a migrated video's rough cut is its lock,
 //! built from the elements by the style rules.
 
-use std::fs;
-
 use shot_analyze::autocut::{self, TakeFacts, TakeFiles};
 use shot_analyze::{Speech, cache};
 use shot_core::{Cut, Format, Id, Micros, Pacing, RuleKind};
@@ -59,20 +57,21 @@ fn rerun(folder: &mut VideoFolder, format: Format) -> Result<(), String> {
     if folder.is_migrated() {
         return Err("this video's cuts come from the style rules of its format".into());
     }
-    let path = folder.dir.join("format.kdl");
-    fs::write(&path, format.to_kdl()).map_err(|e| format!("{}: {e}", path.display()))?;
-    folder.project.format = format;
-    let mut takes: Vec<Id> = Vec::new();
-    for block in folder.project.cut.chapters.iter().flat_map(|c| &c.takes) {
-        if !takes.contains(&block.take) {
-            takes.push(block.take.clone());
+    // The format and the cut it makes undo together.
+    folder.as_one_change(|folder| {
+        folder.write_format(format)?;
+        let mut takes: Vec<Id> = Vec::new();
+        for block in folder.project.cut.chapters.iter().flat_map(|c| &c.takes) {
+            if !takes.contains(&block.take) {
+                takes.push(block.take.clone());
+            }
         }
-    }
-    let mut cut = folder.project.cut.clone();
-    for take in &takes {
-        cut = rough_cut_of(folder, &cut, take)?;
-    }
-    folder.write_cut(cut)
+        let mut cut = folder.project.cut.clone();
+        for take in &takes {
+            cut = rough_cut_of(folder, &cut, take)?;
+        }
+        folder.write_cut(cut)
+    })
 }
 
 fn rough_cut_of(folder: &VideoFolder, cut: &Cut, take: &Id) -> Result<Cut, String> {

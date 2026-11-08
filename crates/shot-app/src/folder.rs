@@ -33,10 +33,19 @@ pub struct VideoFolder {
     /// the preview draws with it and the screens check overlays against it.
     pub theme: Result<Arc<Theme>, String>,
     style: Option<Styled>,
-    /// The cut before each write, newest last, for undo.
-    history: Vec<Cut>,
-    /// Cuts that undo stepped back from, newest last, for redo.
-    undone: Vec<Cut>,
+    /// The files before each change, newest last, for undo.
+    history: Vec<Snapshot>,
+    /// Files that undo stepped back from, newest last, for redo.
+    undone: Vec<Snapshot>,
+    /// Inside [`VideoFolder::as_one_change`]: writes join the change instead of each being one.
+    batching: bool,
+}
+
+/// The files undo and redo step through.
+#[derive(Clone, PartialEq)]
+struct Snapshot {
+    cut: Cut,
+    format: Format,
 }
 
 /// How many writes undo can step back through.
@@ -159,6 +168,7 @@ impl VideoFolder {
             style,
             history: Vec::new(),
             undone: Vec::new(),
+            batching: false,
         };
         folder.load_transcripts()?;
         folder.rebuild_lock()?;
@@ -238,38 +248,65 @@ impl VideoFolder {
     /// Writes `cut` as canonical `cut.kdl` and makes it the project's cut. A change can be
     /// undone.
     pub fn write_cut(&mut self, cut: Cut) -> Result<(), String> {
-        let before = self.project.cut.clone();
-        self.store(cut)?;
-        if before != self.project.cut {
+        self.as_one_change(|folder| folder.store(cut))
+    }
+
+    /// Runs `change`, whose writes of the cut and the format undo and redo as one step.
+    pub fn as_one_change<T>(
+        &mut self,
+        change: impl FnOnce(&mut Self) -> Result<T, String>,
+    ) -> Result<T, String> {
+        if self.batching {
+            return change(self);
+        }
+        let before = self.snapshot();
+        self.batching = true;
+        let result = change(self);
+        self.batching = false;
+        if self.snapshot() != before {
             if self.history.len() == HISTORY {
                 self.history.remove(0);
             }
             self.history.push(before);
             self.undone.clear();
         }
-        Ok(())
+        result
     }
 
-    /// Writes the cut before the last change back. False when there is nothing to undo.
+    /// Writes the files before the last change back. False when there is nothing to undo.
     pub fn undo(&mut self) -> Result<bool, String> {
-        let Some(cut) = self.history.pop() else {
+        let Some(snapshot) = self.history.pop() else {
             return Ok(false);
         };
-        let current = self.project.cut.clone();
-        self.store(cut)?;
+        let current = self.snapshot();
+        self.restore_snapshot(snapshot)?;
         self.undone.push(current);
         Ok(true)
     }
 
-    /// Writes the cut the last undo stepped back from. False when there is nothing to redo.
+    /// Writes the files the last undo stepped back from. False when there is nothing to redo.
     pub fn redo(&mut self) -> Result<bool, String> {
-        let Some(cut) = self.undone.pop() else {
+        let Some(snapshot) = self.undone.pop() else {
             return Ok(false);
         };
-        let current = self.project.cut.clone();
-        self.store(cut)?;
+        let current = self.snapshot();
+        self.restore_snapshot(snapshot)?;
         self.history.push(current);
         Ok(true)
+    }
+
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            cut: self.project.cut.clone(),
+            format: self.project.format.clone(),
+        }
+    }
+
+    fn restore_snapshot(&mut self, snapshot: Snapshot) -> Result<(), String> {
+        if snapshot.format != self.project.format {
+            self.store_format(snapshot.format)?;
+        }
+        self.store(snapshot.cut)
     }
 
     fn store(&mut self, cut: Cut) -> Result<(), String> {
@@ -282,6 +319,10 @@ impl VideoFolder {
     /// Writes `format.kdl` so the settings resolve to `format`: the whole format before
     /// migration, the settings that differ from the channel's after.
     pub fn write_format(&mut self, format: Format) -> Result<(), String> {
+        self.as_one_change(|folder| folder.store_format(format))
+    }
+
+    fn store_format(&mut self, format: Format) -> Result<(), String> {
         let text = match &mut self.style {
             Some(styled) => {
                 styled.layer = crate::style::layer(&format, &styled.base, &styled.layer);
@@ -396,6 +437,53 @@ impl VideoFolder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_format_change_and_the_cut_it_makes_undo_as_one_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = |name: &str, text: &str| fs::write(dir.path().join(name), text).unwrap();
+        file("video.kdl", "title \"A\"\nstatus editing\nformat opinion\n");
+        file("script.md", "# A\n");
+        file(
+            "format.kdl",
+            &shot_core::FormatKind::Opinion.preset().to_kdl(),
+        );
+        file(
+            "cut.kdl",
+            "chapter \"A\" {\n    take t01 {\n        keep from=0 to=20_000_000\n    }\n}\n",
+        );
+        let mut folder = VideoFolder::open(dir.path()).unwrap();
+        let (cut, format) = (folder.project.cut.clone(), folder.project.format.clone());
+        folder
+            .as_one_change(|folder| {
+                let mut changed = folder.project.format.clone();
+                changed.pacing = shot_core::Pacing::Natural;
+                folder.write_format(changed)?;
+                let shorter = folder
+                    .project
+                    .cut
+                    .restore(
+                        TakeAt {
+                            chapter: 0,
+                            take: 0,
+                        },
+                        TimeRange::new(Micros(0), Micros(1)).unwrap(),
+                    )
+                    .map_err(|e| e.to_string())?;
+                folder.write_cut(shorter.append_take(
+                    Id::new("t02").unwrap(),
+                    "B",
+                    TimeRange::new(Micros(0), Micros(5_000_000)).unwrap(),
+                ))
+            })
+            .unwrap();
+        assert!(folder.undo().unwrap());
+        assert_eq!(folder.project.cut, cut);
+        assert_eq!(folder.project.format, format);
+        assert!(!folder.undo().unwrap(), "one step for both writes");
+        let written = fs::read_to_string(dir.path().join("format.kdl")).unwrap();
+        assert_eq!(Format::parse(&written).unwrap(), format);
+    }
 
     #[test]
     fn a_migrated_video_answers_its_lock_review_with_an_override() {
