@@ -238,6 +238,11 @@ impl RecordScreen {
         matches!(self.phase(), Phase::Recording { .. })
     }
 
+    /// Starts the prompter over from the folder's script, after the script changed.
+    pub fn reload_script(&mut self, cx: &mut Context<Self>) {
+        self.prompter.update(cx, |prompter, cx| prompter.reset(cx));
+    }
+
     fn toggle(&mut self, _: &ToggleRecording, _: &mut Window, cx: &mut Context<Self>) {
         match self.phase() {
             Phase::Idle | Phase::Failed(_) | Phase::Finished { .. } => {

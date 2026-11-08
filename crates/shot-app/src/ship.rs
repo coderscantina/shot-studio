@@ -218,9 +218,7 @@ impl ShipScreen {
     pub fn new(folder: Entity<VideoFolder>, cx: &mut Context<Self>) -> Self {
         let (send, events) = mpsc::channel();
         let channel = Channel::of(&folder.read(cx).dir).map_err(|e| match e {
-            ShipError::NoChannel(_) => {
-                "This folder is not videos/<slug> in a channel repo.".to_owned()
-            }
+            ShipError::NoChannel(_) => "This video is not in a channel.".to_owned(),
             e => capitalized(&e.to_string()),
         });
         Self {
@@ -1111,7 +1109,7 @@ impl ShipScreen {
                     lines.clone(),
                 ),
                 _ => (
-                    "not in a channel repo, so there is no branch to compare".to_owned(),
+                    "not in a channel, so there is nothing to compare with".to_owned(),
                     Vec::new(),
                 ),
             },
@@ -1150,7 +1148,7 @@ impl ShipScreen {
                     .gap(px(10.))
                     .px(px(16.))
                     .py(px(12.))
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child("cut.kdl"))
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child("Edits"))
                     .child(
                         div()
                             .flex_1()
@@ -1511,11 +1509,11 @@ impl ShipScreen {
         } else {
             out = match (&self.channel, &self.client) {
                 (Err(e), _) => out.child(card(
-                    "Uploads need a channel repo",
+                    "Uploads need a channel",
                     vec![
                         div().text_size(TEXT_SM).text_color(BODY).child(format!(
                             "{e} Shipping moves the video's card to shipped and tags the \
-                             release, so open the video from its channel repo to upload from \
+                             release, so open the video from its channel to upload from \
                              here."
                         )),
                         div()

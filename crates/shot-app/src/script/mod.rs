@@ -6,21 +6,25 @@
 //! words with Accept (Tab), Reject (Esc) and Another take. Tab and Esc act only while a
 //! proposal is selected. Proposals named `hook-*` are alternative hooks, shown as options in
 //! the agent pane; picking one accepts it and rejects the others. The branch stays out of
-//! sight.
+//! sight. Edit script opens the script in the default editor, and what is saved there lands on
+//! the branch when the window comes back. Continue to record marks the script ready and moves
+//! on.
 //!
 //! [0004]: ../../../docs/decisions/0004-proposals-as-branches.md
 
 pub mod proposal;
 
+use std::collections::BTreeMap;
+use std::fs;
 use std::path::PathBuf;
 
 use gpui::{
-    AnyElement, App, Context, Div, Entity, FocusHandle, Focusable, FontWeight, Hsla, KeyBinding,
-    ScrollHandle, SharedString, Window, actions, div, prelude::*, px,
+    AnyElement, App, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla,
+    KeyBinding, ScrollHandle, SharedString, Subscription, Window, actions, div, prelude::*, px,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use shot_board::Board;
-use shot_core::{Micros, Script};
+use shot_core::{Micros, Script, Status};
 use shot_mcp::agents::ScriptCommand;
 use shot_mcp::bridge::{Claude, Reach};
 use shot_ship::script_check::{self, ScriptFinding, ScriptReport};
@@ -34,15 +38,22 @@ const CONTEXT: &str = "ScriptScreen";
 /// Proposals with this name prefix are alternative hooks.
 const HOOK: &str = "hook-";
 
-actions!(script, [AcceptProposal, RejectProposal]);
+/// The proposal an edit made in the default editor goes through on its way to the branch.
+const OWN_EDIT: &str = "own-edit";
+
+actions!(script, [AcceptProposal, RejectProposal, ContinueToRecord]);
 
 pub fn bind_keys(cx: &mut App) {
     let context = Some(CONTEXT);
     cx.bind_keys([
         KeyBinding::new("tab", AcceptProposal, context),
         KeyBinding::new("escape", RejectProposal, context),
+        KeyBinding::new("cmd-enter", ContinueToRecord, context),
     ]);
 }
+
+/// The script is ready and the person moves on to Record.
+pub struct ReadyToRecord;
 
 /// An open proposal that changes `script.md`.
 struct ScriptProposal {
@@ -74,8 +85,15 @@ pub struct ScriptScreen {
     input: Entity<InputState>,
     /// The document, one child per chapter, so the outline can scroll to one.
     scroll: ScrollHandle,
+    /// The line of the beat a check finding pointed at, shown marked.
+    target: Option<usize>,
+    /// The script on disk when Edit script opened it, to tell a saved edit from no edit.
+    opened: Option<String>,
     focus: FocusHandle,
+    _activation: Subscription,
 }
+
+impl EventEmitter<ReadyToRecord> for ScriptScreen {}
 
 impl Focusable for ScriptScreen {
     fn focus_handle(&self, _: &App) -> FocusHandle {
@@ -108,6 +126,12 @@ impl ScriptScreen {
             _ => {}
         })
         .detach();
+        let activation = cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active() && this.opened.is_some() {
+                this.take_own_edit();
+                cx.notify();
+            }
+        });
         let mut screen = Self {
             repo,
             slug,
@@ -122,7 +146,10 @@ impl ScriptScreen {
             run: None,
             input,
             scroll: ScrollHandle::new(),
+            target: None,
+            opened: None,
             focus: cx.focus_handle(),
+            _activation: activation,
         };
         screen.reload();
         screen
@@ -137,9 +164,19 @@ impl ScriptScreen {
                 return;
             }
         };
-        self.script = match board.read_file(&self.slug, "script.md") {
-            Ok(Some(text)) => Script::parse(&text).map_err(|e| format!("script.md:{e}")),
-            Ok(None) => Err("No script.md yet. Give Claude a brief to draft one.".to_owned()),
+        let text = board.read_file(&self.slug, "script.md");
+        if let (Some(opened), Ok(Some(text))) = (&self.opened, &text) {
+            self.follow_branch(opened.clone(), text);
+        }
+        self.target = None;
+        self.script = match text {
+            Ok(Some(text)) => Script::parse(&text)
+                .map_err(|e| format!("Line {} of the script: {}", e.line, e.message)),
+            Ok(None) => Err(
+                "No script yet. Give Claude a brief to draft one, or write your own with Edit \
+                 script."
+                    .to_owned(),
+            ),
             Err(e) => Err(e.to_string()),
         };
         self.report = self.script.as_ref().ok().map(script_check::check_script);
@@ -298,6 +335,112 @@ impl ScriptScreen {
         }
     }
 
+    /// The script in the video's folder: the file Edit script opens.
+    fn file(&self) -> PathBuf {
+        self.repo.join("videos").join(&self.slug).join("script.md")
+    }
+
+    /// Opens the script in the default editor, after putting the script this screen shows in
+    /// the folder, so the editor never opens an older one.
+    fn edit_script(&mut self, cx: &mut Context<Self>) {
+        let file = self.file();
+        let shown = Board::open(&self.repo)
+            .ok()
+            .and_then(|board| board.read_file(&self.slug, "script.md").ok().flatten());
+        let on_disk = fs::read_to_string(&file).ok();
+        let text = shown.or_else(|| on_disk.clone()).unwrap_or_default();
+        let opened = if on_disk.as_ref() == Some(&text) {
+            Ok(())
+        } else {
+            fs::write(&file, &text)
+        }
+        .and_then(|()| {
+            std::process::Command::new("open")
+                .arg(&file)
+                .spawn()
+                .map(drop)
+        });
+        match opened {
+            Ok(()) => {
+                self.opened = Some(text);
+                self.error = None;
+            }
+            Err(e) => self.error = Some(format!("The script did not open in your editor: {e}")),
+        }
+        cx.notify();
+    }
+
+    /// Puts what was saved in the editor since it opened on the video's branch, as one commit.
+    fn take_own_edit(&mut self) {
+        let (Some(opened), Ok(text)) = (&self.opened, fs::read_to_string(self.file())) else {
+            return;
+        };
+        if *opened == text {
+            return;
+        }
+        let saved = Board::open(&self.repo).and_then(|board| {
+            // A proposal left by an edit that failed to land would block this one.
+            let _ = board.reject_proposal(&self.slug, OWN_EDIT);
+            let files = BTreeMap::from([("script.md".to_owned(), text.clone())]);
+            match board.create_proposal(&self.slug, OWN_EDIT, "📝 edit the script", &files) {
+                Ok(_) => board.accept_proposal(&self.slug, OWN_EDIT).map(drop),
+                Err(shot_board::Error::EmptyProposal) => Ok(()),
+                Err(e) => Err(e),
+            }
+        });
+        match saved {
+            Ok(()) => {
+                self.opened = Some(text);
+                self.error = None;
+            }
+            Err(e) => self.error = Some(format!("Your edit did not reach the board: {e}")),
+        }
+        self.reload();
+    }
+
+    /// While the script is open in an editor, changes accepted here reach the file too, so the
+    /// next save there does not undo them. A file with unsaved-here edits stays as it is.
+    fn follow_branch(&mut self, opened: String, branch: &str) {
+        let file = self.file();
+        if opened != branch
+            && fs::read_to_string(&file).is_ok_and(|text| text == opened)
+            && fs::write(&file, branch).is_ok()
+        {
+            self.opened = Some(branch.to_owned());
+        }
+    }
+
+    /// Marks the script ready, as moving its card to Ready to record does, and moves on.
+    fn continue_to_record(&mut self, _: &ContinueToRecord, _: &mut Window, cx: &mut Context<Self>) {
+        let status = crate::board::channel::status(&self.repo, &self.slug);
+        if matches!(status, Some(Status::Ideas | Status::Scripting)) {
+            let moved =
+                Board::open(&self.repo).and_then(|b| b.move_card(&self.slug, Status::Ready));
+            if let Err(e) = moved {
+                self.error = Some(e.to_string());
+                cx.notify();
+                return;
+            }
+        }
+        cx.emit(ReadyToRecord);
+    }
+
+    /// Scrolls to the chapter of the beat on `line` and marks the beat.
+    fn show_beat(&mut self, line: usize, cx: &mut Context<Self>) {
+        let Ok(script) = &self.script else {
+            return;
+        };
+        if let Some(index) = script
+            .chapters
+            .iter()
+            .position(|c| c.beats.iter().any(|b| b.line == line))
+        {
+            self.scroll.scroll_to_top_of_item(index);
+            self.target = Some(line);
+            cx.notify();
+        }
+    }
+
     fn outline(&self, cx: &mut Context<Self>) -> Div {
         let mut column = pane()
             .w(px(268.))
@@ -423,17 +566,43 @@ impl ScriptScreen {
                     .child(icon("check", ICON, MUTED))
                     .child(text)
             }))
-            .children(summarize(&report.findings).into_iter().map(|text| {
-                div()
-                    .mt(px(6.))
-                    .px(px(12.))
-                    .py(px(10.))
-                    .rounded(RADIUS_MD)
-                    .bg(WARN_TINT)
-                    .text_size(px(14.))
-                    .text_color(WARN)
-                    .child(text)
-            }))
+            .children(summarize(&report.findings).into_iter().enumerate().map(
+                |(index, (text, line))| {
+                    div()
+                        .id(("finding", index))
+                        .mt(px(6.))
+                        .px(px(12.))
+                        .py(px(10.))
+                        .rounded(RADIUS_MD)
+                        .bg(WARN_TINT)
+                        .text_size(px(14.))
+                        .text_color(WARN)
+                        .child(text)
+                        .when_some(line, |this, line| {
+                            this.cursor_pointer()
+                                .hover(|s| s.text_color(STRONG))
+                                .on_click(
+                                    cx.listener(move |this, _, _, cx| this.show_beat(line, cx)),
+                                )
+                        })
+                },
+            ))
+            .child(div().flex_1())
+            .child(
+                div().pt(px(16.)).child(
+                    proposal_action(
+                        "continue-to-record",
+                        "Continue to record",
+                        Some("record"),
+                        Some("⌘↩"),
+                        ActionLook::Accent,
+                    )
+                    .justify_center()
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.continue_to_record(&ContinueToRecord, window, cx)
+                    })),
+                ),
+            )
     }
 
     fn document(&self, cx: &mut Context<Self>) -> Div {
@@ -518,7 +687,8 @@ impl ScriptScreen {
                             .iter()
                             .any(|(_, c)| (c.line..c.end).contains(&beat.line));
                         if !replaced {
-                            section = section.child(beat_view(beat, self.full_script));
+                            let marked = self.target == Some(beat.line);
+                            section = section.child(beat_view(beat, self.full_script, marked));
                         }
                         for i in here {
                             shown[i] = true;
@@ -550,9 +720,22 @@ impl ScriptScreen {
                     .child(segmented("script-mode", SUNK, modes).w(px(170.)))
                     .child(
                         div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
                             .text_size(px(14.))
                             .text_color(MUTED)
                             .child("Beats for reactions, full script for tours"),
+                    )
+                    .child(
+                        proposal_action(
+                            "edit-script",
+                            "Edit script",
+                            Some("edit"),
+                            None,
+                            ActionLook::Plain,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.edit_script(cx))),
                     ),
             )
             .when_some(self.error.clone(), |this, error| {
@@ -778,7 +961,7 @@ impl ScriptScreen {
                         div()
                             .text_size(TEXT_SM)
                             .text_color(MUTED)
-                            .child("Claude · proposes changes to script.md"),
+                            .child("Claude · suggests changes to the script"),
                     ),
             )
             .child(
@@ -808,6 +991,7 @@ impl Render for ScriptScreen {
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::on_accept))
             .on_action(cx.listener(Self::on_reject))
+            .on_action(cx.listener(Self::continue_to_record))
             .size_full()
             .flex()
             .gap(px(8.))
@@ -819,18 +1003,27 @@ impl Render for ScriptScreen {
     }
 }
 
-fn beat_view(beat: &shot_core::Beat, full_script: bool) -> Div {
+/// A beat, `marked` with the warning tint when a check finding pointed at it.
+fn beat_view(beat: &shot_core::Beat, full_script: bool, marked: bool) -> Div {
     let visual = beat.text.to_lowercase().starts_with("b-roll");
     div()
         .flex()
         .gap(px(10.))
+        .when(marked, |this| {
+            this.mx(px(-8.))
+                .px(px(8.))
+                .my(px(-4.))
+                .py(px(4.))
+                .rounded(RADIUS_SM)
+                .bg(WARN_TINT)
+        })
         .child(
             div()
                 .flex_none()
                 .size(px(6.))
                 .mt(px(9.))
                 .rounded_full()
-                .bg(FAINT),
+                .bg(if marked { WARN } else { FAINT }),
         )
         .child(
             div()
@@ -846,37 +1039,49 @@ fn beat_view(beat: &shot_core::Beat, full_script: bool) -> Div {
         )
 }
 
-/// One line per problem, with beats without a source counted together.
-fn summarize(findings: &[ScriptFinding]) -> Vec<String> {
+/// One line per problem with the line of the beat it points at, beats without a source counted
+/// together.
+fn summarize(findings: &[ScriptFinding]) -> Vec<(String, Option<usize>)> {
     let mut out = Vec::new();
-    let unsourced: Vec<usize> = findings
+    let unsourced: Vec<(&str, usize)> = findings
         .iter()
         .filter_map(|f| match f {
-            ScriptFinding::NoSource { line, .. } => Some(*line),
+            ScriptFinding::NoSource { chapter, line } => Some((chapter.as_str(), *line)),
             _ => None,
         })
         .collect();
     for finding in findings {
         match finding {
-            ScriptFinding::LongHook { spoken } => out.push(format!(
-                "The hook takes {} to say. Aim for under 15 s.",
-                clock(*spoken)
+            ScriptFinding::LongHook { spoken } => out.push((
+                format!(
+                    "The hook takes {} to say. Aim for under 15 s.",
+                    clock(*spoken)
+                ),
+                None,
             )),
             ScriptFinding::NoVisual {
-                chapter, spoken, ..
-            } => out.push(format!(
-                "{chapter} runs {} without a visual. Add b-roll notes?",
-                clock(*spoken)
+                chapter,
+                spoken,
+                line,
+            } => out.push((
+                format!(
+                    "{chapter} runs {} without a visual. Add b-roll notes?",
+                    clock(*spoken)
+                ),
+                Some(*line),
             )),
             ScriptFinding::NoSource { .. } => {}
         }
     }
     match unsourced.as_slice() {
         [] => {}
-        [line] => out.push(format!("The beat on line {line} has no source.")),
-        [first, ..] => out.push(format!(
-            "{} beats have no source, the first on line {first}.",
-            unsourced.len()
+        [(chapter, line)] => out.push((format!("A beat in {chapter} has no source."), Some(*line))),
+        [(chapter, line), ..] => out.push((
+            format!(
+                "{} beats have no source, the first in {chapter}.",
+                unsourced.len()
+            ),
+            Some(*line),
         )),
     }
     out
@@ -897,4 +1102,30 @@ fn clock(t: Micros) -> String {
 
 fn spoken_seconds(words: isize) -> f64 {
     words as f64 * 60.0 / script_check::WORDS_PER_MINUTE as f64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_finding_names_the_chapter_and_points_at_the_first_beat() {
+        let findings = [
+            ScriptFinding::NoSource {
+                chapter: "Setup".to_owned(),
+                line: 5,
+            },
+            ScriptFinding::NoSource {
+                chapter: "Wrap".to_owned(),
+                line: 9,
+            },
+        ];
+        assert_eq!(
+            summarize(&findings),
+            [(
+                "2 beats have no source, the first in Setup.".to_owned(),
+                Some(5)
+            )]
+        );
+    }
 }

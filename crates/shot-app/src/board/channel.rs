@@ -17,6 +17,13 @@ use shot_ship::lock::LOCK_FILE;
 /// The files of a video folder that live in git, apart from `elements/` and `sources/`.
 const TRACKED: [&str; 5] = ["video.kdl", "script.md", "format.kdl", "cut.kdl", LOCK_FILE];
 
+/// The status of video `slug` as its card on the board shows it, read from its branch.
+pub fn status(repo: &Path, slug: &str) -> Option<Status> {
+    let cards = Board::open(repo).ok()?.cards().ok()?;
+    let card = cards.into_iter().find(|card| card.slug == slug)?;
+    card.video.ok().map(|video| video.status)
+}
+
 /// The channel repo and slug of a video folder at `<repo>/videos/<slug>`, if the repo opens as
 /// a board.
 pub fn locate(dir: &Path) -> Option<(PathBuf, String)> {
