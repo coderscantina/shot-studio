@@ -222,6 +222,8 @@ struct ChapterStart {
 #[derive(Debug)]
 pub struct Theme {
     pub preset: Preset,
+    /// Whether entrances snap to the beat of the music playing, see [`crate::export`].
+    pub beat_sync: bool,
     /// The preset's springs with the brand's feel.
     pub motion: Motion,
     pub moves: Moves,
@@ -263,6 +265,15 @@ fn preset_of(name: PresetName) -> Preset {
         PresetName::Editorial => Preset::Editorial,
         PresetName::Launch => Preset::Launch,
         PresetName::Calm => Preset::Calm,
+    }
+}
+
+fn name_of(preset: Preset) -> PresetName {
+    match preset {
+        Preset::Reactive => PresetName::Reactive,
+        Preset::Editorial => PresetName::Editorial,
+        Preset::Launch => PresetName::Launch,
+        Preset::Calm => PresetName::Calm,
     }
 }
 
@@ -321,7 +332,10 @@ impl Theme {
             .get(format)
             .map_or_else(|| default_preset(format), preset_of);
         let mut feel = preset.feel();
-        if let Some(tuned) = brand.presets.iter().find(|p| preset_of(p.name) == preset) {
+        let tuned = brand.presets.iter().find(|p| preset_of(p.name) == preset);
+        let beat_sync =
+            shot_audio::beats::beat_sync(name_of(preset), tuned.and_then(|tuned| tuned.beat_sync));
+        if let Some(tuned) = tuned {
             let set = |value: &mut u8, over: Option<u8>| *value = over.unwrap_or(*value);
             set(&mut feel.tempo, tuned.tempo);
             set(&mut feel.bounce, tuned.bounce);
@@ -429,6 +443,7 @@ impl Theme {
         };
         let mut theme = Self {
             preset,
+            beat_sync,
             motion: Motion::new(feel),
             moves: preset.moves(),
             palette,
@@ -774,14 +789,14 @@ pub(crate) fn overlay_key(theme: &Theme, overlay: &Overlay, take: &Id) -> Option
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::plan::ExportPlan;
     use serde_json::json;
     use shot_core::{MediaId, Project, Timeline};
 
     /// A star with a `text` slot and an `accent` color slot.
-    fn star() -> Vec<u8> {
+    pub(crate) fn star() -> Vec<u8> {
         let prop = |k| json!({ "a": 0, "k": k });
         let file = json!({
             "v": "5.7.0", "fr": 60, "ip": 0, "op": 60, "w": 400, "h": 400, "layers": [
