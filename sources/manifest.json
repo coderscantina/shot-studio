@@ -139,7 +139,8 @@
         "crates/shot-render/assets/fonts/Geist.ttf",
         "crates/shot-render/assets/fonts/GeistMono.ttf",
         "crates/shot-render/assets/fonts/OFL-Geist.txt"
-      ]
+      ],
+      "license_file": "crates/shot-render/assets/fonts/OFL-Geist.txt"
     },
     {
       "name": "Inter",
@@ -151,7 +152,8 @@
       "assets": [
         "crates/shot-render/assets/fonts/Inter.ttf",
         "crates/shot-render/assets/fonts/OFL-Inter.txt"
-      ]
+      ],
+      "license_file": "crates/shot-render/assets/fonts/OFL-Inter.txt"
     },
     {
       "name": "JetBrains Mono",
@@ -163,7 +165,8 @@
       "assets": [
         "crates/shot-render/assets/fonts/JetBrainsMono.ttf",
         "crates/shot-render/assets/fonts/OFL-JetBrainsMono.txt"
-      ]
+      ],
+      "license_file": "crates/shot-render/assets/fonts/OFL-JetBrainsMono.txt"
     },
     {
       "name": "Noto Animated Emoji",
@@ -175,6 +178,46 @@
       "assets": [
         "crates/shot-render/assets/emoji/"
       ]
+    },
+    {
+      "name": "Geist and Geist Mono (app interface)",
+      "repository": "https://github.com/vercel/geist-font",
+      "revision": "static TTFs",
+      "license": "OFL-1.1",
+      "contributes": "The app interface fonts: Geist Regular, Medium, SemiBold and Bold, Geist Mono Regular and Medium.",
+      "license_file": "crates/shot-app/assets/fonts/LICENSE-GEIST.txt",
+      "assets": [
+        "crates/shot-app/assets/fonts/"
+      ]
+    },
+    {
+      "name": "Hugeicons free icons",
+      "repository": "https://hugeicons.com",
+      "revision": "@hugeicons/core-free-icons, stroke rounded",
+      "license": "MIT",
+      "contributes": "The app interface icons.",
+      "license_file": "crates/shot-app/assets/icons/LICENSE-HUGEICONS.md",
+      "assets": [
+        "crates/shot-app/assets/icons/"
+      ]
+    },
+    {
+      "name": "libgit2",
+      "repository": "https://github.com/libgit2/libgit2",
+      "revision": "1.9.7, vendored by the libgit2-sys crate",
+      "license": "GPL-2.0-only with the libgit2 linking exception",
+      "contributes": "Git for the board and proposals, linked statically. COPYING also covers its bundled zlib, llhttp, pcre2, xdiff and ntlmclient.",
+      "vendored_in": "libgit2-sys",
+      "license_file": "libgit2/COPYING"
+    },
+    {
+      "name": "whisper.cpp and ggml",
+      "repository": "https://github.com/ggml-org/whisper.cpp",
+      "revision": "vendored by the whisper-rs-sys crate",
+      "license": "MIT",
+      "contributes": "Speech recognition on Metal, linked statically.",
+      "vendored_in": "whisper-rs-sys",
+      "license_file": "whisper.cpp/LICENSE"
     }
   ]
 }

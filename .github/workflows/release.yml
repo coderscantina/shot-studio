@@ -1,0 +1,200 @@
+name: Release
+
+# Runs on release tags that `release.sh` creates: vYY.M.D-<short commit>, e.g.
+# v26.11.8-1a2b3c4, or vYY.M.D.N-<short commit> for the Nth release of a day. Waits for CI on
+# the release commit, builds "Shot Studio.app" and its DMG on Apple Silicon, signs and
+# notarizes them when the Apple secrets are set, and creates a GitHub release whose notes are
+# the version's CHANGELOG.md section. Without the secrets the DMG is unsigned and the release
+# stays a draft, so the cask never points at a build Gatekeeper rejects.
+#
+# Secrets:
+#   APPLE_DEVELOPER_ID_CERT       the Developer ID Application certificate and key, .p12 in base64
+#   APPLE_DEVELOPER_ID_PASSWORD   the .p12 password
+#   APPLE_TEAM_ID                 the team id in the certificate's name
+#   APPLE_NOTARY_API_KEY          an App Store Connect API key, .p8 in base64
+#   APPLE_NOTARY_API_KEY_ID       its key id
+#   APPLE_NOTARY_API_ISSUER       its issuer id
+on:
+  push:
+    tags:
+      - 'v*'
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    outputs:
+      release: ${{ steps.version.outputs.release }}
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check tag and extract release notes
+        id: version
+        run: |
+          release="${GITHUB_REF_NAME#v}"
+          version="${release%-*}"
+          sha="${release##*-}"
+          crate=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)
+          # A same-day release YY.M.D.N has the crate version YY.M.D-N; release.sh sets both.
+          expected=$(printf '%s' "$crate" | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+)-([0-9]+)$/\1.\2/')
+          if [ "$release" = "$version" ] || [ "$version" != "$expected" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match v$expected-<short commit>"
+            exit 1
+          fi
+          if [ "$(git rev-parse --short="${#sha}" HEAD)" != "$sha" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not name its commit $(git rev-parse --short HEAD)"
+            exit 1
+          fi
+          awk -v heading="## $version" '$0 == heading { found = 1; next } found && /^## / { exit } found' \
+            CHANGELOG.md > release-notes.md
+          if ! grep -q '[^[:space:]]' release-notes.md; then
+            echo "::error::CHANGELOG.md has no section $version"
+            exit 1
+          fi
+          {
+            echo "release=$release"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload release notes
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-notes
+          path: release-notes.md
+          retention-days: 1
+
+      # The tag is pushed with main, so CI is already running on this commit. The release waits
+      # for it instead of running the same checks again.
+      - name: Wait for CI on the release commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for _ in $(seq 30); do
+            run=$(gh run list -R "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$GITHUB_SHA" \
+              --event push --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+            [ -n "$run" ] && break
+            sleep 10
+          done
+          if [ -z "$run" ]; then
+            echo "::error::no CI run on $GITHUB_SHA. Push main before the tag."
+            exit 1
+          fi
+          gh run watch "$run" -R "$GITHUB_REPOSITORY" --exit-status --interval 30 > /dev/null
+
+  dmg:
+    needs: check
+    runs-on: macos-latest
+    timeout-minutes: 90
+    env:
+      APPLE_DEVELOPER_ID_CERT: ${{ secrets.APPLE_DEVELOPER_ID_CERT }}
+      APPLE_DEVELOPER_ID_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_NOTARY_API_KEY: ${{ secrets.APPLE_NOTARY_API_KEY }}
+      APPLE_NOTARY_API_KEY_ID: ${{ secrets.APPLE_NOTARY_API_KEY_ID }}
+      APPLE_NOTARY_API_ISSUER: ${{ secrets.APPLE_NOTARY_API_ISSUER }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: release
+
+      - name: Import the Developer ID certificate
+        if: env.APPLE_DEVELOPER_ID_CERT != '' && env.APPLE_TEAM_ID != ''
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password=$(openssl rand -hex 16)
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          printf '%s' "$APPLE_DEVELOPER_ID_CERT" | base64 --decode > "$RUNNER_TEMP/developer-id.p12"
+          security import "$RUNNER_TEMP/developer-id.p12" -k "$keychain" \
+            -P "$APPLE_DEVELOPER_ID_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/developer-id.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain" > /dev/null
+          # shellcheck disable=SC2046
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          identity=$(security find-identity -v -p codesigning "$keychain" |
+            awk -v team="($APPLE_TEAM_ID)" '/Developer ID Application/ && index($0, team) { print $2; exit }')
+          if [ -z "$identity" ]; then
+            echo "::error::no Developer ID Application identity for team $APPLE_TEAM_ID in the certificate"
+            exit 1
+          fi
+          echo "SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+
+      - name: Write the notary API key
+        if: env.SIGN_IDENTITY != '' && env.APPLE_NOTARY_API_KEY != '' && env.APPLE_NOTARY_API_KEY_ID != '' && env.APPLE_NOTARY_API_ISSUER != ''
+        run: |
+          printf '%s' "$APPLE_NOTARY_API_KEY" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+          {
+            echo "NOTARY_KEY=$RUNNER_TEMP/notary.p8"
+            echo "NOTARY_KEY_ID=$APPLE_NOTARY_API_KEY_ID"
+            echo "NOTARY_ISSUER=$APPLE_NOTARY_API_ISSUER"
+          } >> "$GITHUB_ENV"
+
+      - name: Warn about missing Apple secrets
+        if: env.SIGN_IDENTITY == '' || env.NOTARY_KEY == ''
+        run: |
+          echo "::warning::APPLE_DEVELOPER_ID_CERT, APPLE_TEAM_ID or the APPLE_NOTARY_API_* secrets are missing. The DMG is not signed or not notarized, and the release stays a draft."
+
+      - name: Build the app and DMG
+        run: scripts/bundle.sh
+
+      - name: Summarize the cask values
+        env:
+          RELEASE: ${{ needs.check.outputs.release }}
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          sha=$(shasum -a 256 "dist/Shot-Studio-$VERSION.dmg" | cut -d' ' -f1)
+          {
+            echo "### Homebrew cask"
+            echo
+            echo "In coderscantina/homebrew-tap, Casks/shot-studio.rb:"
+            echo
+            echo '```ruby'
+            echo "version \"$VERSION,${RELEASE##*-}\""
+            echo "sha256 \"$sha\""
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Download release notes
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-notes
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          name: ${{ github.ref_name }}
+          body_path: release-notes.md
+          files: dist/Shot-Studio-${{ needs.check.outputs.version }}.dmg
+          draft: ${{ env.NOTARY_KEY == '' }}
+
+      - name: Remove the signing keychain and key
+        if: always()
+        run: |
+          [ ! -f "$RUNNER_TEMP/signing.keychain-db" ] || security delete-keychain "$RUNNER_TEMP/signing.keychain-db"
+          rm -f "$RUNNER_TEMP/notary.p8"

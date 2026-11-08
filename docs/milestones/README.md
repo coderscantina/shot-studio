@@ -71,7 +71,6 @@ Found by agents and waiting for a task. Remove a line when it's fixed.
 - The app's sound, callout, pop and Lottie placement were driven by an in-app script calling the button handlers, not by real clicks; the Lottie import is covered only by its unit test.
 - The end card does not draw the brand logo yet, and a brand font file has only gone through a unit test, not a real export.
 - vello's coverage order varies between runs; rectangle shadows are snapped to whole pixels, but a rare one-bit flip in text or other shapes is still possible.
-- The bundled Noto animated emoji are CC BY 4.0, which needs attribution in the app's About or credits before release (milestone 09).
 - The first seek after playback in the editor engine takes about 0.5 s.
 - The app's preview plays the voice and the lock's music and sound effects, but not export's bumper sound, the brand's per-phase transition sounds or the music ducking under bumpers.
 - `shot check` (`check_cut`) and the Ship screen's cut length read the timeline without bookends, so with an intro the chapter rules and the length are off by the bookends.
