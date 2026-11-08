@@ -2,7 +2,9 @@
 //! middle shows one review item at a time: what the rule found and why it asks, the words around
 //! it, its picture and waveform. Space plays it with a little of what plays before and after,
 //! ⇧Space plays it as it would sound cut. K keeps it, C cuts it, and the next item plays. The
-//! rules with their switches and the pacing sit on the left, the queue on the right.
+//! rules with their switches and the pacing sit on the left, the queue on the right. Once
+//! nothing waits, the cuts the rules applied on their own can be stepped through the same way:
+//! K restores the words, C leaves them cut.
 //!
 //! The queue is the `review` nodes of `cut.kdl`, or a migrated video's `review` instances of
 //! its lock, read through [`Cut::review_queue`] of the shown cut; every answer goes through
@@ -26,13 +28,16 @@ use gpui::{
 use shot_analyze::autocut::{self, RuleCount};
 use shot_analyze::{Speech, cache};
 use shot_core::{
-    Cut, Decision, Id, Micros, Pacing, RangeEdit, Review, RuleKind, TakeAt, TimeRange, Word,
+    Cut, Decision, Id, Micros, Pacing, RangeEdit, RemovedBy, Review, RuleKind, TakeAt, TimeRange,
+    Word,
 };
 
 use crate::folder::VideoFolder;
 use crate::model::{self, FPS};
 use crate::peaks::Peaks;
+use crate::studio::Screen;
 use crate::theme::*;
+use crate::transcribe::{Transcribe, Transcribed};
 use crate::ui::{Segment, icon, kbd, label, mono, pane, segmented};
 use player::{Hear, ItemKey, Player};
 
@@ -51,7 +56,8 @@ actions!(
         PreviousItem,
         PlayAround,
         PlayCut,
-        Continue
+        Continue,
+        ReviewApplied
     ]
 );
 
@@ -65,17 +71,29 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("space", PlayAround, context),
         KeyBinding::new("shift-space", PlayCut, context),
         KeyBinding::new("cmd-enter", Continue, context),
+        KeyBinding::new("r", ReviewApplied, context),
     ]);
 }
 
-/// Asks the studio to show the Edit screen.
-pub struct ContinueToEdit;
+/// Asks the studio to show a screen: Edit when the review is done, Record before any take.
+pub struct GoTo(pub Screen);
+
+/// Which items the middle steps through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// The review items that wait for an answer.
+    Open,
+    /// The cuts the rules applied on their own, once nothing waits.
+    Applied,
+}
 
 /// An item answered on this screen, shown dimmed in the list.
 struct Answered {
     review: Review,
     take: Id,
     decision: Decision,
+    /// An applied cut: Keep restored it, Cut left it.
+    applied: bool,
 }
 
 /// One row of the list: an open item from the cut, or one answered here.
@@ -86,6 +104,7 @@ enum Row {
 
 pub struct CutScreen {
     folder: Entity<VideoFolder>,
+    mode: Mode,
     /// The open item on show, by its place in the cut.
     current: Option<(TakeAt, TimeRange)>,
     /// Where the item on show sat in the queue, so the next one takes its place when it goes.
@@ -103,11 +122,13 @@ pub struct CutScreen {
     list: ScrollHandle,
     /// The item the list last scrolled to.
     scrolled: Option<ItemKey>,
+    transcribe: Entity<Transcribe>,
     /// Pauses playback when another screen takes the focus.
     _blur: Option<Subscription>,
+    _transcribed: Subscription,
 }
 
-impl EventEmitter<ContinueToEdit> for CutScreen {}
+impl EventEmitter<GoTo> for CutScreen {}
 
 impl Focusable for CutScreen {
     fn focus_handle(&self, _: &App) -> FocusHandle {
@@ -124,8 +145,19 @@ impl CutScreen {
             cx.notify();
         })
         .detach();
+        let transcribe = cx.new(|cx| Transcribe::new(folder.clone(), cx));
+        let transcribed = cx.subscribe(&transcribe, |this, _, Transcribed(takes), cx| {
+            // The rules skipped these takes for want of words; now they make their rough cut.
+            let takes = takes.clone();
+            this.change("Transcribed".to_owned(), cx, |folder| {
+                takes
+                    .iter()
+                    .try_for_each(|take| run::rough_cut(folder, take))
+            });
+        });
         Self {
             folder,
+            mode: Mode::Open,
             current: None,
             index: 0,
             answered: Vec::new(),
@@ -138,12 +170,63 @@ impl CutScreen {
             focus: cx.focus_handle(),
             list: ScrollHandle::new(),
             scrolled: None,
+            transcribe,
             _blur: None,
+            _transcribed: transcribed,
         }
     }
 
+    /// The items the middle steps through: the open review items, or the applied cuts not
+    /// answered here yet.
     fn queue(&self, cx: &App) -> Vec<(TakeAt, Review)> {
-        self.folder.read(cx).shown.cut.review_queue().collect()
+        let cut = &self.folder.read(cx).shown.cut;
+        match self.mode {
+            Mode::Open => cut.review_queue().collect(),
+            Mode::Applied => applied(cut)
+                .filter(|(at, review)| {
+                    let take = &cut.chapters[at.chapter].takes[at.take].take;
+                    !self
+                        .answered
+                        .iter()
+                        .any(|a| a.applied && a.take == *take && a.review.range == review.range)
+                })
+                .collect(),
+        }
+    }
+
+    /// Back to the open items as soon as one waits, as after a rule switch.
+    fn follow_open(&mut self, cx: &App) {
+        if self.mode == Mode::Applied
+            && self
+                .folder
+                .read(cx)
+                .shown
+                .cut
+                .review_queue()
+                .next()
+                .is_some()
+        {
+            self.mode = Mode::Open;
+            self.current = None;
+            self.index = 0;
+        }
+    }
+
+    /// Steps through the cuts the rules applied, from the one at `index`.
+    fn review_applied(&mut self, index: usize, cx: &mut Context<Self>) {
+        let cut = &self.folder.read(cx).shown.cut;
+        if self.mode == Mode::Applied
+            || cut.review_queue().next().is_some()
+            || applied(cut).next().is_none()
+        {
+            return;
+        }
+        self.mode = Mode::Applied;
+        self.answered.retain(|a| !a.applied);
+        let queue = self.queue(cx);
+        self.current = None;
+        self.show(&queue, index, true);
+        cx.notify();
     }
 
     /// The open item on show: the one picked, else the one that took its place.
@@ -163,11 +246,18 @@ impl CutScreen {
     }
 
     /// Drops answers that ⌘Z took back from the dimmed list and shows the newest of their items.
+    /// An applied cut left cut wrote nothing, so there is nothing to take back.
     fn bring_back_undone(&mut self, cx: &mut Context<Self>) {
+        self.follow_open(cx);
         let cut = &self.folder.read(cx).shown.cut;
-        let queue: Vec<(TakeAt, Review)> = cut.review_queue().collect();
+        let open: Vec<(TakeAt, Review)> = cut.review_queue().collect();
+        let removed: Vec<(TakeAt, Review)> = applied(cut).collect();
         let mut back = None;
         self.answered.retain(|answered| {
+            if answered.applied && answered.decision == Decision::Cut {
+                return true;
+            }
+            let queue = if answered.applied { &removed } else { &open };
             let open = queue.iter().find(|(at, review)| {
                 review.range == answered.review.range
                     && review.by == answered.review.by
@@ -189,11 +279,17 @@ impl CutScreen {
             return;
         };
         let (at, review) = queue[index];
+        let applied = self.mode == Mode::Applied;
         let result = self.folder.update(cx, |folder, cx| {
             let take = folder.shown.cut.chapters[at.chapter].takes[at.take]
                 .take
                 .clone();
-            folder.decide(at, review.range, decision)?;
+            match (applied, decision) {
+                (false, _) => folder.decide(at, review.range, decision)?,
+                (true, Decision::Keep) => folder.restore(at, review.range)?,
+                // It is cut already.
+                (true, Decision::Cut) => {}
+            }
             cx.notify();
             Ok::<_, String>(take)
         });
@@ -204,6 +300,7 @@ impl CutScreen {
                     review,
                     take,
                     decision,
+                    applied,
                 });
                 // The next open item takes the place of the answered one, and plays.
                 let queue = self.queue(cx);
@@ -251,9 +348,15 @@ impl CutScreen {
         cx.notify();
     }
 
-    fn continue_to_edit(&mut self, cx: &mut Context<Self>) {
+    /// On to Edit, or to Record while there is nothing to cut.
+    fn go_on(&mut self, cx: &mut Context<Self>) {
         self.player.pause();
-        cx.emit(ContinueToEdit);
+        let screen = if self.folder.read(cx).project.cut.chapters.is_empty() {
+            Screen::Record
+        } else {
+            Screen::Edit
+        };
+        cx.emit(GoTo(screen));
     }
 
     /// Runs a rule switch or pacing change and notes what it did to the length of the cut.
@@ -409,6 +512,47 @@ fn reason(rule: RuleKind, length: Micros, murmur: Option<bool>) -> String {
     }
 }
 
+/// Why the rules cut an applied cut on their own, in a sentence.
+fn applied_reason(rule: RuleKind, length: Micros) -> String {
+    let seconds = self::length(length);
+    match rule {
+        RuleKind::Silence => format!("{seconds} without words or voice, so the rules cut it."),
+        RuleKind::Retake => {
+            "You said this again later, so the rules cut the earlier version.".to_owned()
+        }
+        RuleKind::Misspoken => {
+            "A correction follows these words, so the rules cut them.".to_owned()
+        }
+        RuleKind::Pause => format!(
+            "A {seconds} pause in the middle of a sentence, long enough for the rules to cut it."
+        ),
+        RuleKind::Filler => "A filler sound. Keep it when it carries meaning.".to_owned(),
+        RuleKind::IdleScreen => format!(
+            "{seconds} without voice on a screen that does not change, so the rules cut it."
+        ),
+    }
+}
+
+/// The cuts the rules applied, in cut order, as review items of their rule.
+fn applied(cut: &Cut) -> impl Iterator<Item = (TakeAt, Review)> + '_ {
+    model::blocks(cut).flat_map(|(at, block)| {
+        block.ranges.iter().filter_map(move |piece| match *piece {
+            RangeEdit::Remove {
+                range,
+                by: RemovedBy::Rule(by),
+            } => Some((
+                at,
+                Review {
+                    range,
+                    by,
+                    kept: false,
+                },
+            )),
+            _ => None,
+        })
+    })
+}
+
 /// `M:SS` of a length.
 fn minutes(t: Micros) -> String {
     let seconds = t.0 / 1_000_000;
@@ -480,24 +624,25 @@ fn timecode(t: Micros) -> String {
     model::timecode(t.0 * u64::from(FPS) / 1_000_000)
 }
 
-/// What a rule did, for its row: "12 cuts, 2:41 · 3 to review", or "Off".
-fn rule_detail(count: &RuleCount, on: bool) -> String {
+/// What a rule did, for its row: "12 cuts, 2:41 · 3 to review", or "Off". Each piece says
+/// whether it is a duration, which shows in Geist Mono.
+fn rule_detail(count: &RuleCount, on: bool) -> Vec<(String, bool)> {
     let mut parts = Vec::new();
     if count.removed > 0 {
         let cuts = if count.removed == 1 { "cut" } else { "cuts" };
-        parts.push(format!(
-            "{} {cuts}, {}",
-            count.removed,
-            length(count.removed_time)
-        ));
+        parts.push((format!("{} {cuts},", count.removed), false));
+        parts.push((length(count.removed_time), true));
     }
     if count.queued > 0 {
-        parts.push(format!("{} to review", count.queued));
+        if !parts.is_empty() {
+            parts.push(("·".to_owned(), false));
+        }
+        parts.push((format!("{} to review", count.queued), false));
     }
     match (on, parts.is_empty()) {
-        (false, true) => "Off".to_owned(),
-        (true, true) => "Nothing found".to_owned(),
-        _ => parts.join(" · "),
+        (false, true) => vec![("Off".to_owned(), false)],
+        (true, true) => vec![("Nothing found".to_owned(), false)],
+        _ => parts,
     }
 }
 
@@ -572,13 +717,6 @@ impl CutScreen {
         let format = &folder.project.format;
         let pacing = format.pacing;
         let format_name = folder.project.video.format;
-        let mut untranscribed: Vec<String> = Vec::new();
-        for (_, block) in model::blocks(&folder.project.cut) {
-            let take = block.take.to_string();
-            if !folder.transcripts.contains_key(&block.take) && !untranscribed.contains(&take) {
-                untranscribed.push(take);
-            }
-        }
         let rows = counts.iter().map(|count| {
             let rule = count.rule;
             let on = run::rule_on(format, rule);
@@ -601,9 +739,19 @@ impl CutScreen {
                         .child(div().font_weight(FontWeight::MEDIUM).child(rule_name(rule)))
                         .child(
                             div()
+                                .flex()
+                                .gap(px(4.))
                                 .text_size(TEXT_SM)
                                 .text_color(if editable && !on { FAINT } else { MUTED })
-                                .child(rule_detail(count, on || !editable)),
+                                .children(rule_detail(count, on || !editable).into_iter().map(
+                                    |(text, duration)| {
+                                        if duration {
+                                            mono(text)
+                                        } else {
+                                            div().child(text)
+                                        }
+                                    },
+                                )),
                         ),
                 )
                 .when(editable, |this| {
@@ -720,17 +868,17 @@ impl CutScreen {
             .when_some(self.note.clone(), |this, text| {
                 this.child(div().px(px(4.)).pt(px(6.)).child(note(text).text_color(BODY)))
             })
-            .when(!untranscribed.is_empty(), |this| {
-                this.child(div().px(px(4.)).pt(px(6.)).child(note(format!(
-                    "No transcript for {}, so the rules skip it. Transcribe it with shot transcribe.",
-                    untranscribed.join(", ")
-                ))))
-            })
+            .child(div().pt(px(6.)).child(self.transcribe.clone()))
     }
 
     fn progress(&self, queue: &[(TakeAt, Review)], cx: &App) -> Div {
         let cut = &self.folder.read(cx).shown.cut;
-        let answered = self.answered.len();
+        let applied = self.mode == Mode::Applied;
+        let answered = self
+            .answered
+            .iter()
+            .filter(|a| a.applied == applied)
+            .count();
         let total = answered + queue.len();
         let stat = |value: String, name: &'static str, color: Hsla| {
             div()
@@ -756,7 +904,14 @@ impl CutScreen {
                     .gap(px(28.))
                     .child(stat(minutes(raw_length(cut)), "Raw", TEXT.into()))
                     .child(stat(minutes(kept_length(cut)), "Cut", ACCENT.into()))
-                    .child(stat(queue.len().to_string(), "Need your call", TEXT.into()))
+                    .child(stat(
+                        queue.len().to_string(),
+                        match self.mode {
+                            Mode::Open => "Need your call",
+                            Mode::Applied => "Applied, to review",
+                        },
+                        TEXT.into(),
+                    ))
                     .when(total > 0, |this| {
                         this.child(
                             div()
@@ -827,7 +982,12 @@ impl CutScreen {
                     .map(|s| s.ranges.iter().any(|r| r.overlaps(review.range)))
             })
             .flatten();
-        let why = reason(review.by, review.range.duration(), murmur);
+        let applied = self.mode == Mode::Applied;
+        let why = if applied {
+            applied_reason(review.by, review.range.duration())
+        } else {
+            reason(review.by, review.range.duration(), murmur)
+        };
 
         let peaks = self.peaks.get(&take).cloned().flatten();
         let bars: Vec<f32> = self
@@ -993,56 +1153,106 @@ impl CutScreen {
                     .child(play_button(Hear::Cut, "play-cut", "Play as cut", "⇧Space"))
                     .child(div().flex_1())
                     .child(
-                        button("keep", None, "Keep", "K", false).on_click(
-                            cx.listener(|this, _, _, cx| this.decide(Decision::Keep, cx)),
-                        ),
+                        button(
+                            "keep",
+                            None,
+                            if applied { "Restore" } else { "Keep" },
+                            "K",
+                            false,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.decide(Decision::Keep, cx))),
                     )
                     .child(
-                        button("cut", None, format!("Cut {duration}"), "C", true)
-                            .on_click(cx.listener(|this, _, _, cx| this.decide(Decision::Cut, cx))),
+                        button(
+                            "cut",
+                            None,
+                            if applied {
+                                "Leave cut".to_owned()
+                            } else {
+                                format!("Cut {duration}")
+                            },
+                            "C",
+                            true,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.decide(Decision::Cut, cx))),
                     ),
             )
     }
 
-    /// The middle when nothing waits: what happened, and the way on to Edit.
+    /// The middle when nothing waits: what happened, and the way on.
     fn done(&self, cx: &mut Context<Self>) -> Div {
         let folder = self.folder.read(cx);
         let cut = &folder.shown.cut;
-        let kept = self
+        let applied = self.mode == Mode::Applied;
+        let answered: Vec<&Answered> = self
             .answered
+            .iter()
+            .filter(|a| a.applied == applied)
+            .collect();
+        let kept = answered
             .iter()
             .filter(|a| a.decision == Decision::Keep)
             .count();
-        let cuts = self.answered.len() - kept;
+        let cuts = answered.len() - kept;
         let counts = autocut::rule_counts(cut);
         let removed: usize = counts.iter().map(|c| c.removed).sum();
         let removed_time = Micros(counts.iter().map(|c| c.removed_time.0).sum());
-        let (title, text) = if cut.chapters.is_empty() {
+        let untranscribed =
+            model::blocks(cut).any(|(_, b)| !folder.transcripts.contains_key(&b.take));
+        let runs = minutes(kept_length(cut));
+        // A lime check only when the rules or the answers made a cut.
+        let (icon_name, done, title, text) = if cut.chapters.is_empty() {
             (
+                "record",
+                false,
                 "Nothing recorded yet",
                 "Record a take, and the rules make a rough cut of it here.".to_owned(),
             )
-        } else if !self.answered.is_empty() {
+        } else if applied {
             (
+                "check",
+                true,
+                "Every applied cut reviewed",
+                format!("You restored {kept} and left {cuts} cut. The cut runs {runs}."),
+            )
+        } else if !answered.is_empty() {
+            (
+                "check",
+                true,
                 "All answered",
-                format!(
-                    "You kept {kept} and cut {cuts}. The cut runs {}.",
-                    minutes(kept_length(cut))
-                ),
+                format!("You kept {kept} and cut {cuts}. The cut runs {runs}."),
+            )
+        } else if removed == 0 && untranscribed {
+            (
+                "text",
+                false,
+                "No transcript yet",
+                "The rules work from the words. Transcribe the take, and they make a rough cut of it."
+                    .to_owned(),
             )
         } else if removed == 0 {
             (
+                "check",
+                true,
                 "Nothing needs your call",
                 "The rules found nothing to cut.".to_owned(),
             )
         } else {
             (
+                "check",
+                true,
                 "Nothing needs your call",
                 format!(
-                    "The rules cut {removed} places, {} in all, and were sure about each. Switch a rule off to give its cuts back.",
+                    "The rules cut {removed} places, {} in all, and were sure about each.",
                     length(removed_time)
                 ),
             )
+        };
+        let offer_applied = !applied && removed > 0;
+        let (go, go_icon) = if cut.chapters.is_empty() {
+            ("Record a take", "record")
+        } else {
+            ("Continue to edit", "edit")
         };
         div()
             .flex_1()
@@ -1056,11 +1266,15 @@ impl CutScreen {
                     .size(px(44.))
                     .mb(px(6.))
                     .rounded_full()
-                    .bg(SELECTION)
+                    .bg(if done {
+                        SELECTION.into()
+                    } else {
+                        Hsla::from(RAISED)
+                    })
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(icon("check", px(22.), ACCENT)),
+                    .child(icon(icon_name, px(22.), if done { ACCENT } else { MUTED })),
             )
             .child(
                 div()
@@ -1077,32 +1291,56 @@ impl CutScreen {
                     .child(text),
             )
             .child(
-                div().pt(px(14.)).child(
-                    button(
-                        "done-continue",
-                        Some("edit"),
-                        "Continue to edit",
-                        "⌘↩",
-                        true,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| this.continue_to_edit(cx))),
-                ),
+                div()
+                    .pt(px(14.))
+                    .flex()
+                    .gap(px(10.))
+                    .when(offer_applied, |this| {
+                        let cuts = if removed == 1 {
+                            "Review the applied cut".to_owned()
+                        } else {
+                            format!("Review the {removed} applied cuts")
+                        };
+                        this.child(
+                            button("review-applied", Some("cut"), cuts, "R", false)
+                                .on_click(cx.listener(|this, _, _, cx| this.review_applied(0, cx))),
+                        )
+                    })
+                    .child(
+                        button("done-continue", Some(go_icon), go, "⌘↩", true)
+                            .on_click(cx.listener(|this, _, _, cx| this.go_on(cx))),
+                    ),
             )
     }
 
-    fn list_pane(&mut self, queue: &[(TakeAt, Review)], cx: &mut Context<Self>) -> Div {
+    /// The list on the right: what needs your call, or the applied cuts once nothing does.
+    /// `None` when there is nothing to list.
+    fn list_pane(&mut self, queue: &[(TakeAt, Review)], cx: &mut Context<Self>) -> Option<Div> {
         let folder = self.folder.read(cx);
         let cut = &folder.shown.cut;
-        let shown = self.shown(queue);
+        let applied_mode = self.mode == Mode::Applied;
+        // With nothing open the list offers the applied cuts, and a click starts their review.
+        let entering = !applied_mode && queue.is_empty();
+        let offered: Vec<(TakeAt, Review)> = if entering {
+            applied(cut).collect()
+        } else {
+            Vec::new()
+        };
+        let list = if entering { &offered[..] } else { queue };
+        let shown = if entering { None } else { self.shown(queue) };
         let take_of = |at: TakeAt| &cut.chapters[at.chapter].takes[at.take].take;
-        let mut rows: Vec<(Row, Micros)> = queue
+        let mut rows: Vec<(Row, Micros)> = list
             .iter()
             .enumerate()
             .map(|(index, (at, review))| {
                 (Row::Open(index), edited_time(cut, *at, review.range.from()))
             })
             .collect();
+        let with_answered = !entering || offered.is_empty();
         for (i, answered) in self.answered.iter().enumerate() {
+            if !with_answered || answered.applied != applied_mode {
+                continue;
+            }
             let at = model::blocks(cut)
                 .find(|(_, b)| {
                     b.take == answered.take
@@ -1122,7 +1360,10 @@ impl CutScreen {
         rows.sort_by_key(|(_, t)| *t);
         // The words cut, or for a gap the words it follows.
         let detail = |take: &Id, review: &Review| {
-            let words = folder.transcripts.get(take).map_or(&[][..], |t| t.words());
+            let Some(transcript) = folder.transcripts.get(take) else {
+                return format!("Take {take}, no transcript yet");
+            };
+            let words = transcript.words();
             let (inside, text) = words_in(words, review.range);
             let before = &words[inside.start.saturating_sub(3)..inside.start];
             match (text.is_empty(), before.is_empty()) {
@@ -1141,7 +1382,7 @@ impl CutScreen {
             .map(|(n, (row, time))| {
                 let (take, review, status, open) = match row {
                     Row::Open(index) => {
-                        let (at, review) = queue[index];
+                        let (at, review) = list[index];
                         if Some(index) == shown {
                             on_row = Some((n, (take_of(at).clone(), review.range)));
                         }
@@ -1154,9 +1395,11 @@ impl CutScreen {
                     }
                     Row::Answered(i) => {
                         let answered = &self.answered[i];
-                        let status = match answered.decision {
-                            Decision::Keep => "Kept",
-                            Decision::Cut => "Cut",
+                        let status = match (answered.applied, answered.decision) {
+                            (false, Decision::Keep) => "Kept",
+                            (false, Decision::Cut) => "Cut",
+                            (true, Decision::Keep) => "Restored",
+                            (true, Decision::Cut) => "Left cut",
                         };
                         (&answered.take, answered.review, status.to_owned(), None)
                     }
@@ -1204,17 +1447,24 @@ impl CutScreen {
                             .gap(px(2.))
                             .child(mono(timecode(time)).text_size(px(14.)))
                             .child(
-                                div()
-                                    .text_size(TEXT_SM)
-                                    .text_color(if open.is_some() { BODY } else { FAINT })
-                                    .child(status),
+                                if open.is_some() {
+                                    mono(status)
+                                } else {
+                                    div().child(status)
+                                }
+                                .text_size(TEXT_SM)
+                                .text_color(if open.is_some() { BODY } else { FAINT }),
                             ),
                     )
                     .when_some(open, |this, index| {
                         let queue = queue.to_vec();
                         this.on_click(cx.listener(move |this, _, _, cx| {
-                            this.show(&queue, index, true);
-                            cx.notify();
+                            if entering {
+                                this.review_applied(index, cx);
+                            } else {
+                                this.show(&queue, index, true);
+                                cx.notify();
+                            }
                         }))
                     })
             })
@@ -1226,58 +1476,58 @@ impl CutScreen {
             self.list.scroll_to_item(n);
             self.scrolled = Some(key);
         }
-        let empty = items.is_empty();
+        if items.is_empty() {
+            return None;
+        }
         let open = queue.len();
-        pane()
-            .w(px(330.))
-            .flex_none()
-            .p(px(12.))
-            .flex()
-            .flex_col()
-            .gap(px(2.))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .px(px(12.))
-                    .pt(px(4.))
-                    .pb(px(8.))
-                    .child(label("Needs your call"))
-                    .when(open > 1, |this| {
-                        this.child(div().flex().gap(px(4.)).child(kbd("↑")).child(kbd("↓")))
-                    }),
-            )
-            .child(
-                div()
-                    .id("items")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.list)
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.))
-                    .children(items)
-                    .when(empty, |this| {
-                        this.child(
-                            div()
-                                .px(px(12.))
-                                .py(px(10.))
-                                .text_color(MUTED)
-                                .child("Nothing waits for you."),
-                        )
-                    }),
-            )
-            // With nothing open the middle offers it.
-            .when(open > 0, |this| {
-                this.child(
-                    div().pt(px(12.)).px(px(4.)).flex().flex_col().child(
-                        button("continue", Some("edit"), "Continue to edit", "⌘↩", false)
-                            .on_click(cx.listener(|this, _, _, cx| this.continue_to_edit(cx))),
-                    ),
+        let title = if applied_mode || entering {
+            "Applied by the rules"
+        } else {
+            "Needs your call"
+        };
+        Some(
+            pane()
+                .w(px(330.))
+                .flex_none()
+                .p(px(12.))
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .px(px(12.))
+                        .pt(px(4.))
+                        .pb(px(8.))
+                        .child(label(title))
+                        .when(open > 1, |this| {
+                            this.child(div().flex().gap(px(4.)).child(kbd("↑")).child(kbd("↓")))
+                        }),
                 )
-            })
+                .child(
+                    div()
+                        .id("items")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.list)
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .children(items),
+                )
+                // With nothing open the middle offers it.
+                .when(open > 0, |this| {
+                    this.child(
+                        div().pt(px(12.)).px(px(4.)).flex().flex_col().child(
+                            button("continue", Some("edit"), "Continue to edit", "⌘↩", false)
+                                .on_click(cx.listener(|this, _, _, cx| this.go_on(cx))),
+                        ),
+                    )
+                }),
+        )
     }
 }
 
@@ -1289,6 +1539,7 @@ impl Render for CutScreen {
                 cx.notify();
             }));
         }
+        self.follow_open(cx);
         let queue = self.queue(cx);
         self.sync_player(&queue, cx);
         if self.player.advance() || self.player.is_playing() {
@@ -1321,7 +1572,8 @@ impl Render for CutScreen {
             .on_action(cx.listener(|this, _: &PreviousItem, _, cx| this.step(-1, cx)))
             .on_action(cx.listener(|this, _: &PlayAround, _, cx| this.play(Hear::Around, cx)))
             .on_action(cx.listener(|this, _: &PlayCut, _, cx| this.play(Hear::Cut, cx)))
-            .on_action(cx.listener(|this, _: &Continue, _, cx| this.continue_to_edit(cx)))
+            .on_action(cx.listener(|this, _: &Continue, _, cx| this.go_on(cx)))
+            .on_action(cx.listener(|this, _: &ReviewApplied, _, cx| this.review_applied(0, cx)))
             .children(self.error.clone().map(crate::ui::alert))
             .child(
                 div()
@@ -1342,7 +1594,7 @@ impl Render for CutScreen {
                             .child(progress)
                             .child(body),
                     )
-                    .child(list),
+                    .children(list),
             )
     }
 }
@@ -1389,11 +1641,23 @@ mod tests {
             removed_time: Micros(161_000_000),
             queued,
         };
+        let text = |pieces: Vec<(String, bool)>| {
+            let durations: Vec<String> = pieces
+                .iter()
+                .filter(|(_, d)| *d)
+                .map(|(t, _)| t.clone())
+                .collect();
+            let words: Vec<String> = pieces.into_iter().map(|(t, _)| t).collect();
+            (words.join(" "), durations)
+        };
         assert_eq!(
-            rule_detail(&count(12, 3), true),
-            "12 cuts, 2:41 · 3 to review"
+            text(rule_detail(&count(12, 3), true)),
+            (
+                "12 cuts, 2:41 · 3 to review".to_owned(),
+                vec!["2:41".to_owned()]
+            )
         );
-        assert_eq!(rule_detail(&count(0, 0), true), "Nothing found");
-        assert_eq!(rule_detail(&count(0, 0), false), "Off");
+        assert_eq!(text(rule_detail(&count(0, 0), true)).0, "Nothing found");
+        assert_eq!(text(rule_detail(&count(0, 0), false)).0, "Off");
     }
 }

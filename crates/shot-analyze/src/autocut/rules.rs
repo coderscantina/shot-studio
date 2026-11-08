@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use shot_core::{AutoCut, Micros, RuleKind, TimeRange, Word};
+use shot_core::{AutoCut, Micros, Pacing, RuleKind, TimeRange, Word};
 
 use super::{Finding, TakeFacts};
 use crate::normalize;
@@ -231,14 +231,31 @@ impl Gaps {
         Self::new(facts, &words)
     }
 
-    /// Where the cut of a gap rule's finding goes under another pacing: the gap that holds
-    /// `range`, less `breath` on its voiced sides.
-    pub fn place(&self, range: TimeRange, breath: Micros) -> Option<TimeRange> {
+    /// Where the cut `range` of a gap rule goes when the pacing's breath changes from `before`
+    /// to `breath`. An edge within the widest breath of the voice moves by the difference,
+    /// staying inside the gap; an edge further in stays, since a person shortened the cut there
+    /// or a block ends there.
+    pub fn place(&self, range: TimeRange, before: Micros, breath: Micros) -> Option<TimeRange> {
         let at = self.gaps.partition_point(|g| g.range.to() <= range.from());
-        self.gaps
+        let gap = self
+            .gaps
             .get(at)
-            .filter(|gap| gap.range.intersect(range) == Some(range))
-            .and_then(|gap| gap.cut(breath))
+            .filter(|gap| gap.range.intersect(range) == Some(range))?;
+        let reach = Pacing::Loose.breath().0;
+        let (start, end) = (gap.range.from().0, gap.range.to().0);
+        let from = if gap.voiced_before && range.from().0 <= start + reach {
+            (range.from().0 + breath.0)
+                .saturating_sub(before.0)
+                .max(start)
+        } else {
+            range.from().0
+        };
+        let to = if gap.voiced_after && range.to().0 + reach >= end {
+            (range.to().0 + before.0).saturating_sub(breath.0).min(end)
+        } else {
+            range.to().0
+        };
+        TimeRange::new(Micros(from), Micros(to))
     }
 
     fn new(facts: &TakeFacts, words: &[W]) -> Self {

@@ -5,7 +5,8 @@
 //! queue as `review ... by=<rule>` ([0013](../../../docs/decisions/0013-review-queue-in-cut-kdl.md)).
 //! A finding that overlaps a `remove`, `review` or `ignore` of its rule is skipped, so a run
 //! never asks twice. A rule switched off gives back what it removed and drops its open questions.
-//! The pacing places the edges of silence and pause cuts and writes the punch-in zooms
+//! The pacing places the edges of silence and pause cuts next to the voice, and a pacing change
+//! does nothing else, so switching back restores the cut. It also writes the punch-in zooms
 //! ([0014](../../../docs/decisions/0014-auto-edits-as-written-nodes.md)).
 
 mod edit;
@@ -16,7 +17,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use shot_core::{
-    Cut, Format, Id, Layout, Micros, RangeEdit, RemovedBy, RuleKind, TakeEdit, TimeRange,
+    Cut, Format, Id, Layout, Micros, Pacing, RangeEdit, RemovedBy, RuleKind, TakeEdit, TimeRange,
     Transcript,
 };
 
@@ -78,6 +79,32 @@ pub fn rough_cut(
     facts: &TakeFacts,
     transcripts: &HashMap<Id, Transcript>,
 ) -> Cut {
+    rerun(cut, format, facts, transcripts, Change::All)
+}
+
+/// What changed in the format since the rules last ran over a cut.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Change {
+    /// A new take, or no telling: every rule runs.
+    All,
+    /// The pacing was this one before. Only the edges of gap cuts move, by the difference in
+    /// breath, so switching back restores the cut.
+    Pacing(Pacing),
+    /// This rule was switched on, so only it runs.
+    RuleOn(RuleKind),
+    /// A rule was switched off, so it gives back what it cut.
+    RuleOff,
+}
+
+/// [`rough_cut`] after `change`: brings the cut in line with `format` without running rules the
+/// change did not touch.
+pub fn rerun(
+    cut: &Cut,
+    format: &Format,
+    facts: &TakeFacts,
+    transcripts: &HashMap<Id, Transcript>,
+    change: Change,
+) -> Cut {
     let take = facts.transcript.take();
     let rules = &format.auto_cut;
     let breath = format.pacing.breath();
@@ -85,7 +112,14 @@ pub fn rough_cut(
     let shows_screen = |t: Micros| {
         blocks_of(cut, take).any(|edit| layout_at(edit, t, format.default_layout).shows_screen())
     };
-    let findings = rules::find(rules, breath, facts, &voice, shows_screen);
+    let findings: Vec<Finding> = rules::find(rules, breath, facts, &voice, shows_screen)
+        .into_iter()
+        .filter(|f| match change {
+            Change::All => true,
+            Change::RuleOn(rule) => f.rule == rule,
+            Change::Pacing(_) | Change::RuleOff => false,
+        })
+        .collect();
     let gaps = rules::Gaps::of(facts);
     let on = |rule: RuleKind| match rule {
         RuleKind::Silence => rules.silence.on,
@@ -102,7 +136,9 @@ pub fn rough_cut(
             for &rule in RuleKind::ALL.iter().filter(|r| !on(**r)) {
                 edit::strip(block, rule);
             }
-            repace(block, &gaps, breath);
+            if let Change::Pacing(before) = change {
+                repace(block, &gaps, before.breath(), breath);
+            }
             let Some(material) = material(block) else {
                 continue;
             };
@@ -195,8 +231,8 @@ fn material(block: &TakeEdit) -> Option<TimeRange> {
     )
 }
 
-/// Moves the edges of silence and pause cuts to the current pacing.
-fn repace(block: &mut TakeEdit, gaps: &rules::Gaps, breath: Micros) {
+/// Moves the edges of silence and pause cuts from the breath `before` to `breath`.
+fn repace(block: &mut TakeEdit, gaps: &rules::Gaps, before: Micros, breath: Micros) {
     let gap_cuts: Vec<(TimeRange, RuleKind)> = block
         .ranges
         .iter()
@@ -209,7 +245,7 @@ fn repace(block: &mut TakeEdit, gaps: &rules::Gaps, breath: Micros) {
         })
         .collect();
     for (range, rule) in gap_cuts {
-        let Some(placed) = gaps.place(range, breath) else {
+        let Some(placed) = gaps.place(range, before, breath) else {
             continue;
         };
         if placed != range {
@@ -253,7 +289,7 @@ fn learn_voice(cut: &Cut, this: &Transcript, others: &HashMap<Id, Transcript>) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shot_core::{Decision, FormatKind, Pacing, TakeAt, Word};
+    use shot_core::{Decision, FormatKind, TakeAt, Word};
 
     fn transcript(text: &str) -> Transcript {
         let mut transcript = Transcript::new(Id::new("t01").unwrap());
@@ -276,6 +312,10 @@ mod tests {
     }
 
     fn rough(cut: &Cut, format: &Format, transcript: &Transcript) -> Cut {
+        after(cut, format, transcript, Change::All)
+    }
+
+    fn after(cut: &Cut, format: &Format, transcript: &Transcript, change: Change) -> Cut {
         let speech = Speech::default();
         let facts = TakeFacts {
             transcript,
@@ -284,7 +324,7 @@ mod tests {
             again: &[],
             duration: Micros(20_000_000),
         };
-        rough_cut(cut, format, &facts, &HashMap::new())
+        rerun(cut, format, &facts, &HashMap::new(), change)
     }
 
     #[test]
@@ -334,11 +374,47 @@ mod tests {
         format.pacing = Pacing::Natural;
         let natural = rough(&empty, &format, &t);
         format.pacing = Pacing::Tight;
-        let tight = rough(&natural, &format, &t);
+        let tight = after(&natural, &format, &t, Change::Pacing(Pacing::Natural));
         let removed = |cut: &Cut| rule_counts(cut)[0].removed_time;
         assert!(removed(&tight) > removed(&natural));
         assert_eq!(tight, rough(&empty, &format, &t));
         format.auto_cut.silence.on = false;
-        assert_eq!(rough(&tight, &format, &t), empty);
+        assert_eq!(after(&tight, &format, &t, Change::RuleOff), empty);
+    }
+
+    #[test]
+    fn a_pacing_change_only_moves_edges_next_to_the_voice() {
+        // Words end at 1.9 s and start again at 9.9 s: one 8 s silence after a sentence.
+        let t = transcript("We ship it. | | | | We test it.");
+        let mut format = FormatKind::Opinion.preset();
+        format.pacing = Pacing::Tight;
+        let take = Id::new("t01").unwrap();
+        let range = |from: u64, to: u64| TimeRange::new(Micros(from), Micros(to)).unwrap();
+        let mut tight = Cut::default().append_take(take, "Take", range(0, 20_000_000));
+        // A silence cut a person shortened at its end, and one the rules never wrote.
+        tight.chapters[0].takes[0].ranges = vec![
+            RangeEdit::Keep(range(0, 1_950_000)),
+            RangeEdit::Remove {
+                range: range(1_950_000, 5_000_000),
+                by: RemovedBy::Rule(RuleKind::Silence),
+            },
+            RangeEdit::Keep(range(5_000_000, 20_000_000)),
+        ];
+        let pace = |cut: &Cut, from: Pacing, pacing| {
+            let format = Format {
+                pacing,
+                ..format.clone()
+            };
+            after(cut, &format, &t, Change::Pacing(from))
+        };
+        let natural = pace(&tight, Pacing::Tight, Pacing::Natural);
+        assert_eq!(
+            natural.chapters[0].takes[0].ranges[1],
+            RangeEdit::Remove {
+                range: range(2_150_000, 5_000_000),
+                by: RemovedBy::Rule(RuleKind::Silence),
+            }
+        );
+        assert_eq!(pace(&natural, Pacing::Natural, Pacing::Tight), tight);
     }
 }

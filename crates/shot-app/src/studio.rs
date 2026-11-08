@@ -14,7 +14,7 @@ use gpui_component::Root;
 use shot_core::{Cut, Status};
 
 use crate::board::{self, BoardScreen, ShowCurrent, channel};
-use crate::cut::{self, ContinueToEdit, CutScreen};
+use crate::cut::{self, CutScreen, GoTo};
 use crate::edit::{self, EditScreen};
 use crate::folder::VideoFolder;
 use crate::record::{self, RecordScreen, Recorded};
@@ -236,8 +236,8 @@ impl Studio {
             this.show(Screen::Cut, window, cx);
         });
         let continue_to_edit =
-            cx.subscribe_in(&cut, window, |this, _, _: &ContinueToEdit, window, cx| {
-                this.show(Screen::Edit, window, cx);
+            cx.subscribe_in(&cut, window, |this, _, GoTo(screen), window, cx| {
+                this.show(*screen, window, cx);
             });
         window.focus(&edit.focus_handle(cx), cx);
         let mut subscriptions = vec![recorded, continue_to_edit];

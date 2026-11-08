@@ -43,6 +43,7 @@ mod sound;
 mod studio;
 mod style;
 mod theme;
+mod transcribe;
 mod ui;
 mod welcome;
 mod zoom;

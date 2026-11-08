@@ -35,16 +35,33 @@ pub enum Hear {
 pub type ItemKey = (Id, TimeRange);
 
 /// The cut that plays `range` of the block at `at` with up to [`LEAD`] of the block's kept media
-/// on each side: one chapter with one block, the item kept or cut as C would cut it. `None`
-/// when the block or, for [`Hear::Cut`], the open item is not in `cut`.
+/// on each side: one chapter with one block, the item kept or cut as C would cut it. The item
+/// is an open review item, or a cut the rules applied, which plays restored as recorded. `None`
+/// when the block or the item is not in `cut`.
 pub fn clip(cut: &Cut, at: TakeAt, range: TimeRange, hear: Hear) -> Option<Cut> {
-    let source = match hear {
-        Hear::Around => cut.clone(),
-        Hear::Cut => cut.decide(at, range, Decision::Cut).ok()?,
+    let applied = cut
+        .chapters
+        .get(at.chapter)?
+        .takes
+        .get(at.take)?
+        .ranges
+        .iter()
+        .any(
+            |piece| matches!(piece, RangeEdit::Remove { range: removed, .. } if *removed == range),
+        );
+    let recorded = if applied {
+        cut.restore(at, range).ok()?
+    } else {
+        cut.clone()
+    };
+    let source = match (hear, applied) {
+        (Hear::Around, _) => recorded.clone(),
+        (Hear::Cut, true) => cut.clone(),
+        (Hear::Cut, false) => cut.decide(at, range, Decision::Cut).ok()?,
     };
     let chapter = source.chapters.get(at.chapter)?;
     let mut block = chapter.takes.get(at.take)?.clone();
-    let kept: Vec<TimeRange> = cut.chapters[at.chapter].takes[at.take]
+    let kept: Vec<TimeRange> = recorded.chapters[at.chapter].takes[at.take]
         .ranges
         .iter()
         .filter_map(|piece| match piece {

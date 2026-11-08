@@ -185,8 +185,9 @@ impl VideoFolder {
         self.style.as_ref().map(|s| &s.lock)
     }
 
-    /// Reads the cached transcript of every take the cut uses.
-    fn load_transcripts(&mut self) -> Result<(), String> {
+    /// Reads the cached transcript of every take the cut uses that has none loaded, as after
+    /// transcribing.
+    pub fn load_transcripts(&mut self) -> Result<(), String> {
         for chapter in &self.project.cut.chapters {
             for edit in &chapter.takes {
                 if self.transcripts.contains_key(&edit.take) {
