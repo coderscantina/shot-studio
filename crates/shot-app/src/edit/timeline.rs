@@ -1248,7 +1248,6 @@ fn lanes(this: &EditScreen, window: Range<u64>, cx: &mut Context<EditScreen>) ->
                 ))
                 .children(selection_band(this, &window, &x))
                 .children(transition_marks(transitions, &x))
-                .children(super::switch::popover(this, &window, &x, cx))
                 .children(playhead_line(this, &window))
                 .when(
                     this.place.picker == Some(super::place::Picker::Sound),
@@ -1264,6 +1263,7 @@ fn lanes(this: &EditScreen, window: Range<u64>, cx: &mut Context<EditScreen>) ->
                         )
                     },
                 )
+                .children(super::switch::popover(this, &window, &x, cx))
                 .context_menu(move |menu, window, cx| {
                     super::lane_menu::context_menu(menu, &screen, window, cx)
                 }),

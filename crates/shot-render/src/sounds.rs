@@ -263,4 +263,56 @@ mod tests {
         effects.cursor.ripple = false;
         assert!(placed(&effects).iter().all(|(name, _)| name != "click"));
     }
+
+    #[test]
+    fn a_layout_switch_plays_the_brand_transition_over_its_window() {
+        let project = Project {
+            video: Video::parse("title \"t\"\nstatus editing\nformat tutorial\n").unwrap(),
+            script: Script::parse("# t\n").unwrap(),
+            format: FormatKind::Tutorial.preset(),
+            cut: Cut::parse(
+                "chapter \"One\" {\n    take t01 {\n        keep from=0 to=8_000_000\n        \
+                 layout split from=2_000_000 to=6_000_000 {\n            in morph sound=brand\n        }\n    }\n}\n",
+            )
+            .unwrap(),
+        };
+        let plan = ExportPlan::new(Timeline::evaluate(&project).main(), 60, |_| {
+            shot_core::MediaId::default()
+        });
+        let id = |s: &str| Id::new(s).unwrap();
+        let brand = vec![
+            (
+                SoundKey {
+                    effect: SoundEffect::Transition,
+                    phase: None,
+                },
+                id("swoosh"),
+            ),
+            (
+                SoundKey {
+                    effect: SoundEffect::Transition,
+                    phase: Some(Phase::Impact),
+                },
+                id("thud"),
+            ),
+        ];
+        let placed: Vec<(String, Anchor)> = automatic(
+            &plan,
+            &Theme::default(),
+            &Effects::default(),
+            &brand,
+            &mut |_| Vec::new(),
+        )
+        .into_iter()
+        .map(|(name, anchor)| (name.to_string(), anchor))
+        .collect();
+        // The switch into split at 2 s moves for 500 ms; the one back at 6 s has no sound.
+        assert_eq!(
+            placed,
+            [
+                ("swoosh".to_owned(), Anchor::Start(120 * FRAME)),
+                ("thud".to_owned(), Anchor::Peak(150 * FRAME)),
+            ]
+        );
+    }
 }

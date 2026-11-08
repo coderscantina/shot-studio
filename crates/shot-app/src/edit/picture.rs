@@ -12,7 +12,7 @@ use super::EditScreen;
 use super::parts::{self, layout_name};
 use super::place::{self, Picker, tool_button};
 use crate::layout_store;
-use crate::model::{FPS, LAYOUT_KEYS, Span, timecode};
+use crate::model::{FPS, Span, timecode};
 use crate::theme::*;
 use crate::ui::{self, icon, kbd, label, mono};
 
@@ -48,6 +48,7 @@ pub fn render(this: &mut EditScreen, window: &mut Window, cx: &mut Context<EditS
 
 fn layouts(this: &EditScreen, cx: &mut Context<EditScreen>) -> Stateful<Div> {
     let current = this.map.span_at(this.playhead).map(|s| s.layout);
+    let theme = this.folder.read(cx).theme.clone().unwrap_or_default();
     ui::pane()
         .id("layouts")
         .flex_1()
@@ -57,37 +58,43 @@ fn layouts(this: &EditScreen, cx: &mut Context<EditScreen>) -> Stateful<Div> {
         .px(px(10.))
         .py(px(14.))
         .overflow_y_scroll()
-        .children(LAYOUT_KEYS.iter().enumerate().map(|(index, layout)| {
-            let on = current == Some(*layout);
-            div()
-                .id(("layout", index))
-                .flex()
-                .flex_none()
-                .flex_col()
-                .gap(px(6.))
-                .p(px(8.))
-                .rounded(RADIUS_MD)
-                .cursor_pointer()
-                .when(on, |this| this.bg(RAISED))
-                .when(!on, |this| this.hover(|s| s.bg(RAISED)))
-                .child(thumbnail(*layout))
-                .child(
+        .children(
+            this.layout_choices(cx)
+                .0
+                .iter()
+                .enumerate()
+                .map(|(index, layout)| {
+                    let on = current == Some(*layout);
                     div()
+                        .id(("layout", index))
                         .flex()
-                        .items_center()
-                        .text_size(TEXT_SM)
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(if on { STRONG } else { MUTED })
-                        .child(layout_name(*layout))
-                        .child(div().flex_1())
-                        .child(kbd((index + 1).to_string())),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| this.set_layout(index, cx)))
-        }))
+                        .flex_none()
+                        .flex_col()
+                        .gap(px(6.))
+                        .p(px(8.))
+                        .rounded(RADIUS_MD)
+                        .cursor_pointer()
+                        .when(on, |this| this.bg(RAISED))
+                        .when(!on, |this| this.hover(|s| s.bg(RAISED)))
+                        .child(thumbnail(*layout, &theme.layouts))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .text_size(TEXT_SM)
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(if on { STRONG } else { MUTED })
+                                .child(layout_name(*layout))
+                                .child(div().flex_1())
+                                .child(kbd((index + 1).to_string())),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| this.set_layout(index, cx)))
+                }),
+        )
 }
 
 /// A small drawing of where screen and face sit in a layout.
-fn thumbnail(layout: Layout) -> Div {
+fn thumbnail(layout: Layout, custom: &[shot_core::CustomLayout]) -> Div {
     let page = gpui::rgb(0xe9eae5);
     let face = gpui::rgb(0x596170);
     let frame = div()
@@ -119,6 +126,25 @@ fn thumbnail(layout: Layout) -> Div {
         Layout::Split => frame
             .child(block(0.0, 0.0, 0.5, 1.0).bg(page))
             .child(block(0.62, 0.22, 0.26, 0.56).rounded_full().bg(face)),
+        Layout::Custom(name) => {
+            let slots = custom
+                .iter()
+                .find(|l| l.name == name)
+                .map(|l| l.slots.clone());
+            frame.children(slots.unwrap_or_default().into_iter().map(|s| {
+                let (w, h) = (3840.0, 2160.0);
+                block(
+                    f32::from(s.x) / w,
+                    f32::from(s.y) / h,
+                    f32::from(s.width) / w,
+                    f32::from(s.height) / h,
+                )
+                .bg(match s.track {
+                    shot_core::Track::Screen => page,
+                    shot_core::Track::Camera => face,
+                })
+            }))
+        }
         _ => lines(frame.bg(page)).child(block(0.08, 0.42, 0.52, 0.06).bg(gpui::rgb(0xd3d4ce))),
     }
 }

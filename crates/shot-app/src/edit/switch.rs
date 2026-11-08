@@ -9,7 +9,7 @@
 use std::ops::Range;
 
 use gpui::{
-    App, Context, Div, FocusHandle, FontWeight, KeyBinding, MouseButton, MouseDownEvent,
+    App, Context, Div, FocusHandle, FontWeight, Hsla, KeyBinding, MouseButton, MouseDownEvent,
     SharedString, Stateful, Window, actions, div, prelude::*, px,
 };
 use gpui_component::tooltip::Tooltip;
@@ -48,7 +48,7 @@ const KINDS: [(SwitchKind, &str, &str); 4] = [
 ];
 
 /// The lengths `[` and `]` step through, in microseconds.
-const LENGTHS: [u64; 5] = [250_000, 400_000, 500_000, 800_000, 1_200_000];
+const LENGTHS: [u64; 5] = [200_000, 300_000, 500_000, 800_000, 1_200_000];
 
 /// How much of the take the preview plays before the edge and after the window.
 const LEAD: u64 = FPS as u64 * 3 / 4;
@@ -211,7 +211,9 @@ impl EditScreen {
     }
 }
 
-/// A mark on each switch's edge in `window`, its kind's name, dim where the format decides.
+/// A mark on each switch's edge in `window`, its kind's name, dim where the format decides. The
+/// mark ends on the edge, so the new layout's name stays readable, and a faint band shows the
+/// window it moves over.
 pub fn marks(
     this: &EditScreen,
     window: &Range<u64>,
@@ -278,19 +280,51 @@ pub fn marks(
                     this.open_switch(&mark, window, cx);
                 }
             };
-            // A zero-wide column on the edge centers the mark on it.
+            let frames = mark.switch.window.duration().0 * u64::from(FPS) / 1_000_000;
+            let (from, to) = (x(mark.frame), x(mark.frame + frames));
             div()
                 .absolute()
                 .top_0()
                 .bottom_0()
-                .left(gpui::relative(x(mark.frame)))
-                .w(px(0.))
-                .flex()
-                .items_center()
-                .justify_center()
+                .left_0()
+                .right_0()
+                .when(switch.kind != SwitchKind::Cut, |d| {
+                    d.child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .left(gpui::relative(from))
+                            .w(gpui::relative((to - from).max(0.0)))
+                            .bg(Hsla::from(TEXT).opacity(if on { 0.16 } else { 0.07 })),
+                    )
+                })
                 .child(
-                    pill.on_mouse_down(MouseButton::Left, cx.listener(open_it(mark.clone())))
-                        .on_mouse_down(MouseButton::Right, cx.listener(open_it(mark))),
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .left(gpui::relative(from))
+                        .w(px(2.))
+                        .ml(px(-1.))
+                        .bg(if own { TEXT } else { MUTED }),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .right(gpui::relative(1.0 - from))
+                        .pr(px(3.))
+                        .flex()
+                        .items_center()
+                        .child(
+                            pill.on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(open_it(mark.clone())),
+                            )
+                            .on_mouse_down(MouseButton::Right, cx.listener(open_it(mark))),
+                        ),
                 )
         })
         .collect()
@@ -416,7 +450,7 @@ pub fn popover(
         .track_focus(&open.focus)
         .absolute()
         .top(px(40.))
-        .w(px(468.))
+        .w(px(508.))
         .map(|p| {
             if at > 0.55 {
                 p.right(gpui::relative(1.0 - at))

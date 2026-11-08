@@ -656,16 +656,19 @@ pub const LAYOUT_KEYS: [Layout; 4] = [
     Layout::Content,
 ];
 
-/// The layouts on the 1 to 4 keys: the format's, default first, as Record offers them, then
-/// the built-ins of [`LAYOUT_KEYS`] it does not list.
+/// The layouts on the 1 to 4 keys: the built-ins of [`LAYOUT_KEYS`], each other layout the
+/// format lists, a channel layout, taking the place of the first built-in it does not list.
 pub fn layout_keys(format: &Format) -> Vec<Layout> {
-    let mut keys = vec![format.default_layout];
-    for layout in format.other_layouts.iter().chain(&LAYOUT_KEYS) {
-        if keys.len() == 4 {
-            break;
-        }
-        if !keys.contains(layout) {
-            keys.push(*layout);
+    let listed: Vec<Layout> = std::iter::once(format.default_layout)
+        .chain(format.other_layouts.iter().copied())
+        .collect();
+    let mut keys = LAYOUT_KEYS.to_vec();
+    for extra in listed.iter().filter(|l| !LAYOUT_KEYS.contains(l)) {
+        if let Some(free) = keys
+            .iter_mut()
+            .find(|k| LAYOUT_KEYS.contains(k) && !listed.contains(k))
+        {
+            *free = *extra;
         }
     }
     keys
@@ -1152,6 +1155,19 @@ mod tests {
     fn layout_keys_map_to_the_four_layouts_and_the_default_clears() {
         assert_eq!(LAYOUT_KEYS[0], Layout::Face);
         assert_eq!(LAYOUT_KEYS[3], Layout::Content);
+        let mut format = shot_core::FormatKind::Opinion.preset();
+        assert_eq!(layout_keys(&format), LAYOUT_KEYS);
+        let custom = |n: &str| Layout::Custom(shot_core::LayoutName::new(n).unwrap());
+        format.other_layouts = vec![custom("side-by-side"), Layout::Split, custom("talk-left")];
+        assert_eq!(
+            layout_keys(&format),
+            [
+                Layout::Face,
+                custom("side-by-side"),
+                Layout::Split,
+                custom("talk-left")
+            ]
+        );
 
         let cut = two_chapters();
         let at = TakeAt {
