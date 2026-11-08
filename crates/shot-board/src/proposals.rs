@@ -187,6 +187,33 @@ impl Board {
         Ok((read(&base)?, read(&head)?))
     }
 
+    /// Every file the proposal writes since it branched, by path from the repo root, with its
+    /// text at the proposal's head. Proposals only write files, so these on top of the video's
+    /// files are the video as the proposal has it, which is what its preview builds.
+    pub fn proposal_files(&self, slug: &str, name: &str) -> Result<BTreeMap<String, String>> {
+        let head = self.proposal_head(slug, name)?;
+        let (_, tip) = self.target(slug, &head)?;
+        let base = self
+            .repo
+            .find_commit(self.repo.merge_base(tip.id(), head.id())?)?;
+        let diff = self
+            .repo
+            .diff_tree_to_tree(Some(&base.tree()?), Some(&head.tree()?), None)?;
+        let mut files = BTreeMap::new();
+        for delta in diff.deltas().filter(|d| d.status() != Delta::Deleted) {
+            let file = delta.new_file();
+            let Some(path) = file.path().and_then(|p| p.to_str()) else {
+                continue;
+            };
+            let blob = self.repo.find_blob(file.id())?;
+            files.insert(
+                path.to_owned(),
+                String::from_utf8_lossy(blob.content()).into_owned(),
+            );
+        }
+        Ok(files)
+    }
+
     /// Merges the proposal into the video branch, or into the default branch for a proposal of
     /// channel files, fast-forward when that branch has not moved, else with a merge commit,
     /// then deletes the proposal branch. On a conflict nothing changes and [`Error::Conflict`]

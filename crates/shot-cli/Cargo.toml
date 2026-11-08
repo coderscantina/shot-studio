@@ -21,6 +21,7 @@ libc.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 shot-render = { path = "../shot-render" }
+notify.workspace = true
 
 [[bin]]
 name = "shot"

@@ -6,6 +6,10 @@
 //!   files are never deleted yet. Bookend chunks go to the channel repo's `.shot/cache/chunks/`,
 //!   shared by its videos. Consecutive missing chunks of a segment render in one encoder
 //!   session, with a keyframe forced at each chunk start.
+//! - **Proposals** ([0004]) render into their own space, `.shot/cache/proposals/<name>/chunks/`,
+//!   with the lock built from the proposal's files. A chunk the video's cache (or the channel's)
+//!   already holds is read from there and never written, so a proposal leaves the branch's
+//!   `cut.lock` and cache as they were. See [`render_proposal`].
 //! - **Audio** is cut from each take's mic track and encoded to AAC once per export, on its own
 //!   thread while video renders. One continuous AAC stream has no encoder delay or padding at the
 //!   joins, so they cannot click or drift. Where the source jumps, the cut fades over 5 ms. The
@@ -16,6 +20,8 @@
 //! - **The join** runs alongside both. It writes one init segment, then copies each chunk's
 //!   fragments with shifted decode times as soon as the chunk is cached, with the audio packets
 //!   for the same span after each one as they come out of the encoder.
+//!
+//! [0004]: ../../../docs/decisions/0004-proposals-as-branches.md
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
@@ -26,7 +32,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
-use shot_core::{ContentHash, Effects, Id, MediaId, Micros, OutputKind, Project};
+use shot_core::{Brand, ContentHash, Effects, Id, Lock, MediaId, Micros, OutputKind, Project};
 use shot_media::audio::{AAC_PACKET_SAMPLES, AacEncoder, AacStream, AudioError, SAMPLE_RATE};
 use shot_media::encode::{EncodeError, EncodedFrame, EncoderSettings, HevcEncoder};
 use shot_media::mux::{self, AudioTrack, Chapter, FragmentedFile, Joiner, Movie, MuxError, Track};
@@ -57,6 +63,8 @@ const AUDIO_BITRATE: u32 = 128_000;
 
 /// Rendered chunks, inside a video folder or the channel repo.
 const CHUNKS_DIR: &str = ".shot/cache/chunks";
+/// Proposal spaces, inside a video folder, one folder per proposal name.
+const PROPOSALS_DIR: &str = ".shot/cache/proposals";
 /// The tracks of a take, by file name inside `media/<take>/`.
 const SCREEN_FILE: &str = "screen.mp4";
 const CAMERA_FILE: &str = "camera.mp4";
@@ -172,7 +180,66 @@ pub fn export(
     progress: &(dyn Fn(Progress) + Sync),
 ) -> Result<ExportReport, ExportError> {
     let lock = crate::lock::read(video_dir)?;
-    let timeline = match &lock {
+    let cache = |plan: &ExportPlan| Cache::new(video_dir, plan);
+    render(
+        video_dir,
+        project,
+        lock.as_ref(),
+        &cache,
+        cut,
+        Some(out),
+        options,
+        progress,
+    )
+}
+
+/// The folder of proposal `name` of the video in `video_dir`: its `cut.lock` and `chunks/`.
+pub fn proposal_dir(video_dir: &Path, name: &str) -> PathBuf {
+    video_dir.join(PROPOSALS_DIR).join(name)
+}
+
+/// Renders the chunks of cut `cut` of proposal `name` that no cache holds yet, into
+/// [`proposal_dir`]'s `chunks/`, with `project` and `lock` read and built from the proposal's
+/// files. Chunks the video's or the channel's cache hold are reused and never written, so the
+/// branch's cache is left as it was. Nothing is joined: the report's `output` is the
+/// proposal's chunk folder.
+pub fn render_proposal(
+    video_dir: &Path,
+    project: &Project,
+    lock: &Lock,
+    name: &str,
+    cut: &str,
+    options: ExportOptions,
+    progress: &(dyn Fn(Progress) + Sync),
+) -> Result<ExportReport, ExportError> {
+    let dir = proposal_dir(video_dir, name).join("chunks");
+    let cache = |_: &ExportPlan| Cache::proposal(video_dir, &dir);
+    render(
+        video_dir,
+        project,
+        Some(lock),
+        &cache,
+        cut,
+        None,
+        options,
+        progress,
+    )
+}
+
+/// Renders `cut` styled by `lock` into the cache `cache` makes for its plan, and joins it to
+/// `out` when there is one.
+#[allow(clippy::too_many_arguments)]
+fn render(
+    video_dir: &Path,
+    project: &Project,
+    lock: Option<&Lock>,
+    cache: &dyn Fn(&ExportPlan) -> Result<Cache, ExportError>,
+    cut: &str,
+    out: Option<&Path>,
+    options: ExportOptions,
+    progress: &(dyn Fn(Progress) + Sync),
+) -> Result<ExportReport, ExportError> {
+    let timeline = match lock {
         Some(lock) => shot_core::Timeline::styled(project, lock),
         None => shot_core::Timeline::evaluate(project),
     };
@@ -181,8 +248,8 @@ pub fn export(
         .iter()
         .find(|output| output.name == cut)
         .ok_or_else(|| ExportError::UnknownCut(cut.to_owned()))?;
-    let theme = Arc::new(Theme::load(video_dir, project.video.format, &project.cut)?);
-    let media = Media::new(video_dir, project, lock.as_ref());
+    let theme = Arc::new(theme(video_dir, lock, project)?);
+    let media = Media::new(video_dir, project, lock);
     let main = timeline.main();
     let ids: HashMap<&Id, MediaId> = main
         .chapters
@@ -216,7 +283,7 @@ pub fn export(
             (derived.plan.clone(), music)
         }
         None => {
-            let joins = match &lock {
+            let joins = match lock {
                 Some(lock) => Some(joins(&media, project, lock, &theme)?),
                 None => None,
             };
@@ -255,7 +322,7 @@ pub fn export(
     for planned in derived.as_ref().map_or(&plan, |d| &d.main).segments.iter() {
         LayoutSpec::of(planned.segment.layout)?;
     }
-    let cache = Cache::new(video_dir, &plan)?;
+    let cache = cache(&plan)?;
 
     let mut jobs = jobs(&plan, &cache, |_| true, derived.is_some());
     // Longest first, so the last job to finish is a short one.
@@ -293,12 +360,14 @@ pub fn export(
         &theme,
         progress,
     )?;
-    if derived.is_none() {
+    if let Some(out) = out
+        && derived.is_none()
+    {
         crate::captions::write_sidecar(video_dir, &plan, output, out)
             .map_err(io_error(&out.with_extension("vtt")))?;
     }
     Ok(ExportReport {
-        output: out.to_owned(),
+        output: out.map_or_else(|| cache.dir.clone(), Path::to_owned),
         chunks: plan.output_chunks().count(),
         rendered,
         frames: plan.frames,
@@ -452,15 +521,24 @@ struct Media {
 /// lock, with its bookends and transitions and its entrances on the beat. Chunk keys are left
 /// out; the preview draws frames by [`Painter::paint`] and caches nothing.
 pub fn preview_plan(video_dir: &Path, project: &Project) -> Result<ExportPlan, ExportError> {
-    let lock = crate::lock::read(video_dir)?;
-    let timeline = match &lock {
+    preview_plan_with(video_dir, project, crate::lock::read(video_dir)?.as_ref())
+}
+
+/// [`preview_plan`] styled by `lock` instead of the folder's `cut.lock`: a proposal's preview
+/// plays its own lock and leaves the branch's alone.
+pub fn preview_plan_with(
+    video_dir: &Path,
+    project: &Project,
+    lock: Option<&Lock>,
+) -> Result<ExportPlan, ExportError> {
+    let timeline = match lock {
         Some(lock) => shot_core::Timeline::styled(project, lock),
         None => shot_core::Timeline::evaluate(project),
     };
     let main = timeline.main();
-    let theme = Theme::load(video_dir, project.video.format, &project.cut)?;
-    let media = Media::new(video_dir, project, lock.as_ref());
-    let joins = match &lock {
+    let theme = theme(video_dir, lock, project)?;
+    let media = Media::new(video_dir, project, lock);
+    let joins = match lock {
         Some(lock) => Some(joins(&media, project, lock, &theme)?),
         None => None,
     };
@@ -586,6 +664,22 @@ impl Cues {
         }
         cues
     }
+}
+
+/// The theme `lock`'s brand gives the video in `video_dir`, as [`Theme::load`] reads it from
+/// the folder's own lock.
+pub fn theme(
+    video_dir: &Path,
+    lock: Option<&Lock>,
+    project: &Project,
+) -> Result<Theme, crate::theme::ThemeError> {
+    let none = Brand::default();
+    let brand = lock.map_or(&none, |lock| &lock.brand);
+    let root = crate::theme::channel_root(video_dir).unwrap_or(video_dir);
+    Theme::new(brand, project.video.format, Some(&project.cut), &|file| {
+        let path = root.join(file);
+        fs::read(&path).map_err(|source| crate::theme::ThemeError::Io { path, source })
+    })
 }
 
 /// The channel's `brand/` folder when the video is `<repo>/videos/<slug>`.
@@ -993,8 +1087,11 @@ impl Media {
 ///
 /// [0021]: ../../../docs/decisions/0021-sound-transitions-and-bookends.md
 pub(crate) struct Cache {
+    /// Where this export writes its chunks.
     dir: PathBuf,
     channel: Option<(PathBuf, HashSet<ContentHash>)>,
+    /// For a proposal: the video's and the channel's chunk folders, read and never written.
+    branch: Vec<PathBuf>,
 }
 
 impl Cache {
@@ -1015,15 +1112,43 @@ impl Cache {
             }
             _ => None,
         };
-        Ok(Self { dir, channel })
+        Ok(Self {
+            dir,
+            channel,
+            branch: Vec::new(),
+        })
+    }
+
+    /// A proposal's cache: `dir`, over the branch's chunks of the video and the channel.
+    fn proposal(video_dir: &Path, dir: &Path) -> Result<Self, ExportError> {
+        fs::create_dir_all(dir).map_err(io_error(dir))?;
+        let channel = channel_brand(video_dir)
+            .and_then(|brand| brand.parent().map(|root| root.join(CHUNKS_DIR)));
+        Ok(Self {
+            dir: dir.to_owned(),
+            channel: None,
+            branch: [video_dir.join(CHUNKS_DIR)]
+                .into_iter()
+                .chain(channel)
+                .collect(),
+        })
     }
 
     pub(crate) fn path(&self, hash: ContentHash) -> PathBuf {
+        let file = format!("{hash}.mp4");
+        if let Some(cached) = self
+            .branch
+            .iter()
+            .map(|dir| dir.join(&file))
+            .find(|path| path.exists())
+        {
+            return cached;
+        }
         let dir = match &self.channel {
             Some((dir, shared)) if shared.contains(&hash) => dir,
             _ => &self.dir,
         };
-        dir.join(format!("{hash}.mp4"))
+        dir.join(file)
     }
 }
 
@@ -1110,7 +1235,7 @@ fn run(
     music: &shot_audio::Music,
     effects: Effects,
     cache: &Cache,
-    out: &Path,
+    out: Option<&Path>,
     options: ExportOptions,
     theme: &Arc<Theme>,
     progress: &(dyn Fn(Progress) + Sync),
@@ -1123,10 +1248,19 @@ fn run(
     let (audio_out, audio_in) = mpsc::channel();
     std::thread::scope(|scope| {
         let pending = &pending;
-        let audio =
-            scope.spawn(move || pending.guard(|| encode_audio(plan, media, music, &audio_out)));
-        let joiner =
-            scope.spawn(move || pending.guard(|| join(plan, cache, pending, audio_in, out)));
+        // Without an output there is nothing to join, and so no audio to encode.
+        let (audio, joiner) =
+            match out {
+                Some(out) => (
+                    Some(scope.spawn(move || {
+                        pending.guard(|| encode_audio(plan, media, music, &audio_out))
+                    })),
+                    Some(scope.spawn(move || {
+                        pending.guard(|| join(plan, cache, pending, audio_in, out))
+                    })),
+                ),
+                None => (None, None),
+            };
         let workers: Vec<_> = (0..options.jobs.max(1))
             .map(|_| {
                 scope.spawn(|| {
@@ -1167,9 +1301,9 @@ fn run(
             .into_iter()
             .map(|worker| worker.join().expect("render worker panicked"))
             .collect();
-        results.push(audio.join().expect("audio thread panicked"));
+        results.extend(audio.map(|audio| audio.join().expect("audio thread panicked")));
         let render_time = started.elapsed();
-        results.push(joiner.join().expect("join thread panicked"));
+        results.extend(joiner.map(|joiner| joiner.join().expect("join thread panicked")));
         let join_time = started.elapsed() - render_time;
         let mut errors = results.into_iter().filter_map(Result::err);
         match errors.find(|error| !matches!(error, ExportError::Cancelled)) {
@@ -1860,6 +1994,32 @@ on chapter-start {
         assert_eq!(
             cache.path(segment),
             video.join(format!(".shot/cache/chunks/{segment}.mp4"))
+        );
+    }
+
+    #[test]
+    fn a_proposal_reads_branch_chunks_and_writes_only_its_own() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("brand")).unwrap();
+        let video = root.path().join("videos/target");
+        let branch = video.join(CHUNKS_DIR);
+        fs::create_dir_all(&branch).unwrap();
+        let (cached, new) = (ContentHash::of(b"cached"), ContentHash::of(b"new"));
+        fs::write(branch.join(format!("{cached}.mp4")), b"").unwrap();
+        let channel = root.path().join(CHUNKS_DIR);
+        fs::create_dir_all(&channel).unwrap();
+        let bookend = ContentHash::of(b"bookend");
+        fs::write(channel.join(format!("{bookend}.mp4")), b"").unwrap();
+
+        let space = proposal_dir(&video, "tighter").join("chunks");
+        let cache = Cache::proposal(&video, &space).unwrap();
+        assert_eq!(cache.path(cached), branch.join(format!("{cached}.mp4")));
+        assert_eq!(cache.path(bookend), channel.join(format!("{bookend}.mp4")));
+        assert_eq!(cache.path(new), space.join(format!("{new}.mp4")));
+        assert_eq!(
+            space,
+            video.join(".shot/cache/proposals/tighter/chunks"),
+            "the proposal's space is its own folder"
         );
     }
 }
