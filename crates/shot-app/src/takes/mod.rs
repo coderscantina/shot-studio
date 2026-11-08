@@ -110,6 +110,8 @@ impl Mark {
 pub struct TakesView {
     folder: Entity<VideoFolder>,
     takes: HashMap<Id, TakeData>,
+    /// The take with the highest number in the media folder, transcribed or not.
+    newest: Option<Id>,
     lineup: Lineup,
     /// Every row's place, in order.
     rows: Vec<RowAt>,
@@ -182,6 +184,7 @@ impl TakesView {
         let mut view = Self {
             folder,
             takes: HashMap::new(),
+            newest: None,
             lineup: Lineup::default(),
             rows: Vec::new(),
             at: (0, 0),
@@ -212,6 +215,10 @@ impl TakesView {
             })
             .unwrap_or_default();
         self.takes.retain(|id, _| ids.contains(id));
+        self.newest = ids
+            .iter()
+            .max_by_key(|id| (id.as_str().len(), id.as_str()))
+            .cloned();
         for id in ids {
             let transcript =
                 folder
@@ -284,7 +291,7 @@ impl TakesView {
     pub fn recorded(&mut self, cx: &mut Context<Self>) -> bool {
         self.reload(cx);
         // Take numbers only grow, so the new recording has the highest.
-        let Some(take) = self.lineup.takes().pop() else {
+        let Some(take) = self.newest.clone() else {
             return false;
         };
         let take = &take;
@@ -627,6 +634,17 @@ impl TakesView {
             Ok(())
         });
         self.mark = None;
+    }
+
+    /// On to Edit, or to Record while there is nothing to cut.
+    fn go_on(&mut self, cx: &mut Context<Self>) {
+        self.player.pause();
+        let screen = if self.folder.read(cx).project.cut.chapters.is_empty() {
+            Screen::Record
+        } else {
+            Screen::Edit
+        };
+        cx.emit(GoTo(screen));
     }
 
     /// Reads the peaks of `take`'s mic on a background thread, once.
@@ -1099,7 +1117,10 @@ impl TakesView {
 
     fn header(&self, cx: &mut Context<Self>) -> Div {
         let cut = &self.folder.read(cx).shown.cut;
-        let takes = self.lineup.takes().len();
+        let takes = match self.lineup.takes().len() {
+            1 => "1 take".to_owned(),
+            n => format!("{n} takes"),
+        };
         let twice = self
             .lineup
             .rows()
@@ -1315,10 +1336,7 @@ impl Render for TakesView {
                 this.note = None;
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &Continue, _, cx| {
-                this.player.pause();
-                cx.emit(GoTo(Screen::Edit));
-            }));
+            .on_action(cx.listener(|this, _: &Continue, _, cx| this.go_on(cx)));
         if self.takes.is_empty() || self.lineup.takes().is_empty() {
             let untranscribed = std::fs::read_dir(self.folder.read(cx).dir.join("media"))
                 .is_ok_and(|mut entries| entries.next().is_some());
@@ -1335,20 +1353,24 @@ impl Render for TakesView {
                      Every take's attempts show here side by side.",
                 )
             };
+            let action = if untranscribed {
+                big_button(
+                    "takes-transcribe",
+                    "text",
+                    "Transcribe on Review",
+                    "⌥1",
+                    true,
+                )
+                .on_click(|_, window, cx| {
+                    window.dispatch_action(Box::new(crate::cut::ShowReview), cx)
+                })
+            } else {
+                big_button("takes-record", "record", "Record a take", "⌘↩", true)
+                    .on_click(cx.listener(|this, _, _, cx| this.go_on(cx)))
+            };
             return root.child(
                 pane().flex_1().flex().flex_col().child(
-                    empty_state("takes", title, text).child(
-                        div().pt(px(14.)).child(
-                            big_button(
-                                "takes-record",
-                                "record",
-                                "Record a take",
-                                "⌘↩",
-                                !untranscribed,
-                            )
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(GoTo(Screen::Record)))),
-                        ),
-                    ),
+                    empty_state("takes", title, text).child(div().pt(px(14.)).child(action)),
                 ),
             );
         }
