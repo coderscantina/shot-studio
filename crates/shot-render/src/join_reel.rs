@@ -67,7 +67,7 @@ const KINDS: [(u64, TransitionKind); 5] = [
 
 /// A stinger: a full-frame card in the accent fading in to cover the cut 18 frames in, held,
 /// then out, with a dark disc growing on it.
-fn stinger() -> Vec<u8> {
+pub(crate) fn stinger() -> Vec<u8> {
     let prop = |k| json!({ "a": 0, "k": k });
     let ease = |t: u32, s: serde_json::Value| json!({ "t": t, "s": s, "o": { "x": [0.4], "y": [0.0] }, "i": { "x": [0.6], "y": [1.0] } });
     let transform = |opacity| {
@@ -107,7 +107,7 @@ fn stinger() -> Vec<u8> {
     serde_json::to_vec(&file).unwrap()
 }
 
-const LOGO: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="240" height="120"><rect width="240" height="120" rx="28" fill="#c8f25a"/><circle cx="60" cy="60" r="34" fill="#101418"/><rect x="112" y="40" width="100" height="40" rx="12" fill="#101418"/></svg>"##;
+pub(crate) const LOGO: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="240" height="120"><rect width="240" height="120" rx="28" fill="#c8f25a"/><circle cx="60" cy="60" r="34" fill="#101418"/><rect x="112" y="40" width="100" height="40" rx="12" fill="#101418"/></svg>"##;
 
 /// A channel repo in a temp dir with the brand's files and a video folder over the fixture
 /// take, and the theme of `preset` read from it.

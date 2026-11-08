@@ -70,6 +70,10 @@ pub enum PaintError {
     Outside(u64),
 }
 
+/// Drawn on every segment frame after its overlays, at the take time, for benches. Export never
+/// sets one and chunk keys do not know it.
+pub type Decoration = fn(Micros, Canvas, &mut Frame);
+
 /// See the module docs. One per render thread.
 pub struct Painter {
     dir: PathBuf,
@@ -81,6 +85,7 @@ pub struct Painter {
     lotties: HashMap<PathBuf, Arc<Filled>>,
     /// Holds one side of a transition while the other draws.
     scratch: Option<(Target, BufferPool)>,
+    decoration: Option<Decoration>,
 }
 
 /// The size and encoding of a render target.
@@ -109,7 +114,13 @@ impl Painter {
             tracks: Tracks::default(),
             lotties: HashMap::new(),
             scratch: None,
+            decoration: None,
         }
+    }
+
+    /// Draws `decoration` on every segment frame from now on.
+    pub fn set_decoration(&mut self, decoration: Decoration) {
+        self.decoration = Some(decoration);
     }
 
     /// Draws output frame `frame` of `plan` into `target`, at the target's size.
@@ -305,6 +316,9 @@ impl Painter {
             time,
         };
         let mut frame = compose(&shot, &look, canvas, sizes)?;
+        if let Some(decorate) = self.decoration {
+            decorate(time, canvas, &mut frame);
+        }
         let mut screen = decoded.screen.map(|d| d.buffer);
         // A b-roll clip shows in the screen layer instead of the take's screen.
         if let Some(cutaway) = &frame.cutaway {

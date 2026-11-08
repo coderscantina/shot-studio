@@ -3,7 +3,8 @@
 //!
 //! - **Chunks** (see [`crate::plan`]) are cached as `.shot/cache/chunks/<hash>.mp4`: video only,
 //!   4K60 HEVC, one fragment that starts with a keyframe. A file that exists is reused. Stale
-//!   files are never deleted yet. Consecutive missing chunks of a segment render in one encoder
+//!   files are never deleted yet. Bookend chunks go to the channel repo's `.shot/cache/chunks/`,
+//!   shared by its videos. Consecutive missing chunks of a segment render in one encoder
 //!   session, with a keyframe forced at each chunk start.
 //! - **Audio** is cut from each take's mic track and encoded to AAC once per export, on its own
 //!   thread while video renders. One continuous AAC stream has no encoder delay or padding at the
@@ -54,6 +55,8 @@ pub(crate) const KEYFRAME_INTERVAL: u32 = FPS / 2;
 pub(crate) const QUALITY: f32 = 0.75;
 const AUDIO_BITRATE: u32 = 128_000;
 
+/// Rendered chunks, inside a video folder or the channel repo.
+const CHUNKS_DIR: &str = ".shot/cache/chunks";
 /// The tracks of a take, by file name inside `media/<take>/`.
 const SCREEN_FILE: &str = "screen.mp4";
 const CAMERA_FILE: &str = "camera.mp4";
@@ -179,24 +182,7 @@ pub fn export(
         .find(|output| output.name == cut)
         .ok_or_else(|| ExportError::UnknownCut(cut.to_owned()))?;
     let theme = Arc::new(Theme::load(video_dir, project.video.format, &project.cut)?);
-    let brand = lock.as_ref().map(|l| &l.brand);
-    let media = Media {
-        root: video_dir.join("media"),
-        music: project.cut.music.as_ref().map(|m| {
-            (
-                video_dir.join(&m.file),
-                f32::from(m.gain),
-                f32::from(m.duck),
-            )
-        }),
-        cues: lock.as_ref().map(Cues::of).unwrap_or_default(),
-        sounds: shot_audio::sound::Library::new(video_dir, channel_brand(video_dir).as_deref()),
-        brand_sounds: brand.map(|b| b.sounds.clone()).unwrap_or_default(),
-        dir: video_dir.to_owned(),
-        channel: crate::theme::channel_root(video_dir)
-            .unwrap_or(video_dir)
-            .to_owned(),
-    };
+    let media = Media::new(video_dir, project, lock.as_ref());
     let main = timeline.main();
     let ids: HashMap<&Id, MediaId> = main
         .chapters
@@ -224,24 +210,43 @@ pub fn export(
             &theme,
         )?),
     };
-    let plan = match &derived {
-        Some(derived) => derived.plan.clone(),
+    let (plan, music) = match &derived {
+        Some(derived) => {
+            let music = music(&derived.plan, Some(&derived.main), &media)?;
+            (derived.plan.clone(), music)
+        }
         None => {
-            let mut plan = ExportPlan::new(output, FPS, |take| ids[take]);
-            crate::overlay::key_chunks(&mut plan, &assets, &theme);
-            if let Some(lock) = &lock {
-                plan = plan.with_joins(&joins(&media, project, lock, &theme)?);
-                crate::join::key_joins(
-                    &mut plan,
-                    &KeyInputs {
-                        output,
-                        media: &|take| ids[take],
-                        identity: &assets,
-                        theme: &theme,
-                    },
-                );
+            let joins = match &lock {
+                Some(lock) => Some(joins(&media, project, lock, &theme)?),
+                None => None,
+            };
+            let plan_of = |output: &shot_core::Output| {
+                let mut plan = ExportPlan::new(output, FPS, |take| ids[take]);
+                crate::overlay::key_chunks(&mut plan, &assets, &theme);
+                if let Some(joins) = &joins {
+                    plan = plan.with_joins(joins);
+                    crate::join::key_joins(
+                        &mut plan,
+                        &KeyInputs {
+                            output,
+                            media: &|take| ids[take],
+                            identity: &assets,
+                            theme: &theme,
+                        },
+                    );
+                }
+                plan
+            };
+            let plan = plan_of(output);
+            let music = music(&plan, None, &media)?;
+            let snapped = theme
+                .beat_sync
+                .then(|| snap_entrances(output, &plan, &music))
+                .flatten();
+            match snapped {
+                Some(snapped) => (plan_of(&snapped), music),
+                None => (plan, music),
             }
-            plan
         }
     };
     if plan.frames == 0 {
@@ -250,10 +255,7 @@ pub fn export(
     for planned in derived.as_ref().map_or(&plan, |d| &d.main).segments.iter() {
         LayoutSpec::of(planned.segment.layout)?;
     }
-    let cache = Cache {
-        dir: video_dir.join(".shot/cache/chunks"),
-    };
-    fs::create_dir_all(&cache.dir).map_err(io_error(&cache.dir))?;
+    let cache = Cache::new(video_dir, &plan)?;
 
     let mut jobs = jobs(&plan, &cache, |_| true, derived.is_some());
     // Longest first, so the last job to finish is a short one.
@@ -283,6 +285,7 @@ pub fn export(
         derived.as_ref(),
         jobs,
         &media,
+        &music,
         output.effects,
         &cache,
         out,
@@ -446,31 +449,37 @@ struct Media {
 }
 
 /// The plan of the main cut as export draws it, for the preview: the timeline styled by the
-/// lock, with its bookends and transitions. Chunk keys are left out; the preview draws frames
-/// by [`Painter::paint`] and caches nothing.
+/// lock, with its bookends and transitions and its entrances on the beat. Chunk keys are left
+/// out; the preview draws frames by [`Painter::paint`] and caches nothing.
 pub fn preview_plan(video_dir: &Path, project: &Project) -> Result<ExportPlan, ExportError> {
     let lock = crate::lock::read(video_dir)?;
     let timeline = match &lock {
         Some(lock) => shot_core::Timeline::styled(project, lock),
         None => shot_core::Timeline::evaluate(project),
     };
-    let plan = ExportPlan::new(timeline.main(), FPS, |_| MediaId::default());
-    let Some(lock) = lock else {
-        return Ok(plan);
-    };
+    let main = timeline.main();
     let theme = Theme::load(video_dir, project.video.format, &project.cut)?;
-    let media = Media {
-        root: video_dir.join("media"),
-        music: None,
-        cues: Cues::default(),
-        sounds: shot_audio::sound::Library::new(video_dir, None),
-        brand_sounds: Vec::new(),
-        dir: video_dir.to_owned(),
-        channel: crate::theme::channel_root(video_dir)
-            .unwrap_or(video_dir)
-            .to_owned(),
+    let media = Media::new(video_dir, project, lock.as_ref());
+    let joins = match &lock {
+        Some(lock) => Some(joins(&media, project, lock, &theme)?),
+        None => None,
     };
-    Ok(plan.with_joins(&joins(&media, project, &lock, &theme)?))
+    let plan_of = |output: &shot_core::Output| {
+        let plan = ExportPlan::new(output, FPS, |_| MediaId::default());
+        match &joins {
+            Some(joins) => plan.with_joins(joins),
+            None => plan,
+        }
+    };
+    let plan = plan_of(main);
+    if !theme.beat_sync {
+        return Ok(plan);
+    }
+    let music = music(&plan, None, &media)?;
+    Ok(match snap_entrances(main, &plan, &music) {
+        Some(snapped) => plan_of(&snapped),
+        None => plan,
+    })
 }
 
 /// What the lock's brand and transitions put around and between the main cut's segments, with
@@ -602,46 +611,253 @@ fn output_samples(plan: &ExportPlan, take: &Id, at: Micros) -> Vec<u64> {
         .collect()
 }
 
-/// The output's music and sound effects: the cut's music bed from the start, then the lock's
-/// cues and sounds where their moments play, the brand's transition sounds on each transition
-/// and the bumpers' own sound, which the music ducks under.
-fn score(plan: &ExportPlan, media: &Media) -> Result<voice::Score, ExportError> {
+/// Music files decoded with their beats, detected once per file ([0023]) and kept for the next
+/// export or preview plan, which is why the snapped entrances cost a preview nothing. Only the
+/// files the last call used are kept.
+///
+/// [0023]: ../../../docs/decisions/0023-motion-system-and-lottie-templates.md
+mod tracks {
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, MutexGuard};
+    use std::time::SystemTime;
+
+    use super::{ExportError, TimelineAudioError, voice};
+
+    type Cache = BTreeMap<PathBuf, ((u64, SystemTime), shot_audio::Track)>;
+
+    static CACHE: Mutex<Cache> = Mutex::new(BTreeMap::new());
+
+    fn cache() -> MutexGuard<'static, Cache> {
+        CACHE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The file at `path` with its beats, by its size and modification time.
+    pub(super) fn load(path: &Path) -> Result<shot_audio::Track, ExportError> {
+        let metadata = std::fs::metadata(path).map_err(super::io_error(path))?;
+        let identity = (
+            metadata.len(),
+            metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+        );
+        if let Some((known, track)) = cache().get(path)
+            && *known == identity
+        {
+            return Ok(track.clone());
+        }
+        let samples = voice::read_samples(path).map_err(|source| TimelineAudioError {
+            path: path.to_owned(),
+            source,
+        })?;
+        let beats = shot_audio::beats::detect(&samples);
+        let track = shot_audio::Track::new(shot_audio::sound::Sound::new(samples), beats);
+        cache().insert(path.to_owned(), (identity, track.clone()));
+        Ok(track)
+    }
+
+    /// Drops every file but `used`.
+    pub(super) fn keep_only(used: &[PathBuf]) {
+        cache().retain(|path, _| used.contains(path));
+    }
+}
+
+/// The output's music: the cut's music bed from the start, then each of the lock's cues where
+/// its moment plays. A derived cut (with the `main` plan it draws from) also starts, at each
+/// clip, the cue the main cut plays there, so a clip keeps the music under it. A cue already
+/// playing runs on.
+fn music(
+    plan: &ExportPlan,
+    main: Option<&ExportPlan>,
+    media: &Media,
+) -> Result<shot_audio::Music, ExportError> {
+    let mut music = Vec::new();
+    let mut used = Vec::new();
+    if let Some((path, gain, duck)) = &media.music {
+        used.push(path.clone());
+        music.push(shot_audio::MusicCue {
+            at: 0,
+            play: Some(shot_audio::Play {
+                track: tracks::load(path)?,
+                gain_db: *gain,
+                duck_db: *duck,
+            }),
+        });
+    }
+    let cues = &media.cues.music;
+    let mut loaded: HashMap<usize, shot_audio::Track> = HashMap::new();
+    for (at, index) in music_places(plan, main, cues) {
+        let (_, _, file, gain, duck) = &cues[index];
+        let track = match loaded.get(&index) {
+            Some(track) => track.clone(),
+            None => {
+                let path = media.dir.join(file);
+                let track = tracks::load(&path)?;
+                used.push(path);
+                loaded.insert(index, track.clone());
+                track
+            }
+        };
+        music.push(shot_audio::MusicCue {
+            at,
+            play: Some(shot_audio::Play {
+                track,
+                gain_db: f32::from(*gain),
+                duck_db: f32::from(*duck),
+            }),
+        });
+    }
+    tracks::keep_only(&used);
+    Ok(shot_audio::Music::new(music, shot_audio::CROSSFADE))
+}
+
+/// Where each of `cues` starts in `plan`, in output samples, with its index, in output order.
+/// See [`music`] for `main`.
+fn music_places(
+    plan: &ExportPlan,
+    main: Option<&ExportPlan>,
+    cues: &[(Id, Micros, String, i16, i16)],
+) -> Vec<(u64, usize)> {
+    let per_frame = u64::from(SAMPLE_RATE) / u64::from(FPS);
+    let in_main: Vec<(u64, usize)> = main.map_or_else(Vec::new, |main| {
+        let mut places: Vec<(u64, usize)> = cues
+            .iter()
+            .enumerate()
+            .flat_map(|(i, (take, at, ..))| {
+                output_samples(main, take, *at)
+                    .into_iter()
+                    .map(move |s| (s, i))
+            })
+            .collect();
+        places.sort_unstable();
+        places
+    });
+    let mut places = Vec::new();
+    let mut playing = None;
+    for planned in &plan.segments {
+        let take = &planned.segment.take;
+        if let Some(main) = main {
+            let start = frame_time(planned.source_frames.start, FPS);
+            let under = output_samples(main, take, start).first().and_then(|&at| {
+                let i = in_main.partition_point(|&(s, _)| s <= at);
+                i.checked_sub(1).map(|i| in_main[i].1)
+            });
+            if let Some(cue) = under
+                && playing != Some(cue)
+            {
+                places.push((planned.output_frame * per_frame, cue));
+                playing = Some(cue);
+            }
+        }
+        let first = planned.source_frames.start * per_frame;
+        let last = planned.source_frames.end * per_frame;
+        let mut inside: Vec<(u64, usize)> = cues
+            .iter()
+            .enumerate()
+            .filter(|(_, (cue_take, ..))| cue_take == take)
+            .filter_map(|(i, (_, at, ..))| {
+                let t = at.0 * u64::from(SAMPLE_RATE) / 1_000_000;
+                (first..last)
+                    .contains(&t)
+                    .then(|| (planned.output_frame * per_frame + t - first, i))
+            })
+            .collect();
+        inside.sort_unstable();
+        for (at, i) in inside {
+            if playing != Some(i) {
+                places.push((at, i));
+                playing = Some(i);
+            }
+        }
+    }
+    places
+}
+
+/// `output` with the entrances that do not cut moved onto the beat of the music playing where
+/// they start, as [`shot_audio::Music::snap`] finds it in `plan`, and their ends kept ([0023]).
+/// An entrance moves only inside the segment it starts in, so a chapter band never leaves its
+/// chapter. Redactions and b-roll keep their times, and so does every cut. `None` when nothing
+/// moved.
+///
+/// [0023]: ../../../docs/decisions/0023-motion-system-and-lottie-templates.md
+fn snap_entrances(
+    output: &shot_core::Output,
+    plan: &ExportPlan,
+    music: &shot_audio::Music,
+) -> Option<shot_core::Output> {
+    const FIXED: [&str; 3] = ["blur", "bleep", "b-roll"];
+    let per_frame = u64::from(SAMPLE_RATE) / u64::from(FPS);
+    let mut moved: HashMap<(Id, Id, shot_core::TimeRange), Micros> = HashMap::new();
+    for planned in &plan.segments {
+        let take = &planned.segment.take;
+        for overlay in &planned.segment.overlays {
+            if FIXED.contains(&overlay.template.as_str()) {
+                continue;
+            }
+            let key = (take.clone(), overlay.template.clone(), overlay.range);
+            if moved.contains_key(&key) {
+                continue;
+            }
+            let from = overlay.range.from();
+            let t = from.0 * u64::from(SAMPLE_RATE) / 1_000_000;
+            let source =
+                planned.source_frames.start * per_frame..planned.source_frames.end * per_frame;
+            if !source.contains(&t) {
+                continue;
+            }
+            let shown = planned.output_frame * per_frame
+                ..(planned.output_frame + planned.frames()) * per_frame;
+            let at = shown.start + t - source.start;
+            let snapped = music.snap(at, per_frame);
+            // A beat across the segment's edge is in other material: the entrance stays.
+            if snapped == at || !shown.contains(&snapped) {
+                continue;
+            }
+            let shift = |samples: u64| samples * 1_000_000 / u64::from(SAMPLE_RATE);
+            let start = if snapped > at {
+                Micros(from.0 + shift(snapped - at))
+            } else {
+                Micros(from.0.saturating_sub(shift(at - snapped)))
+            };
+            if start < overlay.range.to() {
+                moved.insert(key, start);
+            }
+        }
+    }
+    if moved.is_empty() {
+        return None;
+    }
+    let mut output = output.clone();
+    for segment in output.chapters.iter_mut().flat_map(|c| &mut c.segments) {
+        for overlay in &mut segment.overlays {
+            let key = (
+                segment.take.clone(),
+                overlay.template.clone(),
+                overlay.range,
+            );
+            if let Some(&start) = moved.get(&key) {
+                overlay.range =
+                    shot_core::TimeRange::new(start, overlay.range.to()).expect("start before end");
+            }
+        }
+    }
+    Some(output)
+}
+
+/// Sound effects and bumpers over `music`: the lock's sounds where their moments play, the
+/// brand's transition sounds on each transition and the bumpers' own sound, which the music
+/// ducks under.
+fn score(
+    plan: &ExportPlan,
+    music: &shot_audio::Music,
+    media: &Media,
+) -> Result<voice::Score, ExportError> {
     let read = |path: &Path| {
         voice::read_samples(path).map_err(|source| TimelineAudioError {
             path: path.to_owned(),
             source,
         })
     };
-    let track = |samples: Vec<f32>| {
-        let beats = shot_audio::beats::detect(&samples);
-        shot_audio::Track::new(shot_audio::sound::Sound::new(samples), beats)
-    };
-    let mut music = Vec::new();
-    if let Some((path, gain, duck)) = &media.music {
-        music.push(shot_audio::MusicCue {
-            at: 0,
-            play: Some(shot_audio::Play {
-                track: track(read(path)?),
-                gain_db: *gain,
-                duck_db: *duck,
-            }),
-        });
-    }
-    for (take, at, file, gain, duck) in &media.cues.music {
-        let places = output_samples(plan, take, *at);
-        if places.is_empty() {
-            continue;
-        }
-        let played = track(read(&media.dir.join(file))?);
-        music.extend(places.into_iter().map(|at| shot_audio::MusicCue {
-            at,
-            play: Some(shot_audio::Play {
-                track: played.clone(),
-                gain_db: f32::from(*gain),
-                duck_db: f32::from(*duck),
-            }),
-        }));
-    }
     let find = |name: &Id| -> Result<shot_audio::sound::Sound, ExportError> {
         Ok(match media.sounds.find(name) {
             Some(shot_audio::sound::Source::File(path)) => {
@@ -701,13 +917,33 @@ fn score(plan: &ExportPlan, media: &Media) -> Result<voice::Score, ExportError> 
         }));
     }
     Ok(voice::Score {
-        music: shot_audio::Music::new(music, shot_audio::CROSSFADE),
+        music: music.clone(),
         sfx,
         bumpers,
     })
 }
 
 impl Media {
+    fn new(video_dir: &Path, project: &Project, lock: Option<&shot_core::Lock>) -> Self {
+        Self {
+            root: video_dir.join("media"),
+            music: project.cut.music.as_ref().map(|m| {
+                (
+                    video_dir.join(&m.file),
+                    f32::from(m.gain),
+                    f32::from(m.duck),
+                )
+            }),
+            cues: lock.map(Cues::of).unwrap_or_default(),
+            sounds: shot_audio::sound::Library::new(video_dir, channel_brand(video_dir).as_deref()),
+            brand_sounds: lock.map(|l| l.brand.sounds.clone()).unwrap_or_default(),
+            dir: video_dir.to_owned(),
+            channel: crate::theme::channel_root(video_dir)
+                .unwrap_or(video_dir)
+                .to_owned(),
+        }
+    }
+
     /// The size and modification time of each video track and the event log of `take`. A take
     /// recorded again under the same id differs in both.
     fn id(&self, take: &Id) -> MediaId {
@@ -751,13 +987,43 @@ impl Media {
     }
 }
 
+/// Where rendered chunks live: the video's `.shot/cache/chunks/`, and the channel's for the
+/// bookends' chunks, since their keys never name the video and every video with the same brand
+/// reuses them ([0021]).
+///
+/// [0021]: ../../../docs/decisions/0021-sound-transitions-and-bookends.md
 pub(crate) struct Cache {
     dir: PathBuf,
+    channel: Option<(PathBuf, HashSet<ContentHash>)>,
 }
 
 impl Cache {
+    fn new(video_dir: &Path, plan: &ExportPlan) -> Result<Self, ExportError> {
+        let dir = video_dir.join(CHUNKS_DIR);
+        fs::create_dir_all(&dir).map_err(io_error(&dir))?;
+        let shared: HashSet<ContentHash> = plan
+            .bookends
+            .iter()
+            .flat_map(|b| &b.chunks)
+            .map(|c| c.hash)
+            .collect();
+        let channel = match channel_brand(video_dir).and_then(|b| b.parent().map(Path::to_owned)) {
+            Some(root) if !shared.is_empty() => {
+                let dir = root.join(CHUNKS_DIR);
+                fs::create_dir_all(&dir).map_err(io_error(&dir))?;
+                Some((dir, shared))
+            }
+            _ => None,
+        };
+        Ok(Self { dir, channel })
+    }
+
     pub(crate) fn path(&self, hash: ContentHash) -> PathBuf {
-        self.dir.join(format!("{hash}.mp4"))
+        let dir = match &self.channel {
+            Some((dir, shared)) if shared.contains(&hash) => dir,
+            _ => &self.dir,
+        };
+        dir.join(format!("{hash}.mp4"))
     }
 }
 
@@ -841,6 +1107,7 @@ fn run(
     derived: Option<&DerivedPlan>,
     jobs: Vec<Job>,
     media: &Media,
+    music: &shot_audio::Music,
     effects: Effects,
     cache: &Cache,
     out: &Path,
@@ -856,7 +1123,8 @@ fn run(
     let (audio_out, audio_in) = mpsc::channel();
     std::thread::scope(|scope| {
         let pending = &pending;
-        let audio = scope.spawn(move || pending.guard(|| encode_audio(plan, media, &audio_out)));
+        let audio =
+            scope.spawn(move || pending.guard(|| encode_audio(plan, media, music, &audio_out)));
         let joiner =
             scope.spawn(move || pending.guard(|| join(plan, cache, pending, audio_in, out)));
         let workers: Vec<_> = (0..options.jobs.max(1))
@@ -1149,6 +1417,7 @@ fn video_track(hvcc: Vec<u8>, canvas: Canvas) -> Track {
 fn encode_audio(
     plan: &ExportPlan,
     media: &Media,
+    music: &shot_audio::Music,
     out: &mpsc::Sender<AacStream>,
 ) -> Result<(), ExportError> {
     let send = |stream| out.send(stream).map_err(|_| ExportError::Cancelled);
@@ -1169,7 +1438,7 @@ fn encode_audio(
     bleeps.sort_by_key(|(take, range)| (take.to_string(), range.from()));
     bleeps.dedup();
     let mut audio = audio.with_bleeps(&bleeps);
-    let score = score(plan, media)?;
+    let score = score(plan, music, media)?;
     voice::finish(&mut audio, &score, |samples| {
         encoder.push(samples).map_err(ExportError::AudioEncode)?;
         send(encoder.take())
@@ -1341,5 +1610,256 @@ impl<'a> AudioPackets<'a> {
             .map_err(io_error(path))?;
         self.offset += length;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::join::Joins;
+    use shot_core::{
+        Brand, Cut, Format, FormatLayer, MigrateInput, Overlay, Script, Timeline, TransitionKind,
+        Video,
+    };
+
+    const BRAND: &str = r#"intro bumper="brand/media/intro.mp4" title=#true
+outro bumper="brand/media/outro.mp4"
+end-card length=12_000_000
+transition stinger="brand/stinger.json" peak=300_000
+on video-start {
+    transition dip
+    music "sources/bed.flac" gain=-20 duck=-12
+}
+on chapter-start {
+    overlay chapter-band for=2_500_000
+    sfx swoosh
+    transition stinger
+}
+"#;
+
+    /// The target project as `shot migrate` writes it with no elements, under `BRAND`, with a
+    /// second derived cut later in the take.
+    fn target() -> (Project, shot_core::Lock) {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/projects/target");
+        let read = |name: &str| fs::read_to_string(dir.join(name)).unwrap();
+        let cut =
+            read("cut.kdl") + "\nshort later {\n    clip t01 from=300_000_000 to=305_000_000\n}\n";
+        let old = Project {
+            video: Video::parse(&read("video.kdl")).unwrap(),
+            script: Script::parse(&read("script.md")).unwrap(),
+            format: Format::parse(&read("format.kdl")).unwrap(),
+            cut: Cut::parse(&cut).unwrap(),
+        };
+        let channel = FormatLayer::default();
+        let migration = shot_core::migrate(&MigrateInput {
+            project: &old,
+            imported: &[],
+            brand: &Brand::default(),
+            channel: &channel,
+            elements: &[],
+            assets: &Default::default(),
+        })
+        .unwrap();
+        // Then the brand arrives and `shot style build` runs.
+        let brand = Brand::parse(BRAND).unwrap();
+        let assets = brand
+            .assets()
+            .into_iter()
+            .map(|file| (file.to_owned(), ContentHash::of(file.as_bytes())))
+            .collect();
+        let lock = shot_core::build(&shot_core::StyleInput {
+            imported: &[],
+            brand: &brand,
+            format: migration.channel.as_ref().unwrap_or(&channel),
+            video: &migration.video,
+            cut: &migration.cut,
+            elements: &[],
+            assets: &assets,
+        })
+        .unwrap();
+        let project = Project {
+            cut: migration.cut,
+            format: migration.format,
+            ..old
+        };
+        (project, lock)
+    }
+
+    fn templates(plan: &ExportPlan) -> HashSet<String> {
+        plan.segments
+            .iter()
+            .flat_map(|s| &s.segment.overlays)
+            .map(|o| o.template.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn a_short_of_the_target_project_has_no_bookends_cards_or_stingers_and_keeps_its_sounds() {
+        let (project, lock) = target();
+        let timeline = Timeline::styled(&project, &lock);
+        let bookend = |bumper: &str, title: Option<&str>| BookendInput {
+            bumper: Some(bumper.to_owned()),
+            title: title.map(str::to_owned),
+            length: Micros(3_000_000),
+            identity: Vec::new(),
+        };
+        let joins = Joins {
+            intro: Some(bookend("brand/media/intro.mp4", Some("t"))),
+            outro: Some(bookend("brand/media/outro.mp4", None)),
+            intro_after_hook: true,
+            transitions: Joins::transitions_of(&lock),
+            stinger: Some(StingerTiming {
+                duration: Micros(1_000_000),
+                peak: Micros(300_000),
+            }),
+            end_card: Some(Micros(12_000_000)),
+        };
+        let main = ExportPlan::new(timeline.main(), FPS, |_| MediaId::default()).with_joins(&joins);
+        assert_eq!(main.bookends.len(), 2);
+        assert!(main.end_card.is_some());
+        assert!(
+            main.transitions
+                .iter()
+                .any(|t| t.kind == TransitionKind::Stinger)
+        );
+        assert!(templates(&main).contains("chapter-band"));
+
+        let cues = Cues::of(&lock);
+        for (name, clip_frames) in [("intro-hook", 1752), ("later", 300)] {
+            let output = timeline.outputs.iter().find(|o| o.name == name).unwrap();
+            let theme = Theme::default();
+            let derived = DerivedPlan::new(
+                timeline.main(),
+                output,
+                &DerivedInputs {
+                    fps: FPS,
+                    media: &|_| MediaId::default(),
+                    assets: &|_| Vec::new(),
+                    theme: &theme,
+                    faces: &HashMap::new(),
+                    transcripts: &HashMap::new(),
+                },
+            );
+            let plan = &derived.plan;
+            assert!(
+                plan.bookends.is_empty() && plan.transitions.is_empty(),
+                "{name}"
+            );
+            assert_eq!(plan.end_card, None);
+            assert_eq!(plan.frames, clip_frames, "{name}: only the clip's frames");
+            for drawn in [templates(plan), templates(&derived.main)] {
+                assert!(!drawn.contains("chapter-band") && !drawn.contains("end-card"));
+            }
+            // The video-start cue plays under both clips, from their start.
+            assert_eq!(
+                music_places(plan, Some(&derived.main), &cues.music),
+                [(0, 0)],
+                "{name}"
+            );
+            let sounds: Vec<u64> = cues
+                .sfx
+                .iter()
+                .flat_map(|(take, at, ..)| output_samples(plan, take, *at))
+                .collect();
+            match name {
+                "intro-hook" => {
+                    // The first chapter's swoosh at its start, and its lower third.
+                    assert_eq!(sounds, [0]);
+                    assert!(templates(plan).contains("lower-third"));
+                }
+                _ => assert!(sounds.is_empty()),
+            }
+        }
+    }
+
+    #[test]
+    fn entrances_snap_to_the_beat_and_cuts_keep_their_times() {
+        let (project, lock) = target();
+        let timeline = Timeline::styled(&project, &lock);
+        let mut output = timeline.main().clone();
+        let range = |from, to| shot_core::TimeRange::new(Micros(from), Micros(to)).unwrap();
+        let overlay = |template: &str, from| Overlay {
+            template: Id::new(template).unwrap(),
+            range: range(from, from + 2_000_000),
+            params: Vec::new(),
+        };
+        // 1.45 s and 1.7 s into the take, which plays from 0.8 s: output 0.65 s and 0.9 s.
+        output.chapters[0].segments[0]
+            .overlays
+            .extend([overlay("pop", 1_450_000), overlay("blur", 1_700_000)]);
+        output.chapters[0].segments[1]
+            .overlays
+            .push(overlay("callout", 33_020_000));
+        let plan = ExportPlan::new(&output, FPS, |_| MediaId::default());
+        // A beat every half second of a 10 s track from the start of the output.
+        let samples = vec![0.0; 10 * SAMPLE_RATE as usize];
+        let beats = shot_audio::beats::Beats {
+            bpm: 120.0,
+            at: (0..20).map(|i| i * SAMPLE_RATE as u64 / 2).collect(),
+        };
+        let music = shot_audio::Music::new(
+            vec![shot_audio::MusicCue {
+                at: 0,
+                play: Some(shot_audio::Play {
+                    track: shot_audio::Track::new(shot_audio::sound::Sound::new(samples), beats),
+                    gain_db: -20.0,
+                    duck_db: -12.0,
+                }),
+            }],
+            shot_audio::CROSSFADE,
+        );
+        let snapped = snap_entrances(&output, &plan, &music).unwrap();
+        let starts: HashMap<String, Micros> = snapped.chapters[0].segments[0]
+            .overlays
+            .iter()
+            .map(|o| (o.template.to_string(), o.range.from()))
+            .collect();
+        // Output 0.65 s moves 150 ms back onto the beat at 0.5 s, so the pop starts at 1.3 s.
+        assert_eq!(starts["pop"], Micros(1_300_000));
+        assert_eq!(starts["blur"], Micros(1_700_000));
+        // The take's second kept range plays from output 30.6 s. A callout 20 ms into it is
+        // nearest the beat at 30.5 s, before the cut, so it stays.
+        let second = &snapped.chapters[0].segments[1].overlays;
+        let callout = second
+            .iter()
+            .find(|o| o.template.as_str() == "callout")
+            .unwrap();
+        assert_eq!(callout.range.from(), Micros(33_020_000));
+        assert_eq!(
+            snapped.chapters[0].segments[0].source,
+            output.chapters[0].segments[0].source
+        );
+    }
+
+    #[test]
+    fn bookend_chunks_are_cached_in_the_channel() {
+        let (project, lock) = target();
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("brand")).unwrap();
+        let video = root.path().join("videos/target");
+        fs::create_dir_all(&video).unwrap();
+        let joins = Joins {
+            intro: Some(BookendInput {
+                bumper: None,
+                title: Some("t".to_owned()),
+                length: Micros(3_000_000),
+                identity: Vec::new(),
+            }),
+            ..Joins::default()
+        };
+        let timeline = Timeline::styled(&project, &lock);
+        let plan = ExportPlan::new(timeline.main(), FPS, |_| MediaId::default()).with_joins(&joins);
+        let cache = Cache::new(&video, &plan).unwrap();
+        let bookend = plan.bookends[0].chunks[0].hash;
+        let segment = plan.segments[0].chunks[0].hash;
+        assert_eq!(
+            cache.path(bookend),
+            root.path()
+                .join(format!(".shot/cache/chunks/{bookend}.mp4"))
+        );
+        assert_eq!(
+            cache.path(segment),
+            video.join(format!(".shot/cache/chunks/{segment}.mp4"))
+        );
     }
 }

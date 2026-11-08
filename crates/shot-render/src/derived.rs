@@ -4,9 +4,10 @@
 //! frame at the same moment, scaled to the derived canvas, with the captions burned in. So it
 //! renders in two passes, each cached in chunks:
 //!
-//! 1. **Base**: the main chunk that holds the frames, keyed and rendered exactly as the main
-//!    export does. A main export renders the same chunk, so whichever runs first leaves it for the
-//!    other ([decision 0017](../../../docs/decisions/0017-derived-cuts-from-main-chunks.md)).
+//! 1. **Base**: the main chunk that holds the frames, keyed and rendered as the main export does
+//!    without transitions and cards (below). Where none draw, a main export renders the same
+//!    chunk, so whichever runs first leaves it for the other
+//!    ([decision 0017](../../../docs/decisions/0017-derived-cuts-from-main-chunks.md)).
 //! 2. **Derived**: the window and the captions over the base chunk's frames, keyed by the base
 //!    chunk's key plus the window's position and the caption shown on each frame.
 //!
@@ -15,6 +16,12 @@
 //! moment places it on the main canvas, and the window centers on its smoothed position, moved
 //! only as far as it takes to keep the whole face inside. A layout without the camera, or a
 //! take where Vision finds no face, keeps the window centered.
+//!
+//! A derived cut is a clip of the content, not of the long video's frame: it has no intro, outro
+//! or transitions, its clips join hard, and its base chunks leave out the cards that frame the
+//! main cut, chapter bands and end cards ([0021]). Every other overlay inside a clip draws.
+//!
+//! [0021]: ../../../docs/decisions/0021-sound-transitions-and-bookends.md
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -157,6 +164,7 @@ impl DerivedPlan {
             panic!("{} is the main cut", derived.name);
         };
         let fps = inputs.fps;
+        let (main, derived) = (&without_cards(main), &without_cards(derived));
         let mut main_plan = ExportPlan::new(main, fps, inputs.media);
         crate::overlay::key_chunks(&mut main_plan, inputs.assets, inputs.theme);
         let mut plan = ExportPlan::new(derived, fps, inputs.media);
@@ -269,6 +277,20 @@ impl DerivedPlan {
     pub fn style(&self) -> CaptionStyle {
         self.style
     }
+}
+
+/// The templates that frame the main cut, which derived cuts leave out.
+const CARDS: [&str; 2] = ["chapter-band", "end-card"];
+
+/// `output` without its chapter bands and end cards.
+fn without_cards(output: &Output) -> Output {
+    let mut output = output.clone();
+    for segment in output.chapters.iter_mut().flat_map(|c| &mut c.segments) {
+        segment
+            .overlays
+            .retain(|o| !CARDS.contains(&o.template.as_str()));
+    }
+    output
 }
 
 /// Renders the derived chunks of `job` into the cache from their base chunks, waiting for bases
