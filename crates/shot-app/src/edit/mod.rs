@@ -383,6 +383,9 @@ impl EditScreen {
     }
 
     fn set_playing(&mut self, playing: bool) {
+        if playing {
+            self.place.stop_audition();
+        }
         if playing && self.playhead + 1 >= self.map.frames {
             self.seek(0);
         }

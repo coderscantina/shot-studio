@@ -263,7 +263,7 @@ impl EditScreen {
 }
 
 impl PlaceState {
-    fn stop_audition(&self) {
+    pub fn stop_audition(&self) {
         if let Some(audition) = &self.audition {
             audition.stop();
         }
