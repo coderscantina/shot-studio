@@ -181,7 +181,12 @@ impl PrompterPane {
         }));
         let this = cx.weak_entity();
         subscriptions.push(cx.on_window_closed(move |cx, id| {
-            let _ = this.update(cx, |pane, cx| pane.closed(id, cx));
+            // The pane closes the output itself while it is being updated, so hear about it
+            // after that update ends.
+            let this = this.clone();
+            cx.defer(move |cx| {
+                let _ = this.update(cx, |pane, cx| pane.closed(id, cx));
+            });
         }));
         subscriptions.push(cx.on_release(|pane, cx| {
             if let Some((_, handle)) = pane.output.take() {
