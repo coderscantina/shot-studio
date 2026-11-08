@@ -169,7 +169,7 @@ pub fn zoom_at(zooms: &[Zoom], source_frame: u64, fps: u32) -> f32 {
     zooms
         .iter()
         .find(|zoom| zoom.range.from() <= time && time < zoom.range.to())
-        .map_or(1.0, |zoom| f32::from(zoom.scale) / 100.0)
+        .map_or(1.0, |zoom| crate::zoom::Punch::of(zoom, (1, 1)).scale)
 }
 
 /// The media time where frame `frame` starts.

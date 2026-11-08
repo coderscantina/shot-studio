@@ -180,6 +180,85 @@ pub struct Zoom {
     pub center: Option<Point>,
     /// The rule that wrote it, `None` for a person's zoom.
     pub by: Option<ZoomBy>,
+    /// How it frames the picture and ramps in and out.
+    pub shape: ZoomShape,
+}
+
+keyword_enum! {
+    /// What a zoom frames: `auto` its point or the layout's center, the center, or a quarter
+    /// of the screen. A quarter fills the frame, so it zooms to at least 200 percent.
+    #[derive(Default)]
+    pub enum Framing {
+        #[default]
+        Auto = "auto",
+        Center = "center",
+        TopLeft = "top-left",
+        TopRight = "top-right",
+        BottomLeft = "bottom-left",
+        BottomRight = "bottom-right",
+    }
+}
+
+impl Framing {
+    /// The quarter's center as a fraction of the screen, `None` for `auto` and `center`.
+    pub fn quarter(self) -> Option<[f32; 2]> {
+        match self {
+            Self::Auto | Self::Center => None,
+            Self::TopLeft => Some([0.25, 0.25]),
+            Self::TopRight => Some([0.75, 0.25]),
+            Self::BottomLeft => Some([0.25, 0.75]),
+            Self::BottomRight => Some([0.75, 0.75]),
+        }
+    }
+
+    /// The lowest scale in percent the framing allows.
+    pub fn min_scale(self) -> u16 {
+        if self.quarter().is_some() { 200 } else { 100 }
+    }
+}
+
+/// How a zoom frames and moves, on the `zoom` node and the `zoom` effect alike. Each part is
+/// written only when it differs from the default: `auto` framing and the ramps `zoom-motion`
+/// gives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct ZoomShape {
+    pub framing: Framing,
+    /// How long the zoom eases in, 0 for a hard switch. `None` follows `zoom-motion`.
+    pub ramp_in: Option<Micros>,
+    /// How long it eases out, 0 for a hard switch. `None` follows `zoom-motion`.
+    pub ramp_out: Option<Micros>,
+}
+
+impl ZoomShape {
+    /// Whether a ramp of its own eases the zoom in or out rather than switching.
+    pub fn ramps_gradually(&self) -> bool {
+        [self.ramp_in, self.ramp_out]
+            .iter()
+            .any(|r| r.is_some_and(|r| r.0 > 0))
+    }
+
+    /// The properties [`ZoomShape::read`] takes.
+    pub(crate) const PROPS: [&str; 3] = ["framing", "ramp-in", "ramp-out"];
+
+    pub(crate) fn read(node: Node<'_>) -> Result<Self, ParseError> {
+        Ok(Self {
+            framing: node.opt_prop("framing")?.unwrap_or_default(),
+            ramp_in: node.opt_prop("ramp-in")?,
+            ramp_out: node.opt_prop("ramp-out")?,
+        })
+    }
+
+    pub(crate) fn write(&self, w: &mut Writer) {
+        if self.framing != Framing::Auto {
+            w.prop("framing", &self.framing);
+        }
+        if let Some(ramp) = &self.ramp_in {
+            w.prop("ramp-in", ramp);
+        }
+        if let Some(ramp) = &self.ramp_out {
+            w.prop("ramp-out", ramp);
+        }
+    }
 }
 
 /// A typed overlay template (link card, highlight, b-roll, ...) with its parameters.
@@ -430,7 +509,8 @@ impl TakeEdit {
                     });
                 }
                 "zoom" => {
-                    child.expect(1, &["from", "to", "x", "y", "by"])?;
+                    let props = ["from", "to", "x", "y", "by"];
+                    child.expect(1, &[&props[..], &ZoomShape::PROPS].concat())?;
                     let scale: u16 = child.arg(0)?;
                     if scale < 100 {
                         return Err(child.error("zoom scale is a percentage of at least 100"));
@@ -447,6 +527,7 @@ impl TakeEdit {
                         range,
                         center,
                         by: child.opt_prop("by")?,
+                        shape: ZoomShape::read(child)?,
                     });
                 }
                 "overlay" => edit.overlays.push(Overlay::read(child)?),
@@ -503,6 +584,7 @@ impl TakeEdit {
             if let Some(Point { x, y }) = zoom.center {
                 w.prop("x", &x).prop("y", &y);
             }
+            zoom.shape.write(w);
             if let Some(by) = &zoom.by {
                 w.prop("by", by);
             }

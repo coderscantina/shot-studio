@@ -13,6 +13,7 @@ use kdl::KdlValue;
 use crate::kdl_io::{Bare, FromKdl, Node, Source, ToKdl, Writer, keyword_enum};
 use crate::{
     Attr, AttrValue, CaptionStyle, ElementKind, Id, Layout, Micros, ParamValue, ParseError,
+    ZoomShape,
 };
 
 keyword_enum! {
@@ -282,6 +283,8 @@ pub enum Effect {
         scale: u16,
         hold: Micros,
         lead: Micros,
+        /// Framing and ramps, carried to the zoom it writes.
+        shape: ZoomShape,
     },
     /// A template overlay over the element's span, or for `length` from its start.
     Overlay {
@@ -383,7 +386,7 @@ impl Effect {
                 Self::Layout(node.arg(0)?)
             }
             "zoom" => {
-                node.expect(1, &["hold", "lead"])?;
+                node.expect(1, &[&["hold", "lead"][..], &ZoomShape::PROPS].concat())?;
                 let scale: u16 = node.arg(0)?;
                 if scale < 100 {
                     return Err(node.error("zoom scale is a percentage of at least 100"));
@@ -392,6 +395,7 @@ impl Effect {
                     scale,
                     hold: node.opt_prop("hold")?.unwrap_or_default(),
                     lead: node.opt_prop("lead")?.unwrap_or_default(),
+                    shape: ZoomShape::read(node)?,
                 }
             }
             "overlay" => {
@@ -494,7 +498,12 @@ impl Effect {
                 w.end();
             }
             Self::Layout(layout) => w.arg(layout).end(),
-            Self::Zoom { scale, hold, lead } => {
+            Self::Zoom {
+                scale,
+                hold,
+                lead,
+                shape,
+            } => {
                 w.arg(scale);
                 if hold.0 > 0 {
                     w.prop("hold", hold);
@@ -502,6 +511,7 @@ impl Effect {
                 if lead.0 > 0 {
                     w.prop("lead", lead);
                 }
+                shape.write(w);
                 w.end();
             }
             Self::Overlay {

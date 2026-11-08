@@ -485,13 +485,19 @@ fn apply(effect: &Effect, subject: &Subject<'_>) -> Option<Applied> {
             layout: *layout,
             range: subject.span()?,
         },
-        Effect::Zoom { scale, hold, lead } => {
+        Effect::Zoom {
+            scale,
+            hold,
+            lead,
+            shape,
+        } => {
             let from = Micros(t.0.saturating_sub(lead.0));
             let to = Micros(subject.to.unwrap_or(t).0.max(t.0 + hold.0));
             Applied::Zoom {
                 scale: *scale,
                 range: TimeRange::new(from, to)?,
                 center: subject.element.and_then(Element::point),
+                shape: *shape,
             }
         }
         Effect::Overlay {

@@ -13,7 +13,8 @@ use crate::{
     Attr, AttrValue, AutoZoom, Brand, ContentHash, Cut, Decision, Effect, EffectKey, ElementKind,
     Elements, Filter, Format, FormatKind, FormatLayer, Id, Micros, Overlay, Override,
     OverrideEffect, Project, RangeEdit, RemovedBy, Rule, RuleBody, RuleKind, Selector, StyleError,
-    StyleInput, StyleSheet, TakeEdit, Target, TimeRange, Zoom, ZoomBy, ZoomTrigger, build,
+    StyleInput, StyleSheet, TakeEdit, Target, TimeRange, Zoom, ZoomBy, ZoomShape, ZoomTrigger,
+    build,
 };
 
 /// The pacing's punch-in on emphasis, and the shortest it holds.
@@ -78,6 +79,7 @@ pub fn implied_rules(format: &Format) -> StyleSheet {
             scale: EMPHASIS_ZOOM,
             hold: EMPHASIS_HOLD,
             lead: Micros(0),
+            shape: ZoomShape::default(),
         },
     ));
     for trigger in format.auto_zoom.iter().flat_map(|z| &z.triggers) {
@@ -94,6 +96,7 @@ pub fn implied_rules(format: &Format) -> StyleSheet {
                 scale: zoom.scale,
                 hold: Micros(zoom.hold.0.saturating_sub(ZOOM_LEAD.0)),
                 lead: ZOOM_LEAD,
+                shape: ZoomShape::default(),
             },
         ));
     }
@@ -165,6 +168,7 @@ pub fn preset_rules(kind: FormatKind) -> StyleSheet {
                 scale: EMPHASIS_ZOOM,
                 hold: JUMP_CUT_HOLD,
                 lead: Micros(0),
+                shape: ZoomShape::default(),
             }]),
         };
         let at = sheet
@@ -709,6 +713,7 @@ impl<'a> Migrator<'a> {
                             scale: zoom.scale,
                             hold: Micros(zoom.range.to().0 - e.t.0),
                             lead: Micros(e.t.0 - zoom.range.from().0),
+                            shape: zoom.shape,
                         };
                         self.set_effect(&take, e.kind, e.t, OverrideEffect::Set(effect));
                         placed.push((key, zoom));
@@ -950,11 +955,13 @@ fn zoom_of(instance: &Instance) -> Option<Zoom> {
             scale,
             range,
             center,
+            shape,
         } => Some(Zoom {
             scale,
             range,
             center,
             by: None,
+            shape,
         }),
         _ => None,
     }

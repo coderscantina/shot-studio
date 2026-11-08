@@ -250,6 +250,9 @@ pub struct Brand {
     pub outro: Option<Bookend>,
     pub end_card: Option<Micros>,
     pub camera: Option<Camera>,
+    /// How strongly the camera drifts as if hand-held, 0 (off) to 100. Written on the `camera`
+    /// node; `None` keeps what a lower layer set.
+    pub handheld: Option<u8>,
     pub motion: Motion,
     /// Sorted by name, each name once.
     pub presets: Vec<Preset>,
@@ -331,16 +334,33 @@ impl Brand {
                     node.set_once(&mut end_card, node.prop("length")?)?;
                 }
                 "camera" => {
-                    node.expect(0, &["shape", "corners", "border", "shadow"])?;
-                    node.set_once(
-                        &mut camera,
-                        Camera {
-                            shape: node.prop("shape")?,
-                            corners: node.prop("corners")?,
-                            border: node.prop("border")?,
-                            shadow: node.prop("shadow")?,
-                        },
-                    )?;
+                    node.expect(0, &["shape", "corners", "border", "shadow", "handheld"])?;
+                    let handheld: Option<u8> = node.opt_prop("handheld")?;
+                    if handheld.is_some_and(|h| h > 100) {
+                        return Err(node.error("`handheld` is a strength from 0 to 100"));
+                    }
+                    let frame = (
+                        node.opt_prop("shape")?,
+                        node.opt_prop("corners")?,
+                        node.opt_prop("border")?,
+                        node.opt_prop("shadow")?,
+                    );
+                    let frame = match frame {
+                        (Some(shape), Some(corners), Some(border), Some(shadow)) => Some(Camera {
+                            shape,
+                            corners,
+                            border,
+                            shadow,
+                        }),
+                        (None, None, None, None) if handheld.is_some() => None,
+                        _ => {
+                            return Err(node.error(
+                                "`camera` takes `shape`, `corners`, `border` and `shadow` together",
+                            ));
+                        }
+                    };
+                    node.set_once(&mut camera, frame)?;
+                    brand.handheld = handheld;
                 }
                 "motion" => {
                     let props: Vec<&str> = FormatKind::ALL.iter().map(|k| k.as_str()).collect();
@@ -386,7 +406,7 @@ impl Brand {
         brand.intro = intro;
         brand.outro = outro;
         brand.end_card = end_card;
-        brand.camera = camera;
+        brand.camera = camera.flatten();
         brand.motion = motion.unwrap_or_default();
         brand.presets.sort_by_key(|p| p.name);
         brand.stinger = stinger;
@@ -444,13 +464,16 @@ impl Brand {
         if let Some(length) = &self.end_card {
             w.node("end-card").prop("length", length).end();
         }
-        if let Some(camera) = &self.camera {
-            w.node("camera")
-                .prop("shape", &camera.shape)
-                .prop("corners", &camera.corners)
-                .prop("border", &camera.border)
-                .prop("shadow", &camera.shadow)
-                .end();
+        if self.camera.is_some() || self.handheld.is_some() {
+            w.node("camera");
+            if let Some(camera) = &self.camera {
+                w.prop("shape", &camera.shape)
+                    .prop("corners", &camera.corners)
+                    .prop("border", &camera.border)
+                    .prop("shadow", &camera.shadow);
+            }
+            write_opt(w, "handheld", &self.handheld);
+            w.end();
         }
         if self.motion != Motion::default() {
             w.node("motion");
@@ -524,6 +547,7 @@ impl Brand {
         merge_opt(&mut merged.outro, &over.outro);
         merge_opt(&mut merged.end_card, &over.end_card);
         merge_opt(&mut merged.camera, &over.camera);
+        merge_opt(&mut merged.handheld, &over.handheld);
         for &kind in FormatKind::ALL {
             merge_opt(merged.motion.get_mut(kind), &over.motion.get(kind));
         }

@@ -121,6 +121,7 @@ pub fn zooms(rule: &AutoZoom, events: &EventLog, screen: (u32, u32)) -> Vec<Zoom
                 y: center[1].round() as i32,
             }),
             by: Some(candidate.by),
+            shape: Default::default(),
         });
     }
     out
@@ -420,6 +421,7 @@ mod tests {
             range: TimeRange::new(Micros(10_000_000), Micros(11_000_000)).unwrap(),
             center: None,
             by: None,
+            shape: Default::default(),
         };
         let stale = Zoom {
             by: Some(ZoomBy::Click),
