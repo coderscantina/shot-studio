@@ -15,7 +15,7 @@ Mark a milestone complete only after its acceptance criteria pass and an evidenc
 | 07 | [Overlays and derived cuts](07-overlays-and-derived-cuts.md) | 04, 05 | Media, Core | Complete, face reframing proven on a stand-in face only. [Evidence](../evidence/m07-overlays-and-derived-cuts.md) |
 | 08 | [Planning, agents and ship](08-planning-agents-and-ship.md) | 03, 04, 07 | Core, Agents | Complete, the real YouTube upload waits for Mike's OAuth client. [Evidence](../evidence/m08-planning-agents-and-ship.md) |
 | 10 | [Semantic core](10-semantic-core.md) | 07, 08 | Core, Analysis, Media, App | Items 1 to 6 and 8 on `milestone/10-12`, item 7 waits for a design round with Mike. [Evidence](../evidence/m10-semantic-core.md) |
-| 11 | [Motion system and effects as styles](11-effects-as-styles.md) | 10 (items 1 to 4 can start earlier) | Media, App | Items 1 to 6, 10 and 11 on `milestone/10-12`: motion system, templates on it with brand fonts and colors, sound wired into export. The editor bench passes with glass and motion blur on |
+| 11 | [Motion system and effects as styles](11-effects-as-styles.md) | 10 (items 1 to 4 can start earlier) | Media, App | Items 1 to 11 on `milestone/10-12`, the app preview does not draw transitions and bookends yet: motion system, templates on it with brand fonts and colors, sound wired into export. The editor bench passes with glass and motion blur on |
 | 12 | [Styled monitor and watch builds](12-styled-monitor-and-watch-builds.md) | 10, 11 | App, Media, Agents | Not started |
 | 09 | [Release gate](09-release-gate.md) | 01 to 08, 10 to 12 | Core | Not started |
 
@@ -58,6 +58,7 @@ Waiting for Mike. One line each with a recommendation and a link to its record. 
 Found by agents and waiting for a task. Remove a line when it's fixed.
 
 - Record does not warn when the camera delivers black frames.
+- The contract does not yet describe which transition joins a bookend, where the intro goes, what each title shows, or take handles. Bumpers are cached per video, not per channel as decision 0021 says.
 - Placed sounds and lock overlays cannot be removed in the app yet; that waits for the provenance and scope design round. The transition mark style and Picture's placement buttons are not in the mockup and need Mike's design call.
 - `style::shown` copies every lock instance of a take into every block of that take: frames are right, counts inflate (the bench reports 67 overlays).
 - The app's sound, callout, pop and Lottie placement were driven by an in-app script calling the button handlers, not by real clicks; the Lottie import is covered only by its unit test.
