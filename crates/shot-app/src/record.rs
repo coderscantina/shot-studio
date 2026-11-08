@@ -16,20 +16,24 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     App, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, KeyBinding,
-    ObjectFit, ScrollHandle, Window, actions, div, prelude::*, px, relative, surface,
+    ObjectFit, ScrollHandle, Subscription, Window, actions, div, prelude::*, px, relative, surface,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::progress::Progress;
+use gpui_component::switch::Switch;
+use gpui_component::{Disableable, Sizable};
 use objc2_core_video::{CVPixelBufferGetHeight, CVPixelBufferGetWidth};
 use shot_analyze::elements::{self, Depth};
 use shot_analyze::{SpeechDetector, Transcriber, cache, models};
 use shot_capture::events::Hotkey;
-use shot_capture::{Devices, Preview, PreviewFrame, Session, SessionConfig, Source};
+use shot_capture::{
+    CaptureError, Devices, Permission, Preview, PreviewFrame, Session, SessionConfig, Source,
+};
 use shot_core::{Id, Micros, Transcript};
 
 use crate::folder::VideoFolder;
 use crate::live::{Feeds, Heard, LiveTake, Setup, View};
-use crate::prompter::{Live, PrompterPane};
+use crate::prompter::{Live, PrompterPane, TogglePrompter};
 use crate::theme::*;
 use crate::ui::{self, alert, hint, icon, label, mono};
 
@@ -53,7 +57,65 @@ enum Phase {
     Recording { take: Id, started: Instant },
     Finishing,
     Finished { take: Id, duration: Micros },
-    Failed(String),
+    Failed(Failure),
+}
+
+/// Why a take did not start or finish, with the privacy permission to grant when that is why.
+#[derive(Clone)]
+struct Failure {
+    message: String,
+    permission: Option<Permission>,
+}
+
+impl From<String> for Failure {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            permission: None,
+        }
+    }
+}
+
+impl From<CaptureError> for Failure {
+    fn from(error: CaptureError) -> Self {
+        match error {
+            CaptureError::Permission(permission) => {
+                let then = match permission {
+                    Permission::ScreenRecording | Permission::InputMonitoring => {
+                        "then quit and reopen Shot Studio"
+                    }
+                    Permission::Camera => "then start again, or turn the camera off",
+                    Permission::Microphone => "then start again, or turn the mic off",
+                };
+                Self {
+                    message: format!(
+                        "Recording needs {permission} access. Allow Shot Studio, or the terminal \
+                         you started it from, in Privacy & Security, {then}."
+                    ),
+                    permission: Some(permission),
+                }
+            }
+            error => error.to_string().into(),
+        }
+    }
+}
+
+/// The Privacy & Security pane of System Settings for `permission`.
+fn settings_url(permission: Permission) -> &'static str {
+    match permission {
+        Permission::ScreenRecording => {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+        }
+        Permission::Camera => {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera"
+        }
+        Permission::Microphone => {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+        }
+        Permission::InputMonitoring => {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
+        }
+    }
 }
 
 /// Sources picked for the next take.
@@ -106,8 +168,13 @@ pub struct RecordScreen {
     commands: Sender<Command>,
     focus: FocusHandle,
     scroll: ScrollHandle,
-    error: Option<String>,
+    error: Option<Failure>,
     prompter: Entity<PrompterPane>,
+    /// Display names by id, like "Studio Display".
+    display_names: Vec<(u32, String)>,
+    /// The screen is showing: set on its first render, cleared when focus leaves it.
+    on_screen: bool,
+    _focus_out: Option<Subscription>,
 }
 
 impl EventEmitter<Recorded> for RecordScreen {}
@@ -157,6 +224,9 @@ impl RecordScreen {
             scroll: ScrollHandle::new(),
             error: None,
             prompter,
+            display_names: crate::prompter::display_names(),
+            on_screen: false,
+            _focus_out: None,
         }
     }
 
@@ -238,7 +308,7 @@ impl RecordScreen {
                                     this.shared.set(Phase::Idle);
                                     cx.emit(Recorded);
                                 }
-                                Err(error) => this.error = Some(error),
+                                Err(error) => this.error = Some(error.into()),
                             }
                             cx.notify();
                         })
@@ -299,7 +369,7 @@ fn record(
     hotkeys: Vec<Hotkey>,
     commands: &Receiver<Command>,
     shared: &Shared,
-) -> Result<(Id, Micros), String> {
+) -> Result<(Id, Micros), Failure> {
     let dir = setup.dir.clone();
     let dir = dir.as_path();
     // The transcriber needs the take id before capture creates the folder; a mismatch is fixed
@@ -387,7 +457,7 @@ fn record(
         .iter()
         .find(|d| choice.display.map_or(d.main, |id| d.id == id))
         .map_or((16, 9), |d| (d.width as u32, d.height as u32));
-    let session = Session::start(config).map_err(|e| e.to_string())?;
+    let session = Session::start(config)?;
     let origin = Instant::now() - Duration::from_micros(session.elapsed().0);
     live.set_marks(Some(session.marks()));
     let preview = session.preview();
@@ -406,6 +476,7 @@ fn record(
         take: session.id().clone(),
         started: Instant::now(),
     });
+    live.lock().start();
     let mut last = Instant::now();
     loop {
         match commands.recv_timeout(Duration::from_millis(16)) {
@@ -533,11 +604,25 @@ impl Render for RecordScreen {
             phase,
             Phase::Idle | Phase::Failed(_) | Phase::Finished { .. }
         );
+        let has_beats = self
+            .folder
+            .read(cx)
+            .project
+            .script
+            .chapters
+            .iter()
+            .any(|c| !c.beats.is_empty());
+        if !self.on_screen {
+            self.show(has_beats, window, cx);
+        }
         div()
             .id("record")
             .key_context(CONTEXT)
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::toggle))
+            .on_action(cx.listener(|this, _: &TogglePrompter, _, cx| {
+                this.prompter.update(cx, |prompter, cx| prompter.toggle(cx))
+            }))
             .flex_1()
             .min_h_0()
             .flex()
@@ -548,15 +633,7 @@ impl Render for RecordScreen {
             .child(self.stage(&phase, cx))
             .map(|row| {
                 // Without beats the prompter has nothing to show, so the live transcript stays.
-                if self
-                    .folder
-                    .read(cx)
-                    .project
-                    .script
-                    .chapters
-                    .iter()
-                    .any(|c| !c.beats.is_empty())
-                {
+                if has_beats {
                     row.child(self.prompter.clone())
                 } else {
                     row.child(self.transcript(&phase))
@@ -566,6 +643,55 @@ impl Render for RecordScreen {
 }
 
 impl RecordScreen {
+    /// The screen shows: the prompter output opens with it, and closes when focus leaves the
+    /// screen, which is what the title bar does when it switches screens. Focus also "leaves"
+    /// when another app or the output itself becomes active, which is no reason to close.
+    fn show(&mut self, has_beats: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.on_screen = true;
+        if self._focus_out.is_none() {
+            self._focus_out = Some(cx.on_focus_out(&self.focus, window, |this, _, window, cx| {
+                if window.is_window_active() {
+                    this.on_screen = false;
+                    this.prompter.update(cx, |prompter, cx| prompter.leave(cx));
+                }
+            }));
+        }
+        if has_beats {
+            let display = window
+                .display(cx)
+                .and_then(|display| u32::try_from(u64::from(display.id())).ok());
+            self.prompter
+                .update(cx, |prompter, cx| prompter.enter(display, cx));
+        }
+    }
+
+    /// A display by its name, like "Studio Display", marked when it holds the menu bar.
+    fn screen_name(&self, display: &shot_capture::Display) -> String {
+        let name = self
+            .display_names
+            .iter()
+            .find(|(id, _)| *id == display.id)
+            .map_or("Display", |(_, name)| name.as_str());
+        if display.main {
+            format!("{name} (main)")
+        } else {
+            name.to_owned()
+        }
+    }
+
+    /// The error of the last take, with a way to the setting that fixes a missing permission.
+    fn failure(&self) -> Option<Div> {
+        let failure = self.error.as_ref()?;
+        Some(
+            alert(failure.message.clone()).children(failure.permission.map(|permission| {
+                let url = settings_url(permission);
+                Button::new("open-privacy")
+                    .small()
+                    .label("Open Privacy & Security")
+                    .on_click(move |_, _, cx| cx.open_url(url))
+            })),
+        )
+    }
     fn tracks(&self, busy: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let display = self
             .devices
@@ -609,14 +735,8 @@ impl RecordScreen {
                 Picker::Display,
                 "display",
                 "Screen",
-                display.map_or("None".into(), |d| format!("{}x{}", d.width, d.height)),
-                display.map_or("No display".into(), |d| {
-                    if d.main {
-                        "Main display".into()
-                    } else {
-                        format!("Display {}", d.id)
-                    }
-                }),
+                display.map_or(String::new(), |d| format!("{}x{}", d.width, d.height)),
+                display.map_or("No display".into(), |d| self.screen_name(d)),
                 busy,
                 cx,
             ))
@@ -656,21 +776,26 @@ impl RecordScreen {
                 .child(meter(if recording { level } else { f32::NEG_INFINITY })),
             )
             .child(
-                card()
-                    .id("system-audio")
-                    .cursor_pointer()
-                    .when(!busy, |card| {
-                        card.on_click(cx.listener(|this, _, _, cx| {
-                            this.choice.system_audio = !this.choice.system_audio;
-                            cx.notify();
-                        }))
-                    })
-                    .child(card_head("system-audio", "System audio", String::new()))
-                    .child(card_value(if self.choice.system_audio {
-                        "On"
-                    } else {
-                        "Off"
-                    })),
+                card().child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(icon("system-audio", ICON, TEXT))
+                        .child(div().font_weight(FontWeight::MEDIUM).child("System audio"))
+                        .child(div().flex_1())
+                        .child(
+                            Switch::new("system-audio")
+                                .small()
+                                .checked(self.choice.system_audio)
+                                .disabled(busy)
+                                .accessibility_label("Record system audio")
+                                .on_click(cx.listener(|this, on: &bool, _, cx| {
+                                    this.choice.system_audio = *on;
+                                    cx.notify();
+                                })),
+                        ),
+                ),
             )
             .child(
                 card()
@@ -719,12 +844,7 @@ impl RecordScreen {
                 .map(|d| {
                     (
                         Some(d.id.to_string()),
-                        format!(
-                            "{} {}x{}",
-                            if d.main { "Main display" } else { "Display" },
-                            d.width,
-                            d.height
-                        ),
+                        format!("{}, {}x{}", self.screen_name(d), d.width, d.height),
                     )
                 })
                 .collect(),
@@ -883,7 +1003,7 @@ impl RecordScreen {
                         .w(px(180.)),
                     ),
             )
-            .children(self.error.clone().map(alert))
+            .children(self.failure())
             .children(monitor_error.map(|e| alert(format!("The monitor shows the raw feed: {e}"))))
             .child(
                 div()
@@ -1142,4 +1262,21 @@ fn meter(level: f32) -> Div {
                 .w(gpui::relative(hot))
                 .bg(gpui::rgb(0xe8d44d)),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_missing_permission_names_its_settings_pane_and_how_to_retry() {
+        let failure = Failure::from(CaptureError::Permission(Permission::ScreenRecording));
+        assert_eq!(failure.permission, Some(Permission::ScreenRecording));
+        assert!(
+            failure
+                .message
+                .ends_with("then quit and reopen Shot Studio.")
+        );
+        assert_eq!(Failure::from(CaptureError::NoDisplay(7)).permission, None);
+    }
 }

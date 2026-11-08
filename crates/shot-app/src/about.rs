@@ -63,16 +63,21 @@ fn credits() -> Credits {
     }
 }
 
-/// Sets the app menu with About and Quit (⌘Q). Call once at startup.
+/// Sets the app menu with About and Quit (⌘Q), and the Prompter menu. Call once at startup.
 pub fn init(cx: &mut App) {
     cx.on_action(|_: &About, cx| open(cx));
     cx.on_action(|_: &Quit, cx| cx.quit());
     cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
-    cx.set_menus([Menu::new("Shot Studio").items([
-        MenuItem::action("About Shot Studio", About),
-        MenuItem::separator(),
-        MenuItem::action("Quit Shot Studio", Quit),
-    ])]);
+    // Before the menus, so the menu shows the prompter's shortcut.
+    crate::prompter::bind_keys(cx);
+    cx.set_menus([
+        Menu::new("Shot Studio").items([
+            MenuItem::action("About Shot Studio", About),
+            MenuItem::separator(),
+            MenuItem::action("Quit Shot Studio", Quit),
+        ]),
+        crate::prompter::menu(),
+    ]);
 }
 
 /// Opens the About window, or brings the open one to the front. Needs [`crate::theme::init`].
