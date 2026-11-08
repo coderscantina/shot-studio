@@ -29,7 +29,14 @@ Checked with real clicks on the target project and a copy of the demo channel: t
 
 Not verified on that branch: a real take starting from the standby preview, real denied permissions, a real ScreenCaptureKit timeout, and Edit script with a save in an external editor. No worktrees.
 
-`m13/integration` (from `polish/council-round1`) holds the plan for [milestone 13](milestones/13-takes-scenes-and-studio-tools.md), Mike's 16 change requests of 2026-11-08. Seven delegated agents (streams A to G) work on it in their own worktrees and task branches, each committing there; the integrator merges them into `m13/integration`, then runs fmt, clippy and tests, and removes the worktrees.
+`m13/integration` is finished, checked and not merged: it branches from `polish/council-round1` (so merging it brings that branch too) and holds [milestone 13](milestones/13-takes-scenes-and-studio-tools.md), Mike's 16 change requests of 2026-11-08, built by seven streams and merged, with their worktrees and task branches removed. fmt, workspace clippy and `cargo test --workspace` pass except the flaky watchdog test. [Evidence](evidence/m13-takes-scenes-and-studio-tools.md) lists what each item shows and what was not verified. It holds:
+- Cut: a Takes view (⌥2) lines up each take's attempt at every script beat, rates (1 to 5) and picks (P) them, compares two back to back (A) with the differing words lit, and composes the cut with "Use this" (↩) or "Assemble picks" (⇧↩). Ratings live in a `takes` block in `cut.kdl`.
+- Scenes: a layout switch inside a take morphs (default 500 ms), dissolves, zooms through or cuts, with a sound, set from its mark on the Layout lane (T). A layout builder (⇧L in Edit) saves channel layouts to the brand.
+- Zoom framing (auto, center, four quarters) with ramp in and out per zoom; a hand-held camera drift, 0 to 100, on the brand's camera node.
+- Text: effects marked on their words in the lane hues, chips that pick and remove them, Z H S P L from a selection, layout chips inline. Burned-in captions: a Captions panel to edit, split and join lines, a style editor with five presets saved per video or for the channel. Delete works wherever Backspace removes something.
+- Library (⌘L): sounds, music, memes and images, overlays (with the channel's presets) and effects, Openverse search with download, credit files and Copy credits, placing at the selection or playhead.
+- Theme window (⌘⇧B): every brand field with a live preview, a generator from one color or the logo, several named themes, an overlay preset editor that also opens placed overlays.
+- Record: quiet prompter settings behind "More settings", per-track input switches in `format.kdl` with every downstream path coping without a track. Ship: a thumbnail studio with variants and YouTube-size previews that writes `main.png`.
 
 ## Uncommitted work
 
@@ -42,7 +49,8 @@ No app is running; the PIDs in `.demo/pids` are stale. Generated media in `$HOME
 ## Waiting on Mike
 
 See the [open decisions](milestones/README.md#open-decisions) and [prerequisites](milestones/README.md#prerequisites-from-mike):
-- Push `main`, and merge `polish/council-round1` into it.
+- Push `main`, and merge `m13/integration` into it (it carries `polish/council-round1`).
+- Decisions 0026 to 0030 and 0032 and the zoom ramp ease, each with a recommendation in the [open decisions](milestones/README.md#open-decisions).
 - How studio edits reach a video's branch so the board shows them (known gaps).
 - Score the four reels and listen to the bundled sounds and beds.
 - The design-variants round for milestone 10 item 7.
@@ -51,6 +59,7 @@ See the [open decisions](milestones/README.md#open-decisions) and [prerequisites
 
 ## Next
 
-1. The council's follow-ups: the target fixture's hand-placed `by=pause` cuts sit on speech and its cut is not what the rules write, so pacing changes nothing on the demo; durations in the Cut review footer and list rows still show a wide mono space before "s"; at 1280x800 the zoom inspector's "At" card covers its last hint; Picture and Timeline have no empty state without takes; Cut's private `button` duplicates `ui::big_button`.
-2. Milestone 10 item 7 after the design round.
-3. [Milestone 09](milestones/09-release-gate.md) items 4 and 5: measure every target on the idle reference machine, then one full video from board to a private upload.
+1. Milestone 13 follow-ups: Ship's description does not include the Library's credits yet, and the bundled Noto emoji (CC BY 4.0) are not credited; CLI and MCP have no takes, use or assemble commands; `shot record` has no switch for a track; Text shows an empty block for a take without a mic; the theme window's Captions section only points to the video's Captions panel; at 1600x1000 the Text inspector's "At" card cuts off the last hints; agents driving several app windows at once sent clicks and keys into each other's windows, so one app per agent or a harness that targets one window is needed next time.
+2. The council's follow-ups: the target fixture's hand-placed `by=pause` cuts sit on speech and its cut is not what the rules write, so pacing changes nothing on the demo; durations in the Cut review footer and list rows still show a wide mono space before "s"; at 1280x800 the zoom inspector's "At" card covers its last hint; Picture and Timeline have no empty state without takes; Cut's private `button` duplicates `ui::big_button`.
+3. Milestone 10 item 7 after the design round.
+4. [Milestone 09](milestones/09-release-gate.md) items 4 and 5: measure every target on the idle reference machine, then one full video from board to a private upload.

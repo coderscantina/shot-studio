@@ -17,7 +17,7 @@ Mark a milestone complete only after its acceptance criteria pass and an evidenc
 | 10 | [Semantic core](10-semantic-core.md) | 07, 08 | Core, Analysis, Media, App | Items 1 to 6 and 8 on `milestone/10-12`, item 7 waits for a design round with Mike. [Evidence](../evidence/m10-semantic-core.md) |
 | 11 | [Motion system and effects as styles](11-effects-as-styles.md) | 10 (items 1 to 4 can start earlier) | Media, App | Built on `milestone/10-12`; Mike's reel scores are the open criterion. [Evidence](../evidence/m11-effects-as-styles.md) |
 | 12 | [Styled monitor and watch builds](12-styled-monitor-and-watch-builds.md) | 10, 11 | App, Media, Agents | Built on `milestone/10-12`; watch rebuild 7.8 to 13.5 s, the URL card latency waits for Mike. [Evidence](../evidence/m12-styled-monitor-and-watch-builds.md) |
-| 13 | [Takes, scenes and studio tools](13-takes-scenes-and-studio-tools.md) | 10, 11, 12 | All roles | In progress on `m13/integration` |
+| 13 | [Takes, scenes and studio tools](13-takes-scenes-and-studio-tools.md) | 10, 11, 12 | All roles | Built on `m13/integration`; decisions 0026 to 0030 and 0032 wait for Mike. [Evidence](../evidence/m13-takes-scenes-and-studio-tools.md) |
 | 09 | [Release gate](09-release-gate.md) | 01 to 08, 10 to 12 | Core | Items 1 to 3 and 6 built (release.sh, workflow, bundle, cask, credits); signing waits for Mike's Apple secrets. [Evidence](../evidence/m09/release-machinery.md) |
 
 Milestone 02 is a go/no-go gate. If gpui can't show a 4K60 VideoToolbox decode without a CPU copy, stop and bring the measurements to Mike before 03 starts, because the UI choice changes.
@@ -33,6 +33,12 @@ Waiting for Mike. One line each with a recommendation and a link to its record. 
 - Score the four reels (`docs/evidence/m11/reel-*.mp4`, 81 s each, timecoded list in the report); milestone 11 needs 8 or higher per preset.
 - Website and domain: `shot-studio.app` or `shot.coderscantina.com`, postponed by Mike on 2026-11-08. No website is linked until then.
 - Library search on Openverse ([0026](../decisions/0026-library-search-on-openverse.md)): anonymous, CC0, PDM and CC BY only, sounds into `brand/sounds/`, images into the channel's `library/`, each with a `.credit.kdl`. Recommended: adopt.
+- Scene switches and channel layouts ([0027](../decisions/0027-scene-switches-and-channel-layouts.md)): every layout switch morphs over 500 ms unless a format writes `layout-switch cut`, so existing videos render differently. Recommended: adopt.
+- Takes ([0028](../decisions/0028-attempts-are-derived-ratings-are-written.md)): attempts are worked out from the files each time, only ratings and picks go into `cut.kdl`. Recommended: adopt.
+- Themes ([0029](../decisions/0029-several-themes-per-channel.md)): the active theme lives in `brand.kdl`, others in `brand/themes/`; imports, rules, overlay presets and channel layouts stay with the channel. Recommended: adopt.
+- Captions ([0030](../decisions/0030-caption-presets-look-and-line-edits.md)): a line edit is a dictionary fix with a word of context, so it applies wherever the same words are said. Recommended: adopt.
+- Inputs and thumbnails ([0032](../decisions/0032-input-switches-and-thumbnail-designs.md)): input switches in `format.kdl`, thumbnail designs in `thumbnail.kdl`. Recommended: adopt.
+- Zoom ramps use the smooth zoom's spring, which reads shorter than the ramp's number (a 1.5 s ramp looks done in about 0.5 s). An ease over the whole ramp would also change today's smooth zooms. Recommended: watch one first, see `docs/evidence/m13/c-ramp-in-sequence.png`.
 - Milestone 10 item 7: a design-variants round for provenance, the scope choice and the rule editor, plus the transition mark style and Picture's placement buttons.
 
 Settled on 2026-11-08: every Proposed record (0011, 0013 to 0025) adopted, the live URL card target relaxed to 1.5 s, golden frames allow 1 code value on up to 16 pixels, codec headroom stays 1.5 dB, presets get jump-cut punch-ins back through an `every=<n>` selector filter, the release workflow reuses Kessel's coderscantina signing secrets, the repo goes public now, SECURITY.md promises best effort, Discussions stay off, the Homebrew tap waits for the first release.
