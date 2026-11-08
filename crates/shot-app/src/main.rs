@@ -26,6 +26,7 @@ mod edit;
 mod edit_bench;
 mod engine;
 mod folder;
+mod layout_store;
 mod live;
 mod metrics;
 mod model;
