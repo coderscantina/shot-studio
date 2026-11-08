@@ -605,7 +605,7 @@ impl FormatLayer {
     fn read(src: Source<'_>, doc: &kdl::KdlDocument, style: bool) -> Result<Self, ParseError> {
         let mut layer = Self::default();
         let (mut layouts, mut brand) = (None, None);
-        for node in src.nodes(doc) {
+        for node in src.versioned(doc)? {
             match node.name() {
                 "prompter" => {
                     node.expect(1, &[])?;
@@ -717,6 +717,7 @@ impl FormatLayer {
 
     pub fn to_kdl(&self) -> String {
         let mut w = Writer::default();
+        w.version();
         if let Some(prompter) = &self.prompter {
             w.node("prompter").arg(prompter).end();
         }

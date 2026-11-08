@@ -130,6 +130,32 @@ fn errors_carry_line_and_column() {
 }
 
 #[test]
+fn a_file_from_a_newer_version_is_refused_with_both_versions() {
+    fn check<T>(text: &str, parse: fn(&str) -> Result<T, shot_core::ParseError>) {
+        // The new build's nodes after `version` must not be reported as unknown first.
+        let err = parse(&format!("version 99\n{text}future-node 1\n"))
+            .err()
+            .expect("refused");
+        assert_eq!((err.line, err.column), (1, 1), "{err}");
+        assert!(
+            err.message.contains("version 99") && err.message.contains("version 1"),
+            "{err}"
+        );
+        assert!(parse(&format!("version 1\n{text}")).is_ok());
+        assert!(parse(&format!("version 0\n{text}")).is_err());
+    }
+    check(VIDEO, Video::parse);
+    check(FORMAT, Format::parse);
+    check(CUT, Cut::parse);
+    check("colors accent=\"#ff7a59\"\n", shot_core::Brand::parse);
+    // Version 1 is the default, so the canonical form leaves it out.
+    assert_eq!(
+        Cut::parse(&format!("version 1\n{CUT}")).unwrap().to_kdl(),
+        CUT
+    );
+}
+
+#[test]
 fn tour_examples_round_trip() {
     assert_in_contract(TOUR_FORMAT);
     assert_in_contract(TOUR_CUT);

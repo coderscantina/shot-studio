@@ -11,6 +11,10 @@ use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 
 use crate::ParseError;
 
+/// The version of `cut.kdl`, `format.kdl`, `video.kdl` and `brand.kdl` this build reads and
+/// writes. A file without a `version` node is version 1.
+pub const FILE_VERSION: u32 = 1;
+
 /// The text of one project file, used to turn spans into line-numbered errors.
 #[derive(Clone, Copy)]
 pub(crate) struct Source<'a> {
@@ -36,6 +40,31 @@ impl<'a> Source<'a> {
 
     pub fn nodes(self, doc: &'a KdlDocument) -> impl Iterator<Item = Node<'a>> {
         doc.nodes().iter().map(move |node| Node { src: self, node })
+    }
+
+    /// The top-level nodes of a versioned file without its `version` node. A file from a newer
+    /// build is refused before any other node is read, so its new nodes never show up as
+    /// unknown ones.
+    pub fn versioned(
+        self,
+        doc: &'a KdlDocument,
+    ) -> Result<impl Iterator<Item = Node<'a>>, ParseError> {
+        let mut version = None;
+        for node in self.nodes(doc).filter(|n| n.name() == "version") {
+            node.expect(1, &[])?;
+            let number: u32 = node.arg(0)?;
+            node.set_once(&mut version, number)?;
+            if number == 0 {
+                return Err(node.error("versions start at 1"));
+            }
+            if number > FILE_VERSION {
+                return Err(node.error(format!(
+                    "this file is version {number}, and this build reads up to version \
+                     {FILE_VERSION}. Update Shot Studio to open it"
+                )));
+            }
+        }
+        Ok(self.nodes(doc).filter(|n| n.name() != "version"))
     }
 }
 
@@ -293,6 +322,14 @@ pub(crate) struct Writer {
 }
 
 impl Writer {
+    /// Writes `version` as the first node once [`FILE_VERSION`] is above 1, so files of
+    /// version 1 keep their text.
+    pub fn version(&mut self) {
+        if FILE_VERSION > 1 {
+            self.node("version").arg(&FILE_VERSION).end();
+        }
+    }
+
     pub fn node(&mut self, name: &str) -> &mut Self {
         for _ in 0..self.depth {
             self.out.push_str("    ");

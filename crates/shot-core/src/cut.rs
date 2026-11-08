@@ -379,7 +379,7 @@ impl Cut {
         let mut breaks = Vec::new();
         let mut derived_clips = Vec::new();
         let mut overrides = Vec::new();
-        for node in src.nodes(&doc) {
+        for node in src.versioned(&doc)? {
             match node.name() {
                 "captions" => {
                     node.expect(1, &[])?;
@@ -459,6 +459,7 @@ impl Cut {
 
     pub fn to_kdl(&self) -> String {
         let mut w = Writer::default();
+        w.version();
         let mut first = true;
         let mut separate = |w: &mut Writer| {
             if !std::mem::take(&mut first) {
