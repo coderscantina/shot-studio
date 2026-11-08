@@ -235,6 +235,8 @@ pub struct Theme {
     key: Vec<u8>,
     /// How the camera is framed beside the screen, `None` for the layouts' own corners.
     pub camera: Option<CameraFrame>,
+    /// How strongly the camera drifts as if hand-held, 0 (off) to 100, see [`crate::handheld`].
+    pub handheld: u8,
     pub stinger: Option<StingerAnimation>,
     pub logo: Option<Logo>,
 }
@@ -452,6 +454,7 @@ impl Theme {
             chapters,
             key: Vec::new(),
             camera,
+            handheld: brand.handheld.unwrap_or(0),
             stinger,
             logo,
         };
@@ -483,20 +486,25 @@ impl Theme {
     }
 
     /// The camera's frame as bytes, for the chunks of a layout that shows the camera beside the
-    /// screen; `None` where the brand frames no camera or the layout shows none to frame.
+    /// screen, and its hand-held strength wherever the camera shows; `None` where neither draws.
     pub fn camera_key(&self, layout: Layout) -> Option<Vec<u8>> {
-        let camera = self.camera?;
-        if !matches!(layout, Layout::FaceContent | Layout::Split) {
-            return None;
+        let mut key = Vec::new();
+        let beside = matches!(layout, Layout::FaceContent | Layout::Split);
+        if let Some(camera) = self.camera.filter(|_| beside) {
+            key = format!("{:?}{:?}", camera.shape, camera.shadow).into_bytes();
+            for value in [camera.corners, camera.border]
+                .into_iter()
+                .chain(camera.color)
+            {
+                key.extend_from_slice(&value.to_le_bytes());
+            }
         }
-        let mut key = format!("{:?}{:?}", camera.shape, camera.shadow).into_bytes();
-        for value in [camera.corners, camera.border]
-            .into_iter()
-            .chain(camera.color)
-        {
-            key.extend_from_slice(&value.to_le_bytes());
+        let shows_camera = beside || matches!(layout, Layout::Face | Layout::FaceCorner);
+        if self.handheld > 0 && shows_camera {
+            key.extend_from_slice(b"handheld");
+            key.push(self.handheld);
         }
-        Some(key)
+        (!key.is_empty()).then_some(key)
     }
 
     /// The shape a mask wipe opens in: the camera's, or a circle.
@@ -1006,5 +1014,31 @@ pub(crate) mod tests {
         // The face-content segment's two chunks; the opinion format's face layout around it
         // fills the canvas and has no frame.
         assert_eq!(changed, [2, 3]);
+    }
+
+    #[test]
+    fn the_hand_held_strength_keys_only_layouts_that_show_the_camera() {
+        let still = theme(&brand("")).unwrap();
+        assert_eq!(still.camera_key(Layout::Face), None);
+        let held = theme(&brand("camera handheld=30\n")).unwrap();
+        assert_eq!(held.handheld, 30);
+        assert!(held.camera_key(Layout::Face).is_some());
+        assert!(held.camera_key(Layout::Split).is_some());
+        assert_eq!(held.camera_key(Layout::Content), None);
+        assert_eq!(held.camera_key(Layout::Window), None);
+        // A framed camera keeps its key where it is not hand-held.
+        let framed = theme(&brand(
+            "camera shape=circle corners=0 border=0 shadow=none\n",
+        ))
+        .unwrap();
+        let both = theme(&brand(
+            "camera shape=circle corners=0 border=0 shadow=none handheld=30\n",
+        ))
+        .unwrap();
+        assert_eq!(framed.camera_key(Layout::Face), None);
+        assert_ne!(
+            framed.camera_key(Layout::Split),
+            both.camera_key(Layout::Split)
+        );
     }
 }

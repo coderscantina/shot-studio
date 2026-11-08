@@ -28,7 +28,7 @@ const MAX_LAYERS: usize = 8;
 /// Bytes per layer in the uniform buffer, the minimum dynamic offset alignment.
 const LAYER_STRIDE: u64 = 256;
 /// Size of the shader's `Layer` struct.
-const LAYER_SIZE: u64 = 144;
+const LAYER_SIZE: u64 = 160;
 
 pub struct Renderer {
     device: wgpu::Device,
@@ -286,6 +286,10 @@ impl Renderer {
                 quad.top,
                 quad.right,
                 quad.bottom,
+                layer.turn,
+                0.0,
+                0.0,
+                0.0,
             ];
             let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_ne_bytes()).collect();
             self.queue.write_buffer(&self.uniforms, offset, &bytes);

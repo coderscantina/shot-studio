@@ -445,6 +445,9 @@ pub struct Layer {
     pub opacity: f32,
     pub border: Option<Border>,
     pub shadow: Option<DropShadow>,
+    /// How far the source turns inside `crop`, around the crop's center, in radians: the
+    /// hand-held camera's roll.
+    pub turn: f32,
 }
 
 /// A border drawn inside a layer's edge.
@@ -479,6 +482,7 @@ impl Layer {
             opacity: 1.0,
             border: None,
             shadow: None,
+            turn: 0.0,
         }
     }
 

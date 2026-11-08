@@ -36,6 +36,7 @@ pub mod drawing;
 pub mod events;
 pub mod frame;
 pub mod golden;
+pub mod handheld;
 pub mod join;
 pub mod kinetic;
 pub mod layout;

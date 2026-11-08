@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use shot_core::{
-    Cut, Decision, Elements, Format, FormatLayer, Id, Lock, Micros, MigrateInput, Project, Script,
-    TakeAt, TimeRange, Transcript, Video, ZoomBy,
+    Brand, Cut, Decision, Elements, Format, FormatLayer, Id, Lock, Micros, MigrateInput, Project,
+    Script, TakeAt, TimeRange, Transcript, Video, ZoomBy,
 };
 use shot_mcp::style::{self, Disk, Repo};
 use shot_render::theme::Theme;
@@ -46,6 +46,8 @@ pub struct VideoFolder {
 struct Snapshot {
     cut: Cut,
     format: Format,
+    /// The brand block of a migrated video's `format.kdl`.
+    brand: Option<Brand>,
 }
 
 /// How many writes undo can step back through.
@@ -300,12 +302,16 @@ impl VideoFolder {
         Snapshot {
             cut: self.project.cut.clone(),
             format: self.project.format.clone(),
+            brand: self.layer_brand(),
         }
     }
 
     fn restore_snapshot(&mut self, snapshot: Snapshot) -> Result<(), String> {
         if snapshot.format != self.project.format {
             self.store_format(snapshot.format)?;
+        }
+        if snapshot.brand != self.layer_brand() {
+            self.store_brand(snapshot.brand)?;
         }
         self.store(snapshot.cut)
     }
@@ -333,6 +339,42 @@ impl VideoFolder {
         };
         write(&self.dir.join("format.kdl"), &text)?;
         self.project.format = format;
+        self.rebuild_lock()
+    }
+
+    /// The brand block of a migrated video's `format.kdl`, `None` without one.
+    fn layer_brand(&self) -> Option<Brand> {
+        self.style.as_ref().and_then(|s| s.layer.brand.clone())
+    }
+
+    /// The hand-held strength the video's own layer sets, `None` when it leaves it to the
+    /// channel's brand.
+    pub fn own_handheld(&self) -> Option<u8> {
+        self.layer_brand().and_then(|b| b.handheld)
+    }
+
+    /// Sets the camera's hand-held strength in the video's layer, or with `None` leaves it to
+    /// the channel's brand. Only a migrated video has a brand to set it in. A change can be
+    /// undone.
+    pub fn set_handheld(&mut self, strength: Option<u8>) -> Result<(), String> {
+        if self.style.is_none() {
+            return Err(
+                "The camera is styled by the channel's brand, migrate the video first".into(),
+            );
+        }
+        let mut brand = self.layer_brand().unwrap_or_default();
+        brand.handheld = strength.map(|s| s.min(100));
+        let brand = (!brand.is_empty()).then_some(brand);
+        self.as_one_change(|folder| folder.store_brand(brand))
+    }
+
+    fn store_brand(&mut self, brand: Option<Brand>) -> Result<(), String> {
+        let styled = self
+            .style
+            .as_mut()
+            .ok_or("only a migrated video has a brand layer")?;
+        styled.layer.brand = brand;
+        write(&self.dir.join("format.kdl"), &styled.layer.to_kdl())?;
         self.rebuild_lock()
     }
 
