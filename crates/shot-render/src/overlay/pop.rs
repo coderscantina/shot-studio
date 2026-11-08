@@ -4,6 +4,7 @@
 //! | --- | --- |
 //! | `text` | the emoji or word. Required unless `sticker` is set |
 //! | `sticker` | optional, a Lottie template the brand declares, drawn instead, its `text` slot set to `text` |
+//! | `image` | optional, a still (`.png`, `.jpg`) relative to the video folder, drawn instead on rounded corners: a meme from the Library |
 //! | `x`, `y` | optional, the center in pixels of the 4K output frame, by default right of the middle in the upper third |
 //! | `size` | optional, its height in pixels of the 4K output frame, 360 by default |
 //!
@@ -32,6 +33,7 @@ pub const SPEC: TemplateSpec = TemplateSpec {
     params: &[
         ParamSpec::optional("text", ParamKind::Text, "the emoji or word"),
         ParamSpec::optional("sticker", ParamKind::Text, "a brand sticker instead"),
+        ParamSpec::optional("image", ParamKind::Text, "a still image instead"),
         ParamSpec::optional("x", ParamKind::Integer, "center, 4K output pixels"),
         ParamSpec::optional("y", ParamKind::Integer, "center, 4K output pixels"),
         ParamSpec::optional("size", ParamKind::Integer, "height, 4K output pixels"),
@@ -79,10 +81,29 @@ fn is_emoji(text: &str) -> bool {
     !text.chars().any(char::is_alphanumeric)
 }
 
-/// A pop needs `text` or `sticker`, and an emoji `text` must be one of [`EMOJI`].
+/// The still a pop draws, by its path in the video folder.
+pub fn image(overlay: &Overlay) -> Option<&str> {
+    (overlay.template.as_str() == TEMPLATE)
+        .then(|| Params(overlay).text("image"))
+        .flatten()
+        .filter(|file| super::broll::Media::of(file) == Some(super::broll::Media::Still))
+}
+
+/// A pop needs `text`, `sticker` or `image`, an emoji `text` must be one of [`EMOJI`] and an
+/// `image` a PNG or JPEG.
 pub(crate) fn check(overlay: &Overlay) -> Result<(), TemplateError> {
     let p = Params(overlay);
     let text = p.text("text");
+    if p.text("image").is_some() {
+        return match image(overlay) {
+            Some(_) => Ok(()),
+            None => Err(TemplateError::Kind {
+                template: TEMPLATE.to_owned(),
+                param: "image".to_owned(),
+                kind: "a .png or .jpg file",
+            }),
+        };
+    }
     if text.is_none() && p.text("sticker").is_none() {
         return Err(TemplateError::Missing {
             template: TEMPLATE.to_owned(),
@@ -122,6 +143,26 @@ pub(crate) fn apply(overlay: &Overlay, stage: &mut Stage) {
     let px = |name: &str, default: f32| p.int(name).map_or(default, |v| v as f32) * s;
     let center = [px("x", 3840.0 * 0.72), px("y", 2160.0 * 0.32)];
     let size = px("size", SIZE) * scale;
+    if let Some(file) = image(overlay) {
+        let Some(still) = stage.look.images.get(file) else {
+            return;
+        };
+        let (width, height) = (still.width as f32, still.height as f32);
+        let half = [width * size / height.max(1.0) / 2.0, size / 2.0];
+        stage.drawing.over.push(Shape::Image {
+            rect: Rect::new(
+                center[0] - half[0],
+                center[1] - half[1],
+                center[0] + half[0],
+                center[1] + half[1],
+            ),
+            radius: size * 0.06,
+            image: still.clone(),
+            crop: Rect::UNIT,
+            opacity,
+        });
+        return;
+    }
     let text = p.text("text");
     let elapsed = Micros(t.0 - overlay.range.from().0);
     let lottie = match p.text("sticker") {
@@ -205,5 +246,15 @@ mod tests {
             super::super::check(&pop("🦀")),
             Err(TemplateError::Kind { .. })
         ));
+        let picture = |file: &str| {
+            super::super::overlay(
+                TEMPLATE,
+                shot_core::TimeRange::new(Micros(0), Micros(1)).unwrap(),
+                vec![("image", shot_core::ParamValue::Text(file.into()))],
+            )
+        };
+        assert!(super::super::check(&picture("../../library/facepalm.jpg")).is_ok());
+        assert_eq!(image(&picture("sources/a.PNG")), Some("sources/a.PNG"));
+        assert!(super::super::check(&picture("sources/cat.gif")).is_err());
     }
 }

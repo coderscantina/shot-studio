@@ -333,12 +333,13 @@ pub fn overlay(template: &str, range: TimeRange, params: Vec<(&str, ParamValue)>
     }
 }
 
-/// The file an overlay draws from, by its path in the video folder: a code-diff snapshot or a
-/// b-roll file.
+/// The file an overlay draws from, by its path in the video folder: a code-diff snapshot, a
+/// b-roll file or a pop's image.
 pub fn file(overlay: &Overlay) -> Option<&str> {
     match overlay.template.as_str() {
         code_diff::TEMPLATE => Params(overlay).text("diff"),
         broll::TEMPLATE => broll::file(overlay).map(|(file, _)| file),
+        pop::TEMPLATE => pop::image(overlay),
         _ => None,
     }
 }
