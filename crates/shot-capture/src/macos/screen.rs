@@ -250,14 +250,22 @@ impl Stream {
             queues.push(queue);
         }
 
-        wait_for(|handler| unsafe { stream.startCaptureWithCompletionHandler(Some(handler)) })
-            .map_err(|e| match e {
+        if let Err(error) =
+            wait_for(|handler| unsafe { stream.startCaptureWithCompletionHandler(Some(handler)) })
+        {
+            // A start that timed out can still finish later and keep holding the display, so a
+            // retry would get no frames. Stop it before giving up.
+            let _ = wait_for(|handler| unsafe {
+                stream.stopCaptureWithCompletionHandler(Some(handler))
+            });
+            return Err(match error {
                 Some(_) if !CGPreflightScreenCaptureAccess() => {
                     CaptureError::Permission(Permission::ScreenRecording)
                 }
                 Some(message) => fail(message),
                 None => fail("starting timed out".into()),
-            })?;
+            });
+        }
         Ok(Self {
             stream,
             _sinks: sinks,

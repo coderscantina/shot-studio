@@ -182,17 +182,6 @@ impl Render for BoardWindow {
                         div()
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(channel::name(&self.repo)),
-                    )
-                    .child(
-                        mono(crate::welcome::shown_path(&self.repo))
-                            .min_w_0()
-                            .truncate()
-                            .text_size(TEXT_SM)
-                            .text_color(KBD_TEXT)
-                            .px(px(8.))
-                            .py(px(3.))
-                            .rounded(px(6.))
-                            .bg(CARD),
                     ),
             )
             .child(

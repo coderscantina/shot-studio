@@ -137,6 +137,17 @@ pub fn key(dir: &Path) -> PathBuf {
 actions!(studio, [Undo, Redo]);
 
 /// Binds the keys of every screen. Call once at startup.
+/// Whether a take of the cut has no transcript yet.
+fn untranscribed(folder: &VideoFolder) -> bool {
+    folder
+        .project
+        .cut
+        .chapters
+        .iter()
+        .flat_map(|chapter| &chapter.takes)
+        .any(|edit| !folder.transcripts.contains_key(&edit.take))
+}
+
 pub fn bind_keys(cx: &mut App) {
     // Text fields bind their own undo in their context, which wins over these.
     cx.bind_keys([
@@ -335,21 +346,29 @@ impl Studio {
     }
 
     /// The step this video is on, `None` once it shipped: from its card for a video of a
-    /// channel, else from what its folder holds.
+    /// channel, else from what its folder holds. Edit and Ship work on words, so a take of the
+    /// cut without a transcript keeps the video on Cut, where it is transcribed.
     fn step(&self, cx: &App) -> Option<Screen> {
-        let project = &self.folder.read(cx).project;
-        match &self.planning {
+        let folder = self.folder.read(cx);
+        let project = &folder.project;
+        let step = match &self.planning {
             Some(_) => Screen::step_of(self.status.unwrap_or(project.video.status)),
             None => Some(Screen::step_of_loose(&project.cut)),
+        };
+        match step {
+            Some(Screen::Edit | Screen::Ship) if untranscribed(folder) => Some(Screen::Cut),
+            step => step,
         }
     }
 
     /// The screen a new window opens on: the video's next step. A video outside a channel has
-    /// no status, so it opens on Record until it has takes and on Edit after.
+    /// no status, so it opens on Record until it has takes, on Cut while a take waits for its
+    /// transcript and on Edit after.
     fn first_screen(&self, cx: &App) -> Screen {
         match self.step(cx) {
             None => Screen::Ship,
             Some(Screen::Record) => Screen::Record,
+            Some(Screen::Cut) if untranscribed(self.folder.read(cx)) => Screen::Cut,
             Some(_) if self.planning.is_none() => Screen::Edit,
             Some(step) => step,
         }
