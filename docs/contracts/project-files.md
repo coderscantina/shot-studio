@@ -105,7 +105,7 @@ target-date "2026-11-20"
 | `captions <style>` | the caption preset: `word-pop`, `clean`, `karaoke`, `bold` or `off`, with optional [look properties](#caption-look) that change the brand's look of burned-in captions for this video |
 | `auto-cut confidence=<0..100>` | block with one node per rule. Results at or above `confidence` percent apply right away, the rest go to the review queue |
 
-Layouts are `face`, `face-content`, `split`, `content`, `screen`, `face-corner` and `window` (a captured window on a background).
+Layouts are `face`, `face-content`, `split`, `content`, `screen`, `face-corner` and `window` (a captured window on a background), or the name of a channel layout the brand defines (see [scene switches and channel layouts](#scene-switches-and-channel-layouts)).
 
 The five nodes above are required and appear once. `auto-cut` holds all six rules:
 
@@ -146,6 +146,7 @@ Optional nodes after `auto-cut`, in this order. A missing node means its default
 | `cursor size=<percent> smoothing=<time> ripple=<bool>` | the cursor's size as a percent of the recorded size (0 hides it), the window its path is averaged over (0 draws the raw path), and a ripple on every click | `size=100 smoothing=0 ripple=#false` |
 | `keystrokes` | the keystroke overlay: `off`, `shortcuts` (keys with a modifier held) or `all` | `off` |
 | `window padding=<px> corners=<px> shadow=<shadow> background="#rrggbb" frame=<frame>` | how the `window` layout places the captured window: padding and corner radius in output pixels, a shadow of `none`, `soft` or `hard`, the background color, and a device bezel of `none`, `macbook` or `iphone` | `padding=48 corners=12 shadow=soft background="#101418" frame=none` |
+| `layout-switch <kind> length=<time> sound=<sound>` | how layout switches inside a take move where `cut.kdl` writes nothing, see [scene switches](#scene-switches-and-channel-layouts) | `morph length=500_000` |
 
 `auto-zoom` is a rule like the auto-cut rules: it writes nodes and changes no pixels by itself. The other four reach the renderer, and each enters a chunk's hash only where it draws, see [timeline evaluation](#timeline-evaluation). This example is the product tour preset:
 
@@ -253,7 +254,7 @@ A `chapter` holds `take <id> { ... }` blocks in output order. A take may appear 
 | `remove from=<time> to=<time> by=<who>` | a removed range. `by` is the rule that removed it (`silence`, `retake`, `misspoken`, `pause`, `filler`, `idle-screen`) or `manual` |
 | `review from=<time> to=<time> by=<rule>` | a finding the rule was not sure about, waiting in the review queue. The material plays until a person decides |
 | `ignore from=<time> to=<time> by=<rule>` | a finding a person kept: K in the queue, or a restored removal. The rule leaves this range alone when it runs again |
-| `layout <layout> from=<time> to=<time>` | a layout for that range. Elsewhere the format's default layout applies |
+| `layout <layout> from=<time> to=<time> { in <switch> out <switch> }` | a layout for that range. Elsewhere the format's default layout applies. The optional `in` and `out` children set how the switch on each edge moves, see [scene switches](#scene-switches-and-channel-layouts) |
 | `zoom <percent> from=<time> to=<time> x=<px> y=<px> framing=<framing> ramp-in=<time> ramp-out=<time> by=<what>` | a punch-in zoom, at least `100` percent. `x` and `y`, together or not at all, center it on a point of the screen track in its pixels; without them the layout picks the center. `framing`, `ramp-in` and `ramp-out` are optional, see [zoom framing and ramps](#zoom-framing-and-ramps). `by` names what wrote it: `jump-cut`, `emphasis`, `click`, `typing`, `cursor` or `marker`. A zoom without `by` is a person's |
 | `overlay <template> from=<time> to=<time> { <param> <value> ... }` | a template overlay. Each child is one parameter: a name and one text, integer or boolean value. Integers are written grouped by three like times, so a parameter in microseconds reads as one. Later overlays draw on top |
 
@@ -471,15 +472,15 @@ chapter "Hook" {
 
 `shot-core` evaluates a project into one output for the main cut and one for each derived cut.
 
-- A main output has one group of segments per chapter. A segment is a kept range of one take with one layout, so a kept range splits wherever a layout change starts or ends. It carries the zooms and overlays that overlap it, with their full ranges.
+- A main output has one group of segments per chapter. A segment is a kept range of one take with one layout, so a kept range splits wherever a layout change starts or ends. It carries the zooms and overlays that overlap it, with their full ranges, and the [scene switch](#scene-switches-and-channel-layouts) whose window overlaps it, at most one.
 - A derived output has one group, named after the cut. Its segments are the main segments cut down to each clip's range, so every chunk of a derived cut lies inside one chunk of the main cut.
 - Export caches rendered video in chunks. A segment is snapped to the output frame grid and cut at every half second of its take's media time, which is the recordings' keyframe grid. So a chunk is at most 0.5 s and starts on the grid or at a segment edge.
-- Each chunk has a content hash (BLAKE3) over the renderer version, the output aspect, the burned-in caption style with the video's caption look, the caption fixes and line breaks (or the fact that captions are a sidecar), the take id and the take's media identity, the frame rate and the chunk's frames of the take, the layout, the cursor and keystroke settings when the layout shows the screen (every layout but `face`), the window style in the `window` layout, the zooms with their scale and center and, where they are set, their framing and ramps, and every overlay overlapping the chunk with its full range and parameters. Instant zooms are cut to the chunk; with `zoom-motion smooth`, or when a zoom of the segment has a ramp of its own longer than 0, every zoom of the segment counts whole, because the easing at one frame depends on where the zoom starts and ends and where the next one centers. Output position, chapter titles, zoom provenance, review items and the music bed are not part of it. Deleting a word therefore re-renders only the two chunks at the new edges, and every other chunk is reused at its new position. A new caption fix, look or line break re-renders the derived cuts and nothing of the main cut.
+- Each chunk has a content hash (BLAKE3) over the renderer version, the output aspect, the burned-in caption style with the video's caption look, the caption fixes and line breaks (or the fact that captions are a sidecar), the take id and the take's media identity, the frame rate and the chunk's frames of the take, the layout, a scene switch whose window overlaps the chunk with its kind, edge, window and the layout it leaves (a `cut` draws nothing and adds nothing), the cursor and keystroke settings when the layout shows the screen (every layout but `face`, and every channel layout), the window style in the `window` layout, the zooms with their scale and center and, where they are set, their framing and ramps, and every overlay overlapping the chunk with its full range and parameters. Instant zooms are cut to the chunk; with `zoom-motion smooth`, or when a zoom of the segment has a ramp of its own longer than 0, every zoom of the segment counts whole, because the easing at one frame depends on where the zoom starts and ends and where the next one centers. Output position, chapter titles, zoom provenance, review items and the music bed are not part of it. Deleting a word therefore re-renders only the two chunks at the new edges, and every other chunk is reused at its new position. A new caption fix, look or line break re-renders the derived cuts and nothing of the main cut.
 - An overlay that names a file (a `code-diff` snapshot, a `b-roll` file) adds the file's size and modification time to the hash of every chunk it overlaps, so a file replaced under the same name renders again.
 - A derived chunk renders in two passes. Its base is the main chunk that holds its frames, keyed as above and shared with the main export, so whichever export runs first renders it for both; a base drawn without a transition or card the main chunk has is keyed apart. The derived chunk's own key extends the hash above (with the derived aspect and burned-in captions) with the base chunk's key, which of its frames it shows, the window's position on every frame, the caption design after the brand's look, and the caption on screen on every frame with its highlighted word. A new transcript or a moved face re-renders only the derived chunks whose captions or window changed.
 - A take's media identity hashes the size and modification time of its video tracks and of its event log, since the cursor is drawn from events. A take recorded again under a reused id gets a new identity, so it never matches the old recording's chunks.
 - Audio is not cached. Export encodes the whole cut's audio as one AAC stream with the music bed mixed under the voice, so the joins have no encoder delay or padding.
-- Once a video is migrated, the pacing's cuts, zooms and overlays come from the [lock](#cutlock) instead of the take blocks: the timeline removes the union of the lock's `cut` instances from the kept ranges, and segments carry the lock's zooms and overlays next to a person's. The chunk hash then reads the same values from the lock. It adds the brand fields where something branded draws, font and Lottie files by content hash, the camera style where the camera shows beside the screen, the hand-held strength where the camera shows at all and, at a chapter edge, both sides of the transition. Rule layer and element provenance are not part of it, like zoom provenance today. A video without a `cut.lock` is read from the take blocks as above. A chunk where a template other than `blur`, `bleep`, a b-roll clip or an empty slot draws adds the motion preset with its feel controls, the four brand colors and the content hash and weight of each font; one where a brand Lottie draws (a declared template, a re-skin or a `pop` sticker) adds that file's content hash, and one where a `chapter-band` without `text` draws adds the chapter's number and title. Every other chunk keeps its key when the brand changes. The lock's `music` and `sfx` instances play in the export's audio at their moments' output time, mixed with the music bed before the loudness pass.
+- Once a video is migrated, the pacing's cuts, zooms and overlays come from the [lock](#cutlock) instead of the take blocks: the timeline removes the union of the lock's `cut` instances from the kept ranges, and segments carry the lock's zooms and overlays next to a person's. The chunk hash then reads the same values from the lock. It adds the brand fields where something branded draws, font and Lottie files by content hash, the camera style where the camera shows beside the screen, the hand-held strength where the camera shows at all, the slots of each channel layout a chunk draws (its own, and the one a switch leaves) and, at a chapter edge, both sides of the transition. Rule layer and element provenance are not part of it, like zoom provenance today. A video without a `cut.lock` is read from the take blocks as above. A chunk where a template other than `blur`, `bleep`, a b-roll clip or an empty slot draws adds the motion preset with its feel controls, the four brand colors and the content hash and weight of each font; one where a brand Lottie draws (a declared template, a re-skin or a `pop` sticker) adds that file's content hash, and one where a `chapter-band` without `text` draws adds the chapter's number and title. Every other chunk keeps its key when the brand changes. The lock's `music` and `sfx` instances play in the export's audio at their moments' output time, mixed with the music bed before the loudness pass.
 
 ## Transitions and bookends
 
@@ -616,6 +617,62 @@ Each child of a rule is one effect, one per key (the node, plus the template for
 
 Layers apply lowest first: the brand's imports, `brand.kdl`, the channel's `formats/<format>.kdl`, the video's `format.kdl`. A rule replaces an earlier layer's rule with the same selector, whole. `on <selector> off` removes it. When several surviving rules give one element the same effect key, the selector with more filters wins; at equal count the later layer, then the later rule in its file. An [override](#overrides) in `cut.kdl` comes last and changes one element.
 
+## Scene switches and channel layouts
+
+A take switches scenes wherever its layout changes inside its kept material. Each switch moves the way the format's `layout-switch` says, unless the `layout` range on that edge writes its own. Both use one grammar, `<kind> length=<time> sound=<sound>`:
+
+| Part | Meaning |
+| --- | --- |
+| kind | `morph` (every slot springs from its place, size, corners and crop in the old layout to the new one; a slot only one side has fades and scales by 8 %), `dissolve` (the new layout fades in over the old), `zoom-through` (the old layout punches in towards the middle of the window, the new one punches out of it, motion blurred) or `cut` |
+| `length` | optional, 500 ms by default. The window starts on the edge and runs into the new layout, cut short by the next edge |
+| `sound` | optional, none by default. `brand` plays the brand's `transition` sounds by phase (the bare key and `-travel` at the window's start, `-impact` and `-settle` at its end), any other name plays that sound at the window's start, looked up like `sfx` |
+
+Without a `layout-switch` node, a format switches with `morph length=500_000` and no sound. On a `layout` range, `in` is the switch into it at `from` and `out` the switch out of it at `to`; where one range ends and the next starts, the next one's `in` wins. A layout from the block's first kept moment is how the block starts, not a switch. The morph eases on a spring that settles in the window, drawn the same in preview and export; slots that move are motion blurred like a smooth zoom.
+
+A channel layout is a `layout <name> { ... }` node of the brand, its name in the id alphabet, at most 31 characters and not a built-in's. It places `screen` and `camera` slots, each at most once and at least one, on the 3840x2160 design frame, scaled to the output like the built-in layouts. Slots draw in order, later ones on top:
+
+| Slot | Properties |
+| --- | --- |
+| `screen ...`, `camera ...` | `x`, `y`, `width`, `height` in pixels of the 3840x2160 frame, inside it; `corners` in the same pixels, 0 by default; `focus-x`, `focus-y`, 0 to 100, where the crop of the track centers, 50 by default. Both focus values are written when either differs |
+
+The brand's `camera` node frames a channel layout's camera slot whenever the layout also shows the screen, as it does in `face-content` and `split`. A format layer's `brand` block adds or replaces layouts by name, and its `layouts` node offers them on the hotkeys like the built-in ones. A video outside a channel has no brand and draws only the built-in layouts. A layout name the resolved brand does not define is an export error.
+
+This channel defines two layouts:
+
+```kdl
+camera shape=rounded corners=32 border=0 shadow=soft
+layout side-by-side {
+    screen x=96 y=270 width=2880 height=1620 corners=32
+    camera x=3072 y=630 width=672 height=900 corners=32 focus-x=50 focus-y=40
+}
+layout talk-left {
+    camera x=0 y=0 width=1536 height=2160 focus-x=45 focus-y=50
+    screen x=1632 y=486 width=2112 height=1188 corners=24
+}
+```
+
+Its opinion videos offer them on the hotkeys and morph with the brand's transition sounds:
+
+```kdl
+layouts face side-by-side talk-left
+layout-switch morph length=600_000 sound=brand
+```
+
+A take that dissolves into `side-by-side` with a whoosh at 8 s, zooms through to `face` at 20 s, and morphs into `talk-left` at 24 s and back at 30 s:
+
+```kdl
+chapter "Intro" {
+    take t01 {
+        keep from=0 to=40_000_000
+        layout side-by-side from=8_000_000 to=20_000_000 {
+            in dissolve length=400_000 sound=whoosh
+            out zoom-through
+        }
+        layout talk-left from=24_000_000 to=30_000_000
+    }
+}
+```
+
 ## `brand.kdl`
 
 `brand/brand.kdl` holds the channel's look and sound ([0020](../decisions/0020-channel-brand-and-shared-styles.md), [0021](../decisions/0021-sound-transitions-and-bookends.md), [0023](../decisions/0023-motion-system-and-lottie-templates.md)). Every node is optional and appears once unless noted, in this order. The same grammar, without `import` and rules, is the `brand` block of a format layer; a later layer's fields replace the earlier ones field by field, so a video names only what differs.
@@ -631,6 +688,7 @@ Layers apply lowest first: the brand's imports, `brand.kdl`, the channel's `form
 | `end-card length=<time>` | the end card over the outro, or over the last seconds without one |
 | `camera shape=<rounded,circle,square> corners=<px> border=<px> shadow=<none,soft,hard> handheld=<0..100>` | how the camera is framed, and how strongly it drifts as if hand-held wherever it shows. The four frame properties come together or not at all, so a layer can set `camera handheld=40` alone; frame and strength each replace a lower layer's. `handheld` is 0, off, by default: a slow drift with a little rotation and now and then a small settle, from noise seeded by the take and its media time, so a frame draws the same every time. The camera is overscaled just enough that no edge shows, at most about 6 percent at 100 |
 | `captions <look>` | how burned-in captions change their preset for every video of the channel, at least one of the [look properties](#caption-look) |
+| `layout <name> { screen ... camera ... }` | zero or more, by name: a [channel layout](#scene-switches-and-channel-layouts) |
 | `motion reaction=<preset> opinion=<preset> product-tour=<preset> tutorial=<preset>` | the motion preset of each format: `reactive`, `editorial`, `launch` or `calm` |
 | `preset <name> tempo= bounce= density= stagger= beat-sync=<bool>` | one per preset, feel controls 0 to 100, each optional and defaulting to the preset's own, see [feel controls](#feel-controls) |
 | `transition stinger="<path>" peak=<time>` | the Lottie stinger and the time its frame fully covers the picture, where the cut happens |

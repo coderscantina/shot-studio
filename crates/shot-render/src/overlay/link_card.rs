@@ -391,6 +391,7 @@ mod tests {
                 zooms: &[],
                 overlays: &overlays,
                 time: Micros(t),
+                switch: None,
             };
             let sizes = Sources {
                 screen: (3840, 2160),

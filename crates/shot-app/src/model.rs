@@ -8,8 +8,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use shot_core::{
-    Cut, EditError, Id, Layout, MediaId, Micros, Overlay, Project, RangeEdit, RemovedBy, TakeAt,
-    TimeRange, Timeline, Transcript, WordState, Zoom,
+    Cut, EditError, Format, Id, Layout, MediaId, Micros, Overlay, Project, RangeEdit, RemovedBy,
+    SceneSwitch, TakeAt, TimeRange, Timeline, Transcript, WordState, Zoom,
 };
 use shot_render::plan::{self, ExportPlan, frame_time};
 
@@ -72,6 +72,8 @@ pub struct Span {
     pub output_frame: u64,
     pub zooms: Vec<Zoom>,
     pub overlays: Vec<Overlay>,
+    /// The layout switch whose window overlaps the span.
+    pub switch: Option<SceneSwitch>,
 }
 
 impl Span {
@@ -198,6 +200,7 @@ impl EditMap {
                     output_frame: planned.output_frame,
                     zooms: segment.zooms.clone(),
                     overlays: segment.overlays.clone(),
+                    switch: segment.switch.clone(),
                 });
                 segments.next();
             }
@@ -644,13 +647,67 @@ impl Selection {
     }
 }
 
-/// The layouts on the 1 to 4 keys, in the order the mockup and the renderer offer them.
+/// The built-in layouts on the 1 to 4 keys, in the order the mockup and the renderer offer them,
+/// where the format lists fewer than four.
 pub const LAYOUT_KEYS: [Layout; 4] = [
     Layout::Face,
     Layout::FaceContent,
     Layout::Split,
     Layout::Content,
 ];
+
+/// The layouts on the 1 to 4 keys: the built-ins of [`LAYOUT_KEYS`], each other layout the
+/// format lists, a channel layout, taking the place of the first built-in it does not list.
+pub fn layout_keys(format: &Format) -> Vec<Layout> {
+    let listed: Vec<Layout> = std::iter::once(format.default_layout)
+        .chain(format.other_layouts.iter().copied())
+        .collect();
+    let mut keys = LAYOUT_KEYS.to_vec();
+    for extra in listed.iter().filter(|l| !LAYOUT_KEYS.contains(l)) {
+        if let Some(free) = keys
+            .iter_mut()
+            .find(|k| LAYOUT_KEYS.contains(k) && !listed.contains(k))
+        {
+            *free = *extra;
+        }
+    }
+    keys
+}
+
+/// A switch on the Layout lane: the edge where the layout changes inside a take block, in its
+/// media time, and the output frame it shows at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SwitchMark {
+    pub at: TakeAt,
+    pub frame: u64,
+    pub switch: SceneSwitch,
+}
+
+impl EditMap {
+    /// Every layout switch the output shows, once, at the output frame of its edge or, where the
+    /// edge falls in removed media, of the first frame after it.
+    pub fn switch_marks(&self) -> Vec<SwitchMark> {
+        let mut marks: Vec<SwitchMark> = Vec::new();
+        for span in &self.spans {
+            let Some(switch) = &span.switch else { continue };
+            if marks
+                .iter()
+                .any(|m| m.at == span.at && m.switch.at == switch.at)
+            {
+                continue;
+            }
+            let start = frame_time(span.source_frames.start, FPS);
+            let into = switch.at.0.saturating_sub(start.0) * u64::from(FPS) / 1_000_000;
+            marks.push(SwitchMark {
+                at: span.at,
+                frame: span.output_frame
+                    + into.min(span.source_frames.end - span.source_frames.start),
+                switch: switch.clone(),
+            });
+        }
+        marks
+    }
+}
 
 /// Sets `layout` over `range`. The format's default clears instead, so `cut.kdl` only spells
 /// out the changes.
@@ -998,10 +1055,10 @@ mod tests {
     #[test]
     fn paragraphs_break_at_pauses_and_layout_changes() {
         let mut edit = block("t01", vec![keep(0, 20_000_000)]);
-        edit.layouts.push(LayoutChange {
-            layout: Layout::Split,
-            range: range(10_000_000, 20_000_000),
-        });
+        edit.layouts.push(LayoutChange::new(
+            Layout::Split,
+            range(10_000_000, 20_000_000),
+        ));
         let cut = Cut {
             chapters: vec![Chapter {
                 title: "A".into(),
@@ -1098,6 +1155,19 @@ mod tests {
     fn layout_keys_map_to_the_four_layouts_and_the_default_clears() {
         assert_eq!(LAYOUT_KEYS[0], Layout::Face);
         assert_eq!(LAYOUT_KEYS[3], Layout::Content);
+        let mut format = shot_core::FormatKind::Opinion.preset();
+        assert_eq!(layout_keys(&format), LAYOUT_KEYS);
+        let custom = |n: &str| Layout::Custom(shot_core::LayoutName::new(n).unwrap());
+        format.other_layouts = vec![custom("side-by-side"), Layout::Split, custom("talk-left")];
+        assert_eq!(
+            layout_keys(&format),
+            [
+                Layout::Face,
+                custom("side-by-side"),
+                Layout::Split,
+                custom("talk-left")
+            ]
+        );
 
         let cut = two_chapters();
         let at = TakeAt {

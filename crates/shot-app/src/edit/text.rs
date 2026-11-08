@@ -1005,17 +1005,12 @@ fn layout_chip(
         })
 }
 
-/// The layouts on offer, one list for the switch menus and the L picker: the four on the number
-/// keys, then the format's other layouts.
+/// The layouts on offer, one list for the switch menus and the L picker: the ones on the number
+/// keys, then the other built-in and channel layouts.
 fn layout_choices(this: &EditScreen, cx: &App) -> Vec<Layout> {
-    let format = &this.folder.read(cx).shown.format;
-    let mut choices = LAYOUT_KEYS.to_vec();
-    for layout in std::iter::once(&format.default_layout).chain(&format.other_layouts) {
-        if !choices.contains(layout) {
-            choices.push(*layout);
-        }
-    }
-    choices
+    let (mut keys, more) = this.layout_choices(cx);
+    keys.extend(more);
+    keys
 }
 
 /// A cut between words: a faint seam for short auto cuts, a red length chip for the rest.

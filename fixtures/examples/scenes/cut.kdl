@@ -1,0 +1,10 @@
+chapter "Intro" {
+    take t01 {
+        keep from=0 to=40_000_000
+        layout side-by-side from=8_000_000 to=20_000_000 {
+            in dissolve length=400_000 sound=whoosh
+            out zoom-through
+        }
+        layout talk-left from=24_000_000 to=30_000_000
+    }
+}

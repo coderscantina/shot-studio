@@ -23,7 +23,7 @@ use shot_render::drawing::Drawing;
 use shot_render::frame::{Frame, Shot, compose};
 use shot_render::graph::Renderer;
 use shot_render::join::Piece;
-use shot_render::layout::{Canvas, LayoutSpec, Rect, Scene, Source, Sources};
+use shot_render::layout::{Canvas, Rect, Scene, Source, Sources};
 use shot_render::paint::Painter;
 use shot_render::plan::{ExportPlan, frame_time};
 use shot_render::surface::{BufferPool, Matrix, Range, size};
@@ -403,11 +403,21 @@ fn screen_map(
     let Some(span) = plan.map.span_at(frame) else {
         return Ok(None);
     };
-    let spec = LayoutSpec::styled(span.layout, &plan.effects.window).map_err(|e| e.to_string())?;
+    let theme = assets.theme().map_err(|e| e.to_string())?;
+    let mut specs = vec![theme.layout(span.layout, &plan.effects.window)];
+    specs.extend(
+        span.switch
+            .as_ref()
+            .map(|s| theme.layout(s.from, &plan.effects.window)),
+    );
+    let specs = specs
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
     let take = plan.dir.join("media").join(span.take.as_str());
     let mut size_of = |source, file| -> Result<Option<(u32, u32)>, String> {
         let path = take.join(file);
-        if !spec.uses(source) || !path.exists() {
+        if !specs.iter().any(|s| s.uses(source)) || !path.exists() {
             return Ok(None);
         }
         if let Some(size) = sizes.get(&path) {
@@ -434,6 +444,7 @@ fn screen_map(
         zooms: &span.zooms,
         overlays: &span.overlays,
         time: frame_time(span.source_frame(frame), FPS),
+        switch: span.switch.as_ref(),
     };
     let drawn =
         compose(&shot, &look, CANVAS, Sources { screen, camera }).map_err(|e| e.to_string())?;

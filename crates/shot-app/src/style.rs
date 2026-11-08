@@ -275,6 +275,7 @@ pub fn layer(format: &Format, base: &Format, current: &FormatLayer) -> FormatLay
         cursor: (format.cursor != base.cursor).then_some(effects.cursor),
         keystrokes: (format.keystrokes != base.keystrokes).then_some(effects.keystrokes),
         window: (format.window != base.window).then_some(effects.window),
+        layout_switch: (format.layout_switch != base.layout_switch).then(|| format.layout_switch()),
         brand: current.brand.clone(),
         rules: current.rules.clone(),
     }

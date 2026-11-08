@@ -1,0 +1,9 @@
+camera shape=rounded corners=32 border=0 shadow=soft
+layout side-by-side {
+    screen x=96 y=270 width=2880 height=1620 corners=32
+    camera x=3072 y=630 width=672 height=900 corners=32 focus-x=50 focus-y=40
+}
+layout talk-left {
+    camera x=0 y=0 width=1536 height=2160 focus-x=45 focus-y=50
+    screen x=1632 y=486 width=2112 height=1188 corners=24
+}

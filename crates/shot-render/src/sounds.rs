@@ -8,6 +8,10 @@
 //! ([`crate::zoom::phases`]), a click has all of them at once and plays only where a ripple
 //! draws: with `cursor ripple=#true` in a layout showing the screen.
 //!
+//! A layout switch with `sound=brand` plays the `transition` keys over its window, which is in
+//! take time: the bare key and `-travel` at its start, `-impact` and `-settle` at its end, when
+//! the slots land.
+//!
 //! Each phase lands on a frame: the first frame drawn at or after its time, the first that shows
 //! the move in that phase. Overlays, zooms and clicks are in take time, so that frame plays
 //! wherever the output shows it and nowhere the cut leaves it out. Transitions are in output
@@ -21,7 +25,7 @@ use std::collections::HashSet;
 
 use shot_audio::Anchor;
 use shot_audio::phases::{Move, move_sounds};
-use shot_core::{Effects, Id, Micros, SoundEffect, SoundKey};
+use shot_core::{Effects, Id, Micros, SoundEffect, SoundKey, SwitchSound};
 
 use crate::motion::Part;
 use crate::overlay::Params;
@@ -96,11 +100,27 @@ pub(crate) fn automatic<'a>(
         }
     };
     let (mut seen, mut zooms) = (HashSet::new(), HashSet::new());
+    let mut switches = HashSet::new();
     let mut takes = Vec::new();
     for planned in &plan.segments {
         let take = &planned.segment.take;
         if !takes.contains(take) {
             takes.push(take.clone());
+        }
+        if let Some(switch) = &planned.segment.switch
+            && switch.switch.sound == Some(SwitchSound::Brand)
+            && has(SoundEffect::Transition)
+            && switches.insert((take.clone(), switch.at))
+        {
+            let (start, end) = (frame(switch.window.from()), frame(switch.window.to()));
+            let mv = Move {
+                effect: SoundEffect::Transition,
+                start,
+                impact: end,
+                settle: end,
+                exit: None,
+            };
+            place(take, mv, false);
         }
         for overlay in &planned.segment.overlays {
             let Some(effect) = effect_of(overlay.template.as_str()) else {
@@ -242,5 +262,57 @@ mod tests {
         // Without a ripple clicks are silent; the click at 2 s is in the face layout anyway.
         effects.cursor.ripple = false;
         assert!(placed(&effects).iter().all(|(name, _)| name != "click"));
+    }
+
+    #[test]
+    fn a_layout_switch_plays_the_brand_transition_over_its_window() {
+        let project = Project {
+            video: Video::parse("title \"t\"\nstatus editing\nformat tutorial\n").unwrap(),
+            script: Script::parse("# t\n").unwrap(),
+            format: FormatKind::Tutorial.preset(),
+            cut: Cut::parse(
+                "chapter \"One\" {\n    take t01 {\n        keep from=0 to=8_000_000\n        \
+                 layout split from=2_000_000 to=6_000_000 {\n            in morph sound=brand\n        }\n    }\n}\n",
+            )
+            .unwrap(),
+        };
+        let plan = ExportPlan::new(Timeline::evaluate(&project).main(), 60, |_| {
+            shot_core::MediaId::default()
+        });
+        let id = |s: &str| Id::new(s).unwrap();
+        let brand = vec![
+            (
+                SoundKey {
+                    effect: SoundEffect::Transition,
+                    phase: None,
+                },
+                id("swoosh"),
+            ),
+            (
+                SoundKey {
+                    effect: SoundEffect::Transition,
+                    phase: Some(Phase::Impact),
+                },
+                id("thud"),
+            ),
+        ];
+        let placed: Vec<(String, Anchor)> = automatic(
+            &plan,
+            &Theme::default(),
+            &Effects::default(),
+            &brand,
+            &mut |_| Vec::new(),
+        )
+        .into_iter()
+        .map(|(name, anchor)| (name.to_string(), anchor))
+        .collect();
+        // The switch into split at 2 s moves for 500 ms; the one back at 6 s has no sound.
+        assert_eq!(
+            placed,
+            [
+                ("swoosh".to_owned(), Anchor::Start(120 * FRAME)),
+                ("thud".to_owned(), Anchor::Peak(150 * FRAME)),
+            ]
+        );
     }
 }

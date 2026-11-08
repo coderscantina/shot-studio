@@ -41,10 +41,7 @@ pub fn apply_markers(edit: &mut TakeEdit, markers: &[Marker], format: &Format) {
                     .iter()
                     .find(|(_, next)| *next != layout)
                     .map_or(end, |(t, _)| *t);
-                Some(LayoutChange {
-                    layout,
-                    range: TimeRange::new(from, to)?,
-                })
+                Some(LayoutChange::new(layout, TimeRange::new(from, to)?))
             })
             .collect();
     }

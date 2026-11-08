@@ -46,7 +46,7 @@ use crate::audio::{TimelineAudio, TimelineAudioError};
 use crate::derived::{DerivedInputs, DerivedPlan, FaceTrack};
 use crate::graph::Renderer;
 use crate::join::{BookendInput, BookendKind, Joins, KeyInputs, Piece, StingerTiming};
-use crate::layout::{Canvas, LayoutSpec, UnsupportedLayout};
+use crate::layout::{Canvas, UnsupportedLayout};
 use crate::paint::{PaintError, Painter, is_lottie};
 use crate::plan::{ExportPlan, PlannedChunk, frame_time};
 use crate::theme::Theme;
@@ -340,7 +340,11 @@ fn render(
         return Err(ExportError::Empty(cut.to_owned()));
     }
     for planned in derived.as_ref().map_or(&plan, |d| &d.main).segments.iter() {
-        LayoutSpec::of(planned.segment.layout)?;
+        let segment = &planned.segment;
+        theme.layout(segment.layout, &output.effects.window)?;
+        if let Some(switch) = &segment.switch {
+            theme.layout(switch.from, &output.effects.window)?;
+        }
     }
     let cache = cache(&plan)?;
 
@@ -1122,6 +1126,30 @@ fn score(
                 f32::from(*gain),
             )
         }));
+    }
+    // A layout switch's own sound, once per switch, wherever its window starts in the output.
+    let mut switches = HashSet::new();
+    for planned in &plan.segments {
+        let take = &planned.segment.take;
+        let Some(switch) = &planned.segment.switch else {
+            continue;
+        };
+        let Some(shot_core::SwitchSound::Named(name)) = &switch.switch.sound else {
+            continue;
+        };
+        if !switches.insert((take.clone(), switch.at)) {
+            continue;
+        }
+        let places = output_samples(plan, take, switch.window.from());
+        if places.is_empty() {
+            continue;
+        }
+        let sound = find(name)?;
+        sfx.extend(
+            places.into_iter().map(|at| {
+                shot_audio::SfxCue::new(sound.clone(), shot_audio::Anchor::Start(at), 0.0)
+            }),
+        );
     }
     Ok(voice::Score {
         music: music.clone(),

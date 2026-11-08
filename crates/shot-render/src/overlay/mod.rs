@@ -399,6 +399,23 @@ pub(crate) fn span_input(
         input.extend_from_slice(b"camera");
         input.extend_from_slice(&camera);
     }
+    // A channel layout's slots, and those of the layout a switch over the span leaves.
+    let left = segment.switch.as_ref().filter(|s| s.draws_over(span));
+    for (tag, layout) in [
+        (&b"layout"[..], Some(segment.layout)),
+        (b"from", left.map(|s| s.from)),
+    ] {
+        let Some(layout) = layout else { continue };
+        if let Some(key) = theme.layout_key(layout) {
+            input.extend_from_slice(tag);
+            input.extend_from_slice(&(key.len() as u64).to_le_bytes());
+            input.extend_from_slice(&key);
+        }
+    }
+    if let Some(camera) = left.and_then(|s| theme.camera_key(s.from)) {
+        input.extend_from_slice(b"from-camera");
+        input.extend_from_slice(&camera);
+    }
     input
 }
 

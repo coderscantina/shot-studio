@@ -187,6 +187,7 @@ fn preview_and_export_show_the_same_frames() {
             zooms: &edit.zooms,
             overlays: &edit.overlays,
             time: Micros(time.as_micros() as u64),
+            switch: None,
         };
         let sizes = Sources {
             screen: size(&source.buffer),

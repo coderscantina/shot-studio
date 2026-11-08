@@ -9,7 +9,9 @@ use kdl::KdlValue;
 
 use crate::captions::LOOK_PROPS;
 use crate::kdl_io::{FromKdl, Node, Source, ToKdl, Writer, keyword_enum, quote};
-use crate::{CaptionLook, Color, FormatKind, Id, Micros, ParseError, Shadow, StyleSheet};
+use crate::{
+    CaptionLook, Color, FormatKind, Id, LayoutName, Micros, ParseError, Shadow, StyleSheet,
+};
 
 /// A style imported from a git repo at a commit, the lowest layer of the brand.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -238,6 +240,121 @@ pub struct LottieTemplate {
     pub slots: Vec<Slot>,
 }
 
+keyword_enum! {
+    /// A recorded track a layout slot shows.
+    pub enum Track {
+        Screen = "screen",
+        Camera = "camera",
+    }
+}
+
+/// A channel layout: where the screen and the camera sit on the 3840x2160 design frame, drawn in
+/// order, later slots on top. The brand's camera frame styles its camera slot like a built-in's.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CustomLayout {
+    pub name: LayoutName,
+    /// One or two slots, each track at most once.
+    pub slots: Vec<LayoutSlot>,
+}
+
+/// Where one track sits in a channel layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LayoutSlot {
+    pub track: Track,
+    /// Left, top, width and height in pixels of the 3840x2160 design frame, inside it.
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+    /// Corner radius in design frame pixels.
+    pub corners: u16,
+    /// Where the crop of the track centers, in percent of its width and height, 50 50 for the
+    /// middle. The crop stays inside the track.
+    pub focus: [u8; 2],
+}
+
+impl CustomLayout {
+    /// The design frame layout slots are placed on.
+    pub const FRAME: (u16, u16) = (3840, 2160);
+
+    pub fn slot(&self, track: Track) -> Option<&LayoutSlot> {
+        self.slots.iter().find(|s| s.track == track)
+    }
+
+    fn read(node: Node<'_>) -> Result<Self, ParseError> {
+        node.expect_block(1, &[])?;
+        let mut slots: Vec<LayoutSlot> = Vec::new();
+        for child in node.children() {
+            let track = match child.name() {
+                "screen" => Track::Screen,
+                "camera" => Track::Camera,
+                _ => return Err(child.unknown()),
+            };
+            child.expect(
+                0,
+                &["x", "y", "width", "height", "corners", "focus-x", "focus-y"],
+            )?;
+            if slots.iter().any(|s| s.track == track) {
+                return Err(child.error(format!("`{track}` is placed twice")));
+            }
+            let percent = |key: &str| -> Result<u8, ParseError> {
+                let value: u8 = child.opt_prop(key)?.unwrap_or(50);
+                if value > 100 {
+                    return Err(child.error(format!("`{key}` is 0 to 100")));
+                }
+                Ok(value)
+            };
+            let slot = LayoutSlot {
+                track,
+                x: child.prop("x")?,
+                y: child.prop("y")?,
+                width: child.prop("width")?,
+                height: child.prop("height")?,
+                corners: child.opt_prop("corners")?.unwrap_or(0),
+                focus: [percent("focus-x")?, percent("focus-y")?],
+            };
+            let (w, h) = Self::FRAME;
+            if slot.width == 0
+                || slot.height == 0
+                || u32::from(slot.x) + u32::from(slot.width) > u32::from(w)
+                || u32::from(slot.y) + u32::from(slot.height) > u32::from(h)
+            {
+                return Err(child.error(format!(
+                    "`{track}` needs a size and lies inside the {w}x{h} frame"
+                )));
+            }
+            slots.push(slot);
+        }
+        if slots.is_empty() {
+            return Err(node.error("a `layout` places the screen, the camera or both"));
+        }
+        Ok(Self {
+            name: node.arg(0)?,
+            slots,
+        })
+    }
+
+    fn write(&self, w: &mut Writer) {
+        w.node("layout").arg(&self.name).open();
+        for slot in &self.slots {
+            w.node(slot.track.as_str())
+                .prop("x", &slot.x)
+                .prop("y", &slot.y)
+                .prop("width", &slot.width)
+                .prop("height", &slot.height);
+            if slot.corners > 0 {
+                w.prop("corners", &slot.corners);
+            }
+            if slot.focus != [50, 50] {
+                w.prop("focus-x", &slot.focus[0])
+                    .prop("focus-y", &slot.focus[1]);
+            }
+            w.end();
+        }
+        w.close();
+    }
+}
+
 /// The brand, or a partial override of one.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Brand {
@@ -256,6 +373,8 @@ pub struct Brand {
     pub handheld: Option<u8>,
     /// How burned-in captions change their preset, for every video of the channel.
     pub captions: CaptionLook,
+    /// The channel's layouts. Sorted by name, each name once.
+    pub layouts: Vec<CustomLayout>,
     pub motion: Motion,
     /// Sorted by name, each name once.
     pub presets: Vec<Preset>,
@@ -374,6 +493,13 @@ impl Brand {
                     }
                     node.set_once(&mut captions, look)?;
                 }
+                "layout" => {
+                    let layout = CustomLayout::read(node)?;
+                    if brand.layouts.iter().any(|l| l.name == layout.name) {
+                        return Err(node.error(format!("duplicate layout `{}`", layout.name)));
+                    }
+                    brand.layouts.push(layout);
+                }
                 "motion" => {
                     let props: Vec<&str> = FormatKind::ALL.iter().map(|k| k.as_str()).collect();
                     node.expect(0, &props)?;
@@ -420,6 +546,7 @@ impl Brand {
         brand.end_card = end_card;
         brand.camera = camera.flatten();
         brand.captions = captions.unwrap_or_default();
+        brand.layouts.sort_by_key(|l| l.name);
         brand.motion = motion.unwrap_or_default();
         brand.presets.sort_by_key(|p| p.name);
         brand.stinger = stinger;
@@ -493,6 +620,9 @@ impl Brand {
             self.captions.write(w);
             w.end();
         }
+        for layout in &self.layouts {
+            layout.write(w);
+        }
         if self.motion != Motion::default() {
             w.node("motion");
             for &kind in FormatKind::ALL {
@@ -536,13 +666,29 @@ impl Brand {
         self.rules.write(w);
     }
 
+    /// The channel layout named `name`.
+    pub fn layout(&self, name: LayoutName) -> Option<&CustomLayout> {
+        self.layouts
+            .binary_search_by_key(&name, |l| l.name)
+            .ok()
+            .map(|i| &self.layouts[i])
+    }
+
+    /// Adds `layout`, or replaces the one of its name, keeping the order.
+    pub fn set_layout(&mut self, layout: CustomLayout) {
+        match self.layouts.binary_search_by_key(&layout.name, |l| l.name) {
+            Ok(i) => self.layouts[i] = layout,
+            Err(i) => self.layouts.insert(i, layout),
+        }
+    }
+
     /// Whether no node is set, so a `brand` block would be empty.
     pub fn is_empty(&self) -> bool {
         self == &Self::default()
     }
 
     /// `over` laid on this brand: its fields replace, field by field inside `fonts`, `colors`,
-    /// `sounds`, `motion` and each `preset`; a template or bookend replaces whole. Imports are
+    /// `sounds`, `motion` and each `preset`; a template, layout or bookend replaces whole. Imports are
     /// concatenated and rules are not merged, the cascade orders those as layers.
     pub fn merge(&self, over: &Self) -> Self {
         let mut merged = self.clone();
@@ -567,6 +713,15 @@ impl Brand {
         merge_opt(&mut merged.camera, &over.camera);
         merge_opt(&mut merged.handheld, &over.handheld);
         merged.captions = merged.captions.merge(&over.captions);
+        for layout in &over.layouts {
+            match merged
+                .layouts
+                .binary_search_by_key(&layout.name, |l| l.name)
+            {
+                Ok(i) => merged.layouts[i] = layout.clone(),
+                Err(i) => merged.layouts.insert(i, layout.clone()),
+            }
+        }
         for &kind in FormatKind::ALL {
             merge_opt(merged.motion.get_mut(kind), &over.motion.get(kind));
         }

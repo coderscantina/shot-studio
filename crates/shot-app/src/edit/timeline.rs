@@ -31,7 +31,7 @@ use shot_render::plan::frame_time;
 
 use super::parts::{self, layout_name};
 use super::{EditScreen, music};
-use crate::model::{self, FPS, LAYOUT_KEYS, LayoutRun, Selection, changes, seconds, timecode};
+use crate::model::{self, FPS, LayoutRun, Selection, changes, seconds, timecode};
 use crate::peaks::Peaks;
 use crate::theme::*;
 use crate::ui::{self, hint, icon, kbd, label, mono};
@@ -89,6 +89,8 @@ pub struct Lanes {
     pub picked: Option<Pick>,
     /// What the right-click menu is about.
     pub(super) menu: Option<MenuOn>,
+    /// The layout switch whose popover is open.
+    pub(super) switch: Option<super::switch::OpenSwitch>,
     /// The top row's height the person dragged the split to, and the range it may take.
     top: Option<f32>,
     top_range: (f32, f32),
@@ -106,6 +108,7 @@ impl Default for Lanes {
             drag: None,
             picked: None,
             menu: None,
+            switch: None,
             top: None,
             top_range: (TOP_MIN, TOP_MIN),
         }
@@ -1132,7 +1135,10 @@ fn lanes(this: &EditScreen, window: Range<u64>, cx: &mut Context<EditScreen>) ->
                 )
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                        if this.lanes.switch.take().is_some() {
+                            window.focus(&this.focus, cx);
+                        }
                         let bounds = this.lanes.bounds.get();
                         if event.position.x < bounds.origin.x {
                             return;
@@ -1257,6 +1263,7 @@ fn lanes(this: &EditScreen, window: Range<u64>, cx: &mut Context<EditScreen>) ->
                         )
                     },
                 )
+                .children(super::switch::popover(this, &window, &x, cx))
                 .context_menu(move |menu, window, cx| {
                     super::lane_menu::context_menu(menu, &screen, window, cx)
                 }),
@@ -1514,7 +1521,7 @@ fn toolbar(
                         this.toggle_picker(super::place::Picker::Sound, cx)
                     })),
             )
-            .child(layout_choices(None, cx));
+            .child(layout_choices(this, None, cx));
     }
     match this.lanes.picked {
         Some(Pick::Placed(at, placed)) => {
@@ -1568,7 +1575,16 @@ fn toolbar(
                     seconds(frame_time(run.frames.end - run.frames.start, FPS))
                 ))
             }))
-            .child(layout_choices(run.map(|r| r.layout), cx))
+            .child(layout_choices(this, run.map(|r| r.layout), cx))
+            .child(div().w(px(8.)))
+            .child(tool("tool-switch", "layout", "Switch", "T").on_click(
+                cx.listener(|this, _, window, cx| this.open_switch_near_playhead(window, cx)),
+            ))
+            .child(
+                tool("tool-build", "edit", "Layout builder", "⇧L").on_click(
+                    cx.listener(|this, _, window, cx| this.open_builder(None, window, cx)),
+                ),
+            )
         }
         Some(Pick::Music) => music_tools(this, bar, cx),
         None => bar
@@ -1578,6 +1594,7 @@ fn toolbar(
             .child(hint("Z", "Zoom"))
             .child(hint("S", "Sound"))
             .child(hint("1–4", "Layout"))
+            .child(hint("T", "Switch"))
             .child(hint("⌘Z", "Undo")),
     }
 }
@@ -1601,15 +1618,16 @@ pub(super) fn zoom_scales(
         .collect()
 }
 
-/// The four layouts with their keys, `current` lit; a click does what the key does.
-fn layout_choices(current: Option<Layout>, cx: &mut Context<EditScreen>) -> Div {
+/// The layouts on 1 to 4 with their keys, `current` lit; a click does what the key does.
+fn layout_choices(this: &EditScreen, current: Option<Layout>, cx: &mut Context<EditScreen>) -> Div {
+    let keys = this.layout_choices(cx).0;
     div()
         .flex()
         .items_center()
         .gap(px(4.))
         .ml(px(8.))
         .child(label("Layout").pr(px(4.)))
-        .children(LAYOUT_KEYS.iter().enumerate().map(|(key, layout)| {
+        .children(keys.iter().enumerate().map(|(key, layout)| {
             const KEYS: [&str; 4] = ["1", "2", "3", "4"];
             choice(
                 ("layout-choice", key),
@@ -1709,7 +1727,7 @@ fn tool(
 }
 
 /// A toolbar option, lit with [`Lit::on`] when it is the current one.
-fn choice(
+pub(super) fn choice(
     id: impl Into<ElementId>,
     text: impl Into<SharedString>,
     keys: Option<&'static str>,
@@ -1732,7 +1750,7 @@ fn choice(
 }
 
 /// Lights the current option of a row of [`choice`]s.
-trait Lit {
+pub(super) trait Lit {
     fn on(self, on: bool) -> Self;
 }
 
@@ -2100,6 +2118,7 @@ fn layout_lane(
                 name.to_owned(),
             )
         }))
+        .children(super::switch::marks(this, window, x, cx))
 }
 
 /// Every zoom the edit shows, a person's with its index in `cut.kdl`.

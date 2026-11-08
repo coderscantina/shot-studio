@@ -17,11 +17,18 @@
 //! Capture does not record window bounds yet, so `window` shows the whole screen as the window.
 //!
 //! The brand's `camera` node frames the camera wherever it sits beside the screen, in
-//! `face-content` and `split` ([`LayoutSpec::with_camera`]): its shape and corners, a border in
-//! the accent color and a shadow that falls away from the scene's light. `face` fills the canvas
-//! and has no frame to style.
+//! `face-content`, `split` and every channel layout with both tracks
+//! ([`LayoutSpec::with_camera`]): its shape and corners, a border in the accent color and a
+//! shadow that falls away from the scene's light. `face` fills the canvas and has no frame to
+//! style.
+//!
+//! A channel layout ([`LayoutSpec::custom`]) places its slots on the same design canvas, with a
+//! crop focus per slot, so it draws, zooms and morphs through the same code as the built-ins.
+//! [`LayoutSpec::morph`] springs every slot of one layout into the next for a scene switch.
 
-use shot_core::{CameraShape, DeviceFrame, Effects, Layout, Shadow, WindowStyle};
+use shot_core::{
+    CameraShape, CustomLayout, DeviceFrame, Effects, Layout, Shadow, Track, WindowStyle,
+};
 
 use crate::materials::LIGHT;
 use crate::zoom::Punch;
@@ -124,6 +131,17 @@ impl Rect {
     pub fn contains(self, point: [f32; 2]) -> bool {
         (self.left..=self.right).contains(&point[0]) && (self.top..=self.bottom).contains(&point[1])
     }
+
+    /// The rectangle `t` of the way from this one to `to`.
+    pub fn lerp(self, to: Self, t: f32) -> Self {
+        let mix = |a: f32, b: f32| a + (b - a) * t;
+        Self::new(
+            mix(self.left, to.left),
+            mix(self.top, to.top),
+            mix(self.right, to.right),
+            mix(self.bottom, to.bottom),
+        )
+    }
 }
 
 /// Where one source goes in a layout, on the 3840x2160 design canvas.
@@ -137,6 +155,24 @@ pub struct Slot {
     /// In design canvas pixels, like the shadow's offset and blur.
     pub border: Option<Border>,
     pub shadow: Option<DropShadow>,
+    /// Where the crop centers in the source, as a fraction of its width and height.
+    pub focus: [f32; 2],
+    /// 1 for an opaque slot; below while a morph fades it in or out.
+    pub opacity: f32,
+}
+
+impl Slot {
+    fn new(source: Source, frame: Rect, radius: f32) -> Self {
+        Self {
+            source,
+            frame,
+            radius,
+            border: None,
+            shadow: None,
+            focus: [0.5, 0.5],
+            opacity: 1.0,
+        }
+    }
 }
 
 /// How the brand frames the camera, in design canvas pixels.
@@ -188,10 +224,21 @@ pub struct LayoutSpec {
     pub window: Option<WindowStyle>,
 }
 
-/// A layout the renderer does not draw yet.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("the {0} layout is not rendered yet")]
+/// A layout the renderer does not draw: a built-in it does not draw yet, or a channel layout
+/// the brand does not define.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnsupportedLayout(pub Layout);
+
+impl std::fmt::Display for UnsupportedLayout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Layout::Custom(name) => write!(f, "the brand defines no layout `{name}`"),
+            layout => write!(f, "the {layout} layout is not rendered yet"),
+        }
+    }
+}
+
+impl std::error::Error for UnsupportedLayout {}
 
 const DESIGN_WIDTH: f32 = 3840.0;
 const FULL: Rect = Rect::new(0.0, 0.0, 3840.0, 2160.0);
@@ -202,15 +249,56 @@ impl LayoutSpec {
         Self::styled(layout, &Effects::default().window)
     }
 
-    /// The layout, with `window` placing the captured window in the `window` layout.
+    /// The layout, with `window` placing the captured window in the `window` layout and
+    /// `custom` holding the channel's layouts.
+    pub fn resolve(
+        layout: Layout,
+        window: &WindowStyle,
+        custom: &[CustomLayout],
+    ) -> Result<Self, UnsupportedLayout> {
+        match layout {
+            Layout::Custom(name) => custom
+                .iter()
+                .find(|c| c.name == name)
+                .map(Self::custom)
+                .ok_or(UnsupportedLayout(layout)),
+            _ => Self::styled(layout, window),
+        }
+    }
+
+    /// A channel layout's slots in their order. A zoom punches in on the screen, or on the
+    /// camera where the screen is not shown.
+    pub fn custom(layout: &CustomLayout) -> Self {
+        let slots: Vec<Slot> = layout
+            .slots
+            .iter()
+            .map(|s| {
+                let (x, y) = (f32::from(s.x), f32::from(s.y));
+                let frame = Rect::new(x, y, x + f32::from(s.width), y + f32::from(s.height));
+                let source = match s.track {
+                    Track::Screen => Source::Screen,
+                    Track::Camera => Source::Camera,
+                };
+                Slot {
+                    focus: s.focus.map(|f| f32::from(f) / 100.0),
+                    ..Slot::new(source, frame, f32::from(s.corners))
+                }
+            })
+            .collect();
+        let primary = slots
+            .iter()
+            .position(|s| s.source == Source::Screen)
+            .unwrap_or(0);
+        Self {
+            slots,
+            primary,
+            window: None,
+        }
+    }
+
+    /// A built-in layout, with `window` placing the captured window in the `window` layout.
     pub fn styled(layout: Layout, window: &WindowStyle) -> Result<Self, UnsupportedLayout> {
-        let slot = |source, frame, radius| Slot {
-            source,
-            frame,
-            radius,
-            border: None,
-            shadow: None,
-        };
+        let slot = Slot::new;
         let spec = match layout {
             Layout::Face => Self {
                 slots: vec![slot(Source::Camera, FULL, 0.0)],
@@ -255,7 +343,7 @@ impl LayoutSpec {
                 primary: 0,
                 window: Some(*window),
             },
-            Layout::Screen | Layout::FaceCorner => {
+            Layout::Screen | Layout::FaceCorner | Layout::Custom(_) => {
                 return Err(UnsupportedLayout(layout));
             }
         };
@@ -317,6 +405,55 @@ impl LayoutSpec {
         self.slots.iter().any(|slot| slot.source == source)
     }
 
+    /// The layout `t` of the way from `self` to `to`, `t` from 0 to 1 and beyond while a
+    /// spring overshoots. A source both show moves its frame, corners, crop focus, border and
+    /// shadow; one only one side shows fades and scales by 8 % on its own frame. Slots stack
+    /// by their place in each layout, so a slot rising to the top passes the other halfway.
+    /// The window style and background come from the side the morph is nearer.
+    pub fn morph(&self, to: &Self, t: f32) -> Self {
+        let mix = |a: f32, b: f32| a + (b - a) * t;
+        let fade = t.clamp(0.0, 1.0);
+        fn find(spec: &LayoutSpec, source: Source) -> Option<(usize, &Slot)> {
+            spec.slots
+                .iter()
+                .enumerate()
+                .find(|(_, s)| s.source == source)
+        }
+        let depth = |spec: &Self, index: usize| index as f32 / spec.slots.len().max(1) as f32;
+        let mut slots: Vec<(f32, Slot)> = [Source::Screen, Source::Camera]
+            .into_iter()
+            .filter_map(|source| match (find(self, source), find(to, source)) {
+                (Some((i, a)), Some((j, b))) => Some((
+                    mix(depth(self, i), depth(to, j)),
+                    Slot {
+                        source,
+                        frame: a.frame.lerp(b.frame, t),
+                        radius: mix(a.radius, b.radius).max(0.0),
+                        border: lerp_border(a.border, b.border, fade),
+                        shadow: lerp_shadow(a.shadow, b.shadow, fade),
+                        focus: [mix(a.focus[0], b.focus[0]), mix(a.focus[1], b.focus[1])],
+                        opacity: mix(a.opacity, b.opacity),
+                    },
+                )),
+                (Some((i, a)), None) => Some((depth(self, i), a.faded(1.0 - fade))),
+                (None, Some((j, b))) => Some((depth(to, j), b.faded(fade))),
+                (None, None) => None,
+            })
+            .collect();
+        slots.retain(|(_, s)| s.opacity > 0.0);
+        slots.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let slots: Vec<Slot> = slots.into_iter().map(|(_, s)| s).collect();
+        let near = if t < 0.5 { self } else { to };
+        Self {
+            primary: slots
+                .iter()
+                .position(|s| Some(s.source) == near.slots.get(near.primary).map(|p| p.source))
+                .unwrap_or(0),
+            slots,
+            window: near.window,
+        }
+    }
+
     /// The scene of one frame: slots scaled to the canvas, each source cropped to cover its slot,
     /// and the primary slot punched in by `punch`. The camera ignores the punch's center.
     pub fn scene(&self, canvas: Canvas, sizes: Sources<(u32, u32)>, punch: Punch) -> Scene {
@@ -328,7 +465,7 @@ impl LayoutSpec {
             .map(|(index, slot)| {
                 let frame = slot.frame.scaled(scale);
                 let (width, height) = *sizes.get(slot.source);
-                let mut crop = cover(frame, width as f32 / height as f32);
+                let mut crop = cover(frame, width as f32 / height as f32, slot.focus);
                 if index == self.primary && punch.scale > 1.0 {
                     crop = match slot.source {
                         Source::Camera => crop.shrunk(punch.scale),
@@ -351,6 +488,7 @@ impl LayoutSpec {
                         blur: s.blur * scale,
                         alpha: s.alpha,
                     }),
+                    opacity: slot.opacity,
                     ..Layer::new(slot.source, frame, crop, slot.radius * scale)
                 }
             })
@@ -405,17 +543,55 @@ pub fn srgb(rgb: [u8; 3]) -> [f32; 3] {
 /// The canvas behind the slots, a near black with a hint of blue.
 pub const BACKGROUND: [f32; 3] = [15.0 / 255.0, 17.0 / 255.0, 21.0 / 255.0];
 
-/// The part of a source with aspect `source_aspect` that covers `frame` when scaled, centered,
-/// in texture coordinates.
-fn cover(frame: Rect, source_aspect: f32) -> Rect {
+/// The part of a source with aspect `source_aspect` that covers `frame` when scaled, centered
+/// on `focus` as far as the source allows, in texture coordinates.
+fn cover(frame: Rect, source_aspect: f32, focus: [f32; 2]) -> Rect {
     let frame_aspect = frame.width() / frame.height();
-    if source_aspect > frame_aspect {
-        let width = frame_aspect / source_aspect;
-        Rect::new((1.0 - width) / 2.0, 0.0, (1.0 + width) / 2.0, 1.0)
+    let (width, height) = if source_aspect > frame_aspect {
+        (frame_aspect / source_aspect, 1.0)
     } else {
-        let height = source_aspect / frame_aspect;
-        Rect::new(0.0, (1.0 - height) / 2.0, 1.0, (1.0 + height) / 2.0)
+        (1.0, source_aspect / frame_aspect)
+    };
+    let left = (focus[0] - width / 2.0).clamp(0.0, 1.0 - width);
+    let top = (focus[1] - height / 2.0).clamp(0.0, 1.0 - height);
+    Rect::new(left, top, left + width, top + height)
+}
+
+impl Slot {
+    /// The slot at `presence`, 0 gone and 1 whole: faded, and scaled around its center from
+    /// 92 % up.
+    fn faded(&self, presence: f32) -> Self {
+        let frame = self.frame.shrunk(1.0 / (0.92 + 0.08 * presence));
+        Self {
+            frame,
+            opacity: self.opacity * presence,
+            ..*self
+        }
     }
+}
+
+fn lerp_border(a: Option<Border>, b: Option<Border>, t: f32) -> Option<Border> {
+    let zero =
+        |o: Option<Border>, other: Option<Border>| o.or(other.map(|b| Border { width: 0.0, ..b }));
+    let (a, b) = (zero(a, b)?, zero(b, a)?);
+    let mix = |x: f32, y: f32| x + (y - x) * t;
+    Some(Border {
+        width: mix(a.width, b.width),
+        color: [0, 1, 2].map(|i| mix(a.color[i], b.color[i])),
+    })
+}
+
+fn lerp_shadow(a: Option<DropShadow>, b: Option<DropShadow>, t: f32) -> Option<DropShadow> {
+    let zero = |o: Option<DropShadow>, other: Option<DropShadow>| {
+        o.or(other.map(|s| DropShadow { alpha: 0.0, ..s }))
+    };
+    let (a, b) = (zero(a, b)?, zero(b, a)?);
+    let mix = |x: f32, y: f32| x + (y - x) * t;
+    Some(DropShadow {
+        offset: [mix(a.offset[0], b.offset[0]), mix(a.offset[1], b.offset[1])],
+        blur: mix(a.blur, b.blur),
+        alpha: mix(a.alpha, b.alpha),
+    })
 }
 
 /// What one frame draws, in canvas pixels.
@@ -677,5 +853,82 @@ mod tests {
             LayoutSpec::of(Layout::Screen),
             Err(UnsupportedLayout(Layout::Screen))
         );
+    }
+
+    fn talk_left() -> CustomLayout {
+        let brand = shot_core::Brand::parse(
+            "layout talk-left {\n    camera x=0 y=0 width=1536 height=2160 focus-x=0 focus-y=50\n    screen x=1632 y=486 width=2112 height=1188 corners=24\n}\n",
+        )
+        .unwrap();
+        brand.layouts[0].clone()
+    }
+
+    #[test]
+    fn a_channel_layout_draws_its_slots_with_their_crop_focus() {
+        let custom = talk_left();
+        let name = Layout::Custom(custom.name);
+        assert_eq!(
+            LayoutSpec::resolve(name, &Effects::default().window, &[]),
+            Err(UnsupportedLayout(name))
+        );
+        let spec = LayoutSpec::resolve(
+            name,
+            &Effects::default().window,
+            std::slice::from_ref(&custom),
+        )
+        .unwrap();
+        assert_eq!(spec.primary, 1, "a zoom punches in on the screen");
+        let scene = spec.scene(Canvas::UHD, SIZES, NONE);
+        assert_eq!(scene.layers[0].source, Source::Camera);
+        // A tall slot keeps the left edge of the camera with its focus at 0.
+        let camera = scene.layers[0].crop;
+        assert_close(camera, Rect::new(0.0, 0.0, camera.width(), 1.0));
+        assert!(camera.width() < 0.5);
+        assert_eq!(scene.layers[1].radius, 24.0);
+    }
+
+    #[test]
+    fn a_morph_moves_shared_slots_and_fades_the_others() {
+        let face = LayoutSpec::of(Layout::Face).unwrap();
+        let face_content = LayoutSpec::of(Layout::FaceContent).unwrap();
+        let start = face.morph(&face_content, 0.0);
+        assert_eq!(start.slots.len(), 1, "the screen is not there yet");
+        assert_close(start.slots[0].frame, FULL);
+        let end = face.morph(&face_content, 1.0);
+        assert_eq!(end.slots, face_content.slots);
+        let middle = face.morph(&face_content, 0.5);
+        let camera = middle
+            .slots
+            .iter()
+            .find(|s| s.source == Source::Camera)
+            .unwrap();
+        let inset = face_content.slots[1].frame;
+        assert_close(camera.frame, FULL.lerp(inset, 0.5));
+        assert_eq!(camera.radius, 18.0);
+        let screen = middle
+            .slots
+            .iter()
+            .find(|s| s.source == Source::Screen)
+            .unwrap();
+        assert_eq!(screen.opacity, 0.5);
+        assert!(screen.frame.width() < FULL.width());
+        // The camera rises above the screen, as the inset sits on top.
+        assert_eq!(middle.slots.last().unwrap().source, Source::Camera);
+
+        let custom = LayoutSpec::custom(&talk_left());
+        let to_custom = face_content.morph(&custom, 0.5);
+        assert_eq!(to_custom.slots.len(), 2);
+        let screen = to_custom
+            .slots
+            .iter()
+            .find(|s| s.source == Source::Screen)
+            .unwrap();
+        assert_eq!(screen.focus, [0.5, 0.5]);
+        let camera = to_custom
+            .slots
+            .iter()
+            .find(|s| s.source == Source::Camera)
+            .unwrap();
+        assert_eq!(camera.focus, [0.25, 0.5]);
     }
 }
