@@ -225,15 +225,17 @@ fn document(this: &mut EditScreen, follow: &Entity<bool>, cx: &mut Context<EditS
     if let Some(note) = proposals::agent_note(this) {
         rows.push(doc_row(rail(None, None), note.into_any_element()));
     }
+    let mut offered_transcribe = false;
     for block in blocks {
         if !block.transcribed {
-            rows.push(doc_row(
-                rail(None, None),
-                div().text_color(MUTED).child(format!(
-                    "Take {} has no transcript yet. Run shot transcribe --video <folder> --take {} to make one.",
-                    block.take, block.take
-                )).into_any_element(),
-            ));
+            // One Transcribe action covers every take without words.
+            if !offered_transcribe {
+                offered_transcribe = true;
+                rows.push(doc_row(
+                    rail(None, None),
+                    this.transcribe.clone().into_any_element(),
+                ));
+            }
             continue;
         }
         let mut index = 0;

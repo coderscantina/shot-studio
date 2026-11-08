@@ -624,9 +624,9 @@ fn timecode(t: Micros) -> String {
     model::timecode(t.0 * u64::from(FPS) / 1_000_000)
 }
 
-/// What a rule did, for its row: "12 cuts, 2:41 · 3 to review", or "Off". Each piece says
-/// whether it is a duration, which shows in Geist Mono.
-fn rule_detail(count: &RuleCount, on: bool) -> Vec<(String, bool)> {
+/// What a rule did, for its row: "12 cuts, 2:41 · 3 to review", or "Off", or "On" before
+/// anything is recorded. Each piece says whether it is a duration, which shows in Geist Mono.
+fn rule_detail(count: &RuleCount, on: bool, recorded: bool) -> Vec<(String, bool)> {
     let mut parts = Vec::new();
     if count.removed > 0 {
         let cuts = if count.removed == 1 { "cut" } else { "cuts" };
@@ -641,6 +641,7 @@ fn rule_detail(count: &RuleCount, on: bool) -> Vec<(String, bool)> {
     }
     match (on, parts.is_empty()) {
         (false, true) => vec![("Off".to_owned(), false)],
+        (true, true) if !recorded => vec![("On".to_owned(), false)],
         (true, true) => vec![("Nothing found".to_owned(), false)],
         _ => parts,
     }
@@ -717,6 +718,7 @@ impl CutScreen {
         let format = &folder.project.format;
         let pacing = format.pacing;
         let format_name = folder.project.video.format;
+        let recorded = !folder.project.cut.chapters.is_empty();
         let rows = counts.iter().map(|count| {
             let rule = count.rule;
             let on = run::rule_on(format, rule);
@@ -743,15 +745,17 @@ impl CutScreen {
                                 .gap(px(4.))
                                 .text_size(TEXT_SM)
                                 .text_color(if editable && !on { FAINT } else { MUTED })
-                                .children(rule_detail(count, on || !editable).into_iter().map(
-                                    |(text, duration)| {
-                                        if duration {
-                                            mono(text)
-                                        } else {
-                                            div().child(text)
-                                        }
-                                    },
-                                )),
+                                .children(
+                                    rule_detail(count, on || !editable, recorded)
+                                        .into_iter()
+                                        .map(|(text, duration)| {
+                                            if duration {
+                                                mono(text)
+                                            } else {
+                                                div().child(text)
+                                            }
+                                        }),
+                                ),
                         ),
                 )
                 .when(editable, |this| {
@@ -1651,13 +1655,17 @@ mod tests {
             (words.join(" "), durations)
         };
         assert_eq!(
-            text(rule_detail(&count(12, 3), true)),
+            text(rule_detail(&count(12, 3), true, true)),
             (
                 "12 cuts, 2:41 · 3 to review".to_owned(),
                 vec!["2:41".to_owned()]
             )
         );
-        assert_eq!(text(rule_detail(&count(0, 0), true)).0, "Nothing found");
-        assert_eq!(text(rule_detail(&count(0, 0), false)).0, "Off");
+        assert_eq!(
+            text(rule_detail(&count(0, 0), true, true)).0,
+            "Nothing found"
+        );
+        assert_eq!(text(rule_detail(&count(0, 0), true, false)).0, "On");
+        assert_eq!(text(rule_detail(&count(0, 0), false, true)).0, "Off");
     }
 }

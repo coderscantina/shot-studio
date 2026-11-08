@@ -40,6 +40,7 @@ use crate::model::{
 use crate::peaks::Peaks;
 use crate::sound::Sound;
 use crate::theme::*;
+use crate::transcribe::Transcribe;
 
 const CONTEXT: &str = "EditScreen";
 
@@ -176,6 +177,8 @@ pub struct EditScreen {
     peaks: HashMap<Id, Option<Arc<Peaks>>>,
     export: Option<Arc<Mutex<ExportStatus>>>,
     error: Option<String>,
+    /// Transcribes takes that have no words yet, shown in the Text document.
+    transcribe: Entity<Transcribe>,
     /// When the last edit was written, for the quiet "Saved" under the preview.
     saved: Option<Instant>,
     focus: FocusHandle,
@@ -218,7 +221,9 @@ impl EditScreen {
         let product_tour =
             folder.read(cx).project.video.format == shot_core::FormatKind::ProductTour;
         let channel = crate::studio::channel(&folder.read(cx).dir);
+        let transcribe = cx.new(|cx| Transcribe::new(folder.clone(), cx));
         let mut this = Self {
+            transcribe,
             folder,
             workspace: if product_tour {
                 Workspace::Product

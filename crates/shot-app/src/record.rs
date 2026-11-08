@@ -1508,15 +1508,18 @@ fn access(permission: Permission, access: Access) -> Div {
     }
 }
 
-/// A level meter from -60 to 0 dBFS, lime up to -6 dB and yellow above.
+/// A level meter from -80 to 0 dBFS, lime up to -6 dB and yellow above. The low floor keeps
+/// a quiet mic, such as an interface at low gain, visibly moving.
 fn meter(level: f32) -> Div {
+    const FLOOR: f32 = -80.0;
+    const HOT: f32 = (FLOOR + 6.0) / FLOOR;
     let fill = if level.is_finite() {
-        ((level + 60.0) / 60.0).clamp(0.0, 1.0)
+        ((level - FLOOR) / -FLOOR).clamp(0.0, 1.0)
     } else {
         0.0
     };
-    let safe = fill.min(0.9);
-    let hot = (fill - 0.9).max(0.0);
+    let safe = fill.min(HOT);
+    let hot = (fill - HOT).max(0.0);
     div()
         .h(px(5.))
         .rounded(px(3.))
