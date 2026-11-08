@@ -119,6 +119,8 @@ pub fn overview(
     );
     let playhead = fraction(this.playhead, total);
     let bounds = this.overview_bounds.clone();
+    // The Timeline drags the frame to pan and zoom its lanes and scrubs through its own drag.
+    let timeline = this.workspace == Workspace::Timeline;
     div()
         .id("overview")
         .relative()
@@ -127,15 +129,21 @@ pub fn overview(
         .cursor_pointer()
         .on_mouse_down(
             MouseButton::Left,
-            cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                this.seek_overview(event.position.x, cx)
+            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                if timeline {
+                    this.press_overview(event.position.x, cx);
+                } else {
+                    this.seek_overview(event.position.x, cx);
+                }
             }),
         )
-        .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
-            if event.pressed_button == Some(MouseButton::Left) {
-                this.seek_overview(event.position.x, cx);
-            }
-        }))
+        .when(!timeline, |bar| {
+            bar.on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                if event.pressed_button == Some(MouseButton::Left) {
+                    this.seek_overview(event.position.x, cx);
+                }
+            }))
+        })
         .child(
             canvas(
                 move |b, _, _| bounds.set(b),
@@ -186,8 +194,12 @@ pub fn overview(
             )
             .size_full(),
         )
-        .when(this.workspace != super::Workspace::Timeline, |bar| {
-            bar.children(super::proposals::sparks(this, cx))
+        .map(|bar| {
+            if timeline {
+                bar.child(super::timeline::overview_frame(view, cx))
+            } else {
+                bar.children(super::proposals::sparks(this, cx))
+            }
         })
 }
 
@@ -236,7 +248,7 @@ pub fn error_strip(this: &EditScreen) -> Option<Div> {
 }
 
 impl EditScreen {
-    fn seek_overview(&mut self, x: Pixels, cx: &mut Context<Self>) {
+    pub(super) fn seek_overview(&mut self, x: Pixels, cx: &mut Context<Self>) {
         let bounds = self.overview_bounds.get();
         if bounds.size.width <= px(0.) {
             return;

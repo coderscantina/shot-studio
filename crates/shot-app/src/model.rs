@@ -317,6 +317,38 @@ impl EditMap {
         self.chapters.iter().position(|c| c.frames.contains(&frame))
     }
 
+    /// Each stretch of one layout in one take block: spans of the block with the same layout
+    /// that follow each other in the output, joined across the cuts between them.
+    pub fn layout_runs(&self) -> Vec<LayoutRun> {
+        // Each run's block, layout, output frames and source frames.
+        let mut runs: Vec<(TakeAt, Layout, Range<u64>, Range<u64>)> = Vec::new();
+        for span in &self.spans {
+            let frames = span.output_frames();
+            match runs.last_mut() {
+                Some((at, layout, output, source))
+                    if *at == span.at && *layout == span.layout && output.end == frames.start =>
+                {
+                    output.end = frames.end;
+                    source.end = span.source_frames.end;
+                }
+                _ => runs.push((span.at, span.layout, frames, span.source_frames.clone())),
+            }
+        }
+        runs.into_iter()
+            .filter_map(|(at, layout, frames, source)| {
+                Some(LayoutRun {
+                    at,
+                    layout,
+                    frames,
+                    range: TimeRange::new(
+                        frame_time(source.start, FPS),
+                        frame_time(source.end, FPS),
+                    )?,
+                })
+            })
+            .collect()
+    }
+
     /// Output frames where the picture jumps: each span that does not continue the one before.
     pub fn cut_frames(&self) -> Vec<u64> {
         self.spans
@@ -328,6 +360,16 @@ impl EditMap {
             .map(|pair| pair[1].output_frame)
             .collect()
     }
+}
+
+/// A stretch of one layout in one take block, as the Timeline's Layout lane shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayoutRun {
+    pub at: TakeAt,
+    pub layout: Layout,
+    pub frames: Range<u64>,
+    /// Media from the first frame shown to the last, removed media between included.
+    pub range: TimeRange,
 }
 
 /// A transcript word in a take block.
@@ -827,6 +869,30 @@ mod tests {
         assert_eq!(map.output_frame(body, Micros(10_000_000)), Some(150));
         assert_eq!(map.source_at(120), None);
         assert_eq!(map.source_at(150), Some((body, Micros(10_000_000))));
+    }
+
+    #[test]
+    fn layout_runs_join_a_blocks_spans_across_its_cuts() {
+        let map = EditMap::of(&project(two_chapters()), View::Edited);
+        let runs = map.layout_runs();
+        let shape: Vec<_> = runs
+            .iter()
+            .map(|r| {
+                (
+                    r.at.chapter,
+                    r.frames.clone(),
+                    r.range.from().0,
+                    r.range.to().0,
+                )
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                (0, 0..90, 0, 2_000_000),
+                (1, 90..150, 10_000_000, 11_000_000)
+            ]
+        );
     }
 
     #[test]

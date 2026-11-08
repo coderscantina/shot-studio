@@ -4,6 +4,8 @@
 //! Every edit is a `shot-core` function on the cut, written to `cut.kdl` by [`VideoFolder`]. The
 //! screen keeps only view state: the workspace, the chapter on show, the selection, the playhead.
 
+mod lane_menu;
+mod music;
 mod overlays;
 mod parts;
 mod picture;
@@ -66,6 +68,7 @@ actions!(
         ZoomIn,
         ZoomOut,
         ZoomToFit,
+        ZoomToSelection,
         GoToStart,
         GoToEnd,
     ]
@@ -96,6 +99,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("=", ZoomIn, context),
         KeyBinding::new("-", ZoomOut, context),
         KeyBinding::new("shift-z", ZoomToFit, context),
+        KeyBinding::new("alt-z", ZoomToSelection, context),
         KeyBinding::new("home", GoToStart, context),
         KeyBinding::new("end", GoToEnd, context),
     ]);
@@ -288,6 +292,7 @@ impl EditScreen {
         );
         self.seeking = true;
         self.clock = None;
+        self.repick_layout();
         if let Some(timeline::Pick::Placed(at, placed)) = self.lanes.picked {
             let block = folder
                 .project
@@ -563,11 +568,14 @@ impl EditScreen {
         cx.notify();
     }
 
+    /// Sets the layout on key `key + 1` over the selected words, else the picked layout
+    /// stretch, else the stretch between cuts at the playhead.
     fn set_layout(&mut self, key: usize, cx: &mut Context<Self>) {
         let layout = LAYOUT_KEYS[key];
-        let target = match self.selected() {
-            Some((at, range, ..)) => Some((at, range)),
-            None => self.map.stretch_at(self.playhead),
+        let target = match (self.selected(), self.lanes.picked) {
+            (Some((at, range, ..)), _) => Some((at, range)),
+            (None, Some(timeline::Pick::Layout(at, range))) => Some((at, range)),
+            (None, _) => self.map.stretch_at(self.playhead),
         };
         let Some((at, range)) = target else {
             return;
@@ -593,7 +601,11 @@ impl EditScreen {
         }
     }
 
+    /// Switches the workspace. A pick belongs to the Timeline lanes, so it is dropped.
     fn set_workspace(&mut self, workspace: Workspace, cx: &mut Context<Self>) {
+        if self.workspace != workspace {
+            self.lanes.picked = None;
+        }
         self.workspace = workspace;
         cx.notify();
     }
@@ -724,6 +736,7 @@ impl Render for EditScreen {
             .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom_lanes(0.5, None, cx)))
             .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom_lanes(2.0, None, cx)))
             .on_action(cx.listener(|this, _: &ZoomToFit, _, cx| this.fit_lanes(cx)))
+            .on_action(cx.listener(|this, _: &ZoomToSelection, _, cx| this.zoom_to_selection(cx)))
             .on_action(cx.listener(|this, _: &GoToStart, _, cx| {
                 this.seek(0);
                 cx.notify();
@@ -755,7 +768,7 @@ impl Render for EditScreen {
             .on_action(cx.listener(|this, _: &ExtendNext, _, cx| this.move_selection(1, true, cx)))
             .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
                 if event.pressed_button == Some(gpui::MouseButton::Left) {
-                    this.drag_lanes(event.position.x, cx);
+                    this.drag_lanes(event.position, cx);
                 }
             }))
             .on_mouse_up(

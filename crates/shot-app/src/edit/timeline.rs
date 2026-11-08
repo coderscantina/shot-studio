@@ -1,11 +1,16 @@
-//! The Timeline workspace: preview, change list and overlays on top, the whole-video overview,
-//! then one lane per kind: Layout (with the intro and outro), Zoom, Overlays, Highlight, Words,
-//! Voice, Sound and Music, with export's transitions as marks on their edges.
+//! The Timeline workspace: preview, change list and overlays on top, a split to drag between
+//! them and the lanes, the whole-video overview, then one lane per kind: Layout (with the intro
+//! and outro), Zoom, Overlays, Highlight, Words, Voice, Sound and Music, with export's
+//! transitions as marks on their edges.
 //!
 //! The lanes are the editing surface. Click or drag the ruler or an empty lane to move the
-//! playhead, drag across the lanes to select words, click a zoom or overlay to pick it, drag its
-//! edges to trim it or its body to move it, click a cut to pick it for restoring. `=` and `-`
-//! zoom the lanes, scrolling pans them, ⌘-scroll and pinch zoom around the pointer.
+//! playhead, drag across the lanes to select words, click a block to pick it: a zoom or overlay
+//! (drag its edges to trim it, its middle to move it), a layout stretch, a cut, the music bed.
+//! The toolbar under the lanes and the right-click menu offer what the selection or the pick
+//! can do, each with its key; a right-click selects or picks what is under it first. `=` and
+//! `-` zoom the lanes around the playhead, ⌥Z to the selection and ⇧Z to the whole video, as do
+//! the slider and the overview's frame (its middle pans, its edges zoom). Scrolling pans,
+//! ⌘-scroll and pinch zoom around the pointer.
 
 use std::cell::Cell;
 use std::ops::Range;
@@ -13,27 +18,43 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    Bounds, Context, Div, FontWeight, Hsla, MouseButton, MouseDownEvent, PinchEvent, Pixels,
-    ScrollEvent, Stateful, Window, canvas, div, fill, point, prelude::*, px, size,
+    App, Bounds, Context, Div, ElementId, FontWeight, Hsla, MouseButton, MouseDownEvent,
+    PinchEvent, Pixels, Point, ScrollEvent, SharedString, Stateful, Window, canvas, div, fill,
+    point, prelude::*, px, size,
 };
+use gpui_component::menu::ContextMenuExt;
 use gpui_component::tooltip::Tooltip;
-use shot_core::{Applied, Placed, RemovedBy, TakeAt, TimeRange, WordState};
+use shot_core::{Applied, Layout, Placed, RemovedBy, TakeAt, TimeRange, WordState};
 use shot_render::join::BookendKind;
 use shot_render::overlay::highlight;
 use shot_render::plan::frame_time;
 
-use super::EditScreen;
 use super::parts::{self, layout_name};
-use crate::model::{self, FPS, Selection, changes, seconds, timecode};
+use super::{EditScreen, music};
+use crate::model::{self, FPS, LAYOUT_KEYS, LayoutRun, Selection, changes, seconds, timecode};
 use crate::peaks::Peaks;
 use crate::theme::*;
 use crate::ui::{self, hint, icon, kbd, label, mono};
 
 const NAME_WIDTH: f32 = 112.;
-/// Average width of a character at 13 px, for packing words into rows.
+/// Average width of a character at 13 px, for packing words into rows, and at 11 px mono, for
+/// packing cut lengths.
 const WORD_CHAR: f32 = 7.2;
-/// The lanes pane at its natural height, so the top row gives way on short windows.
-const LANES_HEIGHT: f32 = 516.;
+const CHIP_CHAR: f32 = 6.8;
+/// A row of words on the Words lane, and the strip under the rows that holds cut lengths.
+const WORD_ROW: f32 = 28.;
+const WORD_HEIGHT: f32 = 22.;
+const CHIP_STRIP: f32 = 16.;
+/// The lanes pane at its natural height and at its smallest, where the Words lane keeps one
+/// row and the Voice lane a thin waveform. Both include the margin under the pane.
+const LANES_HEIGHT: f32 = 510.;
+const LANES_MIN: f32 = 456.;
+/// The split between the top row and the lanes.
+const SPLIT: f32 = 8.;
+/// The top row's height: its least, the most it opens at, and the width the change list keeps.
+const TOP_MIN: f32 = 220.;
+const TOP_OPENS: f32 = 420.;
+const CHANGES_MIN: f32 = 260.;
 /// The title bar above the screen.
 const TITLE_BAR: f32 = 46.;
 /// The fewest and most output frames the lanes show: 2 s up to the whole video.
@@ -43,8 +64,10 @@ const DEFAULT_SPAN: u64 = 15 * FPS as u64;
 const SNAP: f32 = 8.;
 /// The shortest zoom or overlay a drag leaves, in frames.
 const MIN_LENGTH: u64 = 6;
-/// A zoom's scale when the format has no auto-zoom rule to take it from.
+/// A zoom's scale when the format has no auto-zoom rule to take it from, and the scales the
+/// toolbar and menu offer.
 const DEFAULT_ZOOM: u16 = 130;
+pub(super) const ZOOM_SCALES: [u16; 4] = [115, 130, 150, 200];
 
 /// What the Timeline lanes show and what the mouse does in them.
 pub struct Lanes {
@@ -53,11 +76,19 @@ pub struct Lanes {
     start: u64,
     /// The playhead the view last followed. A pan holds until the playhead moves.
     followed: Option<u64>,
-    /// Where the tracks were last painted, for mouse mapping.
+    /// Where the tracks, the Words lane and the zoom slider were last painted, for mouse
+    /// mapping and the number of word rows.
     bounds: Rc<Cell<Bounds<Pixels>>>,
+    words: Rc<Cell<Bounds<Pixels>>>,
+    slider: Rc<Cell<Bounds<Pixels>>>,
     drag: Option<Drag>,
-    /// The block a click picked, which Backspace removes or R restores.
+    /// The block a click picked, which the toolbar, the menu and the keys act on.
     pub picked: Option<Pick>,
+    /// What the right-click menu is about.
+    pub(super) menu: Option<MenuOn>,
+    /// The top row's height the person dragged the split to, and the range it may take.
+    top: Option<f32>,
+    top_range: (f32, f32),
 }
 
 impl Default for Lanes {
@@ -67,8 +98,13 @@ impl Default for Lanes {
             start: 0,
             followed: None,
             bounds: Rc::default(),
+            words: Rc::default(),
+            slider: Rc::default(),
             drag: None,
             picked: None,
+            menu: None,
+            top: None,
+            top_range: (TOP_MIN, TOP_MIN),
         }
     }
 }
@@ -80,11 +116,29 @@ pub enum Pick {
     Placed(TakeAt, Placed),
     /// A run of removed media.
     Cut(TakeAt, TimeRange),
+    /// A stretch of one layout, by its media range, as [`model::LayoutRun`] has it.
+    Layout(TakeAt, TimeRange),
+    /// The music bed, or the place for one.
+    Music,
+}
+
+/// What a right-click opened the menu on. A right-click selects or picks first, so the
+/// selection or the pick says the rest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum MenuOn {
+    Selection,
+    Pick,
+    /// A zoom or overlay of the style rules, which the lanes only show, with its name.
+    Lock(String),
+    /// An empty spot, where the playhead now is.
+    Empty,
 }
 
 enum Drag {
     /// The ruler moves the playhead.
     Scrub,
+    /// The overview moves the playhead.
+    Overview,
     /// Words from the frame the drag started at.
     Select { from: u64 },
     /// A zoom's or overlay's edge or body, with its output frames as they were and as dragged.
@@ -96,6 +150,16 @@ enum Drag {
         was: Range<u64>,
         now: Range<u64>,
     },
+    /// The overview's frame around the lanes' window: the body pans, an edge zooms.
+    Frame {
+        grip: Grip,
+        grab: Pixels,
+        was: Range<u64>,
+    },
+    /// The zoom slider's thumb.
+    Slider,
+    /// The split between the top row and the lanes, from the height it had.
+    Split { grab: Pixels, was: f32 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +183,12 @@ impl Lanes {
         let span = self.span.min(total).max(1);
         let start = self.start.min(total.saturating_sub(span));
         start..start + span
+    }
+
+    /// Shows `span` frames from `start`, within the video.
+    fn set_window(&mut self, start: u64, span: u64, total: u64) {
+        self.span = span.clamp(MIN_SPAN, total.max(MIN_SPAN));
+        self.start = start.min(total.saturating_sub(self.span));
     }
 
     /// Pages the view to the playhead when the playhead moved out of it.
@@ -148,6 +218,32 @@ impl Lanes {
         let along = f32::from(x - bounds.origin.x).max(0.);
         (window.start + (along * self.per_pixel(total)) as u64).min(total.saturating_sub(1))
     }
+
+    /// The rows of words the Words lane has room for.
+    fn word_rows(&self) -> usize {
+        let height = f32::from(self.words.get().size.height);
+        if height <= 0. {
+            return 2;
+        }
+        let rows = (height - 4. - CHIP_STRIP + WORD_ROW - WORD_HEIGHT) / WORD_ROW;
+        (rows.floor() as usize).max(1)
+    }
+}
+
+/// Where the zoom slider sits for a window of `span` frames: 0 shows the whole video, 1 the
+/// closest view. The scale is logarithmic, so each step of the slider zooms by the same factor.
+fn slider_at(span: u64, total: u64) -> f32 {
+    if total <= MIN_SPAN {
+        return 0.;
+    }
+    let range = (total as f64 / MIN_SPAN as f64).ln();
+    ((total as f64 / span.max(1) as f64).ln() / range).clamp(0., 1.) as f32
+}
+
+/// The window [`slider_at`] puts at `at`.
+fn slider_span(at: f32, total: u64) -> u64 {
+    let closest = MIN_SPAN as f64 / total.max(1) as f64;
+    (total as f64 * closest.powf(f64::from(at.clamp(0., 1.)))).round() as u64
 }
 
 impl EditScreen {
@@ -155,24 +251,54 @@ impl EditScreen {
         self.lanes.window(self.map.frames)
     }
 
-    /// Shows `factor` times as many frames, keeping `anchor` (or the playhead) where it is.
-    pub(super) fn zoom_lanes(&mut self, factor: f32, anchor: Option<u64>, cx: &mut Context<Self>) {
+    /// Shows `span` frames, keeping `anchor` (else the playhead when shown, else the middle)
+    /// where it is on screen.
+    fn zoom_lanes_to(&mut self, span: u64, anchor: Option<u64>, cx: &mut Context<Self>) {
         let window = self.lane_window();
         let length = (window.end - window.start).max(1);
         let anchor = anchor
             .or_else(|| window.contains(&self.playhead).then_some(self.playhead))
             .unwrap_or(window.start + length / 2);
-        let span = ((self.lanes.span as f32 * factor) as u64)
-            .clamp(MIN_SPAN, self.map.frames.max(MIN_SPAN));
-        let before = (anchor - window.start) as f32 / length as f32;
-        self.lanes.start = anchor.saturating_sub((before * span as f32) as u64);
-        self.lanes.span = span;
+        let before = anchor.saturating_sub(window.start) as f64 / length as f64;
+        let span = span.clamp(MIN_SPAN, self.map.frames.max(MIN_SPAN));
+        let start = anchor.saturating_sub((before * span as f64).round() as u64);
+        self.lanes.set_window(start, span, self.map.frames);
         cx.notify();
     }
 
+    /// Shows `factor` times as many frames, see [`Self::zoom_lanes_to`].
+    pub(super) fn zoom_lanes(&mut self, factor: f32, anchor: Option<u64>, cx: &mut Context<Self>) {
+        let window = self.lane_window();
+        let span = ((window.end - window.start) as f64 * f64::from(factor)).round() as u64;
+        self.zoom_lanes_to(span, anchor, cx);
+    }
+
     pub(super) fn fit_lanes(&mut self, cx: &mut Context<Self>) {
-        self.lanes.start = 0;
-        self.lanes.span = self.map.frames.max(MIN_SPAN);
+        self.lanes.set_window(0, self.map.frames, self.map.frames);
+        cx.notify();
+    }
+
+    /// Fits the lanes to the selection, else the picked block, else the playhead's chapter,
+    /// with a little room on either side.
+    pub(super) fn zoom_to_selection(&mut self, cx: &mut Context<Self>) {
+        let frames = self
+            .selection_frames()
+            .or_else(|| self.picked_frames(cx))
+            .or_else(|| {
+                let chapter = self.map.chapter_at(self.playhead)?;
+                Some(self.map.chapters.get(chapter)?.frames.clone())
+            });
+        let Some(frames) = frames else {
+            return;
+        };
+        let length = (frames.end - frames.start).max(MIN_SPAN);
+        let room = length / 10;
+        let middle = (frames.start + frames.end) / 2;
+        self.lanes.set_window(
+            middle.saturating_sub(length / 2 + room),
+            length + 2 * room,
+            self.map.frames,
+        );
         cx.notify();
     }
 
@@ -201,14 +327,27 @@ impl EditScreen {
         self.zoom_lanes(1. / (1. + event.delta).max(0.1), Some(anchor), cx);
     }
 
-    /// Follows the mouse while a lane drag runs.
-    pub(super) fn drag_lanes(&mut self, x: Pixels, cx: &mut Context<Self>) {
+    /// The top row's height for a viewport, within what leaves the lanes and the change list
+    /// their room.
+    fn top_height(&mut self, width: f32, height: f32) -> f32 {
+        let room = height - TITLE_BAR - SPLIT;
+        let stage_max = width - 32. - super::overlays::PANE_WIDTH - CHANGES_MIN;
+        let by_width = (stage_max - 24.) * 9. / 16. + 66.;
+        let most = (room - LANES_MIN).min(by_width).max(TOP_MIN);
+        let opens = (room - LANES_HEIGHT).clamp(TOP_MIN, TOP_OPENS).min(most);
+        self.lanes.top_range = (TOP_MIN, most);
+        self.lanes.top.unwrap_or(opens).clamp(TOP_MIN, most)
+    }
+
+    /// Follows the mouse while a drag in the Timeline runs.
+    pub(super) fn drag_lanes(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
         let total = self.map.frames;
-        let frame = self.lanes.frame_at(x, total);
+        let frame = self.lanes.frame_at(position.x, total);
         let threshold = (SNAP * self.lanes.per_pixel(total)) as u64;
         match self.lanes.drag {
             None => return,
             Some(Drag::Scrub) => self.seek(frame),
+            Some(Drag::Overview) => self.seek_overview(position.x, cx),
             Some(Drag::Select { from }) => {
                 if frame.abs_diff(from) > threshold / 2 {
                     self.select_frames(from, frame);
@@ -248,6 +387,43 @@ impl EditScreen {
                     *shown = now;
                 }
             }
+            Some(Drag::Frame {
+                grip,
+                grab,
+                ref was,
+            }) => {
+                let width = f32::from(self.overview_bounds.get().size.width).max(1.);
+                let delta = (f32::from(position.x - grab) / width * total as f32) as i64;
+                let (start, end) = match grip {
+                    Grip::Body => (was.start.saturating_add_signed(delta), None),
+                    Grip::Start => (
+                        was.start
+                            .saturating_add_signed(delta)
+                            .min(was.end.saturating_sub(MIN_SPAN)),
+                        Some(was.end),
+                    ),
+                    Grip::End => (
+                        was.start,
+                        Some(
+                            was.end
+                                .saturating_add_signed(delta)
+                                .clamp(was.start + MIN_SPAN, total),
+                        ),
+                    ),
+                };
+                let span = end.map_or(was.end - was.start, |end| end - start);
+                self.lanes.set_window(start, span, total);
+            }
+            Some(Drag::Slider) => {
+                let bounds = self.lanes.slider.get();
+                let at =
+                    f32::from(position.x - bounds.origin.x) / f32::from(bounds.size.width).max(1.);
+                self.zoom_lanes_to(slider_span(at, total), None, cx);
+            }
+            Some(Drag::Split { grab, was }) => {
+                let (least, most) = self.lanes.top_range;
+                self.lanes.top = Some((was + f32::from(position.y - grab)).clamp(least, most));
+            }
         }
         cx.notify();
     }
@@ -273,24 +449,44 @@ impl EditScreen {
         self.edit(cx, |cut| cut.set_range(at, placed, range));
         // Zooms are kept in time order, so the moved one may have a new index.
         if let Placed::Zoom(_) = placed {
-            let cut = &self.folder.read(cx).project.cut;
-            self.lanes.picked = cut
-                .chapters
-                .get(at.chapter)
-                .and_then(|c| c.takes.get(at.take))
-                .and_then(|b| b.zooms.iter().position(|z| z.range == range))
+            self.lanes.picked = self
+                .zoom_index(at, range, cx)
                 .map(|index| Pick::Placed(at, Placed::Zoom(index)));
         }
     }
 
-    /// Removes the picked zoom or overlay. False when none is picked.
+    fn zoom_index(&self, at: TakeAt, range: TimeRange, cx: &App) -> Option<usize> {
+        let cut = &self.folder.read(cx).project.cut;
+        cut.chapters
+            .get(at.chapter)?
+            .takes
+            .get(at.take)?
+            .zooms
+            .iter()
+            .position(|z| z.range == range)
+    }
+
+    /// Picks a block in the lanes, dropping the selection.
+    fn pick(&mut self, pick: Pick) {
+        self.selection = None;
+        self.proposal = None;
+        self.lanes.picked = Some(pick);
+    }
+
+    /// Removes the picked zoom, overlay or music bed. False when none is picked.
     pub(super) fn remove_picked(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(Pick::Placed(at, placed)) = self.lanes.picked else {
-            return false;
-        };
-        self.lanes.picked = None;
-        self.edit(cx, |cut| cut.remove_placed(at, placed));
-        true
+        match self.lanes.picked {
+            Some(Pick::Placed(at, placed)) => {
+                self.lanes.picked = None;
+                self.edit(cx, |cut| cut.remove_placed(at, placed));
+                true
+            }
+            Some(Pick::Music) if self.folder.read(cx).project.cut.music.is_some() => {
+                self.remove_music(cx);
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Adds a zoom over the selected words, at the format's auto-zoom scale.
@@ -308,13 +504,83 @@ impl EditScreen {
             .map_or(DEFAULT_ZOOM, |z| z.scale);
         self.selection = None;
         self.edit(cx, |cut| cut.add_zoom(at, range, scale));
-        let cut = &self.folder.read(cx).project.cut;
-        self.lanes.picked = cut
-            .chapters
-            .get(at.chapter)
-            .and_then(|c| c.takes.get(at.take))
-            .and_then(|b| b.zooms.iter().position(|z| z.range == range))
+        self.lanes.picked = self
+            .zoom_index(at, range, cx)
             .map(|index| Pick::Placed(at, Placed::Zoom(index)));
+    }
+
+    pub(super) fn set_zoom_scale(
+        &mut self,
+        at: TakeAt,
+        index: usize,
+        scale: u16,
+        cx: &mut Context<Self>,
+    ) {
+        self.edit(cx, |cut| cut.set_zoom_scale(at, index, scale));
+    }
+
+    /// The pick after the map changed: a layout stretch becomes the stretch that now holds
+    /// its middle, so the pick always matches a block on the Layout lane.
+    pub(super) fn repick_layout(&mut self) {
+        if let Some(Pick::Layout(at, range)) = self.lanes.picked {
+            let middle = shot_core::Micros((range.from().0 + range.to().0) / 2);
+            self.lanes.picked = self
+                .map
+                .layout_runs()
+                .into_iter()
+                .find(|r| r.at == at && r.range.from() <= middle && middle < r.range.to())
+                .map(|r| Pick::Layout(r.at, r.range));
+        }
+    }
+
+    /// Plays from the selection, else the picked block, else the playhead.
+    pub(super) fn play_from_here(&mut self, cx: &mut Context<Self>) {
+        let frame = self
+            .selection_frames()
+            .or_else(|| self.picked_frames(cx))
+            .map_or(self.playhead, |f| f.start);
+        self.seek(frame);
+        self.set_playing(true);
+        cx.notify();
+    }
+
+    /// Opens the sound picker, which places at the selection or the playhead.
+    pub(super) fn add_sound_here(&mut self, cx: &mut Context<Self>) {
+        if self.place.picker != Some(super::place::Picker::Sound) {
+            self.toggle_picker(super::place::Picker::Sound, cx);
+        }
+    }
+
+    /// The output frames of the selected words.
+    pub(super) fn selection_frames(&self) -> Option<Range<u64>> {
+        let selection = self.selection?;
+        let words = self.block(selection.at)?.words.get(selection.words())?;
+        let from = words.iter().find_map(|w| w.output)?;
+        let to = words
+            .iter()
+            .rev()
+            .find_map(|w| w.output.map(|start| start + word_frames(w.range)))?;
+        Some(from..to.max(from + 1))
+    }
+
+    /// The output frames of the picked block.
+    fn picked_frames(&self, cx: &App) -> Option<Range<u64>> {
+        let cut = &self.folder.read(cx).project.cut;
+        let block = |at: TakeAt| cut.chapters.get(at.chapter)?.takes.get(at.take);
+        match self.lanes.picked? {
+            Pick::Placed(at, Placed::Zoom(index)) => self
+                .map
+                .output_range(at, block(at)?.zooms.get(index)?.range),
+            Pick::Placed(at, Placed::Overlay(index)) => self
+                .map
+                .output_range(at, block(at)?.overlays.get(index)?.range),
+            Pick::Cut(at, range) => {
+                let frame = self.map.output_frame(at, range.to())?;
+                Some(frame.saturating_sub(MIN_SPAN / 2)..frame + MIN_SPAN / 2)
+            }
+            Pick::Layout(at, range) => self.map.output_range(at, range),
+            Pick::Music => None,
+        }
     }
 
     /// Selects the words of the block under `from` that start or end between the two frames.
@@ -372,8 +638,7 @@ impl EditScreen {
     /// Starts a drag of the item's `grip` and picks the item.
     fn grab(&mut self, item: (TakeAt, Placed, Range<u64>), grip: Grip, x: Pixels) {
         let (at, placed, frames) = item;
-        self.selection = None;
-        self.lanes.picked = Some(Pick::Placed(at, placed));
+        self.pick(Pick::Placed(at, placed));
         self.lanes.drag = Some(Drag::Shift {
             at,
             placed,
@@ -383,6 +648,72 @@ impl EditScreen {
             now: frames,
         });
     }
+
+    /// A press on the overview outside its frame: seeks there, shows that moment in the middle
+    /// of the lanes and scrubs while the button is down.
+    pub(super) fn press_overview(&mut self, x: Pixels, cx: &mut Context<Self>) {
+        self.seek_overview(x, cx);
+        let window = self.lane_window();
+        let span = window.end - window.start;
+        self.lanes.set_window(
+            self.playhead.saturating_sub(span / 2),
+            span,
+            self.map.frames,
+        );
+        self.lanes.followed = Some(self.playhead);
+        self.lanes.drag = Some(Drag::Overview);
+    }
+}
+
+pub(super) fn words(count: usize) -> &'static str {
+    if count == 1 { "word" } else { "words" }
+}
+
+/// The picked zoom's or overlay's line for the toolbar and menu, with a zoom's scale.
+pub(super) fn picked_text(
+    this: &EditScreen,
+    at: TakeAt,
+    placed: Placed,
+    cx: &App,
+) -> Option<(String, u16)> {
+    let cut = &this.folder.read(cx).project.cut;
+    let block = cut.chapters.get(at.chapter)?.takes.get(at.take)?;
+    match placed {
+        Placed::Zoom(index) => block.zooms.get(index).map(|z| {
+            (
+                format!("Zoom {}%, {}", z.scale, seconds(z.range.duration())),
+                z.scale,
+            )
+        }),
+        Placed::Overlay(index) => block.overlays.get(index).map(|o| {
+            (
+                format!(
+                    "{}, {}",
+                    super::overlays::summary(o),
+                    seconds(o.range.duration())
+                ),
+                0,
+            )
+        }),
+    }
+}
+
+/// The words a cut run removed, in order.
+pub(super) fn removed_words(this: &EditScreen, at: TakeAt, range: TimeRange) -> String {
+    this.block(at)
+        .map(|b| {
+            b.words
+                .iter()
+                .filter(|w| w.state != WordState::Kept)
+                .filter(|w| {
+                    let middle = (w.range.from().0 + w.range.to().0) / 2;
+                    range.from().0 <= middle && middle < range.to().0
+                })
+                .map(|w| w.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .unwrap_or_default()
 }
 
 fn word_frames(range: TimeRange) -> u64 {
@@ -392,8 +723,9 @@ fn word_frames(range: TimeRange) -> u64 {
 pub fn render(this: &mut EditScreen, win: &mut Window, cx: &mut Context<EditScreen>) -> Div {
     this.lanes.follow(this.playhead, this.map.frames);
     let window = this.lane_window();
+    let viewport = win.viewport_size();
     // The top row gives way first on short windows; the preview keeps 16:9 inside it.
-    let top = (f32::from(win.viewport_size().height) - TITLE_BAR - LANES_HEIGHT).clamp(220., 420.);
+    let top = this.top_height(f32::from(viewport.width), f32::from(viewport.height));
     let stage = (top - 24. - 42.) * 16. / 9. + 24.;
     div()
         .flex_1()
@@ -422,7 +754,44 @@ pub fn render(this: &mut EditScreen, win: &mut Window, cx: &mut Context<EditScre
                 .child(change_list(this, cx))
                 .child(super::overlays::pane(this, cx)),
         )
+        .child(split(top, cx))
         .child(lanes(this, window, cx))
+}
+
+/// The edge between the top row and the lanes, dragged to give one of them more room.
+fn split(top: f32, cx: &mut Context<EditScreen>) -> impl IntoElement {
+    div()
+        .id("split")
+        .group("split")
+        .h(px(SPLIT))
+        .flex_none()
+        .mx(px(8.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_row_resize()
+        .child(
+            div()
+                .w(px(40.))
+                .h(px(3.))
+                .rounded(px(2.))
+                .group_hover("split", |s| s.bg(FAINT)),
+        )
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                if event.click_count == 2 {
+                    this.lanes.top = None;
+                } else {
+                    this.lanes.drag = Some(Drag::Split {
+                        grab: event.position.y,
+                        was: top,
+                    });
+                }
+                cx.notify();
+            }),
+        )
 }
 
 fn change_list(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement {
@@ -443,7 +812,7 @@ fn change_list(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElem
                 .py(px(8.))
                 .rounded(RADIUS_SM)
                 .child(icon(name, ICON, color))
-                .child(div().flex_1().child(text))
+                .child(div().flex_1().min_w_0().truncate().child(text))
                 .child(mono(count.to_string()).text_size(px(14.)).text_color(MUTED))
                 .child(
                     mono(delta)
@@ -474,7 +843,7 @@ fn change_list(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElem
                         .font_weight(FontWeight::SEMIBOLD)
                         .child("Changes"),
                 )
-                .child(div().text_color(MUTED).child(format!(
+                .child(div().min_w_0().truncate().text_color(MUTED).child(format!(
                     "against the raw takes, {}",
                     timecode(raw * u64::from(FPS) / 1_000_000)
                 ))),
@@ -536,6 +905,16 @@ fn capitalized(text: &str) -> String {
 /// Ruler steps in seconds, the first that leaves 90 px between ticks wins.
 const STEPS: [u64; 10] = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
 
+/// How a lane takes its height: fixed, or growing with the room the split gives the lanes.
+enum Height {
+    Fixed(f32),
+    Grow {
+        natural: f32,
+        least: f32,
+        weight: f32,
+    },
+}
+
 fn lanes(this: &EditScreen, window: Range<u64>, cx: &mut Context<EditScreen>) -> impl IntoElement {
     let chapter = this
         .map
@@ -574,11 +953,14 @@ fn lanes(this: &EditScreen, window: Range<u64>, cx: &mut Context<EditScreen>) ->
                 .all(|(f, _)| ((x(*f) - at) * track).abs() > 64.)
         })
         .collect();
+    let runs = this.map.layout_runs();
     let bounds = this.lanes.bounds.clone();
+    let screen = cx.entity();
     ui::pane()
-        .flex_none()
-        .h(px(LANES_HEIGHT - 16.))
-        .m(px(8.))
+        .flex_1()
+        .min_h(px(LANES_MIN - 8.))
+        .mx(px(8.))
+        .mb(px(8.))
         .pt(px(12.))
         .pb(px(10.))
         .flex()
@@ -587,26 +969,35 @@ fn lanes(this: &EditScreen, window: Range<u64>, cx: &mut Context<EditScreen>) ->
         .child(
             div()
                 .flex()
+                .flex_none()
                 .items_center()
                 .gap(px(14.))
                 .px(px(16.))
                 .h(px(24.))
-                .child(div().font_weight(FontWeight::SEMIBOLD).child(chapter))
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(chapter),
+                )
                 .child(
                     mono(format!(
                         "{} to {}",
                         timecode(window.start),
                         timecode(window.end)
                     ))
+                    .flex_none()
                     .text_size(TEXT_SM)
                     .text_color(MUTED),
                 )
                 .child(div().flex_1())
-                .child(zoom_controls(length, cx)),
+                .child(zoom_controls(this, length, cx)),
         )
         .child(
             div()
                 .flex()
+                .flex_none()
                 .ml(px(NAME_WIDTH))
                 .mr(px(16.))
                 .child(parts::overview(this, window.clone(), px(20.), cx)),
@@ -615,6 +1006,7 @@ fn lanes(this: &EditScreen, window: Range<u64>, cx: &mut Context<EditScreen>) ->
             div()
                 .id("ruler")
                 .relative()
+                .flex_none()
                 .h(px(18.))
                 .ml(px(NAME_WIDTH))
                 .mr(px(16.))
@@ -638,7 +1030,7 @@ fn lanes(this: &EditScreen, window: Range<u64>, cx: &mut Context<EditScreen>) ->
                         cx.stop_propagation();
                         this.set_playing(false);
                         this.lanes.drag = Some(Drag::Scrub);
-                        this.drag_lanes(event.position.x, cx);
+                        this.drag_lanes(event.position, cx);
                     }),
                 ),
         )
@@ -646,9 +1038,33 @@ fn lanes(this: &EditScreen, window: Range<u64>, cx: &mut Context<EditScreen>) ->
             div()
                 .id("lanes")
                 .relative()
+                .flex_1()
+                .min_h_0()
                 .flex()
                 .flex_col()
                 .gap(px(4.))
+                // A right-click is on an empty spot unless a block or word under it says
+                // otherwise as the event bubbles back up.
+                .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, _, _| {
+                    if event.button == MouseButton::Right {
+                        this.lanes.menu = Some(MenuOn::Empty);
+                    }
+                }))
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                        if this.lanes.menu != Some(MenuOn::Empty) {
+                            return;
+                        }
+                        this.selection = None;
+                        this.lanes.picked = None;
+                        this.proposal = None;
+                        if event.position.x >= this.lanes.bounds.get().origin.x {
+                            this.seek(this.lanes.frame_at(event.position.x, this.map.frames));
+                        }
+                        cx.notify();
+                    }),
+                )
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, event: &MouseDownEvent, _, cx| {
@@ -682,16 +1098,16 @@ fn lanes(this: &EditScreen, window: Range<u64>, cx: &mut Context<EditScreen>) ->
                 .child(lane(
                     "layout",
                     "Layout",
-                    px(36.),
-                    layout_lane(this, &window, &x),
+                    Height::Fixed(36.),
+                    layout_lane(this, &runs, &window, &x, cx),
                 ))
                 .child(lane(
                     "zoom",
                     "Zoom",
-                    px(36.),
+                    Height::Fixed(36.),
                     item_lane(
                         this,
-                        "zoom-item",
+                        ("zoom-item", "Zoom"),
                         zoom_items(this, cx),
                         &window,
                         &x,
@@ -702,10 +1118,10 @@ fn lanes(this: &EditScreen, window: Range<u64>, cx: &mut Context<EditScreen>) ->
                 .child(lane(
                     "picture",
                     "Overlays",
-                    px(36.),
+                    Height::Fixed(36.),
                     item_lane(
                         this,
-                        "overlay-item",
+                        ("overlay-item", "Overlay"),
                         super::overlays::lane_items(this, false, cx),
                         &window,
                         &x,
@@ -716,10 +1132,10 @@ fn lanes(this: &EditScreen, window: Range<u64>, cx: &mut Context<EditScreen>) ->
                 .child(lane(
                     "edit",
                     "Highlight",
-                    px(36.),
+                    Height::Fixed(36.),
                     item_lane(
                         this,
-                        "highlight-item",
+                        ("highlight-item", "Highlight"),
                         super::overlays::lane_items(this, true, cx),
                         &window,
                         &x,
@@ -730,20 +1146,33 @@ fn lanes(this: &EditScreen, window: Range<u64>, cx: &mut Context<EditScreen>) ->
                 .child(lane(
                     "text",
                     "Words",
-                    px(66.),
+                    Height::Grow {
+                        natural: 4. + 2. * WORD_ROW + CHIP_STRIP - (WORD_ROW - WORD_HEIGHT),
+                        least: 4. + WORD_ROW + CHIP_STRIP - (WORD_ROW - WORD_HEIGHT),
+                        weight: 2.,
+                    },
                     words_lane(this, &window, &x, track, cx),
                 ))
-                .child(lane("mic", "Voice", px(56.), voice_lane(this, &window, cx)))
+                .child(lane(
+                    "mic",
+                    "Voice",
+                    Height::Grow {
+                        natural: 56.,
+                        least: 32.,
+                        weight: 1.,
+                    },
+                    voice_lane(this, &window, cx),
+                ))
                 .child(lane(
                     "system-audio",
                     "Sound",
-                    px(28.),
+                    Height::Fixed(28.),
                     sound_lane(this, &window, &x, cx),
                 ))
                 .child(lane(
                     "music",
                     "Music",
-                    px(28.),
+                    Height::Fixed(28.),
                     music_lane(this, &window, &x, cx),
                 ))
                 .children(selection_band(this, &window, &x))
@@ -758,46 +1187,117 @@ fn lanes(this: &EditScreen, window: Range<u64>, cx: &mut Context<EditScreen>) ->
                                 .absolute()
                                 .bottom(px(28. + 4. + 28. + 6.))
                                 .left(px(NAME_WIDTH))
-                                .w(px(520.)),
+                                .w(px(520.))
+                                .on_any_mouse_down(|_, _, cx| cx.stop_propagation()),
                         )
                     },
-                ),
+                )
+                .context_menu(move |menu, window, cx| {
+                    super::lane_menu::context_menu(menu, &screen, window, cx)
+                }),
         )
-        .child(toolbar(this, cx))
+        .child(toolbar(this, &runs, cx))
 }
 
-fn zoom_controls(length: u64, cx: &mut Context<EditScreen>) -> impl IntoElement {
-    let button = |id: &'static str, text: &'static str| {
-        div()
-            .id(id)
-            .h(px(24.))
-            .min_w(px(26.))
-            .px(px(8.))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(6.))
-            .bg(RAISED)
-            .text_size(TEXT_SM)
-            .text_color(TEXT)
-            .cursor_pointer()
-            .hover(|s| s.bg(FLOAT))
-            .child(text)
-    };
+/// A small square button of the zoom controls.
+fn zoom_button(id: &'static str, text: &'static str) -> Stateful<Div> {
+    div()
+        .id(id)
+        .h(px(24.))
+        .min_w(px(26.))
+        .px(px(8.))
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .rounded(px(6.))
+        .bg(RAISED)
+        .text_size(TEXT_SM)
+        .text_color(TEXT)
+        .cursor_pointer()
+        .hover(|s| s.bg(FLOAT))
+        .child(text)
+}
+
+fn zoom_controls(this: &EditScreen, length: u64, cx: &mut Context<EditScreen>) -> impl IntoElement {
     let span = length as f64 / f64::from(FPS);
     let shown = if span < 60. {
         format!("{span:.0} s")
     } else {
         timecode(length)
     };
+    let at = slider_at(length, this.map.frames);
+    let bounds = this.lanes.slider.clone();
+    let focused =
+        this.selection.is_some() || this.lanes.picked.is_some_and(|pick| pick != Pick::Music);
     div()
         .flex()
+        .flex_none()
         .items_center()
         .gap(px(4.))
         .child(
-            button("lanes-out", "−")
+            zoom_button("lanes-out", "−")
                 .tooltip(|window, cx| Tooltip::new("Show more  −").build(window, cx))
                 .on_click(cx.listener(|this, _, _, cx| this.zoom_lanes(2.0, None, cx))),
+        )
+        .child(
+            div()
+                .id("lanes-zoom")
+                .relative()
+                .w(px(96.))
+                .h(px(24.))
+                .mx(px(8.))
+                .cursor_pointer()
+                .child(
+                    canvas(move |b, _, _| bounds.set(b), |_, _, _, _| {})
+                        .absolute()
+                        .size_full(),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .top(px(10.))
+                        .h(px(4.))
+                        .rounded(px(2.))
+                        .bg(KBD),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top(px(10.))
+                        .h(px(4.))
+                        .w(gpui::relative(at))
+                        .rounded(px(2.))
+                        .bg(MUTED),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(5.))
+                        .left(gpui::relative(at))
+                        .ml(px(-7.))
+                        .size(px(14.))
+                        .rounded_full()
+                        .bg(TEXT)
+                        .shadow_sm(),
+                )
+                .tooltip(|window, cx| Tooltip::new("Zoom the lanes").build(window, cx))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.lanes.drag = Some(Drag::Slider);
+                        this.drag_lanes(event.position, cx);
+                    }),
+                ),
+        )
+        .child(
+            zoom_button("lanes-in", "+")
+                .tooltip(|window, cx| Tooltip::new("Show less  =").build(window, cx))
+                .on_click(cx.listener(|this, _, _, cx| this.zoom_lanes(0.5, None, cx))),
         )
         .child(
             mono(shown)
@@ -808,36 +1308,118 @@ fn zoom_controls(length: u64, cx: &mut Context<EditScreen>) -> impl IntoElement 
                 .text_color(MUTED),
         )
         .child(
-            button("lanes-in", "+")
-                .tooltip(|window, cx| Tooltip::new("Show less  =").build(window, cx))
-                .on_click(cx.listener(|this, _, _, cx| this.zoom_lanes(0.5, None, cx))),
-        )
-        .child(
-            button("lanes-fit", "Fit")
-                .ml(px(4.))
+            zoom_button("lanes-fit", "Fit")
                 .tooltip(|window, cx| Tooltip::new("Whole video  ⇧Z").build(window, cx))
                 .on_click(cx.listener(|this, _, _, cx| this.fit_lanes(cx))),
         )
+        .child(
+            zoom_button(
+                "lanes-selection",
+                if focused { "Selection" } else { "Chapter" },
+            )
+            .tooltip(move |window, cx| {
+                let what = if focused {
+                    "Zoom to the selection  ⌥Z"
+                } else {
+                    "Zoom to the chapter  ⌥Z"
+                };
+                Tooltip::new(what).build(window, cx)
+            })
+            .on_click(cx.listener(|this, _, _, cx| this.zoom_to_selection(cx))),
+        )
+}
+
+/// The overview's frame around the lanes' window in the Timeline: drag its middle to pan, an
+/// edge to show more or less.
+pub(super) fn overview_frame(view: (f32, f32), cx: &mut Context<EditScreen>) -> impl IntoElement {
+    let edge = |id: &'static str, grip: Grip, cx: &mut Context<EditScreen>| {
+        div()
+            .id(id)
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .w(px(9.))
+            .flex()
+            .justify_center()
+            .cursor_ew_resize()
+            .group("frame-edge")
+            .child(
+                div()
+                    .w(px(3.))
+                    .my(px(4.))
+                    .rounded(px(2.))
+                    .group_hover("frame-edge", |s| s.bg(TEXT)),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.grab_frame(grip, event.position.x);
+                    cx.notify();
+                }),
+            )
+    };
+    div()
+        .id("overview-frame")
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left(gpui::relative(view.0))
+        .w(gpui::relative((view.1 - view.0).max(0.)))
+        .min_w(px(10.))
+        .cursor_grab()
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                this.grab_frame(Grip::Body, event.position.x);
+                cx.notify();
+            }),
+        )
+        .child(edge("frame-start", Grip::Start, cx).left(px(-5.)))
+        .child(edge("frame-end", Grip::End, cx).right(px(-5.)))
+}
+
+impl EditScreen {
+    fn grab_frame(&mut self, grip: Grip, x: Pixels) {
+        self.lanes.drag = Some(Drag::Frame {
+            grip,
+            grab: x,
+            was: self.lane_window(),
+        });
+    }
 }
 
 /// What the selection or the picked block can do, under the lanes.
-fn toolbar(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement {
+fn toolbar(
+    this: &EditScreen,
+    runs: &[LayoutRun],
+    cx: &mut Context<EditScreen>,
+) -> impl IntoElement {
     let bar = div()
         .h(px(32.))
-        .mx(px(16.))
+        .flex_none()
         .ml(px(NAME_WIDTH))
+        .mr(px(16.))
         .flex()
         .items_center()
         .gap(px(4.))
         .text_size(TEXT_SM);
-    let what = |text: String| div().pr(px(10.)).text_color(TEXT).child(text);
+    let what = |text: String| {
+        div()
+            .flex_none()
+            .pr(px(10.))
+            .text_color(TEXT)
+            .whitespace_nowrap()
+            .child(text)
+    };
     if let Some((_, range, kept, removed)) = this.selected() {
         let count = this.selection.map_or(0, |s| s.words().count());
-        let words = if count == 1 { "word" } else { "words" };
         let sound_open = this.place.picker == Some(super::place::Picker::Sound);
         return bar
             .child(what(format!(
-                "{count} {words}, {}",
+                "{count} {}, {}",
+                words(count),
                 seconds(range.duration())
             )))
             .when(kept, |bar| {
@@ -869,50 +1451,36 @@ fn toolbar(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement 
                         this.toggle_picker(super::place::Picker::Sound, cx)
                     })),
             )
-            .child(hint("1–4", "Layout").ml(px(8.)));
+            .child(layout_choices(None, cx));
     }
     match this.lanes.picked {
         Some(Pick::Placed(at, placed)) => {
-            let cut = &this.folder.read(cx).project.cut;
-            let block = cut
-                .chapters
-                .get(at.chapter)
-                .and_then(|c| c.takes.get(at.take));
-            let text = match placed {
-                Placed::Zoom(index) => block
-                    .and_then(|b| b.zooms.get(index))
-                    .map(|z| format!("Zoom {}%, {}", z.scale, seconds(z.range.duration()))),
-                Placed::Overlay(index) => block
-                    .and_then(|b| b.overlays.get(index))
-                    .map(|o| format!("{}, {}", o.template.as_str(), seconds(o.range.duration()))),
-            };
-            bar.children(text.map(what))
-                .child(
-                    tool("tool-remove", "close", "Remove", "⌫").on_click(cx.listener(
-                        |this, _, _, cx| {
-                            this.remove_picked(cx);
-                        },
-                    )),
-                )
-                .child(div().flex_1())
-                .child(label("Drag the edges to trim, the middle to move"))
+            let text = picked_text(this, at, placed, cx);
+            let scale = text.as_ref().map_or(0, |(_, scale)| *scale);
+            let mut bar = bar.children(text.map(|(text, _)| what(text)));
+            if let Placed::Zoom(index) = placed {
+                bar = bar
+                    .children(ZOOM_SCALES.into_iter().map(|option| {
+                        choice(("zoom-scale", option as usize), format!("{option}%"), None)
+                            .on(option == scale)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.set_zoom_scale(at, index, option, cx)
+                            }))
+                    }))
+                    .child(div().w(px(8.)));
+            }
+            bar.child(
+                tool("tool-remove", "close", "Remove", "⌫").on_click(cx.listener(
+                    |this, _, _, cx| {
+                        this.remove_picked(cx);
+                    },
+                )),
+            )
+            .child(div().flex_1())
+            .child(label("Drag the edges to trim, the middle to move").truncate())
         }
         Some(Pick::Cut(at, range)) => {
-            let removed = this
-                .block(at)
-                .map(|b| {
-                    b.words
-                        .iter()
-                        .filter(|w| w.state != WordState::Kept)
-                        .filter(|w| {
-                            let middle = (w.range.from().0 + w.range.to().0) / 2;
-                            range.from().0 <= middle && middle < range.to().0
-                        })
-                        .map(|w| w.text.as_str())
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                })
-                .unwrap_or_default();
+            let removed = removed_words(this, at, range);
             bar.child(what(format!("Cut, {}", seconds(range.duration()))))
                 .when(!removed.is_empty(), |bar| {
                     bar.child(
@@ -934,15 +1502,111 @@ fn toolbar(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement 
                     )),
                 )
         }
+        Some(Pick::Layout(at, range)) => {
+            let run = runs.iter().find(|r| r.at == at && r.range == range);
+            bar.children(run.map(|run| {
+                what(format!(
+                    "{}, {}",
+                    layout_name(run.layout),
+                    seconds(frame_time(run.frames.end - run.frames.start, FPS))
+                ))
+            }))
+            .child(layout_choices(run.map(|r| r.layout), cx))
+        }
+        Some(Pick::Music) => music_tools(this, bar, cx),
         None => bar
             .gap(px(18.))
-            .child(label("Drag across the lanes to select words"))
+            .child(label("Drag across the lanes to select words, right-click for more").truncate())
             .child(hint("⌫", "Cut"))
             .child(hint("Z", "Zoom"))
             .child(hint("S", "Sound"))
-            .child(hint("⌘Z", "Undo"))
-            .child(hint("= −", "Zoom lanes")),
+            .child(hint("1–4", "Layout"))
+            .child(hint("⌘Z", "Undo")),
     }
+}
+
+/// The four layouts with their keys, `current` lit; a click does what the key does.
+fn layout_choices(current: Option<Layout>, cx: &mut Context<EditScreen>) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(4.))
+        .ml(px(8.))
+        .child(label("Layout").pr(px(4.)))
+        .children(LAYOUT_KEYS.iter().enumerate().map(|(key, layout)| {
+            const KEYS: [&str; 4] = ["1", "2", "3", "4"];
+            choice(
+                ("layout-choice", key),
+                layout_name(*layout),
+                Some(KEYS[key]),
+            )
+            .on(current == Some(*layout))
+            .on_click(cx.listener(move |this, _, _, cx| this.set_layout(key, cx)))
+        }))
+}
+
+/// The music bed's file, gain and the beds to swap in, or the beds to add.
+fn music_tools(this: &EditScreen, bar: Div, cx: &mut Context<EditScreen>) -> Div {
+    let music = this.folder.read(cx).project.cut.music.clone();
+    let current = music.as_ref().map(|m| m.file.clone());
+    let beds = music::beds().enumerate().map(|(key, name)| {
+        choice(("music-bed", key), name, None)
+            .on(current.as_deref() == Some(music::bed_file(name).as_str()))
+            .on_click(cx.listener(move |this, _, _, cx| this.add_bed(name, cx)))
+    });
+    let choose = choice("music-file", "Choose a file…", None)
+        .on_click(cx.listener(|this, _, _, cx| this.choose_music(cx)));
+    let Some(music) = music else {
+        return bar
+            .child(
+                div()
+                    .flex_none()
+                    .pr(px(10.))
+                    .text_color(MUTED)
+                    .child("No music. Add a bed"),
+            )
+            .children(beds)
+            .child(choose);
+    };
+    let gain = music.gain;
+    bar.child(
+        div()
+            .flex_none()
+            .pr(px(10.))
+            .text_color(TEXT)
+            .child(format!("Music, {}", music::bed_name(&music.file))),
+    )
+    .child(
+        choice("music-quieter", "−", None).on_click(
+            cx.listener(move |this, _, _, cx| this.set_music_gain(gain - music::STEP, cx)),
+        ),
+    )
+    .child(
+        div()
+            .child(music::db(gain))
+            .w(px(64.))
+            .flex()
+            .justify_center(),
+    )
+    .child(
+        choice("music-louder", "+", None).on_click(
+            cx.listener(move |this, _, _, cx| this.set_music_gain(gain + music::STEP, cx)),
+        ),
+    )
+    .child(
+        label(format!("{} under voice", music::db(music.duck)))
+            .flex_none()
+            .px(px(8.)),
+    )
+    .children(beds)
+    .child(choose)
+    .child(
+        tool("tool-remove-music", "close", "Remove", "⌫").on_click(cx.listener(
+            |this, _, _, cx| {
+                this.remove_picked(cx);
+            },
+        )),
+    )
 }
 
 fn tool(
@@ -954,6 +1618,7 @@ fn tool(
     div()
         .id(id)
         .flex()
+        .flex_none()
         .items_center()
         .gap(px(8.))
         .h(px(28.))
@@ -967,20 +1632,50 @@ fn tool(
         .child(kbd(keys))
 }
 
+/// A toolbar option, lit with [`Lit::on`] when it is the current one.
+fn choice(
+    id: impl Into<ElementId>,
+    text: impl Into<SharedString>,
+    keys: Option<&'static str>,
+) -> Stateful<Div> {
+    div()
+        .id(id.into())
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(px(8.))
+        .h(px(28.))
+        .px(px(10.))
+        .rounded(RADIUS_SM)
+        .bg(RAISED)
+        .whitespace_nowrap()
+        .cursor_pointer()
+        .hover(|s| s.bg(FLOAT))
+        .child(text.into())
+        .children(keys.map(kbd))
+}
+
+/// Lights the current option of a row of [`choice`]s.
+trait Lit {
+    fn on(self, on: bool) -> Self;
+}
+
+impl Lit for Stateful<Div> {
+    fn on(self, on: bool) -> Self {
+        self.when(on, |s| s.bg(FLOAT_ON).text_color(STRONG))
+    }
+}
+
 /// A lime band down every lane over the selected words.
 fn selection_band(this: &EditScreen, window: &Range<u64>, x: &impl Fn(u64) -> f32) -> Option<Div> {
-    let selection = this.selection?;
-    let block = this.block(selection.at)?;
-    let words = block.words.get(selection.words())?;
-    let from = words.iter().find_map(|w| w.output)?;
-    let to = words
-        .iter()
-        .rev()
-        .find_map(|w| w.output.map(|start| start + word_frames(w.range)))?;
-    if to <= window.start || from >= window.end {
+    let frames = this.selection_frames()?;
+    if frames.end <= window.start || frames.start >= window.end {
         return None;
     }
-    let (left, right) = (x(from.max(window.start)), x(to.min(window.end)));
+    let (left, right) = (
+        x(frames.start.max(window.start)),
+        x(frames.end.min(window.end)),
+    );
     Some(
         div()
             .absolute()
@@ -1077,28 +1772,24 @@ fn sound_lane(
                 this.selection = None;
                 this.lanes.picked = None;
                 this.seek(frame);
-                if this.place.picker != Some(super::place::Picker::Sound) {
-                    this.toggle_picker(super::place::Picker::Sound, cx);
-                }
+                this.add_sound_here(cx);
                 cx.notify();
             }),
         )
 }
 
-/// The music bed under the whole cut and the lock's music cues, each until the next.
+/// The music bed under the whole cut and the lock's music cues, each until the next. A click
+/// picks the bed, or the place for one.
 fn music_lane(
     this: &EditScreen,
     window: &Range<u64>,
     x: &impl Fn(u64) -> f32,
     cx: &mut Context<EditScreen>,
 ) -> impl IntoElement {
-    let mut blocks: Vec<(u64, u64, String)> = Vec::new();
+    let picked = this.lanes.picked == Some(Pick::Music);
+    let mut blocks: Vec<(u64, u64, String, bool)> = Vec::new();
     if let Some(bed) = &this.folder.read(cx).project.cut.music {
-        blocks.push((
-            0,
-            this.map.frames,
-            format!("{}, ducked under voice", bed.file),
-        ));
+        blocks.push((0, this.map.frames, music::summary(bed), true));
     }
     let all = lock_moments(this, &(0..this.map.frames), cx, |i| match &i.applied {
         Applied::Music { file, .. } => Some(file.clone()),
@@ -1108,23 +1799,56 @@ fn music_lane(
         let end = all
             .get(index + 1)
             .map_or(this.map.frames, |(next, _)| *next);
-        blocks.push((*frame, end, format!("{file}, ducked under voice")));
+        blocks.push((*frame, end, format!("{file}, from the style rules"), false));
     }
-    div().size_full().children(
-        blocks
-            .into_iter()
-            .filter(|(from, to, _)| *to > window.start && *from < window.end)
-            .map(|(from, to, text)| {
-                block(
-                    x(from.max(window.start)),
-                    x(to.min(window.end)) - 0.002,
-                    RAISED,
-                    MUTED,
-                    text,
-                )
-                .line_height(px(28.))
+    let empty = blocks.is_empty();
+    let pick = |this: &mut EditScreen| this.pick(Pick::Music);
+    div()
+        .id("music-lane")
+        .size_full()
+        .cursor_pointer()
+        .when(empty, |lane| {
+            lane.child(
+                div()
+                    .px(px(8.))
+                    .text_size(TEXT_XS)
+                    .line_height(px(28.))
+                    .text_color(if picked { MUTED } else { FAINT })
+                    .child("No music, click to add a bed"),
+            )
+        })
+        .children(
+            blocks
+                .into_iter()
+                .filter(|(from, to, ..)| *to > window.start && *from < window.end)
+                .map(|(from, to, text, bed)| {
+                    block(
+                        x(from.max(window.start)),
+                        x(to.min(window.end)) - 0.002,
+                        if picked && bed { BLOCK_ON } else { RAISED },
+                        if picked && bed { TEXT } else { MUTED },
+                        text,
+                    )
+                    .line_height(px(28.))
+                    .when(picked && bed, |b| b.border_1().border_color(MUTED))
+                }),
+        )
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                pick(this);
+                cx.notify();
             }),
-    )
+        )
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                pick(this);
+                this.lanes.menu = Some(MenuOn::Pick);
+                cx.notify();
+            }),
+        )
 }
 
 /// A transition as export places it: a mark down the lanes on its edge, named by its kind.
@@ -1166,35 +1890,46 @@ fn transition_marks(
         .collect()
 }
 
-fn lane(icon_name: &str, name: &'static str, height: Pixels, track: impl IntoElement) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .child(
-            div()
-                .w(px(NAME_WIDTH))
-                .flex_none()
-                .pl(px(16.))
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .text_size(TEXT_SM)
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(MUTED)
-                .child(icon(icon_name, ICON, MUTED))
-                .child(name),
-        )
-        .child(
-            div()
-                .flex_1()
-                .relative()
-                .mr(px(16.))
-                .h(height)
-                .rounded(px(6.))
-                .bg(WELL)
-                .overflow_hidden()
-                .child(track),
-        )
+fn lane(icon_name: &str, name: &'static str, height: Height, track: impl IntoElement) -> Div {
+    let row = div().flex();
+    let row = match height {
+        Height::Fixed(height) => row.flex_none().h(px(height)),
+        Height::Grow {
+            natural,
+            least,
+            weight,
+        } => {
+            let mut row = row.h(px(natural)).min_h(px(least));
+            row.style().flex_grow = Some(weight);
+            row.style().flex_shrink = Some(1.);
+            row
+        }
+    };
+    row.child(
+        div()
+            .w(px(NAME_WIDTH))
+            .flex_none()
+            .pl(px(16.))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .text_size(TEXT_SM)
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(MUTED)
+            .child(icon(icon_name, ICON, MUTED))
+            .child(name),
+    )
+    .child(
+        div()
+            .flex_1()
+            .relative()
+            .mr(px(16.))
+            .h_full()
+            .rounded(px(6.))
+            .bg(WELL)
+            .overflow_hidden()
+            .child(track),
+    )
 }
 
 fn block(
@@ -1218,23 +1953,22 @@ fn block(
         .text_size(TEXT_XS)
         .font_weight(FontWeight::MEDIUM)
         .line_height(px(36.))
-        .overflow_hidden()
-        .whitespace_nowrap()
+        .truncate()
         .child(text)
 }
 
-fn layout_lane(this: &EditScreen, window: &Range<u64>, x: impl Fn(u64) -> f32) -> impl IntoElement {
-    let mut runs: Vec<(u64, u64, shot_core::Layout)> = Vec::new();
-    for span in &this.map.spans {
-        let frames = span.output_frames();
-        if frames.end <= window.start || frames.start >= window.end {
-            continue;
-        }
-        match runs.last_mut() {
-            Some(last) if last.2 == span.layout && last.1 == frames.start => last.1 = frames.end,
-            _ => runs.push((frames.start, frames.end, span.layout)),
-        }
-    }
+/// The layout of each stretch, a click picks it for 1 to 4, and the intro and outro.
+fn layout_lane(
+    this: &EditScreen,
+    runs: &[LayoutRun],
+    window: &Range<u64>,
+    x: &impl Fn(u64) -> f32,
+    cx: &mut Context<EditScreen>,
+) -> impl IntoElement {
+    let picked = match this.lanes.picked {
+        Some(Pick::Layout(at, range)) => Some((at, range)),
+        _ => None,
+    };
     let bookends = this.map.plan.bookends.iter().filter_map(|b| {
         let (from, to) = (b.output_frame, b.output_frame + b.frames);
         let name = match b.kind {
@@ -1245,15 +1979,42 @@ fn layout_lane(this: &EditScreen, window: &Range<u64>, x: impl Fn(u64) -> f32) -
     });
     div()
         .size_full()
-        .children(runs.into_iter().map(|(from, to, layout)| {
-            block(
-                x(from.max(window.start)),
-                x(to.min(window.end)) - 0.002,
-                BLOCK,
-                BODY,
-                layout_name(layout).to_owned(),
-            )
-        }))
+        .children(
+            runs.iter()
+                .enumerate()
+                .filter(|(_, run)| run.frames.end > window.start && run.frames.start < window.end)
+                .map(|(key, run)| {
+                    let (at, range) = (run.at, run.range);
+                    let on = picked == Some((at, range));
+                    block(
+                        x(run.frames.start.max(window.start)),
+                        x(run.frames.end.min(window.end)) - 0.002,
+                        if on { BLOCK_ON } else { BLOCK },
+                        if on { TEXT } else { BODY },
+                        layout_name(run.layout).to_owned(),
+                    )
+                    .id(("layout-run", key))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(BLOCK_ON))
+                    .when(on, |b| b.border_1().border_color(MUTED))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.pick(Pick::Layout(at, range));
+                            cx.notify();
+                        }),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                            this.pick(Pick::Layout(at, range));
+                            this.lanes.menu = Some(MenuOn::Pick);
+                            cx.notify();
+                        }),
+                    )
+                }),
+        )
         .children(bookends.map(|(from, to, name)| {
             block(
                 x(from.max(window.start)),
@@ -1296,9 +2057,10 @@ fn zoom_items(this: &EditScreen, cx: &Context<EditScreen>) -> Vec<Item> {
 
 /// Zooms or overlays on a lane, in two rows where they overlap. A person's can be picked,
 /// trimmed by their edges and moved by their middle; the lock's say where they come from.
+/// `(id, what)` names the elements and the kind in the menu of a lock's item.
 fn item_lane(
     this: &EditScreen,
-    id: &'static str,
+    (id, what): (&'static str, &'static str),
     items: Vec<Item>,
     window: &Range<u64>,
     x: &impl Fn(u64) -> f32,
@@ -1351,6 +2113,7 @@ fn item_lane(
                 .h(px(height))
                 .left(gpui::relative(left))
                 .w(gpui::relative((right - left).max(0.002)))
+                .min_w(px(6.))
                 .rounded(px(6.))
                 .px(px(8.))
                 .bg(fill)
@@ -1358,16 +2121,28 @@ fn item_lane(
                 .text_size(TEXT_XS)
                 .font_weight(FontWeight::MEDIUM)
                 .line_height(px(height))
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .when(picked, |b| b.border_1().border_color(color))
-                .child(item.text);
+                .truncate()
+                .when(picked, |b| b.border_1().border_color(color));
             match item.placed {
-                None => element
-                    .tooltip(|window, cx| Tooltip::new("From the style rules").build(window, cx)),
+                None => {
+                    let title = format!("{what}: {}", item.text);
+                    element
+                        .child(item.text)
+                        .tooltip(|window, cx| {
+                            Tooltip::new("From the style rules").build(window, cx)
+                        })
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |this, _: &MouseDownEvent, _, _| {
+                                this.lanes.menu = Some(MenuOn::Lock(title.clone()));
+                            }),
+                        )
+                }
                 Some(placed) => {
                     let grabbed = (item.at, placed, item.frames.clone());
+                    let at = item.at;
                     element
+                        .child(item.text)
                         .cursor_pointer()
                         .on_mouse_down(
                             MouseButton::Left,
@@ -1378,6 +2153,14 @@ fn item_lane(
                                     this.grab(grabbed.clone(), Grip::Body, event.position.x);
                                     cx.notify();
                                 }
+                            }),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                                this.pick(Pick::Placed(at, placed));
+                                this.lanes.menu = Some(MenuOn::Pick);
+                                cx.notify();
                             }),
                         )
                         .child(handle(grabbed.clone(), Grip::Start, picked, color, cx).left_0())
@@ -1412,6 +2195,8 @@ fn handle(
         )
 }
 
+/// Spoken words placed by time in as many rows as the lane has room for, and the cuts between
+/// them as red seams with their length in a strip under the words.
 fn words_lane(
     this: &EditScreen,
     window: &Range<u64>,
@@ -1420,9 +2205,9 @@ fn words_lane(
     cx: &mut Context<EditScreen>,
 ) -> impl IntoElement {
     let mut words = Vec::new();
-    // Where each of the two word rows is free again, in pixels. A word that fits neither row
-    // shows only through the waveform.
-    let mut rows = [f32::MIN; 2];
+    // Where each word row is free again, in pixels. A word that fits no row shows only
+    // through the waveform.
+    let mut rows = vec![f32::MIN; this.lanes.word_rows()];
     for block in &this.doc {
         for (index, word) in block.words.iter().enumerate() {
             let Some(frame) = word.output.filter(|f| window.contains(f)) else {
@@ -1448,13 +2233,13 @@ fn words_lane(
                         at.chapter * 1_000_000 + at.take * 100_000 + index,
                     ))
                     .absolute()
-                    .top(px(6. + 30. * row as f32))
+                    .top(px(4. + WORD_ROW * row as f32))
                     .left(gpui::relative(x(frame)))
-                    .h(px(22.))
+                    .h(px(WORD_HEIGHT))
                     .px(px(3.))
                     .rounded(px(3.))
                     .text_size(TEXT_SM)
-                    .line_height(px(22.))
+                    .line_height(px(WORD_HEIGHT))
                     .whitespace_nowrap()
                     .text_color(BODY)
                     .cursor_pointer()
@@ -1475,6 +2260,18 @@ fn words_lane(
                             }
                         }),
                     )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                            let inside = this
+                                .selection
+                                .is_some_and(|s| s.at == at && s.words().contains(&index));
+                            if !inside {
+                                this.select_word(at, index, false, cx);
+                            }
+                            this.lanes.menu = Some(MenuOn::Selection);
+                        }),
+                    )
                     .into_any_element(),
             );
         }
@@ -1484,12 +2281,28 @@ fn words_lane(
     } else {
         Vec::new()
     };
+    // Lengths that would run into the one before stay in the seam's tooltip.
+    let mut chip_free = f32::MIN;
+    let bounds = this.lanes.words.clone();
     div()
         .size_full()
+        .child(
+            canvas(move |b, _, _| bounds.set(b), |_, _, _, _| {})
+                .absolute()
+                .size_full(),
+        )
         .children(seams.into_iter().enumerate().map(|(key, seam)| {
             let picked = this.lanes.picked == Some(Pick::Cut(seam.at, seam.range));
             let (at, range, frame) = (seam.at, seam.range, seam.frame);
             let tip = seam.removed.clone();
+            let chip = seam.length.filter(|text| {
+                let left = seam.left * track + 6.;
+                let fits = left >= chip_free;
+                if fits {
+                    chip_free = left + text.chars().count() as f32 * CHIP_CHAR + 8.;
+                }
+                fits
+            });
             div()
                 .id(("seam", key))
                 .absolute()
@@ -1508,9 +2321,17 @@ fn words_lane(
                     MouseButton::Left,
                     cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                         cx.stop_propagation();
-                        this.selection = None;
-                        this.lanes.picked = Some(Pick::Cut(at, range));
+                        this.pick(Pick::Cut(at, range));
                         this.seek(frame);
+                        cx.notify();
+                    }),
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                        this.pick(Pick::Cut(at, range));
+                        this.seek(frame);
+                        this.lanes.menu = Some(MenuOn::Pick);
                         cx.notify();
                     }),
                 )
@@ -1519,19 +2340,20 @@ fn words_lane(
                         .my(px(4.))
                         .w(px(if picked { 4. } else { 2. }))
                         .rounded(px(1.))
-                        .bg(if seam.length.is_some() || picked {
+                        .bg(if seam.long || picked {
                             Hsla::from(CUT)
                         } else {
                             Hsla::from(FAINT)
                         }),
                 )
-                .children(seam.length.map(|text| {
+                .children(chip.map(|text| {
                     div()
                         .absolute()
-                        .bottom(px(4.))
+                        .bottom(px(2.))
                         .left(px(10.))
                         .font_family(MONO)
                         .text_size(px(11.))
+                        .line_height(px(CHIP_STRIP - 4.))
                         .text_color(CUT_TEXT)
                         .whitespace_nowrap()
                         .child(text)
@@ -1546,7 +2368,8 @@ struct Seam {
     range: TimeRange,
     frame: u64,
     left: f32,
-    /// The length chip of a long or a person's cut.
+    /// A long or a person's cut, red with its length.
+    long: bool,
     length: Option<String>,
     /// The removed words, for the tooltip.
     removed: Option<String>,
@@ -1573,6 +2396,7 @@ fn seams(this: &EditScreen, window: &Range<u64>, x: &impl Fn(u64) -> f32) -> Vec
                         range: run.range,
                         frame,
                         left: x(frame),
+                        long: !run.is_seam(),
                         length: (!run.is_seam()).then(|| seconds(run.removed)),
                         removed: (!removed.is_empty())
                             .then(|| format!("{}: {}", seconds(run.removed), removed.join(" "))),
@@ -1705,4 +2529,26 @@ fn playhead_line(this: &EditScreen, window: &Range<u64>) -> Option<Div> {
 /// Whether `template` belongs on the Highlight lane.
 pub fn is_highlight(template: &str) -> bool {
     template == highlight::TEMPLATE
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_zoom_slider_maps_spans_on_a_log_scale_both_ways() {
+        let total = 60 * 60 * u64::from(FPS);
+        assert_eq!(slider_at(total, total), 0.);
+        assert_eq!(slider_at(MIN_SPAN, total), 1.);
+        assert_eq!(slider_span(0., total), total);
+        assert_eq!(slider_span(1., total), MIN_SPAN);
+        // Halfway is the geometric middle, and every span comes back from its position.
+        let middle = slider_span(0.5, total);
+        assert!(middle.abs_diff(((total * MIN_SPAN) as f64).sqrt() as u64) <= 1);
+        for span in [MIN_SPAN, 900, 54_000, total] {
+            assert!(slider_span(slider_at(span, total), total).abs_diff(span) <= 1);
+        }
+        // A video shorter than the closest view has nothing to zoom.
+        assert_eq!(slider_at(60, 60), 0.);
+    }
 }

@@ -9,7 +9,8 @@
 
 use std::path::Path;
 
-use gpui::{Context, FontWeight, Hsla, div, prelude::*, px, rgb};
+use gpui::{App, Context, Entity, FontWeight, Hsla, Window, div, prelude::*, px, rgb};
+use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use shot_core::{Applied, Cut, DerivedKind, Overlay, ParamValue, TakeAt};
 use shot_render::overlay::{self, Params, broll, highlight, link_card};
 use shot_render::overlay_rules;
@@ -22,6 +23,8 @@ use crate::ui::{self, icon, label, mono};
 
 /// The b-roll lane color from design.md. Not a theme token yet.
 const BROLL: u32 = 0xB69CFF;
+/// The Overlays pane's width in the Timeline's top row.
+pub const PANE_WIDTH: f32 = 400.;
 
 /// Where an overlay sits: its block in the cut, its index there, and its output frames.
 struct Placed<'a> {
@@ -107,7 +110,7 @@ pub fn lane_colors(highlight: bool) -> (Hsla, Hsla) {
 }
 
 /// One line about an overlay: what it shows.
-fn summary(overlay: &Overlay) -> String {
+pub fn summary(overlay: &Overlay) -> String {
     let p = Params(overlay);
     match overlay.template.as_str() {
         link_card::TEMPLATE => link_card::LinkCard::of(overlay)
@@ -185,6 +188,41 @@ impl EditScreen {
         });
     }
 
+    /// Shows `file` in the b-roll slot `index` of the block at `at`.
+    fn set_broll_file(&mut self, at: TakeAt, index: usize, file: String, cx: &mut Context<Self>) {
+        self.change_overlay(
+            at,
+            index,
+            |overlays, i| {
+                let id = shot_core::Id::new("file").expect("an id");
+                overlays[i].params.retain(|(n, _)| *n != id);
+                overlays[i].params.insert(0, (id, ParamValue::Text(file)));
+            },
+            cx,
+        );
+    }
+
+    /// Switches the boolean parameter `name`, now `on`, of the overlay `index` at `at`.
+    fn toggle_param(
+        &mut self,
+        at: TakeAt,
+        index: usize,
+        name: shot_core::Id,
+        on: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.change_overlay(
+            at,
+            index,
+            |overlays, i| {
+                if let Some((_, v)) = overlays[i].params.iter_mut().find(|(n, _)| *n == name) {
+                    *v = ParamValue::Bool(!on);
+                }
+            },
+            cx,
+        );
+    }
+
     /// Runs the overlay rules off the UI thread, since Vision reads the screen, then writes the
     /// cut they return unless it changed meanwhile.
     fn find_overlays(&mut self, cx: &mut Context<Self>) {
@@ -233,6 +271,78 @@ impl EditScreen {
         })
         .detach();
     }
+}
+
+/// What the Overlays pane offers for a person's overlay `index` of the block at `at`, as menu
+/// items: the file of a b-roll slot and the switches of its parameters.
+pub fn menu_items(
+    menu: PopupMenu,
+    screen: &Entity<EditScreen>,
+    at: TakeAt,
+    index: usize,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
+    let Some((overlay, dir)) = overlay_at(screen.read(cx), at, index, cx) else {
+        return menu;
+    };
+    let mut menu = menu;
+    if overlay.template.as_str() == broll::TEMPLATE {
+        let files = candidates(&dir);
+        let current = Params(&overlay).text("file").map(str::to_owned);
+        if !files.is_empty() {
+            let screen = screen.clone();
+            menu = menu.submenu("File", window, cx, move |menu, _, _| {
+                files.iter().fold(menu, |menu, file| {
+                    let (screen, file) = (screen.clone(), file.clone());
+                    menu.item(
+                        PopupMenuItem::new(file.clone())
+                            .checked(current.as_deref() == Some(file.as_str()))
+                            .on_click(move |_, _, cx| {
+                                let file = file.clone();
+                                screen
+                                    .update(cx, |this, cx| this.set_broll_file(at, index, file, cx))
+                            }),
+                    )
+                })
+            });
+        }
+    }
+    for (name, value) in &overlay.params {
+        let ParamValue::Bool(on) = *value else {
+            continue;
+        };
+        let (screen, name) = (screen.clone(), name.clone());
+        menu = menu.item(
+            PopupMenuItem::new(name.as_str().replace('-', " "))
+                .checked(on)
+                .on_click(move |_, _, cx| {
+                    let name = name.clone();
+                    screen.update(cx, |this, cx| this.toggle_param(at, index, name, on, cx))
+                }),
+        );
+    }
+    menu
+}
+
+fn overlay_at(
+    this: &EditScreen,
+    at: TakeAt,
+    index: usize,
+    cx: &App,
+) -> Option<(Overlay, std::path::PathBuf)> {
+    let folder = this.folder.read(cx);
+    let overlay = folder
+        .project
+        .cut
+        .chapters
+        .get(at.chapter)?
+        .takes
+        .get(at.take)?
+        .overlays
+        .get(index)?
+        .clone();
+    Some((overlay, folder.dir.clone()))
 }
 
 /// The Overlays pane: rules, the overlays around the playhead, and the derived cuts.
@@ -292,7 +402,7 @@ pub fn pane(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement
         .map(|(key, (p, made, checked))| overlay_row(&p, key, &files, &made, checked, cx))
         .collect();
     ui::pane()
-        .w(px(400.))
+        .w(px(PANE_WIDTH))
         .flex_none()
         .flex()
         .flex_col()
@@ -401,19 +511,7 @@ fn overlay_row(
                 .cursor_pointer()
                 .hover(|s| s.bg(FLOAT))
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    let name = name.clone();
-                    this.change_overlay(
-                        at,
-                        index,
-                        |overlays, i| {
-                            if let Some((_, v)) =
-                                overlays[i].params.iter_mut().find(|(n, _)| *n == name)
-                            {
-                                *v = ParamValue::Bool(!on);
-                            }
-                        },
-                        cx,
-                    );
+                    this.toggle_param(at, index, name.clone(), on, cx)
                 }));
         }
         params = params.child(line);
@@ -467,19 +565,9 @@ fn overlay_row(
                             "Pick"
                         })
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            let Some(file) = next_file.clone() else {
-                                return;
-                            };
-                            this.change_overlay(
-                                at,
-                                index,
-                                |overlays, i| {
-                                    let id = shot_core::Id::new("file").expect("an id");
-                                    overlays[i].params.retain(|(n, _)| *n != id);
-                                    overlays[i].params.insert(0, (id, ParamValue::Text(file)));
-                                },
-                                cx,
-                            );
+                            if let Some(file) = next_file.clone() {
+                                this.set_broll_file(at, index, file, cx);
+                            }
                         }))
                 }))
                 .when(yours, |row| {
