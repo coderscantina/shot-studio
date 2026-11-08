@@ -130,20 +130,23 @@ pub fn read_markers(path: &Path) -> std::io::Result<Vec<Marker>> {
     };
     let mut markers = Vec::new();
     for line in std::io::BufReader::new(file).lines() {
-        let line = line?;
-        if !line.contains(r#""kind":"marker""#) {
-            continue;
-        }
-        if let Ok(m) = serde_json::from_str::<MarkerLine>(&line) {
-            markers.push(Marker {
-                t: Micros(m.t),
-                x: m.x,
-                y: m.y,
-                mark: m.mark,
-            });
-        }
+        markers.extend(marker(&line?));
     }
     Ok(markers)
+}
+
+/// The marker of one event log line, `None` for any other line or one that does not parse.
+pub fn marker(line: &str) -> Option<Marker> {
+    if !line.contains(r#""kind":"marker""#) {
+        return None;
+    }
+    let m = serde_json::from_str::<MarkerLine>(line).ok()?;
+    Some(Marker {
+        t: Micros(m.t),
+        x: m.x,
+        y: m.y,
+        mark: m.mark,
+    })
 }
 
 /// A key press the event log keeps out of `key` events, because it is a record hotkey and

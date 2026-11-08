@@ -1,3 +1,5 @@
+use std::io::Write;
+
 use super::*;
 
 /// Words of 0.3 s back to back from 1 s, `|` a 1.5 s gap.
@@ -130,21 +132,84 @@ fn the_event_log_and_the_prompter_give_clicks_typing_markers_beats_chapters_and_
 }
 
 #[test]
-fn a_crash_keeps_the_logged_words_and_analysis_writes_the_same_bytes_twice() {
+fn the_stream_writes_what_the_quick_pass_writes_for_the_same_facts_as_they_arrive() {
+    let dir = tempfile::tempdir().unwrap();
+    let video = dir.path();
+    let take = Id::new("t01").unwrap();
+    let mut stream = Stream::create(video, &take).unwrap();
+    assert!(read(video, &take).unwrap().unwrap().is_empty());
+    let media = video.join("media/t01");
+    fs::create_dir_all(&media).unwrap();
+    let events = media.join("events.jsonl");
+    let mut log = fs::File::create(&events).unwrap();
+    let appended = [
+        "{\"t\":500000,\"kind\":\"move\",\"x\":5,\"y\":6}\n",
+        "{\"t\":2000000,\"kind\":\"down\",\"x\":1,\"y\":2,\"button\":\"left\"}\n",
+        "{\"t\":3000000,\"kind\":\"key\",\"key\":\"a\"}\n{\"t\":3200000,\"kind\":\"key\",\"key\":\"b\"}\n",
+        "{\"t\":3400000,\"kind\":\"key\",\"key\":\"c\"}\n{\"t\":5000000,\"kind\":\"marker\",\"x\":1,\"y\":1,\"mark\":\"zoom\"}\n",
+    ];
+    // Capture writes the marker line in two parts; the first part is no line yet.
+    let (head, tail) = appended[3].split_at(appended[3].len() - 20);
+    log.write_all(appended[0].as_bytes()).unwrap();
+    assert_eq!(stream.poll().unwrap(), 1);
+    assert!(!stream.update().unwrap(), "a cursor move is no element");
+    for part in [appended[1], appended[2], head] {
+        log.write_all(part.as_bytes()).unwrap();
+    }
+    stream.poll().unwrap();
+    assert!(stream.update().unwrap());
+    assert_eq!(stream.live().of_kind(ElementKind::Typing).count(), 1);
+    assert_eq!(stream.live().of_kind(ElementKind::Marker).count(), 0);
+    log.write_all(tail.as_bytes()).unwrap();
+    assert_eq!(stream.poll().unwrap(), 1);
+    assert!(stream.update().unwrap());
+
+    let t = transcript("See github dot com slash zed | now.");
+    let (said, rest) = t.words().split_at(3);
+    for word in said {
+        stream.word(word.clone());
+    }
+    stream.tentative(rest.to_vec());
+    stream.update().unwrap();
+    let url = |e: &Elements| -> Vec<String> {
+        e.of_kind(ElementKind::Url)
+            .filter_map(|u| u.text(Attr::Url).map(str::to_owned))
+            .collect()
+    };
+    assert_eq!(url(stream.live()), ["https://github.com/zed"]);
+    assert!(
+        url(&read(video, &take).unwrap().unwrap()).is_empty(),
+        "tentative words stay out of the file"
+    );
+    for word in rest {
+        stream.word(word.clone());
+    }
+    stream.tentative(Vec::new());
+    stream.update().unwrap();
+    assert_eq!(stream.markers().len(), 1);
+    // The cursor move is more than 3 s before the newest line.
+    assert_eq!(stream.recent_events().lines().count(), 5);
+
+    use ElementKind::{Click, Marker, Typing, Url, Word};
+    let kinds = [Word, Url, Click, Typing, Marker];
+    let written = read(video, &take).unwrap().unwrap();
+    assert_eq!(&written, stream.live());
+    let quick = analyze(video, &t, &Speech::default(), Depth::Quick).unwrap();
+    assert_eq!(lines(&written, &kinds), lines(&quick, &kinds));
+}
+
+#[test]
+fn a_crash_keeps_the_streamed_words_and_analysis_writes_the_same_bytes_twice() {
     let dir = tempfile::tempdir().unwrap();
     let video = dir.path();
     let take = Id::new("t01").unwrap();
     let t = transcript("We ship it. | On Fridays.");
-    let log = Log::create(video, &take).unwrap();
+    let mut stream = Stream::create(video, &take).unwrap();
     for word in t.words() {
-        log.word(word).unwrap();
+        stream.word(word.clone());
     }
-    drop(log);
-    let mut file = fs::OpenOptions::new()
-        .append(true)
-        .open(path(video, &take))
-        .unwrap();
-    file.write_all(br#"{"kind":"word","t":9000"#).unwrap();
+    stream.update().unwrap();
+    drop(stream);
     let logged = read(video, &take).unwrap().unwrap();
     assert_eq!(logged.of_kind(ElementKind::Word).count(), 5);
 

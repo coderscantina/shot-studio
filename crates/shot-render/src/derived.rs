@@ -417,7 +417,7 @@ fn key_input(chunk: &DerivedChunk, frames: &Range<u64>, cues: &[Cue]) -> Vec<u8>
 }
 
 /// The burned-in caption of `cue` on a derived canvas.
-fn caption_shape(cue: &Cue, word: Option<usize>, pop: Micros, canvas: Canvas) -> Shape {
+pub(crate) fn caption_shape(cue: &Cue, word: Option<usize>, pop: Micros, canvas: Canvas) -> Shape {
     let tall = canvas.height > canvas.width;
     let size = canvas.width as f32 * if tall { 0.062 } else { 0.05 };
     Shape::Caption {

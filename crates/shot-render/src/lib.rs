@@ -24,7 +24,8 @@
 //!   font files text draws in.
 //! - [`join`]: the intro and outro around a migrated video's segments and the transitions at
 //!   its chapter edges, placed in the plan; [`bookend`] draws a generated title, and [`paint`]
-//!   draws any output frame for export and preview alike.
+//!   draws any output frame for export and preview alike. [`monitor`] draws the take being
+//!   recorded the same way, from capture's live frames.
 
 pub mod assets;
 pub mod autozoom;
@@ -61,6 +62,8 @@ pub mod graph;
 mod join_reel;
 #[cfg(target_os = "macos")]
 mod material_pass;
+#[cfg(target_os = "macos")]
+pub mod monitor;
 #[cfg(target_os = "macos")]
 pub mod overlay_rules;
 #[cfg(target_os = "macos")]

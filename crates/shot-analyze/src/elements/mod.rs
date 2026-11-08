@@ -1,7 +1,8 @@
 //! Elements: the facts of a take, written to `elements/<take>.jsonl` in the video folder
 //! ([0019]). Builds read the file and never analyse; this module is the analysis.
 //!
-//! - While recording, [`Log`] appends each word the transcriber settles, so a crash keeps them.
+//! - While recording, [`Stream`] writes the words the transcriber settles, clicks, typing,
+//!   markers and URLs said as they happen, so a crash keeps them and live rules see them.
 //! - At stop, [`analyze`] with [`Depth::Quick`] maps what milestones 03 to 07 detect to element
 //!   kinds: words and sentences, silences and pauses, fillers, retakes and misspoken words,
 //!   emphasis, URLs said, idle screen, clicks, typing, record markers, and the script's beats,
@@ -17,11 +18,11 @@
 pub mod claude;
 mod mentions;
 mod screen;
+mod stream;
 
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 use shot_capture::events::{Mark, Marker, read_markers};
 use shot_core::{
@@ -31,6 +32,7 @@ use shot_core::{
 
 pub use mentions::{SaidUrl, urls};
 pub use screen::{ReadOut, read_outs};
+pub use stream::Stream;
 
 use crate::autocut::rules::{self, Gaps, Voice};
 use crate::autocut::{TakeFacts, zoom};
@@ -105,35 +107,6 @@ pub fn write(video: &Path, elements: &Elements) -> Result<PathBuf, Error> {
 pub fn add(elements: &mut Elements, extra: impl IntoIterator<Item = Element>) {
     for element in extra {
         let _ = elements.push(element);
-    }
-}
-
-/// A take's elements file while it records: each settled word appended as its own line.
-pub struct Log {
-    take: Id,
-    file: Mutex<fs::File>,
-}
-
-impl Log {
-    /// Starts an empty file for `take`, replacing one left by an earlier recording.
-    pub fn create(video: &Path, take: &Id) -> Result<Self, Error> {
-        let path = path(video, take);
-        fs::create_dir_all(path.parent().expect("elements/ is a parent"))?;
-        Ok(Self {
-            take: take.clone(),
-            file: Mutex::new(fs::File::create(path)?),
-        })
-    }
-
-    /// Appends `word`. Words arrive in order, as the transcriber settles them.
-    pub fn word(&self, word: &Word) -> io::Result<()> {
-        let mut line = Elements::new(self.take.clone());
-        line.push(word_element(word))
-            .expect("one element has no duplicate");
-        self.file
-            .lock()
-            .expect("element log")
-            .write_all(line.to_jsonl().as_bytes())
     }
 }
 
@@ -307,36 +280,8 @@ fn local(facts: &Facts) -> Elements {
         );
     }
 
-    add(
-        &mut out,
-        urls(words).into_iter().map(|said| {
-            Element::over(ElementKind::Url, said.words, BY_TRANSCRIPT)
-                .with_text(Attr::Url, said.url)
-                .with_text(Attr::Host, said.host)
-        }),
-    );
-
-    add(
-        &mut out,
-        facts.input.clicks.iter().map(|&(t, x, y)| {
-            Element::at(ElementKind::Click, t, BY_EVENTS)
-                .with_integer(Attr::X, x.into())
-                .with_integer(Attr::Y, y.into())
-        }),
-    );
-    add(&mut out, typing(&facts.input.keys));
-    add(
-        &mut out,
-        facts.markers.iter().filter_map(|m| {
-            let label = match m.mark {
-                Mark::Marker => "M",
-                Mark::Zoom => "Z",
-                Mark::BRoll => "B",
-                Mark::Again { .. } | Mark::Next { .. } | Mark::Layout { .. } => return None,
-            };
-            Some(Element::at(ElementKind::Marker, m.t, BY_EVENTS).with_text(Attr::Label, label))
-        }),
-    );
+    add(&mut out, url_elements(words));
+    add(&mut out, input_elements(facts.input, facts.markers));
     if let Some(script) = facts.script {
         add(
             &mut out,
@@ -344,6 +289,34 @@ fn local(facts: &Facts) -> Elements {
         );
     }
     out
+}
+
+/// `url` elements for the URLs said in `words`.
+fn url_elements(words: &[Word]) -> impl Iterator<Item = Element> {
+    urls(words).into_iter().map(|said| {
+        Element::over(ElementKind::Url, said.words, BY_TRANSCRIPT)
+            .with_text(Attr::Url, said.url)
+            .with_text(Attr::Host, said.host)
+    })
+}
+
+/// `click`, `typing` and `marker` elements of the event log.
+fn input_elements(input: &Input, markers: &[Marker]) -> Vec<Element> {
+    let clicks = input.clicks.iter().map(|&(t, x, y)| {
+        Element::at(ElementKind::Click, t, BY_EVENTS)
+            .with_integer(Attr::X, x.into())
+            .with_integer(Attr::Y, y.into())
+    });
+    let markers = markers.iter().filter_map(|m| {
+        let label = match m.mark {
+            Mark::Marker => "M",
+            Mark::Zoom => "Z",
+            Mark::BRoll => "B",
+            Mark::Again { .. } | Mark::Next { .. } | Mark::Layout { .. } => return None,
+        };
+        Some(Element::at(ElementKind::Marker, m.t, BY_EVENTS).with_text(Attr::Label, label))
+    });
+    clicks.chain(typing(&input.keys)).chain(markers).collect()
 }
 
 fn word_element(word: &Word) -> Element {

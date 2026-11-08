@@ -47,6 +47,30 @@ struct Styled {
     repo: Option<(Disk, String)>,
 }
 
+/// `cut` with `take` appended as a chapter of its own that keeps `range`, its layout and zoom
+/// markers written as nodes. On a migrated video a marker zoom is a person's zoom.
+pub fn appended(
+    cut: &Cut,
+    take: &Id,
+    range: TimeRange,
+    markers: &[shot_capture::events::Marker],
+    format: &Format,
+    migrated: bool,
+) -> Cut {
+    let mut cut = cut.append_take(take.clone(), format!("Take {take}"), range);
+    if let Some(edit) = cut.chapters.last_mut().and_then(|c| c.takes.last_mut()) {
+        shot_prompter::apply_markers(edit, markers, format);
+        if migrated {
+            for zoom in &mut edit.zooms {
+                if zoom.by == Some(ZoomBy::Marker) {
+                    zoom.by = None;
+                }
+            }
+        }
+    }
+    cut
+}
+
 fn read(dir: &Path, name: &str) -> Result<Option<String>, String> {
     let path = dir.join(name);
     match fs::read_to_string(&path) {
@@ -262,22 +286,16 @@ impl VideoFolder {
         if self.style.is_none() && self.project.cut.chapters.is_empty() {
             self.start_migrated()?;
         }
-        let mut cut = self
-            .project
-            .cut
-            .append_take(take.clone(), format!("Take {take}"), range);
         let markers = shot_capture::events::read_markers(&self.media(&take, "events.jsonl"))
             .map_err(|e| format!("{take}/events.jsonl: {e}"))?;
-        if let Some(edit) = cut.chapters.last_mut().and_then(|c| c.takes.last_mut()) {
-            shot_prompter::apply_markers(edit, &markers, &self.project.format);
-            if self.style.is_some() {
-                for zoom in &mut edit.zooms {
-                    if zoom.by == Some(ZoomBy::Marker) {
-                        zoom.by = None;
-                    }
-                }
-            }
-        }
+        let cut = appended(
+            &self.project.cut,
+            &take,
+            range,
+            &markers,
+            &self.project.format,
+            self.style.is_some(),
+        );
         self.write_cut(cut)
     }
 

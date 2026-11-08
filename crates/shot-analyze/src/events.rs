@@ -61,18 +61,28 @@ pub(crate) fn input(events: &Path) -> io::Result<Input> {
         Err(e) => return Err(e),
     };
     let mut input = Input::default();
-    for line in text
-        .lines()
-        .filter(|line| line.contains("\"down\"") || line.contains("\"key\""))
-        .filter_map(|line| serde_json::from_str::<InputLine>(line).ok())
-    {
+    for line in text.lines() {
+        input.read(line);
+    }
+    Ok(input)
+}
+
+impl Input {
+    /// Adds the click or key press of one event log line. Other lines, and one that does not
+    /// parse, add nothing.
+    pub(crate) fn read(&mut self, line: &str) {
+        if !line.contains("\"down\"") && !line.contains("\"key\"") {
+            return;
+        }
+        let Ok(line) = serde_json::from_str::<InputLine>(line) else {
+            return;
+        };
         match line.kind {
-            "down" => input.clicks.push((Micros(line.t), line.x, line.y)),
-            "key" => input.keys.push(Micros(line.t)),
+            "down" => self.clicks.push((Micros(line.t), line.x, line.y)),
+            "key" => self.keys.push(Micros(line.t)),
             _ => {}
         }
     }
-    Ok(input)
 }
 
 #[cfg(test)]

@@ -3,12 +3,13 @@
 //!
 //! A recorder thread owns the capture session from start to stop, so the session never moves
 //! between threads. Starting loads the speech model first (downloading it on first use), then
-//! starts capture with a mic tap feeding the transcriber. Stopping finishes the take, flushes the
-//! transcript to the cache, writes the take's elements and appends the take to `cut.kdl`. The
-//! Vision and Claude passes of the elements run after the rough cut, in `shot analyze`.
+//! starts capture with a mic tap feeding the transcriber, and the live take ([`crate::live`]),
+//! which streams the take's elements and paints the styled monitor. A switch shows the raw feed
+//! instead. Stopping finishes the take, flushes the transcript to the cache, writes the take's
+//! elements and appends the take to `cut.kdl`. The Vision and Claude passes of the elements run
+//! after the rough cut, in `shot analyze`.
 
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -27,6 +28,7 @@ use shot_capture::{Devices, Preview, PreviewFrame, Session, SessionConfig, Sourc
 use shot_core::{Id, Micros, Transcript};
 
 use crate::folder::VideoFolder;
+use crate::live::{Feeds, Heard, LiveTake, Setup, View};
 use crate::prompter::{Live, PrompterPane};
 use crate::theme::*;
 use crate::ui::{self, alert, hint, icon, label, mono};
@@ -64,7 +66,7 @@ struct Choice {
 }
 
 enum Command {
-    Start(PathBuf, Choice, Arc<Live>, Vec<Hotkey>),
+    Start(Box<Setup>, Choice, Arc<Live>, Vec<Hotkey>),
     Stop,
 }
 
@@ -76,6 +78,10 @@ struct Shared {
     level: AtomicU32,
     /// The running session's live frames, while there is one.
     preview: Mutex<Option<Preview>>,
+    /// The styled monitor of the running take, while there is one.
+    monitor: Mutex<Option<Arc<View>>>,
+    /// Whether the monitor shows the style or the raw feed.
+    styled: Arc<AtomicBool>,
 }
 
 impl Shared {
@@ -128,6 +134,8 @@ impl RecordScreen {
             words: Mutex::new(Vec::new()),
             level: AtomicU32::new(f32::NEG_INFINITY.to_bits()),
             preview: Mutex::new(None),
+            monitor: Mutex::new(None),
+            styled: Arc::new(AtomicBool::new(true)),
         });
         let (commands, rx) = mpsc::channel();
         std::thread::Builder::new()
@@ -165,16 +173,24 @@ impl RecordScreen {
             Phase::Idle | Phase::Failed(_) | Phase::Finished { .. } => {
                 self.shared.words.lock().expect("words").clear();
                 self.error = None;
-                let dir = self.folder.read(cx).dir.clone();
+                let folder = self.folder.read(cx);
+                let setup = Setup {
+                    dir: folder.dir.clone(),
+                    project: folder.project.clone(),
+                    migrated: folder.is_migrated(),
+                };
                 self.shared.set(Phase::Loading);
                 let (live, hotkeys) = self.prompter.update(cx, |prompter, cx| {
                     prompter.reset(cx);
                     prompter.arm();
                     (prompter.live(), prompter.log_filter())
                 });
-                let _ = self
-                    .commands
-                    .send(Command::Start(dir, self.choice.clone(), live, hotkeys));
+                let _ = self.commands.send(Command::Start(
+                    Box::new(setup),
+                    self.choice.clone(),
+                    live,
+                    hotkeys,
+                ));
                 self.open = None;
                 self.poll(cx);
             }
@@ -265,10 +281,10 @@ fn free_space(dir: &std::path::Path) -> Option<u64> {
 
 fn recorder(commands: Receiver<Command>, shared: &Shared) {
     while let Ok(command) = commands.recv() {
-        let Command::Start(dir, choice, live, hotkeys) = command else {
+        let Command::Start(setup, choice, live, hotkeys) = command else {
             continue;
         };
-        match record(&dir, choice, &live, hotkeys, &commands, shared) {
+        match record(*setup, choice, &live, hotkeys, &commands, shared) {
             Ok((take, duration)) => shared.set(Phase::Finished { take, duration }),
             Err(error) => shared.set(Phase::Failed(error)),
         }
@@ -277,16 +293,20 @@ fn recorder(commands: Receiver<Command>, shared: &Shared) {
 
 /// Records one take, from loading the model to the cached transcript.
 fn record(
-    dir: &std::path::Path,
+    setup: Setup,
     choice: Choice,
     live: &Arc<Live>,
     hotkeys: Vec<Hotkey>,
     commands: &Receiver<Command>,
     shared: &Shared,
 ) -> Result<(Id, Micros), String> {
+    let dir = setup.dir.clone();
+    let dir = dir.as_path();
     // The transcriber needs the take id before capture creates the folder; a mismatch is fixed
     // after stop.
     let expected = next_take_id(dir);
+    let mut live_take = LiveTake::start(setup, expected.clone());
+    let (heard, heard_rx) = mpsc::channel();
     let transcriber = match &choice.mic {
         Some(_) => {
             let model_dir = models::models_dir();
@@ -304,17 +324,24 @@ fn record(
             let follow = fetch(shot_prompter::follow_model())?;
             shared.set(Phase::Loading);
             let sink = WordSink::default();
-            let log = elements::Log::create(dir, &expected).map_err(|e| e.to_string())?;
             let on_word = {
-                let sink = sink.clone();
+                let (sink, heard) = (sink.clone(), heard.clone());
                 move |word: &shot_core::Word| {
                     sink.push(word.text.clone());
-                    // Only a crash keeps the log; a failed line is written again at stop.
-                    let _ = log.word(word);
+                    let _ = heard.send(Heard::Word(word.clone()));
                 }
             };
-            let transcriber = Transcriber::new(&whisper, &vad, expected.clone(), on_word)
-                .map_err(|e| e.to_string())?;
+            let on_tentative = move |words: &[shot_core::Word]| {
+                let _ = heard.send(Heard::Tentative(words.to_vec()));
+            };
+            let transcriber = Transcriber::with_tentative(
+                &whisper,
+                &vad,
+                expected.clone(),
+                on_word,
+                on_tentative,
+            )
+            .map_err(|e| e.to_string())?;
             let listener = shot_prompter::Listener::new(&follow, {
                 let live = live.clone();
                 move |words| live.lock().hear(words)
@@ -355,9 +382,25 @@ fn record(
         }));
         (transcriber, sink)
     });
+    let screen_size = shot_capture::list_devices()
+        .displays
+        .iter()
+        .find(|d| choice.display.map_or(d.main, |id| d.id == id))
+        .map_or((16, 9), |d| (d.width as u32, d.height as u32));
     let session = Session::start(config).map_err(|e| e.to_string())?;
+    let origin = Instant::now() - Duration::from_micros(session.elapsed().0);
     live.set_marks(Some(session.marks()));
-    *shared.preview.lock().expect("preview") = Some(session.preview());
+    let preview = session.preview();
+    *shared.preview.lock().expect("preview") = Some(preview.clone());
+    live_take.record(Feeds {
+        take: session.id().clone(),
+        origin,
+        preview,
+        screen_size,
+        heard: heard_rx,
+        styled: shared.styled.clone(),
+    });
+    *shared.monitor.lock().expect("monitor") = Some(live_take.view());
     shared.set(Phase::Recording {
         take: session.id().clone(),
         started: Instant::now(),
@@ -380,6 +423,8 @@ fn record(
     shared.set(Phase::Finishing);
     live.set_marks(None);
     shared.preview.lock().expect("preview").take();
+    shared.monitor.lock().expect("monitor").take();
+    live_take.stop();
     let take = session.stop().map_err(|e| e.to_string())?;
     let mut heard = Transcript::new(take.id.clone());
     if let Some((transcriber, sink)) = transcriber {
@@ -412,9 +457,6 @@ fn record(
     };
     let found = elements::analyze(dir, &heard, &speech, Depth::Quick).map_err(|e| e.to_string())?;
     elements::write(dir, &found).map_err(|e| e.to_string())?;
-    if take.id != expected {
-        let _ = std::fs::remove_file(elements::path(dir, &expected));
-    }
     Ok((take.id, take.duration))
 }
 
@@ -776,6 +818,10 @@ impl RecordScreen {
         let live = self.shared.preview.lock().expect("preview").clone();
         let screen = live.as_ref().and_then(Preview::screen);
         let camera = live.as_ref().and_then(Preview::camera);
+        let styled = self.shared.styled.load(Ordering::Relaxed);
+        let monitor = self.shared.monitor.lock().expect("monitor").clone();
+        let monitor_error = monitor.as_ref().and_then(|m| m.error()).filter(|_| styled);
+        let monitored = monitor.and_then(|m| m.frame()).filter(|_| styled);
         ui::pane()
             .flex_1()
             .min_w_0()
@@ -798,9 +844,28 @@ impl RecordScreen {
                         div()
                             .text_color(MUTED)
                             .child(self.folder.read(cx).project.video.title.clone()),
+                    )
+                    .child(
+                        ui::segmented(
+                            "monitor",
+                            WELL,
+                            [("Styled", true), ("Raw", false)]
+                                .into_iter()
+                                .map(|(name, on)| {
+                                    let shared = self.shared.clone();
+                                    ui::Segment::new(name, styled == on, move |_, window, _| {
+                                        shared.styled.store(on, Ordering::Relaxed);
+                                        window.refresh();
+                                    })
+                                })
+                                .collect(),
+                        )
+                        .ml_auto()
+                        .w(px(180.)),
                     ),
             )
             .children(self.error.clone().map(alert))
+            .children(monitor_error.map(|e| alert(format!("The monitor shows the raw feed: {e}"))))
             .child(
                 div()
                     .flex_1()
@@ -812,8 +877,10 @@ impl RecordScreen {
                     .items_center()
                     .justify_center()
                     .gap(px(14.))
-                    .when_some(screen.clone(), |stage, screen| {
-                        stage.child(live_screen(screen, camera))
+                    .map(|stage| match (monitored, screen.clone()) {
+                        (Some(frame), _) => stage.child(styled_screen(frame)),
+                        (None, Some(screen)) => stage.child(live_screen(screen, camera)),
+                        (None, None) => stage,
                     })
                     .when(recording && screen.is_none(), |stage| {
                         stage.child(
@@ -955,6 +1022,19 @@ impl RecordScreen {
                     ),
             )
     }
+}
+
+/// The styled monitor, 80% of the stage wide: the layout places the camera.
+fn styled_screen(frame: objc2_core_foundation::CFRetained<objc2_core_video::CVPixelBuffer>) -> Div {
+    let aspect = CVPixelBufferGetWidth(&frame) as f32 / CVPixelBufferGetHeight(&frame) as f32;
+    div()
+        .w(relative(0.8))
+        .max_h(relative(0.92))
+        .aspect_ratio(aspect)
+        .rounded(px(8.))
+        .overflow_hidden()
+        .shadow_lg()
+        .child(surface(frame).size_full().object_fit(ObjectFit::Contain))
 }
 
 /// The screen, 80% of the stage wide, with the camera as a rounded square in its corner.
