@@ -208,7 +208,7 @@ pub fn init(cx: &mut App) {
         colors.button_danger_foreground = ON_ACCENT.into();
         colors.danger = RECORD.into();
         colors.danger_foreground = ON_ACCENT.into();
-        colors.accent = FLOAT.into();
+        colors.accent = FLOAT_ON.into();
         colors.accent_foreground = STRONG.into();
         colors.ring = ACCENT.into();
         colors.progress_bar = ACCENT.into();
