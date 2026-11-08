@@ -1,6 +1,6 @@
 //! The Timeline workspace: preview, change list and overlays on top, the whole-video overview,
-//! then one lane per kind around the playhead: Layout, Zoom, Overlays, Highlight, Words, Voice,
-//! Sound and Music, with the lock's transitions as marks on their chapter edges.
+//! then one lane per kind around the playhead: Layout (with the intro and outro), Zoom, Overlays,
+//! Highlight, Words, Voice, Sound and Music, with export's transitions as marks on their edges.
 
 use std::sync::Arc;
 
@@ -9,6 +9,7 @@ use gpui::{
     div, fill, point, prelude::*, px, size,
 };
 use shot_core::{Applied, RemovedBy, WordState};
+use shot_render::join::BookendKind;
 use shot_render::plan::frame_time;
 
 use super::EditScreen;
@@ -207,10 +208,14 @@ fn lanes(
         .take_while(|f| *f < window.end)
         .map(|f| (x(f), timecode(f)))
         .collect();
-    let transitions = lock_moments(this, &window, cx, |i| match &i.applied {
-        Applied::Transition { kind, .. } => Some(*kind),
-        _ => None,
-    });
+    let transitions: Vec<(u64, shot_core::TransitionKind)> = this
+        .map
+        .plan
+        .transitions
+        .iter()
+        .filter(|t| window.contains(&t.edge))
+        .map(|t| (t.edge, t.kind))
+        .collect();
     // A timecode gives way to a transition's name where the two would overlap.
     let ruler: Vec<(f32, String)> = ruler
         .into_iter()
@@ -473,7 +478,7 @@ fn music_lane(
     )
 }
 
-/// A transition from the lock: a mark down the lanes on its chapter edge, named by its kind.
+/// A transition as export places it: a mark down the lanes on its edge, named by its kind.
 fn transition_marks(
     transitions: Vec<(u64, shot_core::TransitionKind)>,
     x: &impl Fn(u64) -> f32,
@@ -585,6 +590,14 @@ fn layout_lane(
             _ => runs.push((frames.start, frames.end, span.layout)),
         }
     }
+    let bookends = this.map.plan.bookends.iter().filter_map(|b| {
+        let (from, to) = (b.output_frame, b.output_frame + b.frames);
+        let name = match b.kind {
+            BookendKind::Intro => "Intro",
+            BookendKind::Outro => "Outro",
+        };
+        (to > window.start && from < window.end).then_some((from, to, name))
+    });
     div()
         .size_full()
         .children(runs.into_iter().map(|(from, to, layout)| {
@@ -594,6 +607,15 @@ fn layout_lane(
                 BLOCK,
                 BODY,
                 layout_name(layout).to_owned(),
+            )
+        }))
+        .children(bookends.map(|(from, to, name)| {
+            block(
+                x(from.max(window.start)),
+                x(to.min(window.end)) - 0.002,
+                BLOCK_ON,
+                TEXT,
+                name.to_owned(),
             )
         }))
 }

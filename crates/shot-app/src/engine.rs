@@ -1,26 +1,30 @@
-//! The Edit screen's preview: a render thread that draws output frames of an [`EditMap`] through
-//! `shot-render`'s render graph, the same decoded frames, layouts, crops and zooms export draws,
+//! The Edit screen's preview: a render thread that draws output frames of an [`EditMap`]'s plan
+//! with `shot-render`'s [`Painter`], the code export renders every chunk with, so segments,
+//! transitions, the intro and outro and the end card look as they will in the export. Frames go
 //! into `420f` BT.601 buffers, the encoding gpui's surface element decodes.
 //!
 //! The thread keeps a few frames ahead while playing and renders one frame while paused. A seek
-//! drops what is queued. Each track has a [`FrameCursor`], export's own.
+//! drops what is queued. Ahead of a dissolve or mask wipe it keeps more frames queued: the
+//! window's first frame opens the incoming side's decoder at its handle, which can take a few
+//! frames' time.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
-use std::time::Duration;
 
 use objc2_core_foundation::CFRetained;
 use objc2_core_video::CVPixelBuffer;
 use shot_core::{Effects, Micros};
 use shot_media::videotoolbox::Decoder;
 use shot_render::assets::Assets;
-use shot_render::cursor::FrameCursor;
+use shot_render::drawing::Drawing;
 use shot_render::frame::{Frame, Shot, compose};
 use shot_render::graph::Renderer;
-use shot_render::layout::{Canvas, LayoutSpec, Rect, Source, Sources};
-use shot_render::plan::frame_time;
+use shot_render::join::Piece;
+use shot_render::layout::{Canvas, LayoutSpec, Rect, Scene, Source, Sources};
+use shot_render::paint::Painter;
+use shot_render::plan::{ExportPlan, frame_time};
 use shot_render::surface::{BufferPool, Matrix, Range, size};
 use shot_render::theme::Theme;
 
@@ -28,6 +32,11 @@ use crate::model::{EditMap, FPS};
 
 /// Frames rendered ahead while playing, about 100 ms.
 const AHEAD: usize = 6;
+/// Frames rendered ahead while a dissolve or mask wipe starts within [`JOIN_NEAR`], 300 ms:
+/// room for the incoming side's first frame.
+const AHEAD_OF_JOIN: usize = 18;
+/// How far ahead of a two-sided transition the deeper queue starts, a second.
+const JOIN_NEAR: u64 = FPS as u64;
 /// The preview's render size. The Picture workspace shows it at 1040 points, 2080 pixels.
 const CANVAS: Canvas = Canvas {
     width: 1920,
@@ -76,16 +85,17 @@ impl ScreenMap {
 // a buffer once it is queued, so handing it to the UI thread is sound.
 unsafe impl Send for PreviewFrame {}
 
-/// Adds drawing to a composed frame, given its media time and the canvas.
+/// Adds drawing over a painted frame, given its output time and the canvas. Only the bench
+/// sets one; it draws in a pass of its own over what the painter drew.
 pub type Decoration = fn(Micros, Canvas, &mut Frame);
 
-/// What one preview plays: where each output frame comes from, where the takes live, the
-/// format's effects and the brand's theme.
+/// What one preview plays: where each output frame comes from, the video folder, the format's
+/// effects and the brand's theme.
 pub struct Plan {
     pub map: EditMap,
-    pub media: PathBuf,
+    pub dir: PathBuf,
     pub effects: Effects,
-    /// The render [`Assets`] are made again whenever this changes, that is when `cut.kdl` or
+    /// The [`Painter`] is made again whenever this changes, that is when `cut.kdl` or
     /// `cut.lock` changed, and kept across plans that only move the playhead or the view.
     pub theme: Result<Arc<Theme>, String>,
 }
@@ -216,23 +226,43 @@ impl Drop for Engine {
     }
 }
 
+/// The frames to keep queued while playing from output frame `position` of `plan`.
+fn lead(plan: &ExportPlan, position: u64) -> usize {
+    let near = plan
+        .transitions
+        .iter()
+        .any(|t| t.two_sided() && (position..=position + JOIN_NEAR).contains(&t.window.start));
+    if near { AHEAD_OF_JOIN } else { AHEAD }
+}
+
+/// What the render thread keeps for one theme: the painter with its decoders, and the assets
+/// the screen layer of a paused frame is laid out with.
+struct Painting {
+    theme: Arc<Theme>,
+    painter: Painter,
+    assets: Assets,
+}
+
 fn render_loop(shared: &Shared) {
     let mut renderer = None;
     let mut pool = None;
-    let mut tracks: HashMap<PathBuf, FrameCursor> = HashMap::new();
-    // Event logs, snapshots and stills, read again for each new theme.
-    let mut assets: Option<(Arc<Theme>, Assets)> = None;
+    let mut painting: Option<Painting> = None;
+    // The size of each recording, by path, for the screen layer.
+    let mut sizes: HashMap<PathBuf, (u32, u32)> = HashMap::new();
     loop {
-        let (plan, frame, generation, decoration) = {
+        let (plan, frame, generation, decoration, playing) = {
             let mut state = shared.lock();
             loop {
                 if state.quit {
                     return;
                 }
-                let frames = state.plan.as_ref().map_or(0, |p| p.map.frames);
-                let wants = state.position < frames
-                    && state.error.is_none()
-                    && (state.owed || (state.playing && state.queue.len() < AHEAD));
+                let wants = state.plan.as_ref().is_some_and(|p| {
+                    state.position < p.map.frames
+                        && state.error.is_none()
+                        && (state.owed
+                            || (state.playing
+                                && state.queue.len() < lead(&p.map.plan, state.position)))
+                });
                 if wants {
                     break;
                 }
@@ -240,7 +270,13 @@ fn render_loop(shared: &Shared) {
             }
             state.owed = false;
             let plan = state.plan.clone().expect("checked above");
-            (plan, state.position, state.generation, state.decoration)
+            (
+                plan,
+                state.position,
+                state.generation,
+                state.decoration,
+                state.playing,
+            )
         };
 
         let rendered = (|| {
@@ -256,23 +292,46 @@ fn render_loop(shared: &Shared) {
                 ),
             };
             let theme = plan.theme.as_ref().map_err(Clone::clone)?;
-            let assets = match &mut assets {
-                Some((current, assets)) if Arc::ptr_eq(current, theme) => assets,
-                _ => {
-                    let dir = plan.media.parent().unwrap_or(&plan.media);
-                    let fresh = Assets::with_theme(dir, theme.clone());
-                    &mut assets.insert((theme.clone(), fresh)).1
-                }
+            let painting = match &mut painting {
+                Some(current) if Arc::ptr_eq(&current.theme, theme) => current,
+                _ => painting.insert(Painting {
+                    theme: theme.clone(),
+                    painter: Painter::with_theme(&plan.dir, plan.effects, theme.clone()),
+                    assets: Assets::with_theme(&plan.dir, theme.clone()),
+                }),
             };
-            render(
-                &plan,
-                frame,
-                decoration,
-                renderer,
-                pool,
-                &mut tracks,
-                assets,
-            )
+            let target = pool.buffer().map_err(|e| e.to_string())?;
+            painting
+                .painter
+                .paint(renderer, &plan.map.plan, frame, &target)
+                .map_err(|e| e.to_string())?;
+            if let Some(decorate) = decoration {
+                let mut over = Frame {
+                    scene: Scene {
+                        background: [0.0; 3],
+                        layers: Vec::new(),
+                    },
+                    drawing: Drawing::default(),
+                    cutaway: None,
+                };
+                decorate(frame_time(frame, FPS), CANVAS, &mut over);
+                renderer
+                    .draw_over(
+                        &over,
+                        Sources {
+                            screen: None,
+                            camera: None,
+                        },
+                        &target,
+                    )
+                    .map_err(|e| e.to_string())?;
+            }
+            // Only a paused frame can be clicked on to place a callout.
+            let screen = match playing {
+                true => None,
+                false => screen_map(&plan, frame, &mut painting.assets, &mut sizes)?,
+            };
+            Ok::<_, String>((target, screen))
         })();
 
         let mut state = shared.lock();
@@ -294,57 +353,45 @@ fn render_loop(shared: &Shared) {
     }
 }
 
-fn render(
+/// Where the take's screen recording sits in output frame `frame`, laid out as the painter lays
+/// it out. `None` in a bookend, a transition, a b-roll cutaway or a layout without the screen.
+fn screen_map(
     plan: &Plan,
     frame: u64,
-    decoration: Option<Decoration>,
-    renderer: &Renderer,
-    pool: &BufferPool,
-    tracks: &mut HashMap<PathBuf, FrameCursor>,
     assets: &mut Assets,
-) -> Result<(CFRetained<CVPixelBuffer>, Option<ScreenMap>), String> {
-    let span = plan
-        .map
-        .span_at(frame)
-        .ok_or_else(|| format!("no segment at frame {frame}"))?;
-    let spec = LayoutSpec::styled(span.layout, &plan.effects.window).map_err(|e| e.to_string())?;
-    let source_frame = span.source_frame(frame);
-    let time = Duration::from_micros(frame_time(source_frame, FPS).0);
-    let take = plan.media.join(span.take.as_str());
-    let path = |source| {
-        take.join(match source {
-            Source::Screen => "screen.mp4",
-            Source::Camera => "camera.mp4",
-        })
-    };
-    // A take recorded without a camera draws its layouts without the camera slot.
-    let available = |source| spec.uses(source) && path(source).exists();
-    for source in [Source::Screen, Source::Camera] {
-        if available(source) {
-            let path = path(source);
-            if !tracks.contains_key(&path) {
-                let decoder =
-                    Decoder::open_native(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-                tracks.insert(path.clone(), FrameCursor::new(decoder));
-            }
-            tracks
-                .get_mut(&path)
-                .expect("inserted above")
-                .goto(time)
-                .map_err(|e| format!("{}: {e}", path.display()))?;
-        }
+    sizes: &mut HashMap<PathBuf, (u32, u32)>,
+) -> Result<Option<ScreenMap>, String> {
+    let export = &plan.map.plan;
+    if export.join_at(frame).is_some() || !matches!(export.piece_at(frame), Some(Piece::Segment(_)))
+    {
+        return Ok(None);
     }
-    let size_of = |source| {
-        available(source)
-            .then(|| tracks.get(&path(source)))
-            .flatten()
-            .and_then(FrameCursor::current)
-            .map(|f| size(&f.buffer))
+    let Some(span) = plan.map.span_at(frame) else {
+        return Ok(None);
     };
-    let sizes = Sources {
-        screen: size_of(Source::Screen).unwrap_or((16, 9)),
-        camera: size_of(Source::Camera).unwrap_or((16, 9)),
+    let spec = LayoutSpec::styled(span.layout, &plan.effects.window).map_err(|e| e.to_string())?;
+    let take = plan.dir.join("media").join(span.take.as_str());
+    let mut size_of = |source, file| -> Result<Option<(u32, u32)>, String> {
+        let path = take.join(file);
+        if !spec.uses(source) || !path.exists() {
+            return Ok(None);
+        }
+        if let Some(size) = sizes.get(&path) {
+            return Ok(Some(*size));
+        }
+        let error = |e: shot_media::videotoolbox::DecodeError| format!("{}: {e}", path.display());
+        let first = Decoder::open_native(&path)
+            .map_err(error)?
+            .next_frame()
+            .map_err(error)?;
+        let size = first.map_or((16, 9), |f| size(&f.buffer));
+        sizes.insert(path, size);
+        Ok(Some(size))
     };
+    let Some(screen) = size_of(Source::Screen, "screen.mp4")? else {
+        return Ok(None);
+    };
+    let camera = size_of(Source::Camera, "camera.mp4")?.unwrap_or((16, 9));
     let look = assets
         .look(&span.take, &span.overlays, plan.effects)
         .map_err(|e| e.to_string())?;
@@ -352,75 +399,186 @@ fn render(
         layout: span.layout,
         zooms: &span.zooms,
         overlays: &span.overlays,
-        time: frame_time(source_frame, FPS),
+        time: frame_time(span.source_frame(frame), FPS),
     };
-    let mut drawn = compose(&shot, &look, CANVAS, sizes).map_err(|e| e.to_string())?;
-    if let Some(decorate) = decoration {
-        decorate(shot.time, CANVAS, &mut drawn);
+    let drawn =
+        compose(&shot, &look, CANVAS, Sources { screen, camera }).map_err(|e| e.to_string())?;
+    if drawn.cutaway.is_some() {
+        return Ok(None);
     }
-    // A b-roll clip shows in the screen layer instead of the take's screen.
-    let cutaway = match &drawn.cutaway {
-        Some(cutaway) => {
-            let clip = plan
-                .media
-                .parent()
-                .unwrap_or(&plan.media)
-                .join(&cutaway.file);
-            if !tracks.contains_key(&clip) {
-                let decoder =
-                    Decoder::open_native(&clip).map_err(|e| format!("{}: {e}", clip.display()))?;
-                tracks.insert(clip.clone(), FrameCursor::new(decoder));
-            }
-            let cursor = tracks.get_mut(&clip).expect("inserted above");
-            cursor
-                .goto(Duration::from_micros(cutaway.time.0))
-                .map_err(|e| format!("{}: {e}", clip.display()))?;
-            if let Some(frame) = cursor.current() {
-                shot_render::overlay::broll::fit_cutaway(&mut drawn, size(&frame.buffer));
-            }
-            Some(clip)
-        }
-        None => None,
-    };
-    let frame_of = |source| {
-        let path = match (&cutaway, source) {
-            (Some(clip), Source::Screen) => clip.clone(),
-            _ if available(source) => path(source),
-            _ => return None,
-        };
-        tracks.get(&path).and_then(FrameCursor::current)
-    };
-    let frames = Sources {
-        screen: frame_of(Source::Screen),
-        camera: frame_of(Source::Camera),
-    };
-    drawn
+    Ok(drawn
         .scene
         .layers
-        .retain(|layer| frames.get(layer.source).is_some());
-    let screen = match (&cutaway, sizes.screen) {
-        (None, size) if available(Source::Screen) => drawn
-            .scene
-            .layers
-            .iter()
-            .find(|l| l.source == Source::Screen)
-            .map(|l| ScreenMap {
-                frame: l.frame,
-                crop: l.crop,
-                size,
-            }),
-        _ => None,
-    };
-    let target = pool.buffer().map_err(|e| e.to_string())?;
-    renderer
-        .draw(
-            &drawn,
-            Sources {
-                screen: frames.screen.map(|f| &*f.buffer),
-                camera: frames.camera.map(|f| &*f.buffer),
-            },
-            &target,
-        )
-        .map_err(|e| e.to_string())?;
-    Ok((target, screen))
+        .iter()
+        .find(|l| l.source == Source::Screen)
+        .map(|l| ScreenMap {
+            frame: l.frame,
+            crop: l.crop,
+            size: screen,
+        }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::time::{Duration, Instant};
+
+    use shot_core::TransitionKind;
+    use shot_render::cursor::FrameCursor;
+    use shot_render::export::{ExportOptions, export};
+    use shot_render::surface::read_rgb;
+
+    use super::*;
+    use crate::folder::VideoFolder;
+    use crate::model::{EditMap, View};
+
+    const CUT: &str = "chapter \"Hook\" {\n    take t01 {\n        keep from=10_000_000 to=14_000_000\n    }\n}\n\nchapter \"Setup\" {\n    take t01 {\n        keep from=120_000_000 to=124_000_000\n        layout split from=120_000_000 to=124_000_000\n    }\n}\n\nchapter \"Structure\" {\n    take t01 {\n        keep from=300_000_000 to=304_000_000\n    }\n}\n";
+
+    /// A channel with the target project's take, an intro after the hook (the 30 s screen clip
+    /// with a title), an outro (the camera clip) under a 3 s end card, and `video` joining its
+    /// chapters with `kind`.
+    fn channel(root: &Path, fixtures: &Path, kind: &str) -> PathBuf {
+        let write = |path: &str, text: &str| {
+            let path = root.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        write(
+            "brand/brand.kdl",
+            "intro bumper=\"brand/media/intro.mp4\" title=#true\noutro bumper=\"brand/media/outro.mp4\"\nend-card length=3_000_000\ncamera shape=circle corners=0 border=8 shadow=soft\non video-start {\n    transition dip\n}\n",
+        );
+        std::fs::create_dir_all(root.join("brand/media")).unwrap();
+        for (clip, name) in [("screen-30s.mp4", "intro"), ("camera-30s.mp4", "outro")] {
+            std::os::unix::fs::symlink(
+                fixtures.join(clip),
+                root.join(format!("brand/media/{name}.mp4")),
+            )
+            .unwrap();
+        }
+        let dir = root.join("videos/v");
+        write(
+            "videos/v/video.kdl",
+            "title \"Painted\"\nstatus editing\nformat opinion\n",
+        );
+        write("videos/v/script.md", "# Painted\n");
+        write(
+            "videos/v/format.kdl",
+            &format!("on chapter-start {{\n    transition {kind} length=800_000\n}}\n"),
+        );
+        write("videos/v/cut.kdl", CUT);
+        write("videos/v/cut.lock", "lock 1\n");
+        std::os::unix::fs::symlink(fixtures.join("target-project/media"), dir.join("media"))
+            .unwrap();
+        dir
+    }
+
+    /// The mean difference per channel of a preview frame and the export's frame, which is
+    /// twice its size and averaged down to it.
+    fn difference(preview: &[[u8; 3]], export: &[[u8; 3]]) -> f64 {
+        let (w, h) = (CANVAS.width as usize, CANVAS.height as usize);
+        let mut sum = 0u64;
+        for y in 0..h {
+            for x in 0..w {
+                let at = |dx, dy| export[(2 * y + dy) * 2 * w + 2 * x + dx];
+                for (c, &value) in preview[y * w + x].iter().enumerate() {
+                    let down = [(0, 0), (1, 0), (0, 1), (1, 1)]
+                        .iter()
+                        .map(|&(dx, dy)| u32::from(at(dx, dy)[c]))
+                        .sum::<u32>()
+                        .div_ceil(4);
+                    sum += u64::from(down.abs_diff(u32::from(value)));
+                }
+            }
+        }
+        sum as f64 / (w * h * 3) as f64
+    }
+
+    // Needs the generated fixtures and exports two short cuts at 4K, about a minute each.
+    #[test]
+    #[ignore]
+    fn the_preview_draws_transitions_and_bookends_as_the_export_does() {
+        let fixtures = PathBuf::from(std::env::var("SHOT_FIXTURES").expect("SHOT_FIXTURES"));
+        for kind in ["dissolve", "mask-wipe"] {
+            let root = tempfile::tempdir().unwrap();
+            let dir = channel(root.path(), &fixtures, kind);
+            let folder = VideoFolder::open(&dir).unwrap();
+            let map = EditMap::preview(&dir, &folder.project, &folder.shown, View::Edited).unwrap();
+            let plan = map.plan.clone();
+            let out = dir.join("main.mp4");
+            export(
+                &dir,
+                &folder.project,
+                "main",
+                &out,
+                ExportOptions::default(),
+                &|_| {},
+            )
+            .unwrap();
+
+            // Inside each transition at its start, a quarter, the frames around the cut and
+            // three quarters; the intro's title and the end card over the outro.
+            let mut samples = Vec::new();
+            for t in &plan.transitions {
+                let quarter = (t.window.end - t.window.start) / 4;
+                samples.extend([
+                    t.window.start,
+                    t.window.start + quarter,
+                    t.edge - 1,
+                    t.edge,
+                    t.window.end - quarter,
+                ]);
+            }
+            let intro = &plan.bookends[0];
+            samples.push(intro.output_frame + intro.frames / 3);
+            let card = plan.end_card.clone().expect("an end card");
+            samples.extend([card.start + 30, card.end - 1]);
+            assert!(
+                plan.transitions
+                    .iter()
+                    .any(|t| t.kind.as_str() == kind && t.two_sided()),
+                "{kind}: {:?}",
+                plan.transitions
+            );
+            assert!(
+                plan.transitions
+                    .iter()
+                    .any(|t| t.kind == TransitionKind::Dip)
+            );
+
+            let engine = Engine::spawn();
+            engine.set_plan(
+                Plan {
+                    map,
+                    dir: dir.clone(),
+                    effects: folder.project.format.effects(),
+                    theme: folder.theme.clone(),
+                },
+                0,
+            );
+            let mut decoded = FrameCursor::new(Decoder::open_native(&out).unwrap());
+            for frame in samples {
+                engine.seek(frame);
+                let waited = Instant::now();
+                let shown = loop {
+                    assert_eq!(engine.error(), None);
+                    if let Some(shown) = engine.take_next() {
+                        break shown;
+                    }
+                    assert!(waited.elapsed() < Duration::from_secs(30), "frame {frame}");
+                    std::thread::sleep(Duration::from_millis(1));
+                };
+                assert_eq!(shown.frame, frame);
+                let time = Duration::from_micros(frame_time(frame, FPS).0);
+                let exported = decoded.goto(time).unwrap().unwrap();
+                let off = difference(
+                    &read_rgb(&shown.buffer).unwrap(),
+                    &read_rgb(&exported.buffer).unwrap(),
+                );
+                println!("{kind} frame {frame}: {off:.2}");
+                // The export's encoding leaves up to about 3 levels; inside a window the frame 8
+                // later differs by 6 to 41.
+                assert!(off < 4.0, "{kind}: frame {frame} differs by {off:.2}");
+            }
+        }
+    }
 }

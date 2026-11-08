@@ -97,6 +97,72 @@ pub fn chapter_marks(output: &Output, words: &[SpokenWord]) -> Vec<ChapterMark> 
     marks
 }
 
+/// The intro and outro export plays in the main output, which its [`Output`] leaves out, in
+/// output order.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Bookends(pub Vec<Bookend>);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bookend {
+    /// The take and media start of the segment it plays before, `None` after the last.
+    pub before: Option<(Id, Micros)>,
+    pub length: Micros,
+}
+
+impl Bookends {
+    /// `marks`, the chapter marks of `output`, on the export's timeline: moved on by every
+    /// bookend played before them, and a chapter an intro opens marked where the intro starts,
+    /// as export marks it.
+    pub fn place(&self, output: &Output, marks: &[ChapterMark]) -> Vec<ChapterMark> {
+        // Where each bookend goes in the output's own time, and the chapter it opens.
+        let mut inserted: Vec<(Micros, Option<usize>, Micros)> = Vec::new();
+        let mut starts = Vec::new();
+        let mut offset = 0;
+        for (index, group) in output.chapters.iter().enumerate() {
+            if group.segments.iter().any(|s| s.source.duration().0 > 0) {
+                starts.push(index);
+            }
+            for segment in &group.segments {
+                for bookend in &self.0 {
+                    if bookend.before.as_ref().is_some_and(|(take, from)| {
+                        *take == segment.take && *from == segment.source.from()
+                    }) {
+                        inserted.push((Micros(offset), Some(index), bookend.length));
+                    }
+                }
+                offset += segment.source.duration().0;
+            }
+        }
+        for bookend in self.0.iter().filter(|b| b.before.is_none()) {
+            inserted.push((Micros(offset), None, bookend.length));
+        }
+        let played_before = |at: Micros, strictly: bool| -> u64 {
+            inserted
+                .iter()
+                .filter(|(t, ..)| if strictly { *t < at } else { *t <= at })
+                .map(|(.., length)| length.0)
+                .sum()
+        };
+        marks
+            .iter()
+            .zip(&starts)
+            .map(|(mark, &chapter)| {
+                let at = match inserted
+                    .iter()
+                    .find(|(_, opens, _)| *opens == Some(chapter))
+                {
+                    Some(&(t, ..)) => Micros(t.0 + played_before(t, true)),
+                    None => Micros(mark.at.0 + played_before(mark.at, false)),
+                };
+                ChapterMark {
+                    title: mark.title.clone(),
+                    at,
+                }
+            })
+            .collect()
+    }
+}
+
 /// `m:ss`, or `h:mm:ss` from an hour on, rounded down to the second as YouTube reads chapters.
 pub fn clock(t: Micros) -> String {
     let seconds = t.0 / 1_000_000;
@@ -166,6 +232,36 @@ pub(crate) mod tests {
         assert_eq!(marks[0].at, Micros(0));
         assert_eq!(marks[1].at, Micros(6_000_000));
         assert_eq!(duration(main), Micros(17_000_000));
+    }
+
+    #[test]
+    fn bookends_move_marks_on_and_an_intro_opens_its_chapter() {
+        let project = project(CUT);
+        let main = &Timeline::evaluate(&project).outputs[0];
+        let words = spoken_words(main, &transcript(&[("then", 9_000_000, 9_400_000)]));
+        let marks = chapter_marks(main, &words);
+        let t01 = Id::new("t01").unwrap();
+        let bookend = |before: Option<u64>, length: u64| Bookend {
+            before: before.map(|from| (t01.clone(), Micros(from))),
+            length: Micros(length),
+        };
+        let at = |bookends: Vec<Bookend>| -> Vec<u64> {
+            Bookends(bookends)
+                .place(main, &marks)
+                .iter()
+                .map(|m| m.at.0)
+                .collect()
+        };
+        // After the hook: the body's mark is the intro's start, 5 s in.
+        assert_eq!(
+            at(vec![
+                bookend(Some(8_000_000), 3_000_000),
+                bookend(None, 4_000_000)
+            ]),
+            [0, 5_000_000]
+        );
+        // Before the video: the body's first word plays 3 s later.
+        assert_eq!(at(vec![bookend(Some(0), 3_000_000)]), [0, 9_000_000]);
     }
 
     #[test]

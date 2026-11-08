@@ -7,7 +7,7 @@ use std::fmt::Write;
 
 use shot_core::{Id, Output, ParamValue, Project, Transcript};
 
-use crate::spoken::{chapter_marks, clock, spoken_words};
+use crate::spoken::{Bookends, chapter_marks, clock, spoken_words};
 
 /// The template whose `url` parameter is a link card.
 pub const LINK_CARD: &str = "link-card";
@@ -19,10 +19,12 @@ pub struct Description {
 }
 
 /// Drafts the description of `main`, the main output as export renders it (see
-/// [`crate::lock::timeline`]).
+/// [`crate::lock::timeline`]), with chapters placed around its `bookends` (see
+/// [`crate::lock::bookends`]).
 pub fn describe(
     project: &Project,
     main: &Output,
+    bookends: &Bookends,
     transcripts: &HashMap<Id, Transcript>,
 ) -> Description {
     let words = spoken_words(main, transcripts);
@@ -35,7 +37,7 @@ pub fn describe(
     {
         let _ = writeln!(text, "{}\n", hook.text.trim());
     }
-    let marks = chapter_marks(main, &words);
+    let marks = bookends.place(main, &chapter_marks(main, &words));
     if !marks.is_empty() {
         text.push_str("Chapters\n");
         for mark in &marks {
@@ -102,7 +104,12 @@ mod tests {
         .unwrap();
         let transcripts =
             transcript(&[("never", 300_000, 600_000), ("so", 65_200_000, 65_500_000)]);
-        let description = describe(&project, Timeline::evaluate(&project).main(), &transcripts);
+        let description = describe(
+            &project,
+            Timeline::evaluate(&project).main(),
+            &Bookends::default(),
+            &transcripts,
+        );
         assert_eq!(
             description.text,
             "Never on a Friday? post\n\nChapters\n0:00 Hook\n1:05 Why\n\nLinks\nhttps://github.com/a/b/pull/1\nhttps://example.com/post\n"

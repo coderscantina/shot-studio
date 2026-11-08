@@ -112,7 +112,15 @@ struct StallShared {
     origin: Instant,
     /// Nanoseconds from `origin` to the last render.
     last_render: AtomicU64,
-    samples: Mutex<Vec<StallSample>>,
+    /// Symbolized only when read: `dladdr` scans the binary's symbols, which in a large binary
+    /// takes longer than the sampling interval.
+    samples: Mutex<Vec<RawSample>>,
+}
+
+/// A sample with its return addresses still unnamed.
+struct RawSample {
+    waiting: bool,
+    addresses: Vec<u64>,
 }
 
 /// The main thread at one moment of a stall.
@@ -182,7 +190,17 @@ impl StallWatch {
     pub fn rendered(&self) -> Vec<StallSample> {
         let now = self.shared.origin.elapsed().as_nanos() as u64;
         self.shared.last_render.store(now, Ordering::Relaxed);
-        std::mem::take(&mut *self.shared.samples.lock().expect("stall samples poisoned"))
+        let raw = std::mem::take(&mut *self.shared.samples.lock().expect("stall samples poisoned"));
+        raw.into_iter()
+            .map(|sample| {
+                let mut frames: Vec<String> = sample.addresses.into_iter().map(symbol).collect();
+                frames.dedup();
+                StallSample {
+                    waiting: sample.waiting,
+                    frames,
+                }
+            })
+            .collect()
     }
 }
 
@@ -227,7 +245,7 @@ const ADDRESS_MASK: u64 = (1 << 47) - 1;
     deprecated,
     reason = "libc points the mach thread calls to the mach2 crate; they do not justify a dependency"
 )]
-fn sample_thread(port: libc::mach_port_t, stack: std::ops::Range<usize>) -> StallSample {
+fn sample_thread(port: libc::mach_port_t, stack: std::ops::Range<usize>) -> RawSample {
     // SAFETY: thread_info fills at most `count` words of the zeroed struct.
     let waiting = unsafe {
         let mut info: libc::thread_basic_info = std::mem::zeroed();
@@ -248,9 +266,9 @@ fn sample_thread(port: libc::mach_port_t, stack: std::ops::Range<usize>) -> Stal
     // frame pointer is checked to lie inside its stack before it is dereferenced.
     unsafe {
         if thread_suspend(port) != 0 {
-            return StallSample {
+            return RawSample {
                 waiting,
-                frames: Vec::new(),
+                addresses: Vec::new(),
             };
         }
         let mut state = ArmThreadState::default();
@@ -279,13 +297,14 @@ fn sample_thread(port: libc::mach_port_t, stack: std::ops::Range<usize>) -> Stal
         }
         thread_resume(port);
     }
-    let mut frames: Vec<String> = addresses[..depth]
-        .iter()
-        .filter(|&&address| address != 0)
-        .map(|&address| symbol(address))
-        .collect();
-    frames.dedup();
-    StallSample { waiting, frames }
+    RawSample {
+        waiting,
+        addresses: addresses[..depth]
+            .iter()
+            .copied()
+            .filter(|&address| address != 0)
+            .collect(),
+    }
 }
 
 fn symbol(address: u64) -> String {

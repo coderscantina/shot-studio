@@ -4,6 +4,8 @@
 
 use std::collections::HashMap;
 use std::ops::{Range, RangeInclusive};
+use std::path::Path;
+use std::sync::Arc;
 
 use shot_core::{
     Cut, EditError, Id, Layout, MediaId, Micros, Overlay, Project, RangeEdit, RemovedBy, TakeAt,
@@ -94,31 +96,85 @@ pub struct ChapterSpan {
     pub frames: Range<u64>,
 }
 
-/// Where every take block lands in one output.
+/// Where every take block lands in one output, with the plan export draws it from.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EditMap {
     pub spans: Vec<Span>,
     /// One per chapter of the cut, in order.
     pub chapters: Vec<ChapterSpan>,
+    /// Output length in frames, bookends included.
     pub frames: u64,
+    /// The plan the preview paints and plays: the main cut with its bookends and transitions
+    /// in the edited view, the bare segments in the untrimmed one.
+    pub plan: Arc<ExportPlan>,
+}
+
+impl Default for EditMap {
+    fn default() -> Self {
+        Self {
+            spans: Vec::new(),
+            chapters: Vec::new(),
+            frames: 0,
+            plan: Arc::new(ExportPlan {
+                fps: FPS,
+                segments: Vec::new(),
+                chapters: Vec::new(),
+                frames: 0,
+                pieces: Vec::new(),
+                bookends: Vec::new(),
+                transitions: Vec::new(),
+                end_card: None,
+            }),
+        }
+    }
 }
 
 impl EditMap {
-    /// Plans `project` as `view` shows it.
+    /// Plans `project` as `view` shows it, without bookends or transitions.
     pub fn of(project: &Project, view: View) -> Self {
         let project = Project {
             cut: cut_for(&project.cut, view),
             ..project.clone()
         };
         let timeline = Timeline::evaluate(&project);
-        // Only the time mapping is used here, so cache identity doesn't matter.
+        // The preview caches nothing, so cache identity doesn't matter.
         let plan = ExportPlan::new(timeline.main(), FPS, |_| MediaId::default());
-        Self::new(&project.cut, &plan)
+        Self::new(&project.cut, plan)
+    }
+
+    /// The map the Edit screen shows of the video in `dir`: in the edited view the timeline
+    /// export renders from `files` (styled by the lock, with the brand's intro, outro and
+    /// transitions), tied to the blocks of `shown`, the cut as the screens show it; the whole
+    /// recordings of `shown` in the untrimmed view.
+    pub fn preview(
+        dir: &Path,
+        files: &Project,
+        shown: &Project,
+        view: View,
+    ) -> Result<Self, String> {
+        match view {
+            View::Edited => {
+                let plan =
+                    shot_render::export::preview_plan(dir, files).map_err(|e| e.to_string())?;
+                let map = Self::new(&shown.cut, plan);
+                // `shown` folds the lock into the blocks so that this holds; see `crate::style`.
+                if map.spans.len() != map.plan.segments.len() {
+                    return Err(format!(
+                        "the preview could place {} of the {} segments export renders",
+                        map.spans.len(),
+                        map.plan.segments.len()
+                    ));
+                }
+                Ok(map)
+            }
+            View::Untrimmed => Ok(Self::of(shown, view)),
+        }
     }
 
     /// Ties each planned segment back to its take block. Segments come in block order, so one
-    /// walk over both assigns them.
-    pub fn new(cut: &Cut, plan: &ExportPlan) -> Self {
+    /// walk over both assigns them. A chapter runs from its marker in the plan, at the intro
+    /// when one opens it, to the next chapter's.
+    pub fn new(cut: &Cut, plan: ExportPlan) -> Self {
         let mut spans = Vec::with_capacity(plan.segments.len());
         let mut segments = plan.segments.iter().peekable();
         for (at, edit) in blocks(cut) {
@@ -144,16 +200,30 @@ impl EditMap {
                 segments.next();
             }
         }
+        // The plan marks each chapter that has frames, in order.
+        let mut markers = plan.chapters.iter().map(|c| c.output_frame);
+        let starts: Vec<Option<u64>> = (0..cut.chapters.len())
+            .map(|index| {
+                spans
+                    .iter()
+                    .any(|s| s.at.chapter == index)
+                    .then(|| markers.next())
+                    .flatten()
+            })
+            .collect();
         let chapters = cut
             .chapters
             .iter()
+            .zip(&starts)
             .enumerate()
-            .map(|(index, chapter)| {
-                let mut of_chapter = spans.iter().filter(|s| s.at.chapter == index);
-                let frames = match of_chapter.next() {
-                    Some(first) => {
-                        let end = of_chapter.next_back().unwrap_or(first).output_frames().end;
-                        first.output_frame..end
+            .map(|(index, (chapter, start))| {
+                let frames = match start {
+                    Some(start) => {
+                        let end = starts[index + 1..]
+                            .iter()
+                            .find_map(|s| *s)
+                            .unwrap_or(plan.frames);
+                        *start..end
                     }
                     None => 0..0,
                 };
@@ -167,6 +237,7 @@ impl EditMap {
             spans,
             chapters,
             frames: plan.frames,
+            plan: Arc::new(plan),
         }
     }
 
@@ -676,6 +747,38 @@ mod tests {
         );
         assert_eq!(map.source_at(90), Some((b, Micros(10_000_000))));
         assert_eq!(map.cut_frames(), [60, 90]);
+    }
+
+    #[test]
+    fn an_intro_after_the_hook_moves_what_follows_and_opens_its_chapter() {
+        use shot_render::join::{BookendInput, Joins};
+        let project = project(two_chapters());
+        let timeline = Timeline::evaluate(&project);
+        let bookend = |seconds: u64| BookendInput {
+            bumper: None,
+            title: Some("A".into()),
+            length: Micros(seconds * 1_000_000),
+            identity: Vec::new(),
+        };
+        let plan =
+            ExportPlan::new(timeline.main(), FPS, |_| MediaId::default()).with_joins(&Joins {
+                intro: Some(bookend(1)),
+                outro: Some(bookend(2)),
+                intro_after_hook: true,
+                ..Joins::default()
+            });
+        let map = EditMap::new(&project.cut, plan);
+        // The hook's 90 frames, the intro's 60, the body's 60 and the outro's 120.
+        assert_eq!(map.frames, 330);
+        assert_eq!(map.chapters[0].frames, 0..90);
+        assert_eq!(map.chapters[1].frames, 90..330);
+        let body = TakeAt {
+            chapter: 1,
+            take: 0,
+        };
+        assert_eq!(map.output_frame(body, Micros(10_000_000)), Some(150));
+        assert_eq!(map.source_at(120), None);
+        assert_eq!(map.source_at(150), Some((body, Micros(10_000_000))));
     }
 
     #[test]

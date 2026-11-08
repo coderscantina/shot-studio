@@ -193,11 +193,7 @@ impl EditScreen {
                 Workspace::Text
             },
             view: View::Edited,
-            map: EditMap {
-                spans: Vec::new(),
-                chapters: Vec::new(),
-                frames: 0,
-            },
+            map: EditMap::default(),
             doc: Vec::new(),
             chapter: 0,
             selection: None,
@@ -239,7 +235,15 @@ impl EditScreen {
         let keep = self.map.source_at(self.playhead);
         let folder = self.folder.read(cx);
         let project = &folder.shown;
-        self.map = EditMap::of(project, self.view);
+        self.map = match EditMap::preview(&folder.dir, &folder.project, project, self.view) {
+            Ok(map) => map,
+            Err(error) => {
+                self.error = Some(format!(
+                    "the preview leaves out the bookends and transitions: {error}"
+                ));
+                EditMap::of(project, self.view)
+            }
+        };
         self.doc = document(
             &project.cut,
             &folder.transcripts,
@@ -257,11 +261,11 @@ impl EditScreen {
         self.playhead = frame;
         let media = folder.dir.join("media");
         let cues = Cues::of(&folder.dir, project.cut.music.as_ref(), folder.lock());
-        self.sound.set_plan(&self.map, media.clone(), cues, frame);
+        self.sound.set_plan(&self.map, media, cues, frame);
         self.engine.set_plan(
             Plan {
                 map: self.map.clone(),
-                media,
+                dir: folder.dir.clone(),
                 effects: project.format.effects(),
                 theme: folder.theme.clone(),
             },

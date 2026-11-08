@@ -463,7 +463,9 @@ impl ShotServer {
             let _ = writeln!(out, "  \"{}\" -> \"{}\"", fix.heard, fix.said);
         }
         let project = self.project(&args.slug, cut)?;
-        let main = &shot_core::Timeline::evaluate(&project).outputs[0];
+        let timeline = shot_ship::lock::timeline(&self.video_dir(&args.slug), &project)
+            .map_err(|e| e.to_string())?;
+        let main = timeline.main();
         let words = shot_ship::spoken::spoken_words(main, &transcripts);
         let unsure =
             shot_ship::check::captions(main.captions, true, None, &main.caption_fixes, &words, &[]);
@@ -514,16 +516,28 @@ impl ShotServer {
     }
 
     #[tool(
-        description = "A draft title and description for the upload: the hook, chapters at the moment their first word is heard, and the links the video shows or the script cites."
+        description = "A draft title and description for the upload: the hook, chapters at the moment their first word is heard or their intro starts, and the links the video shows or the script cites."
     )]
     fn describe(&self, Parameters(args): Parameters<VideoArgs>) -> Result<String, String> {
         let cut = self.cut(&args.slug)?;
         let transcripts = self.transcripts(&args.slug, &cut)?;
         let project = self.project(&args.slug, cut)?;
-        let timeline = shot_core::Timeline::evaluate(&project);
-        let description = shot_ship::describe::describe(&project, timeline.main(), &transcripts);
+        let dir = self.video_dir(&args.slug);
+        let timeline = shot_ship::lock::timeline(&dir, &project).map_err(|e| e.to_string())?;
+        // A brand export cannot place yet still leaves a draft, its chapters said to be early.
+        let (bookends, note) = match shot_ship::lock::bookends(&dir, &project) {
+            Ok(bookends) => (bookends, String::new()),
+            Err(e) => (
+                Default::default(),
+                format!(
+                    "note: chapter times leave out the intro and outro, which export cannot place: {e}\n\n"
+                ),
+            ),
+        };
+        let description =
+            shot_ship::describe::describe(&project, timeline.main(), &bookends, &transcripts);
         Ok(format!(
-            "title: {}\n\n{}",
+            "{note}title: {}\n\n{}",
             description.title, description.text
         ))
     }

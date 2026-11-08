@@ -7,9 +7,9 @@ use std::path::Path;
 
 use shot_core::{
     Brand, Cut, EditError, Effect, ElementKind, Elements, Id, Layer, LottieTemplate, Micros,
-    Overlay, OverrideEffect, ParamValue, Point, Provenance, TakeAt, TimeRange,
+    Overlay, OverrideEffect, ParamValue, Point, Provenance, Slot, SlotType, TakeAt, TimeRange,
 };
-use shot_render::lottie::{self, Finding};
+use shot_render::lottie::{self, Finding, SlotKind};
 use shot_render::overlay::{self, callout};
 
 /// How long a placed callout shows.
@@ -221,7 +221,9 @@ pub enum LottieImport {
 
 /// Checks the Lottie at `source` with [`lottie::check`] and, when it renders, copies it to
 /// `brand/<name>.json` of the channel repo at `repo` and declares `template <name>` in
-/// `brand/brand.kdl`, named after the file. Slots are not declared: the brand file names them.
+/// `brand/brand.kdl`, named after the file, with the slots the file offers ([`lottie::slots`]),
+/// none of them required. A slot id that is no valid name in `brand.kdl` is left out: no
+/// overlay could fill it.
 pub fn add_lottie(repo: &Path, source: &Path) -> Result<LottieImport, String> {
     let bytes = fs::read(source).map_err(|e| format!("{}: {e}", source.display()))?;
     let findings = lottie::check(&bytes);
@@ -260,10 +262,26 @@ pub fn add_lottie(repo: &Path, source: &Path) -> Result<LottieImport, String> {
     }
     fs::create_dir_all(repo.join("brand")).map_err(|e| e.to_string())?;
     fs::write(&target, &bytes).map_err(|e| format!("{}: {e}", target.display()))?;
+    let slots = lottie::slots(&bytes)
+        .map_err(|e| format!("{}: {e}", source.display()))?
+        .into_iter()
+        .filter_map(|(id, kind)| {
+            Some(Slot {
+                name: Id::new(id)?,
+                kind: match kind {
+                    SlotKind::Text => SlotType::Text,
+                    SlotKind::Color => SlotType::Color,
+                    SlotKind::Integer => SlotType::Integer,
+                    SlotKind::Time => SlotType::Time,
+                },
+                required: false,
+            })
+        })
+        .collect();
     brand.templates.push(LottieTemplate {
         name: name.clone(),
         file: file.clone(),
-        slots: Vec::new(),
+        slots,
     });
     brand.templates.sort_by(|a, b| a.name.cmp(&b.name));
     let tmp = brand_path.with_extension("tmp");
@@ -342,6 +360,27 @@ mod tests {
         );
     }
 
+    /// Adds a fill with the slot id `accent` to the first shape group of a Lottie.
+    fn add_slotted_fill(value: &mut serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Object(map) if map.get("ty").is_some_and(|t| t == "gr") => {
+                let fill = serde_json::json!({
+                    "ty": "fl",
+                    "c": { "a": 0, "k": [1, 0, 0], "sid": "accent" },
+                    "o": { "a": 0, "k": 100 }
+                });
+                map["it"]
+                    .as_array_mut()
+                    .expect("a group lists its items")
+                    .insert(1, fill);
+                true
+            }
+            serde_json::Value::Object(map) => map.values_mut().any(add_slotted_fill),
+            serde_json::Value::Array(items) => items.iter_mut().any(add_slotted_fill),
+            _ => false,
+        }
+    }
+
     #[test]
     fn a_lottie_is_added_to_the_brand_only_when_it_renders() {
         let repo = tempfile::tempdir().unwrap();
@@ -365,7 +404,10 @@ mod tests {
         );
         assert!(!repo.path().join("brand/brand.kdl").exists());
 
-        let added = add_lottie(repo.path(), &file("Party Hat.json", shape)).unwrap();
+        let mut slotted: serde_json::Value = serde_json::from_str(shape).unwrap();
+        assert!(add_slotted_fill(&mut slotted));
+        let slotted = slotted.to_string();
+        let added = add_lottie(repo.path(), &file("Party Hat.json", &slotted)).unwrap();
         assert_eq!(
             added,
             LottieImport::Added {
@@ -376,6 +418,22 @@ mod tests {
         let brand = Brand::parse(&fs::read_to_string(repo.path().join("brand/brand.kdl")).unwrap())
             .unwrap();
         assert_eq!(stickers(&brand).collect::<Vec<_>>(), [&id("party-hat")]);
+        assert_eq!(
+            brand.templates[0].slots,
+            [
+                Slot {
+                    name: id("accent"),
+                    kind: SlotType::Color,
+                    required: false
+                },
+                // The bundled emoji's `rest` marker.
+                Slot {
+                    name: id("rest"),
+                    kind: SlotType::Time,
+                    required: false
+                }
+            ]
+        );
         assert!(add_lottie(repo.path(), &file("Party Hat.json", shape)).is_err());
     }
 }
