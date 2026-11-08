@@ -1,17 +1,25 @@
-//! Voice chain, ducking and loudness.
+//! Voice chain, ducking, sounds, music cues and loudness.
 //!
 //! Export renders a cut's voice as one 48 kHz mono stream and runs it more than once: pass 1
 //! measures the [`VoiceChain`] output with a [`Meter`], later passes repeat the chain and apply
 //! [`Finish`], the gain to the target and a true-peak limiter.
 //! Every stage is deterministic and streaming: the output does not depend on how the input is
 //! split into pieces.
+//!
+//! Sound effects and music cues join the voice in a [`Mix`] between the chain and the finish, so
+//! loudness is measured on the whole: [`sound`] finds and decodes sounds, [`beats`] finds the
+//! beats entrances snap to, and [`phases`] places the brand's sounds on a move.
 
+pub mod beats;
 mod compressor;
 mod denoise;
 mod ducking;
 mod eq;
 mod limiter;
 mod loudness;
+mod mix;
+pub mod phases;
+pub mod sound;
 
 use compressor::Compressor;
 use denoise::Denoiser;
@@ -19,6 +27,7 @@ use eq::Eq;
 
 pub use ducking::MusicBed;
 pub use loudness::{CEILING_DBTP, CODEC_HEADROOM_DB, Finish, Meter, TARGET_LUFS};
+pub use mix::{Anchor, CROSSFADE, Mix, Music, MusicCue, Play, SfxCue, Track};
 
 pub const SAMPLE_RATE: u32 = 48_000;
 
@@ -251,6 +260,110 @@ mod tests {
         );
     }
 
+    /// The speech fixtures one after another, mono 48 kHz.
+    fn speech() -> Vec<f32> {
+        let dir = std::path::PathBuf::from(std::env::var("SHOT_FIXTURES").expect("SHOT_FIXTURES"))
+            .join("speech");
+        let mut names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|e| e == "wav"))
+            .collect();
+        names.sort();
+        names
+            .iter()
+            .flat_map(|path| {
+                let file = std::fs::File::open(path).unwrap();
+                let source =
+                    symphonia::core::io::MediaSourceStream::new(Box::new(file), Default::default());
+                sound::decode_mono(source, "wav").unwrap()
+            })
+            .collect()
+    }
+
+    /// Needs the generated speech fixtures: `SHOT_FIXTURES=... cargo test -p shot-audio -- --ignored`.
+    #[test]
+    #[ignore]
+    fn speech_with_sfx_and_music_meets_the_loudness_target() {
+        let voice = speech();
+        let len = voice.len() as u64;
+        let bundled = |name: &str| sound::bundled(name).unwrap().decode();
+        let play = |name: &str| {
+            let sound = bundled(name);
+            let beats = beats::detect(sound.samples());
+            Some(Play {
+                track: Track::new(sound, beats),
+                gain_db: -14.0,
+                duck_db: -26.0,
+            })
+        };
+        let music = Music::new(
+            vec![
+                MusicCue {
+                    at: 0,
+                    play: play("bed-lofi"),
+                },
+                MusicCue {
+                    at: len / 2,
+                    play: play("bed-pulse"),
+                },
+            ],
+            CROSSFADE,
+        );
+        // A sound every 1.5 s at full gain, far denser than any rule places them.
+        let names = [
+            "whoosh", "impact", "pop", "click", "riser", "swoosh", "thud", "tick",
+        ];
+        let sfx: Vec<SfxCue> = (0..len / 72_000)
+            .map(|k| {
+                let sound = bundled(names[k as usize % names.len()]);
+                SfxCue::new(sound, Anchor::Peak(k * 72_000 + 24_000), 0.0)
+            })
+            .collect();
+        let bumpers = Some(0..2 * SAMPLE_RATE as u64);
+
+        let run = |gain_db: Option<f64>| {
+            let mut chain = VoiceChain::new();
+            let mut mix = Mix::new(music.clone(), sfx.clone(), bumpers.clone());
+            let mut finish = gain_db.map(|g| Finish::new(g, CEILING_DBTP));
+            let mut meter = Meter::new();
+            let mut chain_lead = VoiceChain::LATENCY;
+            let mut finish_lead = gain_db.map_or(0, |_| Finish::LATENCY);
+            let mut input = voice.clone();
+            input.resize(voice.len() + VoiceChain::LATENCY + Finish::LATENCY, 0.0);
+            for block in input.chunks_mut(SAMPLE_RATE as usize / 4) {
+                chain.process(block);
+                let drop = chain_lead.min(block.len());
+                chain_lead -= drop;
+                let block = &mut block[drop..];
+                mix.mix(block);
+                if let Some(finish) = &mut finish {
+                    finish.process(block);
+                }
+                let drop = finish_lead.min(block.len());
+                finish_lead -= drop;
+                meter.add(&block[drop..]);
+            }
+            meter
+        };
+        let before = run(None).loudness().unwrap();
+        let mut gain = TARGET_LUFS - before;
+        let mut meter = run(Some(gain));
+        for _ in 0..3 {
+            let after = meter.loudness().unwrap();
+            if (TARGET_LUFS - after).abs() <= 0.1 {
+                break;
+            }
+            gain += TARGET_LUFS - after;
+            meter = run(Some(gain));
+        }
+        let loudness = meter.loudness().unwrap();
+        let peak = meter.true_peak();
+        println!("mix at {before:.2} LUFS, finished at {loudness:.2} LUFS and {peak:.2} dBTP");
+        assert!((loudness - TARGET_LUFS).abs() <= 0.5, "loudness {loudness}");
+        assert!(peak <= CEILING_DBTP, "true peak {peak}");
+    }
+
     /// Release-mode speed check: `cargo test -p shot-audio --release -- --ignored --nocapture`.
     #[test]
     #[ignore]
@@ -273,5 +386,34 @@ mod tests {
             finish.process(&mut piece);
         }
         println!("17 min of audio in {:?}", start.elapsed());
+
+        let sound = sound::bundled("bed-lofi").unwrap().decode();
+        let start = std::time::Instant::now();
+        let beats = beats::detect(sound.samples());
+        println!("beats of an 18 s bed in {:?}", start.elapsed());
+        let cue = |at: u64| MusicCue {
+            at,
+            play: Some(Play {
+                track: Track::new(sound.clone(), beats.clone()),
+                gain_db: -18.0,
+                duck_db: -28.0,
+            }),
+        };
+        let total = (pieces * piece_len) as u64;
+        let music = Music::new((0..8).map(|k| cue(k * total / 8)).collect(), CROSSFADE);
+        let pop = sound::bundled("pop").unwrap().decode();
+        let sfx = (0..total / 96_000)
+            .map(|k| SfxCue::new(pop.clone(), Anchor::Start(k * 96_000), -6.0))
+            .collect();
+        let mut mix = Mix::new(music, sfx, Some(0..96_000));
+        let start = std::time::Instant::now();
+        for _ in 0..pieces {
+            piece.copy_from_slice(&template);
+            mix.mix(&mut piece);
+        }
+        println!(
+            "mix of 17 min with 8 cues and a sound every 2 s in {:?}",
+            start.elapsed()
+        );
     }
 }
