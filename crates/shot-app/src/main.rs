@@ -27,6 +27,7 @@ mod folder;
 mod metrics;
 mod model;
 mod peaks;
+mod place;
 mod preview;
 mod prompter;
 mod record;

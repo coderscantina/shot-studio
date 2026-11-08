@@ -8,12 +8,14 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use shot_core::{
-    Cut, Decision, Format, FormatLayer, Id, Lock, Micros, MigrateInput, Project, Script, TakeAt,
-    TimeRange, Transcript, Video, ZoomBy,
+    Cut, Decision, Elements, Format, FormatLayer, Id, Lock, Micros, MigrateInput, Project, Script,
+    TakeAt, TimeRange, Transcript, Video, ZoomBy,
 };
 use shot_mcp::style::{self, Disk, Repo};
+use shot_render::theme::Theme;
 use shot_ship::lock::LOCK_FILE;
 
 pub struct VideoFolder {
@@ -25,6 +27,11 @@ pub struct VideoFolder {
     pub shown: Project,
     /// Cached transcripts by take. A take without one is missing here.
     pub transcripts: HashMap<Id, Transcript>,
+    /// The committed elements of each take that has an elements file.
+    pub elements: HashMap<Id, Elements>,
+    /// What the brand gives the templates, read again on every write like export reads it:
+    /// the preview draws with it and the screens check overlays against it.
+    pub theme: Result<Arc<Theme>, String>,
     style: Option<Styled>,
 }
 
@@ -116,6 +123,8 @@ impl VideoFolder {
             shown: project.clone(),
             project,
             transcripts: HashMap::new(),
+            elements: HashMap::new(),
+            theme: Ok(Arc::default()),
             style,
         };
         folder.load_transcripts()?;
@@ -150,8 +159,26 @@ impl VideoFolder {
         Ok(())
     }
 
+    /// Reads `elements/<take>.jsonl` of every take the cut uses.
+    fn load_elements(&mut self) -> Result<(), String> {
+        self.elements.clear();
+        for edit in self.project.cut.chapters.iter().flat_map(|c| &c.takes) {
+            let path = format!("elements/{}.jsonl", edit.take);
+            if self.elements.contains_key(&edit.take) {
+                continue;
+            }
+            if let Some(text) = read(&self.dir, &path)? {
+                let elements =
+                    Elements::parse(edit.take.clone(), &text).map_err(|e| format!("{path}:{e}"))?;
+                self.elements.insert(edit.take.clone(), elements);
+            }
+        }
+        Ok(())
+    }
+
     /// Builds a migrated video's lock from the files and writes `cut.lock` when it changed,
-    /// unless the video shipped. Called after every write, and when analysis added elements.
+    /// unless the video shipped, then reads the elements and the theme again. Called after
+    /// every write, and when analysis added elements.
     pub fn rebuild_lock(&mut self) -> Result<(), String> {
         if let Some(styled) = &mut self.style
             && let Some((disk, slug)) = &styled.repo
@@ -169,7 +196,10 @@ impl VideoFolder {
             },
             ..self.project.clone()
         };
-        Ok(())
+        self.theme = Theme::load(&self.dir, self.project.video.format, &self.project.cut)
+            .map(Arc::new)
+            .map_err(|e| e.to_string());
+        self.load_elements()
     }
 
     /// Writes `cut` as canonical `cut.kdl` and makes it the project's cut.
@@ -280,6 +310,19 @@ impl VideoFolder {
         disk.write(&path(LOCK_FILE), &migration.lock.to_kdl())?;
         *self = Self::open(&self.dir)?;
         Ok(())
+    }
+
+    /// Adds the Lottie at `source` to the channel's brand when the import check passes, see
+    /// [`crate::place::add_lottie`], and rebuilds the lock so its stickers and hashes are in.
+    pub fn add_lottie(&mut self, source: &Path) -> Result<crate::place::LottieImport, String> {
+        let repo = Disk::locate(&self.dir)
+            .ok()
+            .and(shot_render::theme::channel_root(&self.dir))
+            .ok_or("Lottie templates live in a channel's brand, and this video is not in one")?
+            .to_owned();
+        let imported = crate::place::add_lottie(&repo, source)?;
+        self.rebuild_lock()?;
+        Ok(imported)
     }
 
     pub fn media(&self, take: &Id, file: &str) -> PathBuf {

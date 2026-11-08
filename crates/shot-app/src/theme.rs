@@ -122,6 +122,7 @@ embedded!(
     "export",
     "layout",
     "mic",
+    "music",
     "pause",
     "picture",
     "play",

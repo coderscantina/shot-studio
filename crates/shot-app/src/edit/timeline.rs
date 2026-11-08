@@ -1,5 +1,6 @@
 //! The Timeline workspace: preview, change list and overlays on top, the whole-video overview,
-//! then one lane per kind around the playhead: Layout, Zoom, B-roll, Highlight, Words and Voice.
+//! then one lane per kind around the playhead: Layout, Zoom, Overlays, Highlight, Words, Voice,
+//! Sound and Music, with the lock's transitions as marks on their chapter edges.
 
 use std::sync::Arc;
 
@@ -7,7 +8,7 @@ use gpui::{
     Bounds, Context, Div, FontWeight, Hsla, MouseButton, MouseDownEvent, Pixels, Window, canvas,
     div, fill, point, prelude::*, px, size,
 };
-use shot_core::{RemovedBy, WordState};
+use shot_core::{Applied, RemovedBy, WordState};
 use shot_render::plan::frame_time;
 
 use super::EditScreen;
@@ -206,6 +207,19 @@ fn lanes(
         .take_while(|f| *f < window.end)
         .map(|f| (x(f), timecode(f)))
         .collect();
+    let transitions = lock_moments(this, &window, cx, |i| match &i.applied {
+        Applied::Transition { kind, .. } => Some(*kind),
+        _ => None,
+    });
+    // A timecode gives way to a transition's name where the two would overlap.
+    let ruler: Vec<(f32, String)> = ruler
+        .into_iter()
+        .filter(|(at, _)| {
+            transitions
+                .iter()
+                .all(|(f, _)| ((x(*f) - at) * track).abs() > 64.)
+        })
+        .collect();
     ui::pane()
         .flex_1()
         .min_h_0()
@@ -278,15 +292,15 @@ fn lanes(
                 .child(lane("zoom", "Zoom", px(36.), zoom_lane(this, &window, &x)))
                 .child(lane(
                     "picture",
-                    "B-roll",
+                    "Overlays",
                     px(36.),
-                    super::overlays::lane(this, &window, &x, "b-roll"),
+                    super::overlays::lane(this, &window, &x, false),
                 ))
                 .child(lane(
                     "edit",
                     "Highlight",
                     px(36.),
-                    super::overlays::lane(this, &window, &x, "highlight"),
+                    super::overlays::lane(this, &window, &x, true),
                 ))
                 .child(lane(
                     "text",
@@ -295,8 +309,207 @@ fn lanes(
                     words_lane(this, &window, &x, track, cx),
                 ))
                 .child(lane("mic", "Voice", px(60.), voice_lane(this, &window, cx)))
-                .child(playhead_line(this, &window)),
+                .child(sound_lane(this, &window, &x, cx))
+                .child(lane(
+                    "music",
+                    "Music",
+                    px(28.),
+                    music_lane(this, &window, &x, cx),
+                ))
+                .children(transition_marks(transitions, &x))
+                .child(playhead_line(this, &window))
+                .when(
+                    this.place.picker == Some(super::place::Picker::Sound),
+                    |stack| {
+                        // Above the Sound lane, over the Music lane and the gaps below it.
+                        stack.child(
+                            super::place::sound_picker(this, cx)
+                                .absolute()
+                                .bottom(px(28. + 4. + 28. + 6.))
+                                .left(px(NAME_WIDTH))
+                                .w(px(520.)),
+                        )
+                    },
+                ),
         )
+}
+
+/// The moments the lock places in take time, as output frames inside `window`, with what
+/// `pick` makes of each instance.
+fn lock_moments<T: Clone>(
+    this: &EditScreen,
+    window: &std::ops::Range<u64>,
+    cx: &Context<EditScreen>,
+    pick: impl Fn(&shot_core::Instance) -> Option<T>,
+) -> Vec<(u64, T)> {
+    let Some(lock) = this.folder.read(cx).lock() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for take in &lock.takes {
+        for instance in &take.instances {
+            if let Some(value) = pick(instance) {
+                let frames = this.map.outputs_of(&take.take, instance.applied.start());
+                out.extend(
+                    frames
+                        .filter(|f| window.contains(f))
+                        .map(|f| (f, value.clone())),
+                );
+            }
+        }
+    }
+    out.sort_by_key(|(frame, _)| *frame);
+    out
+}
+
+/// Neutral marks for the lock's sound effects, named by their sound. Clicking the lane moves
+/// the playhead there and opens the sound picker above it.
+fn sound_lane(
+    this: &EditScreen,
+    window: &std::ops::Range<u64>,
+    x: &impl Fn(u64) -> f32,
+    cx: &mut Context<EditScreen>,
+) -> impl IntoElement {
+    let sounds = lock_moments(this, window, cx, |i| match &i.applied {
+        Applied::Sfx { sound, .. } => Some(sound.to_string()),
+        _ => None,
+    });
+    let marks = div()
+        .id("sound-lane")
+        .size_full()
+        .cursor_pointer()
+        .children(sounds.into_iter().map(|(frame, name)| {
+            div()
+                .absolute()
+                .top(px(4.))
+                .bottom(px(4.))
+                .left(gpui::relative(x(frame)))
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .child(div().w(px(2.)).h_full().rounded(px(1.)).bg(BODY))
+                .child(
+                    div()
+                        .px(px(6.))
+                        .rounded(px(4.))
+                        .bg(BLOCK)
+                        .text_color(BODY)
+                        .text_size(TEXT_XS)
+                        .font_weight(FontWeight::MEDIUM)
+                        .line_height(px(20.))
+                        .whitespace_nowrap()
+                        .child(name),
+                )
+        }))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                let bounds = this.sound_lane_bounds.get();
+                if bounds.size.width > px(0.) {
+                    let at =
+                        ((event.position.x - bounds.origin.x) / bounds.size.width).clamp(0., 1.);
+                    let window = lane_window(this);
+                    let frame = window.start + ((window.end - window.start) as f32 * at) as u64;
+                    this.selection = None;
+                    this.seek(frame);
+                    if this.place.picker != Some(super::place::Picker::Sound) {
+                        this.toggle_picker(super::place::Picker::Sound, cx);
+                    }
+                    cx.notify();
+                }
+            }),
+        );
+    let bounds = this.sound_lane_bounds.clone();
+    let track = div()
+        .size_full()
+        .child(
+            canvas(move |b, _, _| bounds.set(b), |_, _, _, _| {})
+                .absolute()
+                .size_full(),
+        )
+        .child(marks);
+    lane("system-audio", "Sound", px(28.), track)
+}
+
+/// The music bed under the whole cut and the lock's music cues, each until the next.
+fn music_lane(
+    this: &EditScreen,
+    window: &std::ops::Range<u64>,
+    x: &impl Fn(u64) -> f32,
+    cx: &mut Context<EditScreen>,
+) -> impl IntoElement {
+    let mut blocks: Vec<(u64, u64, String)> = Vec::new();
+    if let Some(bed) = &this.folder.read(cx).project.cut.music {
+        blocks.push((
+            0,
+            this.map.frames,
+            format!("{}, ducked under voice", bed.file),
+        ));
+    }
+    let all = lock_moments(this, &(0..this.map.frames), cx, |i| match &i.applied {
+        Applied::Music { file, .. } => Some(file.clone()),
+        _ => None,
+    });
+    for (index, (frame, file)) in all.iter().enumerate() {
+        let end = all
+            .get(index + 1)
+            .map_or(this.map.frames, |(next, _)| *next);
+        blocks.push((*frame, end, format!("{file}, ducked under voice")));
+    }
+    div().size_full().children(
+        blocks
+            .into_iter()
+            .filter(|(from, to, _)| *to > window.start && *from < window.end)
+            .map(|(from, to, text)| {
+                block(
+                    x(from.max(window.start)),
+                    x(to.min(window.end)) - 0.002,
+                    RAISED,
+                    MUTED,
+                    text,
+                )
+                .line_height(px(28.))
+            }),
+    )
+}
+
+/// A transition from the lock: a mark down the lanes on its chapter edge, named by its kind.
+fn transition_marks(
+    transitions: Vec<(u64, shot_core::TransitionKind)>,
+    x: &impl Fn(u64) -> f32,
+) -> Vec<Div> {
+    transitions
+        .into_iter()
+        .map(|(frame, kind)| {
+            div()
+                .absolute()
+                .top(px(-18.))
+                .bottom_0()
+                .left(px(NAME_WIDTH))
+                .right(px(16.))
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .left(gpui::relative(x(frame)))
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .px(px(5.))
+                                .rounded(px(4.))
+                                .bg(BLOCK_ON)
+                                .text_color(TEXT)
+                                .text_size(px(11.))
+                                .line_height(px(16.))
+                                .whitespace_nowrap()
+                                .child(capitalized(kind.as_str())),
+                        )
+                        .child(div().flex_1().w(px(1.)).bg(Hsla::from(TEXT).opacity(0.35))),
+                )
+        })
+        .collect()
 }
 
 fn lane(icon_name: &str, name: &'static str, height: Pixels, track: impl IntoElement) -> Div {

@@ -1,11 +1,15 @@
 //! The Picture workspace: the preview fills the stage, the layout picker on the left, what is on
-//! screen now and next on the right, three rolling transcript lines, and the overview bar.
+//! screen now and next on the right with the tools that place callouts, pops and sounds, three
+//! rolling transcript lines, and the overview bar.
 
-use gpui::{Context, Div, FontWeight, Window, div, prelude::*, px};
+use gpui::{
+    Context, Div, FontWeight, MouseButton, MouseDownEvent, Window, canvas, div, prelude::*, px,
+};
 use shot_core::{Layout, WordState};
 
 use super::EditScreen;
 use super::parts::{self, layout_name};
+use super::place::{self, Picker, tool_button};
 use crate::model::{LAYOUT_KEYS, Span, timecode};
 use crate::theme::*;
 use crate::ui::{self, icon, kbd, label};
@@ -34,7 +38,7 @@ pub fn render(this: &mut EditScreen, _: &mut Window, cx: &mut Context<EditScreen
                 .mx(px(8.))
                 .child(layouts(this, cx))
                 .child(stage(this, cx))
-                .child(layers(this)),
+                .child(layers(this, cx)),
         )
         .child(parts::overview_footer(this, chapter_frames, cx))
 }
@@ -130,10 +134,38 @@ fn stage(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement {
                 .flex()
                 .flex_col()
                 .gap(px(14.))
-                .child(parts::preview(this))
+                .child(callout_target(this, cx))
                 .child(parts::transport(this, false, cx)),
         )
         .child(lines(this))
+}
+
+/// The preview, which places a callout where it is clicked while the callout tool is on.
+fn callout_target(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement {
+    let bounds = this.preview_bounds.clone();
+    let on = this.place.callout;
+    div()
+        .id("picture-preview")
+        .relative()
+        .child(parts::preview(this))
+        .child(
+            canvas(move |b, _, _| bounds.set(b), |_, _, _, _| {})
+                .absolute()
+                .size_full(),
+        )
+        .when(on, |preview| {
+            preview.cursor_crosshair().on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    let b = this.preview_bounds.get();
+                    if b.size.width > px(0.) && b.size.height > px(0.) {
+                        let x = (event.position.x - b.origin.x) / b.size.width;
+                        let y = (event.position.y - b.origin.y) / b.size.height;
+                        this.place_callout((x, y), cx);
+                    }
+                }),
+            )
+        })
 }
 
 /// The line being spoken, with the one before and after it.
@@ -210,7 +242,7 @@ fn lines(this: &EditScreen) -> impl IntoElement {
         )
 }
 
-fn layers(this: &EditScreen) -> impl IntoElement {
+fn layers(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement {
     let now = this.map.span_at(this.playhead);
     let source_frame = now.map(|s| s.source_frame(this.playhead));
     let zoom = now
@@ -250,6 +282,50 @@ fn layers(this: &EditScreen) -> impl IntoElement {
         .children(
             next.into_iter()
                 .map(|(name, what, frame)| layer(name, &what, timecode(frame), false)),
+        )
+        .child(div().h(px(14.)))
+        .child(label("Place at the playhead").px(px(10.)).pb(px(8.)))
+        .child(
+            div()
+                .flex()
+                .flex_wrap()
+                .gap(px(4.))
+                .px(px(6.))
+                .child(
+                    tool_button("place-callout", "cursor", "Callout", this.place.callout)
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_callout(cx))),
+                )
+                .child(
+                    tool_button(
+                        "place-pop",
+                        "spark",
+                        "Pop",
+                        this.place.picker == Some(Picker::Pop),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_picker(Picker::Pop, cx))),
+                )
+                .child(
+                    tool_button(
+                        "place-sound",
+                        "system-audio",
+                        "Sound",
+                        this.place.picker == Some(Picker::Sound),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_picker(Picker::Sound, cx))),
+                ),
+        )
+        .child(
+            div()
+                .id("place-panel")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .pt(px(8.))
+                .map(|panel| match this.place.picker {
+                    Some(Picker::Pop) => panel.child(place::pop_picker(this, cx)),
+                    Some(Picker::Sound) => panel.child(place::sound_picker(this, cx)),
+                    None => panel.children(place::note(this).map(|n| n.px(px(10.)))),
+                }),
         )
 }
 

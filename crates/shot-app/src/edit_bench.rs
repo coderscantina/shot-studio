@@ -74,6 +74,7 @@ pub fn run(dir: &std::path::Path, options: &BenchOptions) -> Result<bool, String
             map,
             media: dir.join("media"),
             effects: project.format.effects(),
+            theme: folder.theme.clone(),
         },
         0,
     );
