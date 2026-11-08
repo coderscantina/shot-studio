@@ -124,6 +124,11 @@ fn fixtures() -> PathBuf {
 }
 
 fn reel(preset: &str, camera: &str) -> Reel {
+    reel_of(preset, camera, CUT, true)
+}
+
+/// The reel over `cut`, with the transitions, bookends and end card of [`joins`] when `joined`.
+fn reel_of(preset: &str, camera: &str, cut: &str, joined: bool) -> Reel {
     let root = tempfile::tempdir().unwrap();
     let brand_dir = root.path().join("brand");
     std::fs::create_dir_all(brand_dir.join("media")).unwrap();
@@ -144,7 +149,7 @@ fn reel(preset: &str, camera: &str) -> Reel {
          transition stinger=\"brand/stinger.json\" peak=300_000\n"
     ))
     .unwrap();
-    let cut = Cut::parse(CUT).unwrap();
+    let cut = Cut::parse(cut).unwrap();
     let read_root = root.path().to_owned();
     let theme = Arc::new(
         Theme::new(&brand, FormatKind::Opinion, Some(&cut), &|file| {
@@ -159,6 +164,25 @@ fn reel(preset: &str, camera: &str) -> Reel {
         format: FormatKind::Opinion.preset(),
         cut,
     };
+    let timeline = Timeline::evaluate(&project);
+    let plan = ExportPlan::new(timeline.main(), 60, |_| MediaId::default());
+    let plan = if joined {
+        plan.with_joins(&joins(&project, &theme))
+    } else {
+        plan
+    };
+    Reel {
+        _root: root,
+        video,
+        plan,
+        theme,
+        effects: project.format.effects(),
+    }
+}
+
+/// A dip into the video, every kind of [`KINDS`] between chapters, both bookends and the end
+/// card.
+fn joins(project: &Project, theme: &Theme) -> Joins {
     let t01 = Id::new("t01").unwrap();
     let join = |at: u64, target, kind| Join {
         take: t01.clone(),
@@ -170,7 +194,7 @@ fn reel(preset: &str, camera: &str) -> Reel {
     let mut transitions = vec![join(0, Target::VideoStart, TransitionKind::Dip)];
     transitions.extend(KINDS.map(|(at, kind)| join(at, Target::ChapterStart, kind)));
     let stinger = theme.stinger.as_ref().unwrap();
-    let joins = Joins {
+    Joins {
         intro: Some(BookendInput {
             bumper: Some("brand/media/intro.mp4".into()),
             title: Some(project.video.title.clone()),
@@ -190,15 +214,6 @@ fn reel(preset: &str, camera: &str) -> Reel {
             peak: stinger.peak,
         }),
         end_card: Some(Micros(2_000_000)),
-    };
-    let timeline = Timeline::evaluate(&project);
-    let plan = ExportPlan::new(timeline.main(), 60, |_| MediaId::default()).with_joins(&joins);
-    Reel {
-        _root: root,
-        video,
-        plan,
-        theme,
-        effects: project.format.effects(),
     }
 }
 
@@ -248,7 +263,7 @@ fn transitions_bookends_and_the_camera_frame_the_same_reached_by_playing_or_by_s
         })
         .collect();
     let mut played_on = painter(&reel);
-    let mut played = crate::golden::Played::new(plan.frames, seeks.iter().copied());
+    let mut played = crate::golden::Played::new(CANVAS.0, plan.frames, seeks.iter().copied());
     for f in 0..plan.frames {
         played.push(&pixels(&mut played_on, &renderer, plan, &pool, f));
     }
@@ -262,6 +277,73 @@ fn transitions_bookends_and_the_camera_frame_the_same_reached_by_playing_or_by_s
         };
         played.assert_same("seek", f, &pixels(with, on, plan, &pool, f));
     }
+}
+
+/// A 10 s stretch of the fixture take, 6 s of it in the `split` layout with `switch` on both
+/// edges, or without the layout (`None`) or with it throughout (`Some(None)`).
+fn switch_cut(layout: Option<Option<&str>>) -> String {
+    let (from, to, edges) = match layout {
+        None => {
+            return "chapter \"A\" {\n take t01 {\n keep from=10_000_000 to=20_000_000\n }\n}\n"
+                .into();
+        }
+        Some(None) => ("10_000_000", "20_000_000", String::new()),
+        Some(Some(switch)) => (
+            "12_000_000",
+            "18_000_000",
+            format!("{{\n in {switch} length=500_000\n out {switch} length=500_000\n }}"),
+        ),
+    };
+    format!(
+        "chapter \"A\" {{\n take t01 {{\n keep from=10_000_000 to=20_000_000\n layout split from={from} to={to} {edges}\n }}\n}}\n"
+    )
+}
+
+/// Holds the switch `kind` to starting on the outgoing layout's frame and ending on the incoming
+/// one's, on both edges of the `split` layout.
+fn assert_switch_edges(kind: &str) {
+    let pool = BufferPool::new(CANVAS.0, CANVAS.1, Range::Full, Matrix::Bt601).unwrap();
+    let renderer = Renderer::new().unwrap();
+    let frame = |cut: String, at: u64| {
+        let reel = reel_of(
+            "editorial",
+            "shape=circle corners=24 border=8 shadow=soft",
+            &cut,
+            false,
+        );
+        pixels(&mut painter(&reel), &renderer, &reel.plan, &pool, at)
+    };
+    // Output frames of the 10 s take stretch at 60 fps: the layout starts at 2 s and ends at
+    // 8 s, each switch plays for 30 frames from its edge.
+    let (enter, leave) = (120, 480);
+    let outside = |at| frame(switch_cut(None), at);
+    let inside = |at| frame(switch_cut(Some(None)), at);
+    let with = |at| frame(switch_cut(Some(Some(kind))), at);
+    let check = |what: &str, got: Vec<[u8; 3]>, want: Vec<[u8; 3]>| {
+        crate::golden::assert_match(&format!("{kind} {what}"), CANVAS.0, &want, &got);
+    };
+    check("enter, progress 0", with(enter), outside(enter));
+    check("enter, progress 1", with(enter + 30), inside(enter + 30));
+    check("leave, progress 0", with(leave), inside(leave));
+    check("leave, progress 1", with(leave + 30), outside(leave + 30));
+}
+
+#[test]
+#[ignore = "needs the GPU and the generated target project"]
+fn a_dissolve_starts_on_the_outgoing_frame_and_ends_on_the_incoming_one() {
+    assert_switch_edges("dissolve");
+}
+
+#[test]
+#[ignore = "needs the GPU and the generated target project; fails at progress 0: 165 pixels differ by up to 5 on enter, 7088 by up to 81 on leave"]
+fn a_zoom_through_starts_on_the_outgoing_frame_and_ends_on_the_incoming_one() {
+    assert_switch_edges("zoom-through");
+}
+
+#[test]
+#[ignore = "needs the GPU and the generated target project; fails at progress 0: 824892 pixels differ by up to 55 on enter, 98860 by up to 82 on leave"]
+fn a_morph_starts_on_the_outgoing_frame_and_ends_on_the_incoming_one() {
+    assert_switch_edges("morph");
 }
 
 /// Where the reel's frames go, git-ignored.

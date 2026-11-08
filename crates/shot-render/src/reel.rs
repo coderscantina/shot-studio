@@ -354,7 +354,8 @@ mod tests {
                     state % frames
                 })
                 .collect();
-            let mut played = crate::golden::Played::new(frames, seeks.iter().copied());
+            let mut played =
+                crate::golden::Played::new(PREVIEW.width, frames, seeks.iter().copied());
             for f in 0..frames {
                 played.push(&at(&renderer, f));
             }

@@ -317,7 +317,7 @@ chapter "One" {
             let painted = pool.buffer().unwrap();
             painter.paint(&renderer, &plan, frame, &painted).unwrap();
             let (a, b) = (read_rgb(&live).unwrap(), read_rgb(&painted).unwrap());
-            crate::golden::assert_match(&format!("frame {frame}"), &a, &b);
+            crate::golden::assert_match(&format!("frame {frame}"), canvas.width, &a, &b);
         }
     }
 }
