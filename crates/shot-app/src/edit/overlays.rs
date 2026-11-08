@@ -14,12 +14,10 @@
 use std::path::Path;
 
 use gpui::{App, Context, Entity, FontWeight, Hsla, Window, div, prelude::*, px, rgb};
+use gpui_component::Sizable;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
-use gpui_component::{Selectable, Sizable};
-use shot_core::{
-    Applied, Cut, DerivedKind, Id, Micros, Overlay, OverlayPreset, ParamValue, TakeAt,
-};
+use shot_core::{Applied, Cut, DerivedKind, Id, Overlay, OverlayPreset, ParamValue, TakeAt};
 use shot_render::overlay::{self, Params, broll, highlight, link_card};
 use shot_render::overlay_rules;
 
@@ -527,7 +525,6 @@ fn add_menu(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement
         .label("Add")
         .small()
         .ghost()
-        .selected(false)
         .dropdown_menu(move |menu, _, _| {
             let mut menu = menu.label("Presets");
             if presets.is_empty() {
@@ -535,13 +532,12 @@ fn add_menu(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement
             }
             for preset in &presets {
                 let (screen, preset) = (screen.clone(), preset.clone());
-                let length = Micros(preset.length.0);
                 menu = menu.item(
                     PopupMenuItem::new(format!(
                         "{}  ·  {}, {}",
                         preset.name,
                         preset.template,
-                        crate::model::seconds(length)
+                        crate::model::seconds(preset.length)
                     ))
                     .on_click(move |_, _, cx| {
                         let preset = preset.clone();
@@ -611,6 +607,9 @@ fn overlay_row(
     for (name, value) in &overlay.params {
         let shown = match value {
             ParamValue::Text(text) => text.clone(),
+            ParamValue::Integer(n) if is_time(template, name.as_str()) => {
+                format!("{:.2} s", *n as f64 / 1e6)
+            }
             ParamValue::Integer(n) => n.to_string(),
             ParamValue::Bool(b) => if *b { "on" } else { "off" }.to_owned(),
         };
@@ -763,6 +762,17 @@ fn overlay_row(
         )
         .child(params)
         .into_any_element()
+}
+
+/// Whether parameter `name` of `template` is a time in microseconds, shown in seconds.
+fn is_time(template: &str, name: &str) -> bool {
+    let keyframes = overlay::KEYFRAME_PARAMS.iter();
+    overlay::spec(template).is_some_and(|spec| {
+        spec.params
+            .iter()
+            .chain(keyframes)
+            .any(|p| p.name == name && p.kind == overlay::ParamKind::Time)
+    })
 }
 
 fn params_index(overlay: &Overlay, name: &str) -> usize {
