@@ -1,6 +1,7 @@
 //! gpui UI, bundled as "Shot Studio.app" by `scripts/bundle.sh`.
 //!
 //! `shot-app <video-folder>` opens a video folder on its Edit screen, with Record one click away.
+//! `shot-app <channel-repo>` opens the channel's board.
 //! Without arguments, as when started from Finder, it opens the welcome window.
 //!
 //! `shot-app [flags] <video.mp4>` opens the preview spike window on one file:
@@ -83,7 +84,13 @@ fn main() -> ExitCode {
         let dir = options.video;
         studio_app().run(move |cx| {
             init(cx);
-            if let Err(error) = studio::open(&dir, cx) {
+            // A channel repo has no video.kdl of its own and opens as its board.
+            let opened = if !dir.join("video.kdl").exists() && board::channel::is_channel(&dir) {
+                board::open_window(&dir, cx)
+            } else {
+                studio::open(&dir, cx)
+            };
+            if let Err(error) = opened {
                 eprintln!("{}: {error}", dir.display());
                 cx.quit();
             }

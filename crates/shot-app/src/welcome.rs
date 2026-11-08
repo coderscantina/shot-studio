@@ -18,7 +18,7 @@ use crate::board::{FORMATS, format_color, format_name};
 use crate::theme::*;
 use crate::ui::{ActionLook, alert, icon, label, mono, pane, proposal_action};
 
-actions!(shot_app, [ShowWelcome, OpenVideo]);
+actions!(shot_app, [ShowWelcome, OpenVideo, NewChannel]);
 
 /// How many recent folders each list keeps.
 const RECENT: usize = 8;
@@ -29,6 +29,7 @@ const RECENT_CHANNELS: &str = "recent-channels.json";
 pub fn init(cx: &mut App) {
     cx.on_action(|_: &ShowWelcome, cx| open(cx));
     cx.on_action(|_: &OpenVideo, cx| pick_folder(None, cx));
+    cx.on_action(|_: &NewChannel, cx| new_channel(&home(), welcome_done, cx));
     cx.bind_keys([KeyBinding::new("cmd-o", OpenVideo, None)]);
 }
 
