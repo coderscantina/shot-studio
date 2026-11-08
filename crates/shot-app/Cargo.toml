@@ -20,6 +20,7 @@ shot-media = { path = "../shot-media" }
 shot-board = { path = "../shot-board" }
 shot-mcp = { path = "../shot-mcp" }
 shot-ship = { path = "../shot-ship" }
+shot-library = { path = "../shot-library" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { workspace = true }

@@ -5,6 +5,7 @@
 //! screen keeps only view state: the workspace, the chapter on show, the selection, the playhead.
 
 mod lane_menu;
+pub(crate) mod library;
 mod music;
 mod overlays;
 mod parts;

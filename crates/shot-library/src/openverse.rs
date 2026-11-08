@@ -294,7 +294,7 @@ impl Client {
         let config = ureq::Agent::config_builder()
             .user_agent(USER_AGENT)
             .timeout_connect(Some(Duration::from_secs(8)))
-            .timeout_recv_response(Some(Duration::from_secs(15)))
+            .timeout_recv_response(Some(Duration::from_secs(30)))
             .https_only(true)
             .build();
         Self {

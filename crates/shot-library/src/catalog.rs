@@ -195,6 +195,19 @@ impl Folders {
             .collect()
     }
 
+    /// `path` as `cut.kdl` names it from the video folder: `sources/cat.jpg`, or
+    /// `../../library/cat.jpg` for the channel's.
+    pub fn in_video(&self, path: &Path) -> Option<String> {
+        relative(self.video.as_ref()?, path)
+    }
+
+    /// `path` as a person finds it: from the channel repo, else from the video folder.
+    pub fn shown(&self, path: &Path) -> String {
+        let from = self.channel.as_ref().or(self.video.as_ref());
+        from.and_then(|dir| path.strip_prefix(dir).ok())
+            .map_or_else(|| path.display().to_string(), |p| p.display().to_string())
+    }
+
     /// The asset downloaded before from the Openverse result `id`, if it is still there.
     pub fn downloaded(&self, media: Media, id: &str) -> Option<Asset> {
         let assets = match media {
@@ -233,7 +246,7 @@ impl Folders {
         let credit = hit.credit();
         write_atomic(&path.with_extension(CREDIT), credit.to_kdl().as_bytes())?;
         write_atomic(&path, bytes)?;
-        let relative = self.video.as_ref().and_then(|v| relative(v, &path));
+        let relative = self.in_video(&path);
         let section = match hit.media {
             Media::Audio => Section::Sounds,
             Media::Image => Section::Images,
