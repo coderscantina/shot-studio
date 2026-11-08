@@ -16,3 +16,6 @@ docs/evidence/**/*.jpg
 docs/evidence/**/*.gif
 docs/evidence/**/*.mov
 docs/evidence/**/*.mp4
+
+# scripts/bundle.sh output
+/dist/

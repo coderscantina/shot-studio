@@ -23,9 +23,23 @@ Claude does the judgement work, such as script drafts, unsure cuts and Shorts pi
 
 In development. There is no release yet. The plan and milestones live in [docs/README.md](docs/README.md).
 
+## Install
+
+Shot Studio needs macOS 26 or newer on Apple Silicon. Once the first release is out:
+
+```sh
+brew install --cask coderscantina/tap/shot-studio
+```
+
+The cask also puts the `shot` command on your `PATH`. With the DMG from [GitHub Releases](https://github.com/coderscantina/shot-studio/releases), drag the app to Applications and link the command yourself:
+
+```sh
+sudo ln -sf "/Applications/Shot Studio.app/Contents/MacOS/shot" /usr/local/bin/shot
+```
+
 ## Build
 
-Run `cargo build` from the repo root. The app needs macOS 26 or newer on Apple Silicon.
+Run `cargo build` from the repo root. `scripts/bundle.sh` builds `Shot Studio.app` and a DMG into `dist/`, and `./release.sh` cuts a release (see `./release.sh --help`).
 
 ## Contributing
 
@@ -37,7 +51,7 @@ Report vulnerabilities privately, see [SECURITY.md](SECURITY.md).
 
 ## License
 
-[MIT](LICENSE), Coder's Cantina.
+[MIT](LICENSE), Coder's Cantina. Bundled fonts, sounds, emoji, libraries and crates keep their own licenses, listed in [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md) and the app's About window.
 
 ---
 
