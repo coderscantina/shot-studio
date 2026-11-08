@@ -11,6 +11,8 @@ use shot_core::{
 };
 
 const BRAND: &str = include_str!("../../../fixtures/examples/channel/brand/brand.kdl");
+const THEME: &str =
+    include_str!("../../../fixtures/examples/channel/brand/themes/cantina-light.kdl");
 const CHANNEL_FORMAT: &str = include_str!("../../../fixtures/examples/channel/formats/opinion.kdl");
 const FORMAT: &str = include_str!("../../../fixtures/examples/channel/videos/fridays/format.kdl");
 const CUT: &str = include_str!("../../../fixtures/examples/channel/videos/fridays/cut.kdl");
@@ -105,6 +107,7 @@ fn assert_in_contract(example: &str) {
 fn channel_examples_round_trip() {
     for (text, written) in [
         (BRAND, Brand::parse(BRAND).unwrap().to_kdl()),
+        (THEME, Brand::parse_theme(THEME).unwrap().to_kdl()),
         (
             CHANNEL_FORMAT,
             FormatLayer::parse(CHANNEL_FORMAT).unwrap().to_kdl(),
@@ -139,6 +142,37 @@ fn the_lock_is_what_the_engine_builds() {
     );
     assert!(lock.brand.rules.rules.is_empty() && lock.brand.imports.is_empty());
     assert_eq!(lock.imports, channel.brand.imports);
+    // The theme name and the overlay presets are the channel's, not part of the style.
+    assert_eq!(channel.brand.theme, Some(id("cantina-dark")));
+    assert_eq!(channel.brand.overlay_presets[0].template, id("lower-third"));
+    assert!(lock.brand.theme.is_none() && lock.brand.overlay_presets.is_empty());
+}
+
+#[test]
+fn a_saved_theme_holds_a_look_only() {
+    let theme = Brand::parse_theme(THEME).unwrap();
+    assert_eq!(
+        theme.colors.card,
+        Some(shot_core::Color([0xff, 0xff, 0xff]))
+    );
+    for (node, line) in [
+        ("theme cantina-light", 1),
+        ("overlay-preset a template=pop length=1_000_000", 1),
+        ("on punchline off", 1),
+    ] {
+        let err = Brand::parse_theme(&format!("{node}\n")).unwrap_err();
+        assert_eq!(err.line, line, "{err}");
+        assert!(err.message.contains("unknown node"), "{err}");
+    }
+    let no_length = BRAND.replace(" length=5_000_000 {", " {");
+    let err = Brand::parse(&no_length).unwrap_err();
+    assert!(err.message.contains("length"), "{err}");
+    let twice = BRAND.replace(
+        "overlay-preset speaker",
+        "overlay-preset speaker template=pop length=1_000_000\noverlay-preset speaker",
+    );
+    let err = Brand::parse(&twice).unwrap_err();
+    assert!(err.message.contains("duplicate overlay preset"), "{err}");
 }
 
 #[test]
@@ -330,7 +364,7 @@ fn grammar_errors_name_the_line() {
 
     let transition_on_a_url = BRAND.replace("    sfx pop\n", "    transition dip\n");
     let err = Brand::parse(&transition_on_a_url).unwrap_err();
-    assert_eq!(err.line, 28, "{err}");
+    assert_eq!(err.line, 34, "{err}");
 
     let twice = CUT.replace(
         "override t02 filler at=30_000_000",

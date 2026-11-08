@@ -4,11 +4,17 @@
 //!
 //! [0020]: ../../../docs/decisions/0020-channel-brand-and-shared-styles.md
 //! [0023]: ../../../docs/decisions/0023-motion-system-and-lottie-templates.md
+//!
+//! The channel file also names the theme its look is and holds the channel's overlay presets.
+//! Neither is part of a resolved brand: other themes live in `brand/themes/<id>.kdl`, read with
+//! [`Brand::parse_theme`] ([0029]).
+//!
+//! [0029]: ../../../docs/decisions/0029-several-themes-per-channel.md
 
 use kdl::KdlValue;
 
 use crate::kdl_io::{FromKdl, Node, Source, ToKdl, Writer, keyword_enum, quote};
-use crate::{Color, FormatKind, Id, Micros, ParseError, Shadow, StyleSheet};
+use crate::{Color, FormatKind, Id, Micros, ParamValue, ParseError, Shadow, StyleSheet};
 
 /// A style imported from a git repo at a commit, the lowest layer of the brand.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -237,6 +243,21 @@ pub struct LottieTemplate {
     pub slots: Vec<Slot>,
 }
 
+/// A reusable overlay: a template with filled parameters and a length, placed as a normal
+/// `overlay` node ([0029]). The template and parameters are checked against the template's spec
+/// where it is placed, as an overlay's are.
+///
+/// [0029]: ../../../docs/decisions/0029-several-themes-per-channel.md
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverlayPreset {
+    pub name: Id,
+    pub template: Id,
+    /// How long a placed overlay shows.
+    pub length: Micros,
+    /// Parameters in file order, names unique, `enter` and `exit` among them.
+    pub params: Vec<(Id, ParamValue)>,
+}
+
 /// The brand, or a partial override of one.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Brand {
@@ -257,6 +278,10 @@ pub struct Brand {
     /// Sorted by name, each name once.
     pub templates: Vec<LottieTemplate>,
     pub rules: StyleSheet,
+    /// The name of the theme this look is, in the channel file only. Not resolved.
+    pub theme: Option<Id>,
+    /// Sorted by name, each name once, in the channel file only. Not resolved.
+    pub overlay_presets: Vec<OverlayPreset>,
 }
 
 /// Which nodes a brand block may hold.
@@ -278,6 +303,17 @@ impl Brand {
         Self::read(src.nodes(&doc), BrandScope::File)
     }
 
+    /// A saved theme, `brand/themes/<id>.kdl`: the grammar of a format layer's `brand` block,
+    /// without imports, rules, a theme name or overlay presets.
+    pub fn parse_theme(text: &str) -> Result<Self, ParseError> {
+        let src = Source {
+            file: "theme.kdl",
+            text,
+        };
+        let doc = src.parse()?;
+        Self::read(src.nodes(&doc), BrandScope::Patch)
+    }
+
     pub(crate) fn read<'a>(
         nodes: impl Iterator<Item = Node<'a>>,
         scope: BrandScope,
@@ -286,6 +322,7 @@ impl Brand {
         let (mut fonts, mut colors, mut logo, mut sounds, mut intro, mut outro) =
             (None, None, None, None, None, None);
         let (mut end_card, mut camera, mut motion, mut stinger) = (None, None, None, None);
+        let mut theme = None;
         for node in nodes {
             match node.name() {
                 "import" if scope == BrandScope::File => {
@@ -375,6 +412,19 @@ impl Brand {
                     }
                     brand.templates.push(template);
                 }
+                "theme" if scope == BrandScope::File => {
+                    node.expect(1, &[])?;
+                    node.set_once(&mut theme, node.arg(0)?)?;
+                }
+                "overlay-preset" if scope == BrandScope::File => {
+                    let preset = OverlayPreset::read(node)?;
+                    if brand.overlay_presets.iter().any(|p| p.name == preset.name) {
+                        return Err(
+                            node.error(format!("duplicate overlay preset `{}`", preset.name))
+                        );
+                    }
+                    brand.overlay_presets.push(preset);
+                }
                 "on" if scope == BrandScope::File => brand.rules.add(node)?,
                 _ => return Err(node.unknown()),
             }
@@ -391,6 +441,8 @@ impl Brand {
         brand.presets.sort_by_key(|p| p.name);
         brand.stinger = stinger;
         brand.templates.sort_by(|a, b| a.name.cmp(&b.name));
+        brand.theme = theme;
+        brand.overlay_presets.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(brand)
     }
 
@@ -407,6 +459,9 @@ impl Brand {
                 .prop("rev", &import.rev)
                 .prop("style", &import.style)
                 .end();
+        }
+        if let Some(theme) = &self.theme {
+            w.node("theme").arg(theme).end();
         }
         let f = &self.fonts;
         if f != &Fonts::default() {
@@ -492,6 +547,9 @@ impl Brand {
             }
             w.close();
         }
+        for preset in &self.overlay_presets {
+            preset.write(w);
+        }
         self.rules.write(w);
     }
 
@@ -502,7 +560,8 @@ impl Brand {
 
     /// `over` laid on this brand: its fields replace, field by field inside `fonts`, `colors`,
     /// `sounds`, `motion` and each `preset`; a template or bookend replaces whole. Imports are
-    /// concatenated and rules are not merged, the cascade orders those as layers.
+    /// concatenated and rules are not merged, the cascade orders those as layers. The theme name
+    /// and overlay presets of `over` are not part of a resolved brand and stay out.
     pub fn merge(&self, over: &Self) -> Self {
         let mut merged = self.clone();
         merged.imports.extend(over.imports.iter().cloned());
@@ -656,6 +715,48 @@ impl Preset {
             stagger: control("stagger")?,
             beat_sync: node.opt_prop("beat-sync")?,
         })
+    }
+}
+
+impl OverlayPreset {
+    fn read(node: Node<'_>) -> Result<Self, ParseError> {
+        node.expect_block(1, &["template", "length"])?;
+        let mut params: Vec<(Id, ParamValue)> = Vec::new();
+        for param in node.children() {
+            param.expect(1, &[])?;
+            let name =
+                Id::new(param.name()).ok_or_else(|| param.error("parameter names are ids"))?;
+            if params.iter().any(|(n, _)| *n == name) {
+                return Err(param.error(format!("duplicate parameter `{name}`")));
+            }
+            params.push((name, param.arg(0)?));
+        }
+        let length: Micros = node.prop("length")?;
+        if length.0 == 0 {
+            return Err(node.error("`length` is longer than 0"));
+        }
+        Ok(Self {
+            name: node.arg(0)?,
+            template: node.prop("template")?,
+            length,
+            params,
+        })
+    }
+
+    fn write(&self, w: &mut Writer) {
+        w.node("overlay-preset")
+            .arg(&self.name)
+            .prop("template", &self.template)
+            .prop("length", &self.length);
+        if self.params.is_empty() {
+            w.end();
+            return;
+        }
+        w.open();
+        for (name, value) in &self.params {
+            w.node(name.as_str()).arg(value).end();
+        }
+        w.close();
     }
 }
 
