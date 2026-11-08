@@ -17,8 +17,8 @@ use shot_media::videotoolbox::Decoder;
 use crate::check::{self, CheckKind, FrameSample, Problem};
 use crate::spoken::{chapter_marks, duration, spoken_words};
 
-/// Frames are sampled this often. The export has a keyframe at least every 0.5 s, so each sample
-/// decodes at most one chunk.
+/// Frames are sampled this often, each on the keyframe at or before its time: the export has
+/// one at least every 0.5 s, and a keyframe decodes alone.
 pub const FRAME_STEP: Micros = Micros(500_000);
 /// The grid of block means compared for frozen frames.
 const GRID: (usize, usize) = (16, 9);
@@ -29,10 +29,21 @@ pub enum MediaError {
     Audio(String),
     #[error("{0}")]
     Video(String),
+    /// The caller cancelled the measurement.
+    #[error("cancelled")]
+    Cancelled,
 }
 
 /// Integrated loudness and true peak of a file's audio, as the voice chain's finish measures it.
 pub fn loudness(path: &Path) -> Result<(Option<f64>, f64), MediaError> {
+    loudness_until(path, &|| false)
+}
+
+/// [`loudness`], stopping with [`MediaError::Cancelled`] once `cancelled` returns true.
+fn loudness_until(
+    path: &Path,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<(Option<f64>, f64), MediaError> {
     let audio =
         |e: shot_media::audio::AudioError| MediaError::Audio(format!("{}: {e}", path.display()));
     let mut reader = PcmReader::open(path).map_err(audio)?;
@@ -41,6 +52,9 @@ pub fn loudness(path: &Path) -> Result<(Option<f64>, f64), MediaError> {
     let mut samples = Vec::with_capacity(block as usize);
     let mut at = 0;
     loop {
+        if cancelled() {
+            return Err(MediaError::Cancelled);
+        }
         samples.clear();
         reader.read(at, at + block, &mut samples).map_err(audio)?;
         // The reader pads past the end with silence, which must not count as audio.
@@ -53,30 +67,73 @@ pub fn loudness(path: &Path) -> Result<(Option<f64>, f64), MediaError> {
     Ok((meter.loudness(), meter.true_peak()))
 }
 
-/// Samples the video every [`FRAME_STEP`] up to `length` or its own end.
-pub fn sample_frames(path: &Path, length: Micros) -> Result<Vec<FrameSample>, MediaError> {
+/// Samples the video every [`FRAME_STEP`] up to `length` or its own end, stopping with
+/// [`MediaError::Cancelled`] once `cancelled` returns true. Each sample is the keyframe at or
+/// before its time, so it decodes one frame, and [`DECODERS`] decoders work side by side.
+pub fn sample_frames(
+    path: &Path,
+    length: Micros,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<Vec<FrameSample>, MediaError> {
+    let video = |e: shot_media::videotoolbox::DecodeError| {
+        MediaError::Video(format!("{}: {e}", path.display()))
+    };
+    let decoder = Decoder::open_native(path).map_err(video)?;
+    // Seeking past the end shows the last frame, which would read as frozen.
+    let end = length.0.min(decoder.duration().as_micros() as u64);
+    let mut times: Vec<Duration> = (0..end)
+        .step_by(FRAME_STEP.0 as usize)
+        .filter_map(|at| decoder.index().plan(Duration::from_micros(at)))
+        .map(|plan| plan.keyframe)
+        .collect();
+    times.dedup();
+    drop(decoder);
+    let part = times.len().div_ceil(DECODERS).max(1);
+    let parts: Vec<Result<Vec<FrameSample>, MediaError>> = std::thread::scope(|scope| {
+        let workers: Vec<_> = times
+            .chunks(part)
+            .map(|times| scope.spawn(move || sample_at(path, times, cancelled)))
+            .collect();
+        workers
+            .into_iter()
+            .map(|w| w.join().expect("frame sampler panicked"))
+            .collect()
+    });
+    let mut samples = Vec::with_capacity(times.len());
+    for part in parts {
+        samples.extend(part?);
+    }
+    Ok(samples)
+}
+
+/// Decoders seeking at the same time in [`sample_frames`].
+const DECODERS: usize = 6;
+
+/// The frames of `path` at `times`.
+fn sample_at(
+    path: &Path,
+    times: &[Duration],
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<FrameSample>, MediaError> {
     let video = |e: shot_media::videotoolbox::DecodeError| {
         MediaError::Video(format!("{}: {e}", path.display()))
     };
     let mut decoder = Decoder::open_native(path).map_err(video)?;
-    // Seeking past the end shows the last frame, which would read as frozen.
-    let end = length.0.min(decoder.duration().as_micros() as u64);
-    let mut samples = Vec::new();
-    let mut at = 0;
-    while at < end {
-        let Some(frame) = decoder
-            .seek(Duration::from_micros(at), || false)
-            .map_err(video)?
-        else {
+    let mut samples = Vec::with_capacity(times.len());
+    for &at in times {
+        if cancelled() {
+            return Err(MediaError::Cancelled);
+        }
+        // A keyframe decodes alone, so the seek has nothing to cancel.
+        let Some(frame) = decoder.seek(at, || false).map_err(video)? else {
             break;
         };
         let planes = Planes::lock(&frame.buffer);
         samples.push(FrameSample {
-            at: Micros(at),
+            at: Micros(at.as_micros() as u64),
             luma: planes.mean(),
             grid: planes.grid(GRID),
         });
-        at += FRAME_STEP.0;
     }
     Ok(samples)
 }
@@ -203,6 +260,18 @@ pub fn check_cut(
     cut: &str,
     export: &Path,
 ) -> Result<Vec<Problem>, MediaError> {
+    check_cut_until(video_dir, project, cut, export, &|| false)
+}
+
+/// [`check_cut`], stopping with [`MediaError::Cancelled`] soon after `cancelled` returns true,
+/// for a watcher whose files changed while it checks.
+pub fn check_cut_until(
+    video_dir: &Path,
+    project: &Project,
+    cut: &str,
+    export: &Path,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<Vec<Problem>, MediaError> {
     let lock = shot_render::lock::read(video_dir).map_err(|e| MediaError::Video(e.to_string()))?;
     let timeline = match &lock {
         Some(lock) => Timeline::styled(project, lock),
@@ -228,9 +297,15 @@ pub fn check_cut(
     let length = duration(output);
     let mut problems = Vec::new();
     if export.exists() {
-        let (lufs, peak) = loudness(export)?;
+        // The audio and the frames are read side by side.
+        let (loudness, frames) = std::thread::scope(|scope| {
+            let loudness = scope.spawn(|| loudness_until(export, cancelled));
+            let frames = sample_frames(export, length, cancelled);
+            (loudness.join().expect("loudness reader panicked"), frames)
+        });
+        let (lufs, peak) = loudness?;
         problems.extend(check::loudness(lufs, peak));
-        problems.extend(check::frames(&sample_frames(export, length)?));
+        problems.extend(check::frames(&frames?));
     } else {
         problems.push(Problem {
             check: CheckKind::Loudness,

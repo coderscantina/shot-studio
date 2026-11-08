@@ -5,6 +5,8 @@
 //! [0004]: ../../../docs/decisions/0004-proposals-as-branches.md
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -44,7 +46,7 @@ pub fn run(args: BuildArgs) -> Result<(), String> {
         return proposal(&args.video, name, options);
     }
     if !args.watch {
-        let problems = build(&args.video, options)?;
+        let problems = build(&args.video, options, &|| false)?;
         return match problems {
             0 => Ok(()),
             1 => Err("1 problem".to_owned()),
@@ -55,8 +57,13 @@ pub fn run(args: BuildArgs) -> Result<(), String> {
 }
 
 /// Rebuilds the lock, exports every cut and checks each one. Prints one line for the build,
-/// then only the problems, and returns how many there are.
-fn build(video: &Path, options: ExportOptions) -> Result<usize, String> {
+/// then only the problems, and returns how many there are. The check stops once `changed`
+/// returns true, since the next build replaces what it measures.
+fn build(
+    video: &Path,
+    options: ExportOptions,
+    changed: &(dyn Fn() -> bool + Sync),
+) -> Result<usize, String> {
     let started = Instant::now();
     crate::restyle::refresh(video)?;
     let project = load(video)?;
@@ -76,9 +83,14 @@ fn build(video: &Path, options: ExportOptions) -> Result<usize, String> {
     let mut problems = 0;
     for cut in &cuts {
         let out = shot_ship::ship::export_path(video, cut);
-        for problem in shot_ship::media::check_cut(video, &project, cut, &out)
-            .map_err(|e| format!("{cut}: {e}"))?
-        {
+        let found = match shot_ship::media::check_cut_until(video, &project, cut, &out, changed) {
+            Err(shot_ship::media::MediaError::Cancelled) => {
+                println!("check stopped: the files changed");
+                return Ok(problems);
+            }
+            found => found.map_err(|e| format!("{cut}: {e}"))?,
+        };
+        for problem in found {
             println!("{cut}: {problem}");
             problems += 1;
         }
@@ -108,16 +120,30 @@ fn watch(video: &Path, options: ExportOptions) -> Result<(), String> {
         .map_err(|e| format!("{}: {e}", video.display()))?;
     let inputs = Inputs::of(&video);
     let (events, incoming) = mpsc::channel();
-    let mut watcher =
-        notify::recommended_watcher(events).map_err(|e| format!("watching files: {e}"))?;
+    // Set by a change that matters, so a running check stops for the build after it.
+    let changed = Arc::new(AtomicBool::new(false));
+    let mut watcher = notify::recommended_watcher({
+        let (inputs, changed) = (inputs.clone(), changed.clone());
+        move |event: notify::Result<notify::Event>| {
+            if event
+                .as_ref()
+                .is_ok_and(|e| e.paths.iter().any(|p| inputs.matters(p)))
+            {
+                changed.store(true, Ordering::Relaxed);
+            }
+            let _ = events.send(event);
+        }
+    })
+    .map_err(|e| format!("watching files: {e}"))?;
     for root in inputs.roots() {
         watcher
             .watch(&root, RecursiveMode::Recursive)
             .map_err(|e| format!("watching {}: {e}", root.display()))?;
     }
     println!("watching {}", video.display());
+    let stop = || changed.load(Ordering::Relaxed);
     let mut built = inputs.fingerprint();
-    report(build(&video, options));
+    report(build(&video, options, &stop));
     loop {
         // Wait for a change, then for the files to settle.
         loop {
@@ -135,12 +161,13 @@ fn watch(video: &Path, options: ExportOptions) -> Result<(), String> {
                 }
             }
         }
+        changed.store(false, Ordering::Relaxed);
         let now = inputs.fingerprint();
         if now == built {
             continue;
         }
         built = now;
-        report(build(&video, options));
+        report(build(&video, options, &stop));
     }
 }
 
@@ -152,6 +179,7 @@ fn report(result: Result<usize, String>) {
 
 /// What a build of one video reads: its folder, the takes in `media/` (often a link to where
 /// the recordings live) and the channel's style layers.
+#[derive(Clone)]
 struct Inputs {
     video: PathBuf,
     media: Option<PathBuf>,
