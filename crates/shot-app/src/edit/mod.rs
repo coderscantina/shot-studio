@@ -4,6 +4,7 @@
 //! Every edit is a `shot-core` function on the cut, written to `cut.kdl` by [`VideoFolder`]. The
 //! screen keeps only view state: the workspace, the chapter on show, the selection, the playhead.
 
+mod camera;
 mod lane_menu;
 mod music;
 mod overlays;
@@ -14,6 +15,7 @@ mod product;
 mod proposals;
 mod text;
 mod timeline;
+mod zoom;
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
@@ -117,6 +119,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("end", GoToEnd, context),
         KeyBinding::new("cmd-enter", RecordTake, context),
     ]);
+    zoom::bind_keys(cx);
 }
 
 /// A cut run by its block and media start.
@@ -206,6 +209,8 @@ pub struct EditScreen {
     overlay_note: Option<String>,
     /// The sound and pop pickers and the callout tool.
     place: place::PlaceState,
+    /// The zoom and camera sliders' drag and replay.
+    knobs: zoom::KnobState,
     /// Where the Picture preview was last painted, for mouse mapping.
     preview_bounds: Rc<Cell<Bounds<Pixels>>>,
     /// The channel repo and slug when the folder is a video of one, for agent proposals.
@@ -276,6 +281,7 @@ impl EditScreen {
             product: product::ProductState::default(),
             overlay_note: None,
             place: place::PlaceState::default(),
+            knobs: zoom::KnobState::default(),
             preview_bounds: Rc::default(),
             channel,
             proposals: Vec::new(),

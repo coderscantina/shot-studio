@@ -341,6 +341,8 @@ fn layers(this: &EditScreen, cx: &mut Context<EditScreen>) -> Stateful<Div> {
             layer("picture", o.color, &o.text, mono(format!("{length:.1} s")))
         }))
         .child(div().flex_none().h(px(14.)))
+        .child(super::camera::section(this, cx))
+        .child(div().flex_none().h(px(14.)))
         .child(label("Next up").px(px(10.)).pb(px(8.)))
         .when(next.is_empty(), |pane| {
             pane.child(
