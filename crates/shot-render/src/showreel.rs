@@ -560,7 +560,7 @@ fn every_reel_frame_is_the_same_reached_by_playing_or_by_seeking() {
         .collect();
     let renderer = Renderer::new().expect("a renderer");
     let mut playing = Painter::new(&reel.video, effects);
-    let mut played = Played::new(plan.frames, seeks.iter().copied());
+    let mut played = Played::new(1280, plan.frames, seeks.iter().copied());
     for f in 0..plan.frames {
         played.push(&pixels(&mut playing, &renderer, f));
     }
