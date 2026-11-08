@@ -29,6 +29,8 @@ Checked with real clicks on the target project and a copy of the demo channel: t
 
 Not verified on that branch: a real take starting from the standby preview, real denied permissions, a real ScreenCaptureKit timeout, and Edit script with a save in an external editor. No worktrees.
 
+`m13/integration` (from `polish/council-round1`) holds the plan for [milestone 13](milestones/13-takes-scenes-and-studio-tools.md), Mike's 16 change requests of 2026-11-08. Seven delegated agents (streams A to G) work on it in their own worktrees and task branches, each committing there; the integrator merges them into `m13/integration`, then runs fmt, clippy and tests, and removes the worktrees.
+
 ## Uncommitted work
 
 None.
