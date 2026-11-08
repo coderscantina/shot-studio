@@ -1168,5 +1168,5 @@ fn inspector(this: &LayoutBuilder, cx: &mut Context<LayoutBuilder>) -> impl Into
             )
             .child("Offer on the 1 to 4 keys of this video"),
     );
-    panel.children(this.error.clone().map(|e| ui::alert(e)))
+    panel.children(this.error.clone().map(ui::alert))
 }

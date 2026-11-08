@@ -867,9 +867,12 @@ mod tests {
             LayoutSpec::resolve(name, &Effects::default().window, &[]),
             Err(UnsupportedLayout(name))
         );
-        let spec =
-            LayoutSpec::resolve(name, &Effects::default().window, std::slice::from_ref(&custom))
-                .unwrap();
+        let spec = LayoutSpec::resolve(
+            name,
+            &Effects::default().window,
+            std::slice::from_ref(&custom),
+        )
+        .unwrap();
         assert_eq!(spec.primary, 1, "a zoom punches in on the screen");
         let scene = spec.scene(Canvas::UHD, SIZES, NONE);
         assert_eq!(scene.layers[0].source, Source::Camera);
@@ -890,11 +893,19 @@ mod tests {
         let end = face.morph(&face_content, 1.0);
         assert_eq!(end.slots, face_content.slots);
         let middle = face.morph(&face_content, 0.5);
-        let camera = middle.slots.iter().find(|s| s.source == Source::Camera).unwrap();
+        let camera = middle
+            .slots
+            .iter()
+            .find(|s| s.source == Source::Camera)
+            .unwrap();
         let inset = face_content.slots[1].frame;
         assert_close(camera.frame, FULL.lerp(inset, 0.5));
         assert_eq!(camera.radius, 18.0);
-        let screen = middle.slots.iter().find(|s| s.source == Source::Screen).unwrap();
+        let screen = middle
+            .slots
+            .iter()
+            .find(|s| s.source == Source::Screen)
+            .unwrap();
         assert_eq!(screen.opacity, 0.5);
         assert!(screen.frame.width() < FULL.width());
         // The camera rises above the screen, as the inset sits on top.
@@ -903,9 +914,17 @@ mod tests {
         let custom = LayoutSpec::custom(&talk_left());
         let to_custom = face_content.morph(&custom, 0.5);
         assert_eq!(to_custom.slots.len(), 2);
-        let screen = to_custom.slots.iter().find(|s| s.source == Source::Screen).unwrap();
+        let screen = to_custom
+            .slots
+            .iter()
+            .find(|s| s.source == Source::Screen)
+            .unwrap();
         assert_eq!(screen.focus, [0.5, 0.5]);
-        let camera = to_custom.slots.iter().find(|s| s.source == Source::Camera).unwrap();
+        let camera = to_custom
+            .slots
+            .iter()
+            .find(|s| s.source == Source::Camera)
+            .unwrap();
         assert_eq!(camera.focus, [0.25, 0.5]);
     }
 }

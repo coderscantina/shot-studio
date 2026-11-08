@@ -874,12 +874,26 @@ pub(crate) mod tests {
         let duo = theme.layout_key(name("duo")).unwrap();
         assert_ne!(Some(duo.clone()), theme.layout_key(name("solo")));
         assert_eq!(theme.layout_key(Layout::Split), None);
-        assert!(theme.camera_key(name("duo")).is_some(), "the camera sits beside the screen");
+        assert!(
+            theme.camera_key(name("duo")).is_some(),
+            "the camera sits beside the screen"
+        );
         assert_eq!(theme.camera_key(name("solo")), None);
-        let moved = theme_of(&text.replace("width=1920 height=2160\n    camera", "width=1900 height=2160\n    camera"));
+        let moved = theme_of(&text.replace(
+            "width=1920 height=2160\n    camera",
+            "width=1900 height=2160\n    camera",
+        ));
         assert_ne!(moved.layout_key(name("duo")).unwrap(), duo);
-        assert!(theme.layout(name("solo"), &shot_core::Effects::default().window).is_ok());
-        assert!(theme.layout(name("none"), &shot_core::Effects::default().window).is_err());
+        assert!(
+            theme
+                .layout(name("solo"), &shot_core::Effects::default().window)
+                .is_ok()
+        );
+        assert!(
+            theme
+                .layout(name("none"), &shot_core::Effects::default().window)
+                .is_err()
+        );
     }
 
     fn theme_of(text: &str) -> Theme {
