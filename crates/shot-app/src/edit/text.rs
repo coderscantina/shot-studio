@@ -949,11 +949,9 @@ fn inspector(this: &EditScreen, cx: &mut Context<EditScreen>) -> Stateful<Div> {
                 .child(here(
                     "text",
                     "Captions",
-                    div().text_color(TEXT).child(match captions {
-                        shot_core::CaptionStyle::WordPop => "Word pop",
-                        shot_core::CaptionStyle::Clean => "Clean",
-                        shot_core::CaptionStyle::Off => "Off",
-                    }),
+                    div()
+                        .text_color(TEXT)
+                        .child(super::captions::style_name(captions)),
                 )),
         )
 }

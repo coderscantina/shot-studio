@@ -284,16 +284,12 @@ fn layers(this: &EditScreen, cx: &mut Context<EditScreen>) -> Stateful<Div> {
         .map(|s| s.zoom_at(s.source_frame(this.playhead)))
         .filter(|z| *z > 1.0);
     let folder = this.folder.read(cx);
-    let captions = match folder
+    let captions = folder
         .project
         .cut
         .captions
-        .unwrap_or(folder.project.format.captions)
-    {
-        shot_core::CaptionStyle::WordPop => "Word pop",
-        shot_core::CaptionStyle::Clean => "Clean",
-        shot_core::CaptionStyle::Off => "Off",
-    };
+        .unwrap_or(folder.project.format.captions);
+    let captions = super::captions::style_name(captions);
     let overlays = overlays(this, cx);
     let showing: Vec<&Overlay> = overlays
         .iter()

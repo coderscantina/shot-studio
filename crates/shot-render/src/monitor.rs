@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use objc2_core_foundation::CFRetained;
 use objc2_core_video::CVPixelBuffer;
-use shot_core::{CaptionFix, CaptionStyle, Effects, Micros, Segment, Transcript};
+use shot_core::{CaptionFix, CaptionLook, CaptionStyle, Effects, Micros, Segment, Transcript};
 
 use crate::RenderError;
 use crate::assets::Assets;
@@ -66,6 +66,8 @@ pub struct Feed<'a> {
 pub struct Monitor {
     renderer: Renderer,
     assets: Assets,
+    /// For the captions' fonts and the brand's caption look.
+    theme: Arc<Theme>,
     pool: BufferPool,
     canvas: Canvas,
     caption: LiveCaption,
@@ -77,7 +79,8 @@ impl Monitor {
     pub fn new(video_dir: &Path, theme: Arc<Theme>, canvas: Canvas) -> Result<Self, RenderError> {
         Ok(Self {
             renderer: Renderer::new()?,
-            assets: Assets::with_theme(video_dir, theme),
+            assets: Assets::with_theme(video_dir, theme.clone()),
+            theme,
             pool: BufferPool::new(canvas.width, canvas.height, Range::Full, Matrix::Bt601)?,
             canvas,
             caption: LiveCaption::default(),
@@ -118,11 +121,13 @@ impl Monitor {
         };
         let mut frame = compose(&shot, &look, self.canvas, sizes)?;
         frame.cutaway = None;
+        let design = captions::Design::new(styled.captions, &CaptionLook::default(), &self.theme);
         if let Some((cue, word, pop)) = self.caption.at(styled.captions, feed.time) {
+            let shown = captions::Shown { cue: 0, word, pop };
             frame
                 .drawing
                 .over
-                .push(crate::derived::caption_shape(cue, word, pop, self.canvas));
+                .push(design.shape(cue, shown, self.canvas));
         }
         let sources = Sources {
             screen: Some(feed.screen),
@@ -160,8 +165,15 @@ impl LiveCaption {
             return None;
         }
         Some(match style {
-            CaptionStyle::WordPop => (cue, cue.words.len().checked_sub(1), since),
-            _ => (cue, None, kinetic::word_pop_settle()),
+            CaptionStyle::WordPop | CaptionStyle::Bold => {
+                (cue, cue.words.len().checked_sub(1), since)
+            }
+            CaptionStyle::Karaoke => (
+                cue,
+                cue.words.len().checked_sub(1),
+                kinetic::word_pop_settle(),
+            ),
+            CaptionStyle::Clean | CaptionStyle::Off => (cue, None, kinetic::word_pop_settle()),
         })
     }
 }

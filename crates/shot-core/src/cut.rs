@@ -15,6 +15,9 @@ pub struct Cut {
     pub captions: Option<CaptionStyle>,
     /// Transcript corrections for captions, in file order. `heard` is unique ignoring case.
     pub caption_fixes: Vec<CaptionFix>,
+    /// Where caption lines break other than the automatic grouping, sorted by take and `at`,
+    /// each (take, `at`) once.
+    pub caption_breaks: Vec<CaptionBreak>,
     /// The music bed under the whole cut and its derived cuts.
     pub music: Option<Music>,
     /// The main cut, in output order.
@@ -70,6 +73,15 @@ impl OverrideEffect {
 pub struct CaptionFix {
     pub heard: String,
     pub said: String,
+}
+
+/// A caption line break a person set: `split` starts a new line at the word of `take` that
+/// starts at `at`, `join` keeps that word on the line before it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CaptionBreak {
+    pub take: Id,
+    pub at: Micros,
+    pub split: bool,
 }
 
 /// A music bed: a file relative to the video folder, its gain in dB (at most 0) and the gain
@@ -236,6 +248,7 @@ impl Cut {
         let doc = src.parse()?;
         let mut cut = Self::default();
         let (mut captions, mut fixes, mut music) = (None, None, None);
+        let mut breaks = Vec::new();
         let mut derived_clips = Vec::new();
         let mut overrides = Vec::new();
         for node in src.nodes(&doc) {
@@ -244,7 +257,11 @@ impl Cut {
                     node.expect(1, &[])?;
                     node.set_once(&mut captions, node.arg(0)?)?;
                 }
-                "caption-fixes" => node.set_once(&mut fixes, CaptionFix::read_all(node)?)?,
+                "caption-fixes" => {
+                    let (read, read_breaks) = CaptionFix::read_all(node)?;
+                    node.set_once(&mut fixes, read)?;
+                    breaks = read_breaks;
+                }
                 "music" => node.set_once(&mut music, Music::read(node)?)?,
                 "chapter" => cut.chapters.push(Chapter::read(node)?),
                 "override" => overrides.push((Override::read(node)?, node)),
@@ -265,6 +282,7 @@ impl Cut {
         }
         cut.captions = captions;
         cut.caption_fixes = fixes.unwrap_or_default();
+        cut.caption_breaks = breaks;
         cut.music = music;
         let takes: HashSet<&Id> = cut
             .chapters
@@ -321,11 +339,17 @@ impl Cut {
             separate(&mut w);
             w.node("captions").arg(captions).end();
         }
-        if !self.caption_fixes.is_empty() {
+        if !self.caption_fixes.is_empty() || !self.caption_breaks.is_empty() {
             separate(&mut w);
             w.node("caption-fixes").open();
             for fix in &self.caption_fixes {
                 w.node("fix").arg(&fix.heard).arg(&fix.said).end();
+            }
+            for b in &self.caption_breaks {
+                w.node(if b.split { "split" } else { "join" })
+                    .arg(&b.take)
+                    .prop("at", &b.at)
+                    .end();
             }
             w.close();
         }
@@ -516,10 +540,27 @@ impl TakeEdit {
 }
 
 impl CaptionFix {
-    fn read_all(node: Node<'_>) -> Result<Vec<Self>, ParseError> {
+    /// The fixes of a `caption-fixes` block, and its line breaks in canonical order.
+    fn read_all(node: Node<'_>) -> Result<(Vec<Self>, Vec<CaptionBreak>), ParseError> {
         node.expect_block(0, &[])?;
         let mut fixes: Vec<Self> = Vec::new();
+        let mut breaks: Vec<CaptionBreak> = Vec::new();
         for child in node.children() {
+            if let name @ ("split" | "join") = child.name() {
+                child.expect(1, &["at"])?;
+                let b = CaptionBreak {
+                    take: child.arg(0)?,
+                    at: child.prop("at")?,
+                    split: name == "split",
+                };
+                if breaks.iter().any(|o| o.take == b.take && o.at == b.at) {
+                    return Err(
+                        child.error(format!("duplicate line break at {} in {}", b.at.0, b.take))
+                    );
+                }
+                breaks.push(b);
+                continue;
+            }
             if child.name() != "fix" {
                 return Err(child.unknown());
             }
@@ -537,7 +578,8 @@ impl CaptionFix {
             }
             fixes.push(fix);
         }
-        Ok(fixes)
+        breaks.sort_by(|a, b| (&a.take, a.at).cmp(&(&b.take, b.at)));
+        Ok((fixes, breaks))
     }
 }
 

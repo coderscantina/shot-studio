@@ -237,6 +237,8 @@ pub struct Theme {
     pub camera: Option<CameraFrame>,
     pub stinger: Option<StingerAnimation>,
     pub logo: Option<Logo>,
+    /// The brand's changes to the caption presets.
+    pub captions: shot_core::CaptionLook,
 }
 
 impl Default for Theme {
@@ -454,6 +456,7 @@ impl Theme {
             camera,
             stinger,
             logo,
+            captions: brand.captions.clone(),
         };
         theme.key = theme.make_key(feel);
         Ok(theme)

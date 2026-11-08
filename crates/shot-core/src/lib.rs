@@ -4,6 +4,7 @@
 //! The grammar of each file is in `docs/contracts/project-files.md`.
 
 mod brand;
+mod captions;
 mod cut;
 mod edit;
 mod element;
@@ -24,10 +25,13 @@ pub use brand::{
     Bookend, Brand, BundledFont, Camera, CameraShape, Colors, Font, Fonts, Import, LottieTemplate,
     Motion, Phase, Preset, PresetName, Slot, SlotType, SoundEffect, SoundKey, Stinger,
 };
+pub use captions::{
+    CaptionBack, CaptionCase, CaptionDesign, CaptionFont, CaptionLook, CaptionPosition, Emphasis,
+};
 pub use cut::{
-    CaptionFix, Chapter, Clip, Cut, DerivedCut, DerivedKind, LayoutChange, Music, Overlay,
-    Override, OverrideEffect, ParamValue, Point, RangeEdit, RemovedBy, Review, TakeEdit, Zoom,
-    ZoomBy,
+    CaptionBreak, CaptionFix, Chapter, Clip, Cut, DerivedCut, DerivedKind, LayoutChange, Music,
+    Overlay, Override, OverrideEffect, ParamValue, Point, RangeEdit, RemovedBy, Review, TakeEdit,
+    Zoom, ZoomBy,
 };
 pub use edit::{Decision, EditError, Placed, TakeAt, WordState, WordView};
 pub use element::{Attr, AttrValue, DuplicateElement, Element, ElementKind, Elements};

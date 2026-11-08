@@ -4,6 +4,7 @@
 //! Every edit is a `shot-core` function on the cut, written to `cut.kdl` by [`VideoFolder`]. The
 //! screen keeps only view state: the workspace, the chapter on show, the selection, the playhead.
 
+mod captions;
 mod lane_menu;
 mod music;
 mod overlays;
