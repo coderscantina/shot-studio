@@ -11,6 +11,9 @@
 //! apps: ⌃⌥ plus the letter by default, the plain letters when Mike switches that on, and the
 //! pedal's key. No permission is needed. The event tap that records keys for the keystroke
 //! overlay leaves these presses out, they are markers.
+//!
+//! The output window shows only while the Record screen does, never opens over the app's own
+//! display unless asked, and Esc, its close control, ⌘⇧P and the Prompter menu all hide it.
 
 mod native;
 mod output;
@@ -19,13 +22,47 @@ mod settings;
 
 use std::sync::{Arc, Mutex};
 
+use gpui::{App, KeyBinding, Menu, MenuItem, actions};
 use shot_capture::Marks;
 use shot_capture::events::{Hotkey, Mark, Modifier};
 use shot_core::{Layout, Project};
-use shot_prompter::{Prompter, Scroll};
+use shot_prompter::{Pace, Prompter};
 
+pub use native::display_names;
 pub use pane::PrompterPane;
 pub use settings::Settings;
+
+actions!(prompter, [TogglePrompter, HidePrompter]);
+
+/// The key context of the output window.
+const OUTPUT_CONTEXT: &str = "PrompterOutput";
+
+/// Binds ⌘⇧P everywhere and Esc on the output. Where no Record screen takes them, both close
+/// every prompter output, so there is always a way out.
+pub fn bind_keys(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("cmd-shift-p", TogglePrompter, None),
+        KeyBinding::new("escape", HidePrompter, Some(OUTPUT_CONTEXT)),
+    ]);
+    cx.on_action(|_: &TogglePrompter, cx| close_outputs(cx));
+    cx.on_action(|_: &HidePrompter, cx| close_outputs(cx));
+}
+
+/// The Prompter menu of the menu bar.
+pub fn menu() -> Menu {
+    Menu::new("Prompter").items([
+        MenuItem::action("Show or hide prompter", TogglePrompter),
+        MenuItem::action("Hide prompter", HidePrompter),
+    ])
+}
+
+fn close_outputs(cx: &mut App) {
+    for window in cx.windows() {
+        if let Some(output) = window.downcast::<output::PrompterOutput>() {
+            let _ = output.update(cx, |_, window, _| window.remove_window());
+        }
+    }
+}
 
 /// A record hotkey.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,14 +101,14 @@ pub struct Live {
 }
 
 impl Live {
-    pub fn new(project: &Project, scroll: Scroll) -> Arc<Self> {
+    pub fn new(project: &Project, pace: Pace) -> Arc<Self> {
         let live = Arc::new(Self {
             prompter: Mutex::new(Prompter::new(&project.script, project.format.prompter)),
             marks: Mutex::new(None),
             layouts: Mutex::new(Vec::new()),
         });
         live.reset(project);
-        live.lock().set_scroll(scroll);
+        live.lock().set_pace(pace);
         live
     }
 
@@ -79,12 +116,12 @@ impl Live {
         self.prompter.lock().expect("prompter")
     }
 
-    /// Starts over from the project's script and format, keeping the scroll mode.
+    /// Starts over from the project's script and format, keeping the pace.
     pub fn reset(&self, project: &Project) {
         let mut prompter = self.lock();
-        let scroll = prompter.scroll();
+        let pace = prompter.pace();
         *prompter = Prompter::new(&project.script, project.format.prompter);
-        prompter.set_scroll(scroll);
+        prompter.set_pace(pace);
         let format = &project.format;
         *self.layouts.lock().expect("layouts") = std::iter::once(format.default_layout)
             .chain(format.other_layouts.iter().copied())

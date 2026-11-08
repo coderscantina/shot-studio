@@ -44,9 +44,11 @@ fn native_view(window: &Window) -> Option<*mut AnyObject> {
     }
 }
 
-/// Makes the window borderless and sizes it to its screen's full frame, over the menu bar,
-/// without a fullscreen Space. It stays visible when the app is in the background.
-pub fn cover_screen(window: &Window) {
+/// Makes the window borderless and sizes it to its screen's full frame, without a fullscreen
+/// Space. It stays visible when the app is in the background. `over_menu_bar` puts it above the
+/// menu bar and the Dock, which a dedicated prompter display wants; otherwise it sits at the
+/// level of normal windows, so the menu bar, the Dock and app switching stay reachable.
+pub fn cover_screen(window: &Window, over_menu_bar: bool) {
     let Some(view) = native_view(window) else {
         return;
     };
@@ -62,6 +64,10 @@ pub fn cover_screen(window: &Window) {
         let () = msg_send![native, setFrame: frame, display: Bool::YES];
         let () = msg_send![native, setHidesOnDeactivate: Bool::NO];
         let () = msg_send![native, setHasShadow: Bool::NO];
+        // NSStatusWindowLevel is just above the menu bar. gpui gives the panel the pop-up
+        // level, which also covers system alerts.
+        let level: isize = if over_menu_bar { 25 } else { 0 };
+        let () = msg_send![native, setLevel: level];
         // NSWindowCollectionBehaviorStationary | IgnoresCycle | FullScreenNone: not part of
         // Exposé, window cycling or a fullscreen Space.
         let () = msg_send![native, setCollectionBehavior: (1usize << 4) | (1 << 6) | (1 << 9)];

@@ -7,9 +7,6 @@ use shot_core::{PrompterMode, Script};
 
 use crate::matcher;
 
-/// Speaking rate for steady scrolling and time left until the reader's own rate is known.
-const WORDS_PER_MINUTE: f32 = 150.0;
-
 /// How the prompter moves on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Scroll {
@@ -20,6 +17,26 @@ pub enum Scroll {
     Steady,
     /// Moves a beat at a time, on the pedal's key or N.
     Pedal,
+}
+
+/// How the prompter moves on, how fast, and how long it waits at the start of a take.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Pace {
+    pub scroll: Scroll,
+    /// Speaking rate for steady scrolling and time left.
+    pub words_per_minute: f32,
+    /// The countdown the prompter shows before it moves on, from [`Prompter::start`].
+    pub countdown: Duration,
+}
+
+impl Default for Pace {
+    fn default() -> Self {
+        Self {
+            scroll: Scroll::default(),
+            words_per_minute: 150.0,
+            countdown: Duration::ZERO,
+        }
+    }
 }
 
 /// An inline retake the retake rule caught while recording: what was heard and the clean
@@ -64,7 +81,9 @@ pub struct Prompter {
     /// Words said, counted across the script.
     position: usize,
     current: usize,
-    scroll: Scroll,
+    pace: Pace,
+    /// What is left of the countdown, while it runs.
+    countdown: Option<Duration>,
     retakes: u32,
     /// Fractional words a steady scroll has moved.
     steady: f32,
@@ -85,6 +104,8 @@ pub struct View<'a> {
     pub beats: u32,
     pub retakes: u32,
     pub time_left: Duration,
+    /// Whole seconds left of the countdown, while it runs.
+    pub countdown: Option<u32>,
 }
 
 impl Prompter {
@@ -98,7 +119,8 @@ impl Prompter {
             keys: Vec::new(),
             position: 0,
             current: 0,
-            scroll: Scroll::default(),
+            pace: Pace::default(),
+            countdown: None,
             retakes: 0,
             steady: 0.0,
             caught: None,
@@ -138,12 +160,18 @@ impl Prompter {
         prompter
     }
 
-    pub fn scroll(&self) -> Scroll {
-        self.scroll
+    pub fn pace(&self) -> Pace {
+        self.pace
     }
 
-    pub fn set_scroll(&mut self, scroll: Scroll) {
-        self.scroll = scroll;
+    pub fn set_pace(&mut self, pace: Pace) {
+        self.pace = pace;
+        self.steady = 0.0;
+    }
+
+    /// The take starts: runs the pace's countdown, if it has one, before steady scroll moves.
+    pub fn start(&mut self) {
+        self.countdown = (!self.pace.countdown.is_zero()).then_some(self.pace.countdown);
         self.steady = 0.0;
     }
 
@@ -182,7 +210,7 @@ impl Prompter {
 
     /// Voice follow: moves to where the newest recognized words reach. Never moves back.
     pub fn hear<S: AsRef<str>>(&mut self, words: &[S]) {
-        if self.scroll != Scroll::Voice {
+        if self.pace.scroll != Scroll::Voice {
             return;
         }
         let heard: Vec<String> = words
@@ -191,16 +219,23 @@ impl Prompter {
             .filter(|w| !w.is_empty())
             .collect();
         if let Some(to) = matcher::advance(&self.keys, self.position, &heard) {
+            // Reading before the countdown ends means the reader is ready.
+            self.countdown = None;
             self.set_position(to);
         }
     }
 
-    /// Steady scroll: moves on by the speaking rate over `elapsed`.
+    /// Runs the countdown, then steady scroll moves on by the speaking rate over `elapsed`.
     pub fn tick(&mut self, elapsed: Duration) {
-        if self.scroll != Scroll::Steady {
+        if let Some(left) = self.countdown {
+            let rest = left.saturating_sub(elapsed);
+            self.countdown = (!rest.is_zero()).then_some(rest);
             return;
         }
-        self.steady += elapsed.as_secs_f32() * WORDS_PER_MINUTE / 60.0;
+        if self.pace.scroll != Scroll::Steady {
+            return;
+        }
+        self.steady += elapsed.as_secs_f32() * self.pace.words_per_minute / 60.0;
         let words = self.steady.floor();
         if words >= 1.0 {
             self.steady -= words;
@@ -243,7 +278,10 @@ impl Prompter {
             beat: self.beat(),
             beats: self.beats.len() as u32,
             retakes: self.retakes,
-            time_left: Duration::from_secs_f32(words_left as f32 * 60.0 / WORDS_PER_MINUTE),
+            time_left: Duration::from_secs_f32(
+                words_left as f32 * 60.0 / self.pace.words_per_minute.max(1.0),
+            ),
+            countdown: self.countdown.map(|left| left.as_secs_f32().ceil() as u32),
         }
     }
 
@@ -251,6 +289,7 @@ impl Prompter {
         self.current = line;
         self.position = self.lines[line].start;
         self.steady = 0.0;
+        self.countdown = None;
     }
 
     /// Sets the words said and makes the line holding the next word current. A finished last
@@ -378,11 +417,42 @@ mod tests {
     fn steady_scroll_moves_at_the_speaking_rate_and_time_left_shrinks() {
         let mut p = prompter(PrompterMode::FullScript);
         let before = p.view().time_left;
-        p.set_scroll(Scroll::Steady);
+        p.set_pace(Pace {
+            scroll: Scroll::Steady,
+            ..Pace::default()
+        });
         p.hear(&["Everyone", "says", "never"]);
         assert_eq!(p.position(), 0);
         p.tick(Duration::from_secs(2));
         assert_eq!(p.position(), 5);
         assert_eq!(before - p.view().time_left, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn the_countdown_holds_steady_scroll_and_reading_ends_it() {
+        let mut p = prompter(PrompterMode::FullScript);
+        p.set_pace(Pace {
+            scroll: Scroll::Steady,
+            words_per_minute: 300.0,
+            countdown: Duration::from_secs(3),
+        });
+        assert_eq!(p.view().countdown, None);
+        p.start();
+        assert_eq!(p.view().countdown, Some(3));
+        p.tick(Duration::from_millis(2500));
+        assert_eq!((p.view().countdown, p.position()), (Some(1), 0));
+        p.tick(Duration::from_millis(500));
+        assert_eq!(p.view().countdown, None);
+        p.tick(Duration::from_secs(1));
+        assert_eq!(p.position(), 5);
+
+        let mut p = prompter(PrompterMode::FullScript);
+        p.set_pace(Pace {
+            countdown: Duration::from_secs(5),
+            ..Pace::default()
+        });
+        p.start();
+        p.hear(&["Everyone", "says"]);
+        assert_eq!((p.view().countdown, p.position()), (None, 2));
     }
 }

@@ -64,10 +64,13 @@ fn credits() -> Credits {
 }
 
 /// Sets the app menu with About, Welcome, Open (⌘O) and Quit (⌘Q). Call once at startup.
+        crate::prompter::menu(),
 pub fn init(cx: &mut App) {
     cx.on_action(|_: &About, cx| open(cx));
     cx.on_action(|_: &Quit, cx| cx.quit());
     cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
+    // Before the menus, so the menu shows the prompter's shortcut.
+    crate::prompter::bind_keys(cx);
     cx.set_menus([
         Menu::new("Shot Studio").items([
             MenuItem::action("About Shot Studio", About),
@@ -81,6 +84,7 @@ pub fn init(cx: &mut App) {
             MenuItem::action("Undo", crate::studio::Undo),
             MenuItem::action("Redo", crate::studio::Redo),
         ]),
+        crate::prompter::menu(),
     ]);
 }
 
