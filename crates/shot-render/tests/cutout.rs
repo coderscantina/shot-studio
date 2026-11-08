@@ -178,7 +178,7 @@ fn the_cut_out_person_stands_over_the_screen() {
         "the slot shows the screen around the person"
     );
     assert_ne!(plain, screen);
-    shot_render::golden::assert_match("cut out over the screen", &cut, &expected);
+    shot_render::golden::assert_match("cut out over the screen", CANVAS.0, &cut, &expected);
 }
 
 #[test]
@@ -190,5 +190,5 @@ fn a_frame_without_a_person_shows_the_plain_camera() {
         .write(dir.path(), &Id::new("t01").unwrap())
         .unwrap();
     let fallback = paint(dir.path(), &project, &plan, true);
-    shot_render::golden::assert_match("no person", &plain, &fallback);
+    shot_render::golden::assert_match("no person", CANVAS.0, &plain, &fallback);
 }
