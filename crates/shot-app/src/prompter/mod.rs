@@ -22,7 +22,7 @@ mod settings;
 
 use std::sync::{Arc, Mutex};
 
-use gpui::{App, KeyBinding, Menu, MenuItem, actions};
+use gpui::{App, Menu, MenuItem, actions};
 use shot_capture::Marks;
 use shot_capture::events::{Hotkey, Mark, Modifier};
 use shot_core::{Layout, Project};
@@ -35,15 +35,11 @@ pub use settings::Settings;
 actions!(prompter, [TogglePrompter, HidePrompter]);
 
 /// The key context of the output window.
-const OUTPUT_CONTEXT: &str = "PrompterOutput";
+pub(crate) const OUTPUT_CONTEXT: &str = "PrompterOutput";
 
-/// Binds ⌘⇧P everywhere and Esc on the output. Where no Record screen takes them, both close
-/// every prompter output, so there is always a way out.
-pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new("cmd-shift-p", TogglePrompter, None),
-        KeyBinding::new("escape", HidePrompter, Some(OUTPUT_CONTEXT)),
-    ]);
+/// Where no Record screen takes ⌘⇧P or Esc on the output, both close every prompter output, so
+/// there is always a way out.
+pub fn init(cx: &mut App) {
     cx.on_action(|_: &TogglePrompter, cx| close_outputs(cx));
     cx.on_action(|_: &HidePrompter, cx| close_outputs(cx));
 }

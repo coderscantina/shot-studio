@@ -7,7 +7,7 @@
 //! uploads run on threads and report back over a channel the screen polls. One run, an export
 //! or a ship, goes at a time; Esc stops it.
 
-mod thumbnail;
+pub(crate) mod thumbnail;
 mod words;
 
 use std::collections::HashMap;
@@ -18,9 +18,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant, SystemTime};
 
 use gpui::{
-    App, ClipboardItem, Context, Div, Entity, FocusHandle, Focusable, FontWeight, Hsla, KeyBinding,
-    ObjectFit, PathPromptOptions, ScrollHandle, SharedString, Window, actions, div, img,
-    prelude::*, px,
+    App, ClipboardItem, Context, Div, Entity, FocusHandle, Focusable, FontWeight, Hsla, ObjectFit,
+    PathPromptOptions, ScrollHandle, SharedString, Window, actions, div, img, prelude::*, px,
 };
 use shot_core::{Cut, DerivedKind, OutputKind};
 use shot_mcp::bridge::{Claude, Reach};
@@ -54,7 +53,7 @@ actions!(
     ]
 );
 
-const CONTEXT: &str = "ShipScreen";
+pub(crate) const CONTEXT: &str = "ShipScreen";
 /// How often background work is picked up.
 const POLL: Duration = Duration::from_millis(150);
 /// Thumbnail candidates shown.
@@ -65,20 +64,6 @@ const DIFF_CONTEXT: usize = 2;
 const JOBS: usize = 3;
 /// Where a Desktop app OAuth client is created.
 const CREDENTIALS_URL: &str = "https://console.cloud.google.com/apis/credentials";
-
-pub fn bind_keys(cx: &mut App) {
-    let context = Some(CONTEXT);
-    cx.bind_keys([
-        KeyBinding::new("cmd-enter", ShipVideo, context),
-        KeyBinding::new("e", ExportCut, context),
-        KeyBinding::new("t", FindThumbnails, context),
-        KeyBinding::new("d", OpenStudio, context),
-        KeyBinding::new("escape", Stop, context),
-        KeyBinding::new("down", NextCut, context),
-        KeyBinding::new("up", PreviousCut, context),
-    ]);
-    thumbnail::bind_keys(cx);
-}
 
 enum Event {
     Step(Step),
@@ -1693,17 +1678,22 @@ impl ShipScreen {
                     .map(|n| div().text_size(TEXT_SM).text_color(WARN).child(n.clone())),
             );
         }
-        let (cta, enabled) = if self.shipped() {
+        // The reason is why the button is off.
+        let (cta, reason) = if self.shipped() {
             (
                 format!(
                     "Shipped as {}",
                     self.record.release.clone().unwrap_or_default()
                 ),
-                false,
+                Some("This video is shipped"),
             )
         } else if let Some(run) = &self.run {
-            let doing = if run.ship { "Shipping" } else { "Exporting" };
-            (doing.to_owned(), false)
+            let (doing, reason) = if run.ship {
+                ("Shipping", "Shipping is running")
+            } else {
+                ("Exporting", "An export is running")
+            };
+            (doing.to_owned(), Some(reason))
         } else if !ready {
             (
                 if self.cuts.len() == 1 {
@@ -1711,18 +1701,19 @@ impl ShipScreen {
                 } else {
                     "Export every cut".to_owned()
                 },
-                !self.cuts.is_empty(),
+                self.cuts.is_empty().then_some("No cuts to export"),
             )
         } else if self.problems() > 0 {
             (
                 format!("Ship with {} and tag", plural(self.problems(), "problem")),
-                true,
+                None,
             )
         } else if self.record.uploads.values().any(|u| u.video_id.is_some()) {
-            ("Finish shipping and tag".to_owned(), true)
+            ("Finish shipping and tag".to_owned(), None)
         } else {
-            ("Ship to YouTube and tag".to_owned(), true)
+            ("Ship to YouTube and tag".to_owned(), None)
         };
+        let enabled = reason.is_none();
         out.child(
             div()
                 .id("ship-go")
@@ -1742,7 +1733,13 @@ impl ShipScreen {
                             cx.listener(|this, _, window, cx| this.primary(&ShipVideo, window, cx)),
                         )
                 })
-                .when(!enabled, |this| this.bg(RAISED).text_color(MUTED))
+                .when_some(reason, |this, reason| {
+                    this.bg(RAISED)
+                        .text_color(MUTED)
+                        .tooltip(move |window, cx| {
+                            gpui_component::tooltip::Tooltip::new(reason).build(window, cx)
+                        })
+                })
                 .child(cta)
                 .when(enabled, |this| {
                     this.child(

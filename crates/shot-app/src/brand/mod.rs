@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 
 use gpui::{
     AnyWindowHandle, App, Bounds, Context, Entity, FocusHandle, Focusable, FontWeight, Global,
-    KeyBinding, Menu, MenuItem, SharedString, Subscription, TitlebarOptions, Window, WindowBounds,
+    Menu, MenuItem, SharedString, Subscription, TitlebarOptions, Window, WindowBounds,
     WindowOptions, actions, div, point, prelude::*, px, size,
 };
 use gpui_component::Root;
@@ -37,14 +37,6 @@ use crate::sound::Audition;
 use crate::theme::*;
 
 actions!(brand, [OpenTheme, OpenOverlays]);
-
-/// ⌘⇧B opens the channel theme, ⌘⇧O its overlay presets, from a studio or board window.
-pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new("cmd-shift-b", OpenTheme, None),
-        KeyBinding::new("cmd-shift-o", OpenOverlays, None),
-    ]);
-}
 
 /// The Channel menu with both.
 pub fn menu() -> Menu {

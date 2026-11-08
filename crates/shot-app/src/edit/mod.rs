@@ -16,12 +16,12 @@ mod picture;
 mod place;
 mod product;
 mod proposals;
-mod switch;
+pub(crate) mod switch;
 
 pub use parts::layout_name;
 mod text;
 mod timeline;
-mod zoom;
+pub(crate) mod zoom;
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
@@ -31,8 +31,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    App, Bounds, Context, Entity, FocusHandle, Focusable, KeyBinding, Pixels, ScrollHandle, Window,
-    actions, div, prelude::*,
+    App, Bounds, Context, Entity, FocusHandle, Focusable, Pixels, ScrollHandle, Window, actions,
+    div, prelude::*,
 };
 use shot_core::{Cut, EditError, Id, Layout, Micros, TakeAt, TimeRange, WordState};
 use shot_mcp::bridge::Claude;
@@ -51,7 +51,7 @@ use crate::sound::Sound;
 use crate::theme::*;
 use crate::transcribe::Transcribe;
 
-const CONTEXT: &str = "EditScreen";
+pub(crate) const CONTEXT: &str = "EditScreen";
 
 /// Selected words in the transcript and the Words lane: lime, strong enough to read a short
 /// selection at a glance, faint enough for the text on it.
@@ -104,48 +104,6 @@ actions!(
         BuildLayout,
     ]
 );
-
-pub fn bind_keys(cx: &mut App) {
-    let context = Some(CONTEXT);
-    cx.bind_keys([
-        KeyBinding::new("space", TogglePlay, context),
-        KeyBinding::new("backspace", DeleteSelection, context),
-        KeyBinding::new("delete", DeleteSelection, context),
-        KeyBinding::new("r", RestoreSelection, context),
-        KeyBinding::new("escape", ClearSelection, context),
-        KeyBinding::new("1", Layout1, context),
-        KeyBinding::new("2", Layout2, context),
-        KeyBinding::new("3", Layout3, context),
-        KeyBinding::new("4", Layout4, context),
-        KeyBinding::new("alt-1", ShowText, context),
-        KeyBinding::new("alt-2", ShowPicture, context),
-        KeyBinding::new("alt-3", ShowTimeline, context),
-        KeyBinding::new("left", PreviousWord, context),
-        KeyBinding::new("right", NextWord, context),
-        KeyBinding::new("shift-left", ExtendPrevious, context),
-        KeyBinding::new("shift-right", ExtendNext, context),
-        KeyBinding::new("tab", AcceptProposal, context),
-        KeyBinding::new("shift-tab", FocusPrevious, context),
-        KeyBinding::new("g", ShowProposal, context),
-        KeyBinding::new("s", PickSound, context),
-        KeyBinding::new("z", AddZoom, context),
-        KeyBinding::new("=", ZoomIn, context),
-        KeyBinding::new("-", ZoomOut, context),
-        KeyBinding::new("shift-z", ZoomToFit, context),
-        KeyBinding::new("alt-z", ZoomToSelection, context),
-        KeyBinding::new("home", GoToStart, context),
-        KeyBinding::new("end", GoToEnd, context),
-        KeyBinding::new("cmd-enter", RecordTake, context),
-        KeyBinding::new("enter", EditCaption, context),
-        KeyBinding::new("h", AddHighlight, context),
-        KeyBinding::new("p", PickPop, context),
-        KeyBinding::new("l", PickLayout, context),
-        KeyBinding::new("t", EditSwitch, context),
-        KeyBinding::new("shift-l", BuildLayout, context),
-    ]);
-    zoom::bind_keys(cx);
-    switch::bind_keys(cx);
-}
 
 /// A cut run by its block and media start.
 type RunKey = (usize, usize, Micros);

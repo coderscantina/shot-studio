@@ -16,8 +16,8 @@ use std::sync::Arc;
 
 use gpui::{
     App, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle,
-    Hsla, InteractiveText, KeyBinding, ObjectFit, ScrollHandle, StyledText, Subscription, Window,
-    actions, div, prelude::*, px, relative, surface,
+    Hsla, InteractiveText, ObjectFit, ScrollHandle, StyledText, Subscription, Window, actions, div,
+    prelude::*, px, relative, surface,
 };
 use shot_core::{
     Attempt, Chapter, Cut, Elements, Id, Lineup, Micros, RangeEdit, Row, RowAt, TakeWords,
@@ -62,30 +62,6 @@ actions!(
         Continue,
     ]
 );
-
-pub fn bind_keys(cx: &mut App) {
-    let context = Some(CONTEXT);
-    cx.bind_keys([
-        KeyBinding::new("down", NextBeat, context),
-        KeyBinding::new("up", PreviousBeat, context),
-        KeyBinding::new("right", NextAttempt, context),
-        KeyBinding::new("left", PreviousAttempt, context),
-        KeyBinding::new("space", Play, context),
-        KeyBinding::new("a", Compare, context),
-        KeyBinding::new("1", Rate1, context),
-        KeyBinding::new("2", Rate2, context),
-        KeyBinding::new("3", Rate3, context),
-        KeyBinding::new("4", Rate4, context),
-        KeyBinding::new("5", Rate5, context),
-        KeyBinding::new("p", Pick, context),
-        KeyBinding::new("enter", UseThis, context),
-        KeyBinding::new("shift-enter", Assemble, context),
-        KeyBinding::new("shift-right", MarkMore, context),
-        KeyBinding::new("shift-left", MarkLess, context),
-        KeyBinding::new("escape", ClearMark, context),
-        KeyBinding::new("cmd-enter", Continue, context),
-    ]);
-}
 
 /// A take's words and elements, read once.
 struct TakeData {

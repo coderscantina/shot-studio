@@ -22,8 +22,8 @@ use std::sync::Arc;
 
 use gpui::{
     App, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle,
-    Hsla, KeyBinding, ObjectFit, ScrollHandle, SharedString, StrikethroughStyle, StyledText,
-    Subscription, Window, actions, div, prelude::*, px, relative, surface,
+    Hsla, ObjectFit, ScrollHandle, SharedString, StrikethroughStyle, StyledText, Subscription,
+    Window, actions, div, prelude::*, px, relative, surface,
 };
 use shot_analyze::autocut::{self, RuleCount};
 use shot_analyze::{Speech, cache};
@@ -36,13 +36,13 @@ use crate::folder::VideoFolder;
 use crate::model::{self, FPS};
 use crate::peaks::Peaks;
 use crate::studio::Screen;
-use crate::takes::{self, TakesView};
+use crate::takes::TakesView;
 use crate::theme::*;
 use crate::transcribe::{Transcribe, Transcribed};
 use crate::ui::{Segment, icon, kbd, label, mono, pane, segmented};
 use player::{Hear, ItemKey, Player};
 
-const CONTEXT: &str = "CutScreen";
+pub(crate) const CONTEXT: &str = "CutScreen";
 /// Words of context shown on each side of an item.
 const CONTEXT_WORDS: usize = 8;
 /// Bars of the waveform under an item.
@@ -65,25 +65,6 @@ actions!(
         ShowTakes
     ]
 );
-
-pub fn bind_keys(cx: &mut App) {
-    let context = Some(CONTEXT);
-    cx.bind_keys([
-        KeyBinding::new("k", KeepItem, context),
-        KeyBinding::new("c", CutItem, context),
-        KeyBinding::new("down", NextItem, context),
-        KeyBinding::new("up", PreviousItem, context),
-        KeyBinding::new("space", PlayAround, context),
-        KeyBinding::new("shift-space", PlayCut, context),
-        KeyBinding::new("cmd-enter", Continue, context),
-        KeyBinding::new("r", ReviewApplied, context),
-        KeyBinding::new("alt-1", ShowReview, context),
-        KeyBinding::new("alt-2", ShowTakes, context),
-        KeyBinding::new("alt-1", ShowReview, Some(takes::CONTEXT)),
-        KeyBinding::new("alt-2", ShowTakes, Some(takes::CONTEXT)),
-    ]);
-    takes::bind_keys(cx);
-}
 
 /// Asks the studio to show a screen: Edit when the review is done, Record before any take.
 pub struct GoTo(pub Screen);

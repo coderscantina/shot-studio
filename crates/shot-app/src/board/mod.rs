@@ -13,9 +13,8 @@ use std::path::{Path, PathBuf};
 
 use gpui::{
     AnyWindowHandle, App, Bounds, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle,
-    Focusable, FontWeight, Global, Hsla, KeyBinding, Rgba, SharedString, Subscription,
-    TitlebarOptions, Window, WindowBounds, WindowOptions, actions, div, point, prelude::*, px,
-    size,
+    Focusable, FontWeight, Global, Hsla, Rgba, SharedString, Subscription, TitlebarOptions, Window,
+    WindowBounds, WindowOptions, actions, div, point, prelude::*, px, size,
 };
 use gpui_component::Root;
 use gpui_component::input::{Escape, Input, InputEvent, InputState};
@@ -36,7 +35,7 @@ use crate::ui::{ActionLook, Segment, alert, hint, kbd, mono, pane, proposal_acti
 const CADENCE: u8 = 2;
 /// Commits shown in the activity line.
 const ACTIVITY: usize = 3;
-const CONTEXT: &str = "Board";
+pub(crate) const CONTEXT: &str = "Board";
 
 /// The formats in the order the new video picker lists them.
 pub const FORMATS: [FormatKind; 4] = [
@@ -60,22 +59,6 @@ actions!(
         Deselect
     ]
 );
-
-/// Binds the board's keys. Call once at startup.
-pub fn bind_keys(cx: &mut App) {
-    let context = Some(CONTEXT);
-    cx.bind_keys([
-        KeyBinding::new("left", SelectLeft, context),
-        KeyBinding::new("right", SelectRight, context),
-        KeyBinding::new("up", SelectUp, context),
-        KeyBinding::new("down", SelectDown, context),
-        KeyBinding::new("alt-left", MoveLeft, context),
-        KeyBinding::new("alt-right", MoveRight, context),
-        KeyBinding::new("enter", OpenSelected, context),
-        KeyBinding::new("n", NewVideo, context),
-        KeyBinding::new("escape", Deselect, context),
-    ]);
-}
 
 /// The open board windows by channel repo.
 #[derive(Default)]

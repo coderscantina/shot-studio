@@ -28,6 +28,7 @@ mod edit;
 mod edit_bench;
 mod engine;
 mod folder;
+mod keymap;
 mod layout_store;
 mod layouts;
 mod library;
@@ -116,12 +117,9 @@ fn studio_app() -> gpui::Application {
 /// Fonts, theme, menus and key bindings, once per app run.
 fn init(cx: &mut gpui::App) {
     theme::init(cx);
+    keymap::bind(cx);
     about::init(cx);
     welcome::init(cx);
-    studio::bind_keys(cx);
-    layouts::builder::bind_keys(cx);
-    brand::bind_keys(cx);
-    library::bind_keys(cx);
 }
 
 fn parse_args(args: impl Iterator<Item = String>) -> Result<Options, String> {

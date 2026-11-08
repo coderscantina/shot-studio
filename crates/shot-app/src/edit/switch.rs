@@ -9,8 +9,8 @@
 use std::ops::Range;
 
 use gpui::{
-    App, Context, Div, FocusHandle, FontWeight, Hsla, KeyBinding, MouseButton, MouseDownEvent,
-    SharedString, Stateful, Window, actions, div, prelude::*, px,
+    Context, Div, FocusHandle, FontWeight, Hsla, MouseButton, MouseDownEvent, SharedString,
+    Stateful, Window, actions, div, prelude::*, px,
 };
 use gpui_component::tooltip::Tooltip;
 use shot_core::{Cut, Id, LayoutSwitch, Micros, SwitchKind, SwitchSound, TakeAt};
@@ -37,7 +37,7 @@ actions!(
     ]
 );
 
-const CONTEXT: &str = "SceneSwitch";
+pub(crate) const CONTEXT: &str = "SceneSwitch";
 
 /// The kinds in the order of their keys.
 const KINDS: [(SwitchKind, &str, &str); 4] = [
@@ -52,22 +52,6 @@ const LENGTHS: [u64; 5] = [200_000, 300_000, 500_000, 800_000, 1_200_000];
 
 /// How much of the take the preview plays before the edge and after the window.
 const LEAD: u64 = FPS as u64 * 3 / 4;
-
-pub fn bind_keys(cx: &mut App) {
-    let context = Some(CONTEXT);
-    cx.bind_keys([
-        KeyBinding::new("1", MorphSwitch, context),
-        KeyBinding::new("2", DissolveSwitch, context),
-        KeyBinding::new("3", ZoomThroughSwitch, context),
-        KeyBinding::new("4", CutSwitch, context),
-        KeyBinding::new("[", ShorterSwitch, context),
-        KeyBinding::new("]", LongerSwitch, context),
-        KeyBinding::new("space", PlaySwitch, context),
-        KeyBinding::new("backspace", FormatSwitch, context),
-        KeyBinding::new("delete", FormatSwitch, context),
-        KeyBinding::new("escape", CloseSwitch, context),
-    ]);
-}
 
 /// The switch whose popover is open.
 pub struct OpenSwitch {
