@@ -91,6 +91,25 @@ pub fn punch_at(zooms: &[Zoom], t: Micros, motion: ZoomMotion, screen: (u32, u32
     punch
 }
 
+/// When each of `zooms` (in order, not overlapping) starts, comes to rest and starts to spring
+/// out, as [`punch_at`] moves it, for the sounds on a zoom. A zoom handing over to the next one
+/// has no way out; an instant zoom rests at its start and leaves at its end.
+pub fn phases(
+    zooms: &[Zoom],
+    motion: ZoomMotion,
+) -> impl Iterator<Item = (Micros, Micros, Option<Micros>)> + '_ {
+    zooms.iter().enumerate().map(move |(index, zoom)| {
+        let (from, to) = (zoom.range.from(), zoom.range.to());
+        let hands_over = zooms.get(index + 1).is_some_and(|n| n.range.from() == to);
+        let ease = match motion {
+            ZoomMotion::Instant => Micros(0),
+            ZoomMotion::Smooth => Micros(EASE.0.min(zoom.range.duration().0 / 3).max(1)),
+        };
+        let exit = (!hands_over).then(|| Micros(to.0 - ease.0));
+        (from, Micros(from.0 + ease.0), exit)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

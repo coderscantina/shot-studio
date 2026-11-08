@@ -13,12 +13,15 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use shot_core::Project;
 use shot_media::audio::SAMPLE_RATE;
 use shot_media::speaker::{Speaker, SpeakerClock};
 use shot_render::audio::{FADE_SAMPLES, TimelineAudio};
 
 use crate::model::{EditMap, FPS};
-use crate::score::{self, Cues, Finished, Score, Sounds};
+use shot_render::voice::Score;
+
+use crate::score::{self, Finished};
 
 const SAMPLES_PER_FRAME: u64 = (SAMPLE_RATE / FPS) as u64;
 /// Samples decoded per read, about 21 ms.
@@ -34,7 +37,7 @@ const FEED_INTERVAL: Duration = Duration::from_millis(10);
 struct State {
     /// The edit, where its takes live and what plays with the voice; `None` before the first
     /// plan.
-    plan: Option<(EditMap, PathBuf, Cues)>,
+    plan: Option<(EditMap, PathBuf, Project)>,
     /// The loudness gain of the last measured plan, in dB.
     gain: Option<f64>,
     /// Counts plan changes, so the feeder rebuilds its reader.
@@ -85,11 +88,11 @@ impl Sound {
         }
     }
 
-    /// Plays `map`'s audio, with takes in `media` and `cues` with the voice, from output frame
+    /// Plays the audio of `map`'s plan of `project`, the video in `dir`, from output frame
     /// `frame`.
-    pub fn set_plan(&self, map: &EditMap, media: PathBuf, cues: Cues, frame: u64) {
+    pub fn set_plan(&self, map: &EditMap, dir: PathBuf, project: Project, frame: u64) {
         let mut state = self.shared.lock();
-        state.plan = Some((map.clone(), media, cues));
+        state.plan = Some((map.clone(), dir, project));
         state.plan_generation += 1;
         state.error = None;
         Self::restart(&mut state, frame);
@@ -154,7 +157,6 @@ fn feed(shared: Arc<Shared>) {
         }
     };
     shared.lock().clock = Some(speaker.clock());
-    let mut sounds = Sounds::default();
     let mut audio: Option<(TimelineAudio, Score)> = None;
     let mut finished: Option<Finished> = None;
     let measuring = Arc::new(AtomicU64::new(0));
@@ -174,10 +176,11 @@ fn feed(shared: Arc<Shared>) {
                 plan_generation = state.plan_generation;
                 let plan = state.plan.clone();
                 drop(state);
-                let placed = plan.map(|(map, media, cues)| {
-                    let score = Score::place(&map, &cues, &mut sounds)?;
-                    measure(&shared, &measuring, plan_generation, &map, &media, &score);
-                    Ok::<_, String>((score::timeline_audio(&map, media, &score), score))
+                let placed = plan.map(|(map, dir, project)| {
+                    let score = shot_render::export::preview_score(&dir, &project, &map.plan)
+                        .map_err(|e| e.to_string())?;
+                    measure(&shared, &measuring, plan_generation, &map, &dir, &score);
+                    Ok::<_, String>((shot_render::export::plan_audio(&dir, &map.plan), score))
                 });
                 state = shared.lock();
                 audio = match placed.transpose() {
@@ -246,16 +249,16 @@ fn measure(
     measuring: &Arc<AtomicU64>,
     generation: u64,
     map: &EditMap,
-    media: &std::path::Path,
+    dir: &std::path::Path,
     score: &Score,
 ) {
     measuring.store(generation, Ordering::Relaxed);
     let (shared, measuring, score) = (shared.clone(), measuring.clone(), score.clone());
-    let (map, media) = (map.clone(), media.to_owned());
+    let (plan, dir) = (map.plan.clone(), dir.to_owned());
     let spawned = std::thread::Builder::new()
         .name("shot-loudness".into())
         .spawn(move || {
-            let mut audio = score::timeline_audio(&map, media, &score);
+            let mut audio = shot_render::export::plan_audio(&dir, &plan);
             if let Ok(Some(gain)) = score::gain(&mut audio, &score, &measuring, generation) {
                 shared.lock().gain = Some(gain);
             }
