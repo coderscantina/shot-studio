@@ -237,6 +237,9 @@ pub struct Theme {
     pub camera: Option<CameraFrame>,
     /// How strongly the camera drifts as if hand-held, 0 (off) to 100, see [`crate::handheld`].
     pub handheld: u8,
+    /// Whether the camera shows the person cut out of their background, see
+    /// [`crate::frame::compose`].
+    pub cutout: bool,
     /// The channel's layouts, sorted by name.
     pub layouts: Vec<shot_core::CustomLayout>,
     pub stinger: Option<StingerAnimation>,
@@ -459,6 +462,7 @@ impl Theme {
             key: Vec::new(),
             camera,
             handheld: brand.handheld.unwrap_or(0),
+            cutout: brand.cutout.unwrap_or(false),
             layouts: brand.layouts.clone(),
             stinger,
             logo,
@@ -524,7 +528,8 @@ impl Theme {
     }
 
     /// The camera's frame as bytes, for the chunks of a layout that shows the camera beside the
-    /// screen, and its hand-held strength wherever the camera shows; `None` where neither draws.
+    /// screen, and its hand-held strength and cut-out wherever the camera shows; `None` where
+    /// none of them draws.
     pub fn camera_key(&self, layout: Layout) -> Option<Vec<u8>> {
         let spec =
             LayoutSpec::resolve(layout, &shot_core::Effects::default().window, &self.layouts).ok();
@@ -546,7 +551,17 @@ impl Theme {
             key.extend_from_slice(b"handheld");
             key.push(self.handheld);
         }
+        if self.cutout && shows_camera {
+            key.extend_from_slice(b"cutout");
+        }
         (!key.is_empty()).then_some(key)
+    }
+
+    /// Whether `layout` shows the camera cut out, so its frames depend on the take's masks.
+    pub fn cuts_out(&self, layout: Layout) -> bool {
+        self.cutout
+            && LayoutSpec::resolve(layout, &shot_core::Effects::default().window, &self.layouts)
+                .is_ok_and(|s| s.uses(Source::Camera))
     }
 
     /// The shape a mask wipe opens in: the camera's, or a circle.
@@ -1117,5 +1132,15 @@ pub(crate) mod tests {
             framed.camera_key(Layout::Split),
             both.camera_key(Layout::Split)
         );
+    }
+
+    #[test]
+    fn the_cut_out_keys_only_layouts_that_show_the_camera() {
+        let cut = theme(&brand("camera cutout=#true\n")).unwrap();
+        assert!(cut.cuts_out(Layout::Face) && cut.cuts_out(Layout::FaceContent));
+        assert!(!cut.cuts_out(Layout::Content));
+        assert!(cut.camera_key(Layout::Face).is_some());
+        assert_eq!(cut.camera_key(Layout::Content), None);
+        assert!(!theme(&brand("")).unwrap().cuts_out(Layout::Face));
     }
 }

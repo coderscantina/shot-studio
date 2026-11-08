@@ -417,6 +417,12 @@ pub(crate) fn span_input(
         input.extend_from_slice(b"from-camera");
         input.extend_from_slice(&camera);
     }
+    if theme.cuts_out(segment.layout) || left.is_some_and(|s| theme.cuts_out(s.from)) {
+        let masks = identity(&shot_analyze::masks::cache_file(&segment.take));
+        input.extend_from_slice(b"masks");
+        input.extend_from_slice(&(masks.len() as u64).to_le_bytes());
+        input.extend_from_slice(&masks);
+    }
     input
 }
 

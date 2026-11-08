@@ -1,5 +1,5 @@
 //! The files frames draw from besides the video tracks, read once per video folder: each take's
-//! event log, the code-diff snapshots in `sources/`, the b-roll stills and diffs overlays name,
+//! event log and person masks, the code-diff snapshots in `sources/`, the b-roll stills and diffs overlays name,
 //! and the video's theme with the brand's fonts and Lottie templates.
 
 use std::collections::HashMap;
@@ -8,6 +8,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use shot_analyze::masks::PersonMasks;
 use shot_core::{Effects, Id, Overlay};
 use vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
 
@@ -45,6 +46,8 @@ pub struct Assets {
     /// Read from the folder on first use unless given.
     theme: Option<Arc<Theme>>,
     events: HashMap<Id, Option<Arc<EventLog>>>,
+    /// Read once found; a take without masks is looked for again, since analysis may add them.
+    masks: HashMap<Id, Arc<PersonMasks>>,
     diffs: HashMap<String, Arc<CodeDiff>>,
     images: HashMap<String, ImageData>,
 }
@@ -56,6 +59,7 @@ impl Assets {
             dir: video_dir.to_owned(),
             theme: None,
             events: HashMap::new(),
+            masks: HashMap::new(),
             diffs: HashMap::new(),
             images: HashMap::new(),
         }
@@ -107,14 +111,26 @@ impl Assets {
         for file in overlays.iter().filter_map(crate::overlay::pop::image) {
             images.insert(file.to_owned(), self.image(file)?);
         }
+        let theme = self.theme()?;
         Ok(Look {
             effects,
             events: self.events(take)?,
             diffs,
             images,
-            theme: self.theme()?,
+            masks: theme.cutout.then(|| self.masks(take)).flatten(),
+            theme,
             take: Some(take.clone()),
         })
+    }
+
+    /// The person masks of `take`'s camera, `None` until analysis computed them.
+    fn masks(&mut self, take: &Id) -> Option<Arc<PersonMasks>> {
+        if let Some(masks) = self.masks.get(take) {
+            return Some(masks.clone());
+        }
+        let masks = Arc::new(PersonMasks::read(&self.dir, take)?);
+        self.masks.insert(take.clone(), masks.clone());
+        Some(masks)
     }
 
     pub fn events(&mut self, take: &Id) -> Result<Option<Arc<EventLog>>, AssetError> {

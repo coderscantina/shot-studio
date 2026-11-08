@@ -261,6 +261,7 @@ impl DerivedPlan {
             },
             drawing,
             cutaway: None,
+            cutout: None,
         }
     }
 

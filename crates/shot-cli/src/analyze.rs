@@ -1,11 +1,12 @@
-//! `shot analyze`: runs a take's analysis again and rewrites `elements/<take>.jsonl`.
+//! `shot analyze`: runs a take's analysis again and rewrites `elements/<take>.jsonl`, and computes
+//! the camera's person masks when the brand cuts the camera out.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use clap::Args;
 use shot_analyze::elements::{self, BY_CLAUDE, Depth};
-use shot_analyze::{SpeechDetector, Transcriber, cache, decode_mono, models};
+use shot_analyze::{SpeechDetector, Transcriber, cache, decode_mono, masks, models};
 use shot_core::{Element, ElementKind, Id, Transcript};
 use shot_mcp::bridge::{Claude, Reach, Session, new_log_dir};
 
@@ -69,6 +70,24 @@ pub(crate) fn analyze_take(video: &Path, take: &Id, claude: bool) -> Result<(), 
         found.len(),
         analyzed.as_secs_f64(),
         path.display()
+    );
+    person_masks(video, take)
+}
+
+/// Computes the person masks of `take`'s camera when the video's brand cuts the camera out,
+/// unless they are cached for the track as it is.
+fn person_masks(video: &Path, take: &Id) -> Result<(), String> {
+    let theme = shot_render::theme::Theme::open(video).map_err(|e| e.to_string())?;
+    let camera = video.join("media").join(take.as_str()).join("camera.mp4");
+    if !theme.cutout || !camera.exists() {
+        return Ok(());
+    }
+    let start = Instant::now();
+    let masks = masks::person_masks(video, take, |_| {}).map_err(|e| e.to_string())?;
+    let (person, frames) = masks.confident();
+    eprintln!(
+        "{take} person masks: {person} of {frames} frames show a person, {:.2} s",
+        start.elapsed().as_secs_f64()
     );
     Ok(())
 }

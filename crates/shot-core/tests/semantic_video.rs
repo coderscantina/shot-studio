@@ -642,3 +642,26 @@ fn the_camera_node_sets_its_frame_and_hand_held_strength_apart() {
     let layer = FormatLayer::parse("brand {\n    camera handheld=0\n}\n").unwrap();
     assert_eq!(layer.brand.unwrap().handheld, Some(0));
 }
+
+#[test]
+fn the_camera_node_cuts_the_person_out_on_its_own_or_with_the_frame() {
+    let channel = "camera shape=circle corners=0 border=8 shadow=soft handheld=20 cutout=#true\n";
+    let brand = Brand::parse(channel).unwrap();
+    assert_eq!(brand.cutout, Some(true));
+    assert_eq!(brand.to_kdl(), channel);
+
+    // A video turns it off in its format layer and keeps the channel's frame and drift.
+    let layer = FormatLayer::parse("brand {\n    camera cutout=#false\n}\n").unwrap();
+    let video = layer.brand.unwrap();
+    assert_eq!((video.camera, video.cutout), (None, Some(false)));
+    let merged = brand.merge(&video);
+    assert_eq!(
+        (merged.camera, merged.handheld, merged.cutout),
+        (brand.camera, Some(20), Some(false))
+    );
+    assert_eq!(
+        Brand::parse("camera cutout=#false\n").unwrap().to_kdl(),
+        "camera cutout=#false\n"
+    );
+    assert!(Brand::parse("camera cutout=1\n").is_err());
+}

@@ -4,6 +4,10 @@
 //! frame's planes in place. The target is whatever the consumer takes directly: the encoder's
 //! `420v` BT.709 buffers for export, `420f` BT.601 buffers for gpui's preview surface. Range and
 //! matrix are read from each buffer, so both sides show the same RGB.
+//!
+//! A frame's person mask is a small one-channel texture the camera layer samples at its own
+//! texture coordinates; its alpha goes from the plain camera to the person alone by the
+//! cut-out's weight. Every other layer samples a white texel.
 
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -16,7 +20,7 @@ use std::sync::Mutex;
 use crate::RenderError;
 use crate::drawing::Drawing;
 use crate::frame::Frame;
-use crate::layout::{Canvas, Scene, Sources};
+use crate::layout::{Canvas, Scene, Source, Sources};
 use crate::material_pass::MaterialPass;
 use crate::materials;
 use crate::surface::{Matrix, Plane, Range, plane_texture, size};
@@ -43,6 +47,8 @@ pub struct Renderer {
     vector: Mutex<VectorPass>,
     /// Shadows and sheets between them, see [`crate::material_pass`].
     material: Mutex<MaterialPass>,
+    /// What a layer without a person mask samples: one white texel.
+    no_mask: wgpu::TextureView,
 }
 
 impl Renderer {
@@ -98,6 +104,7 @@ impl Renderer {
                     },
                     count: None,
                 },
+                texture(4),
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -155,6 +162,7 @@ impl Renderer {
         });
         let vector = Mutex::new(VectorPass::new(&device)?);
         let material = Mutex::new(MaterialPass::new(&device));
+        let no_mask = mask_texture(&device, &queue, 1, 1, &[255]);
         Ok(Self {
             device,
             queue,
@@ -165,6 +173,7 @@ impl Renderer {
             uniforms,
             vector,
             material,
+            no_mask,
         })
     }
 
@@ -175,7 +184,7 @@ impl Renderer {
         sources: Sources<Option<&CVPixelBuffer>>,
         target: &CVPixelBuffer,
     ) -> Result<(), RenderError> {
-        self.render_with(&frame.scene, &frame.drawing, sources, target, true)
+        self.render_with(frame, sources, target, true)
     }
 
     /// Draws `frame` on top of what `target` holds, without its background: for a frame
@@ -186,7 +195,7 @@ impl Renderer {
         sources: Sources<Option<&CVPixelBuffer>>,
         target: &CVPixelBuffer,
     ) -> Result<(), RenderError> {
-        self.render_with(&frame.scene, &frame.drawing, sources, target, false)
+        self.render_with(frame, sources, target, false)
     }
 
     /// Draws `scene` into `target` and waits for the GPU, so the target can go straight to the
@@ -197,17 +206,23 @@ impl Renderer {
         sources: Sources<Option<&CVPixelBuffer>>,
         target: &CVPixelBuffer,
     ) -> Result<(), RenderError> {
-        self.render_with(scene, &Drawing::default(), sources, target, true)
+        let frame = Frame {
+            scene: scene.clone(),
+            drawing: Drawing::default(),
+            cutaway: None,
+            cutout: None,
+        };
+        self.render_with(&frame, sources, target, true)
     }
 
     fn render_with(
         &self,
-        scene: &Scene,
-        drawing: &Drawing,
+        frame: &Frame,
         sources: Sources<Option<&CVPixelBuffer>>,
         target: &CVPixelBuffer,
         clear: bool,
     ) -> Result<(), RenderError> {
+        let (scene, drawing) = (&frame.scene, &frame.drawing);
         if scene.layers.len() > MAX_LAYERS {
             return Err(RenderError::TooManyLayers(scene.layers.len()));
         }
@@ -220,8 +235,18 @@ impl Renderer {
             group: wgpu::BindGroup,
             offset: u32,
         }
+        let mask = frame.cutout.as_ref().map(|c| {
+            (
+                mask_texture(&self.device, &self.queue, c.width, c.height, &c.alpha),
+                c.weight,
+            )
+        });
         let mut layers = Vec::with_capacity(scene.layers.len());
         for (index, layer) in scene.layers.iter().enumerate() {
+            let (mask, cutout) = match &mask {
+                Some((view, weight)) if layer.source == Source::Camera => (view, *weight),
+                _ => (&self.no_mask, 0.0),
+            };
             let source = sources
                 .get(layer.source)
                 .ok_or(RenderError::MissingSource(layer.source))?;
@@ -290,7 +315,7 @@ impl Renderer {
                 layer.turn,
                 source_size.0 as f32,
                 source_size.1 as f32,
-                0.0,
+                cutout,
             ];
             let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_ne_bytes()).collect();
             self.queue.write_buffer(&self.uniforms, offset, &bytes);
@@ -317,6 +342,10 @@ impl Renderer {
                             offset: 0,
                             size: wgpu::BufferSize::new(LAYER_SIZE),
                         }),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(mask),
                     },
                 ],
             });
@@ -482,6 +511,42 @@ impl Renderer {
         }
         Ok(rgba)
     }
+}
+
+/// A one-channel texture of `pixels`, `width` by `height`, row by row.
+fn mask_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    width: u32,
+    height: u32,
+    pixels: &[u8],
+) -> wgpu::TextureView {
+    let size = wgpu::Extent3d {
+        width,
+        height,
+        depth_or_array_layers: 1,
+    };
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("person mask"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        texture.as_image_copy(),
+        pixels,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(width),
+            rows_per_image: Some(height),
+        },
+        size,
+    );
+    texture.create_view(&Default::default())
 }
 
 fn begin_pass<'a>(

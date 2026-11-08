@@ -393,6 +393,9 @@ pub struct Brand {
     /// How strongly the camera drifts as if hand-held, 0 (off) to 100. Written on the `camera`
     /// node; `None` keeps what a lower layer set.
     pub handheld: Option<u8>,
+    /// Whether the camera shows the person cut out of their background. Written on the `camera`
+    /// node; `None` keeps what a lower layer set.
+    pub cutout: Option<bool>,
     /// How burned-in captions change their preset, for every video of the channel.
     pub captions: CaptionLook,
     /// The channel's layouts. Sorted by name, each name once.
@@ -495,8 +498,12 @@ impl Brand {
                     node.set_once(&mut end_card, node.prop("length")?)?;
                 }
                 "camera" => {
-                    node.expect(0, &["shape", "corners", "border", "shadow", "handheld"])?;
+                    node.expect(
+                        0,
+                        &["shape", "corners", "border", "shadow", "handheld", "cutout"],
+                    )?;
                     let handheld: Option<u8> = node.opt_prop("handheld")?;
+                    let cutout: Option<bool> = node.opt_prop("cutout")?;
                     if handheld.is_some_and(|h| h > 100) {
                         return Err(node.error("`handheld` is a strength from 0 to 100"));
                     }
@@ -513,7 +520,7 @@ impl Brand {
                             border,
                             shadow,
                         }),
-                        (None, None, None, None) if handheld.is_some() => None,
+                        (None, None, None, None) if handheld.is_some() || cutout.is_some() => None,
                         _ => {
                             return Err(node.error(
                                 "`camera` takes `shape`, `corners`, `border` and `shadow` together",
@@ -522,6 +529,7 @@ impl Brand {
                     };
                     node.set_once(&mut camera, frame)?;
                     brand.handheld = handheld;
+                    brand.cutout = cutout;
                 }
                 "captions" => {
                     node.expect(0, &LOOK_PROPS)?;
@@ -660,7 +668,7 @@ impl Brand {
         if let Some(length) = &self.end_card {
             w.node("end-card").prop("length", length).end();
         }
-        if self.camera.is_some() || self.handheld.is_some() {
+        if self.camera.is_some() || self.handheld.is_some() || self.cutout.is_some() {
             w.node("camera");
             if let Some(camera) = &self.camera {
                 w.prop("shape", &camera.shape)
@@ -669,6 +677,7 @@ impl Brand {
                     .prop("shadow", &camera.shadow);
             }
             write_opt(w, "handheld", &self.handheld);
+            write_opt(w, "cutout", &self.cutout);
             w.end();
         }
         if !self.captions.is_empty() {
@@ -772,6 +781,7 @@ impl Brand {
         merge_opt(&mut merged.end_card, &over.end_card);
         merge_opt(&mut merged.camera, &over.camera);
         merge_opt(&mut merged.handheld, &over.handheld);
+        merge_opt(&mut merged.cutout, &over.cutout);
         merged.captions = merged.captions.merge(&over.captions);
         for layout in &over.layouts {
             match merged

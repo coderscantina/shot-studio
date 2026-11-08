@@ -330,6 +330,7 @@ fn render_loop(shared: &Shared) {
                         ..Drawing::default()
                     },
                     cutaway: None,
+                    cutout: None,
                 };
                 let none = Sources {
                     screen: None,
@@ -347,6 +348,7 @@ fn render_loop(shared: &Shared) {
                     },
                     drawing: Drawing::default(),
                     cutaway: None,
+                    cutout: None,
                 };
                 decorate(frame_time(frame, FPS), CANVAS, &mut over);
                 renderer
