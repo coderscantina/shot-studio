@@ -11,9 +11,9 @@ use crate::lock::{Applied, Instance, Lock};
 use crate::timeline::Timeline;
 use crate::{
     Attr, AttrValue, AutoZoom, Brand, ContentHash, Cut, Decision, Effect, EffectKey, ElementKind,
-    Elements, Filter, Format, FormatLayer, Id, Micros, Overlay, Override, OverrideEffect, Project,
-    RangeEdit, RemovedBy, Rule, RuleBody, RuleKind, Selector, StyleError, StyleInput, StyleSheet,
-    TakeEdit, Target, TimeRange, Zoom, ZoomBy, ZoomTrigger, build,
+    Elements, Filter, Format, FormatKind, FormatLayer, Id, Micros, Overlay, Override,
+    OverrideEffect, Project, RangeEdit, RemovedBy, Rule, RuleBody, RuleKind, Selector, StyleError,
+    StyleInput, StyleSheet, TakeEdit, Target, TimeRange, Zoom, ZoomBy, ZoomTrigger, build,
 };
 
 /// The pacing's punch-in on emphasis, and the shortest it holds.
@@ -137,6 +137,42 @@ pub fn implied_rules(format: &Format) -> StyleSheet {
                 body: RuleBody::Effects(vec![effect]),
             }),
         }
+    }
+    sheet
+}
+
+/// The jump-cut punch-in of the talking formats: 112% on the kept stretch after every other
+/// silence cut. `hold` reaches past the silence into the speech that follows.
+pub const JUMP_CUT_EVERY: u32 = 2;
+pub const JUMP_CUT_HOLD: Micros = Micros(3_000_000);
+
+/// The rules a shipped preset carries: those its settings stand for, and for the talking
+/// formats (`reaction`, `opinion`) the punch-in on every other jump cut. [`implied_rules`] stays
+/// without it, so a migrated video keeps the frames it had.
+pub fn preset_rules(kind: FormatKind) -> StyleSheet {
+    let mut sheet = implied_rules(&kind.preset());
+    if matches!(kind, FormatKind::Reaction | FormatKind::Opinion) {
+        let selector = Selector {
+            target: Target::Kind(ElementKind::Silence),
+            filters: vec![
+                Filter::Min(kind.preset().auto_cut.silence.min),
+                Filter::Every(JUMP_CUT_EVERY),
+            ],
+        };
+        let rule = Rule {
+            selector,
+            body: RuleBody::Effects(vec![Effect::Zoom {
+                scale: EMPHASIS_ZOOM,
+                hold: JUMP_CUT_HOLD,
+                lead: Micros(0),
+            }]),
+        };
+        let at = sheet
+            .rules
+            .iter()
+            .position(|r| r.selector.target == Target::Kind(ElementKind::Emphasis))
+            .map_or(sheet.rules.len(), |i| i + 1);
+        sheet.rules.insert(at, rule);
     }
     sheet
 }
@@ -1035,16 +1071,11 @@ fn same_frames(old: &Timeline, new: &Timeline) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::FormatKind;
 
     #[test]
     fn presets_carry_the_rules_their_settings_stand_for() {
         for &kind in FormatKind::ALL {
-            assert_eq!(
-                kind.preset_layer().rules,
-                implied_rules(&kind.preset()),
-                "{kind}"
-            );
+            assert_eq!(kind.preset_layer().rules, preset_rules(kind), "{kind}");
         }
     }
 }

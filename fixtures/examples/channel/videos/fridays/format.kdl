@@ -14,4 +14,7 @@ on pause min=1_000_000 {
 on silence min=4_000_000 confidence=50 {
     cut breath=250_000
 }
+on silence min=500_000 every=2 {
+    zoom 112 hold=3_000_000
+}
 on punchline off

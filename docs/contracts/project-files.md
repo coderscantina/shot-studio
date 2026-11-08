@@ -118,7 +118,7 @@ The five nodes above are required and appear once. `auto-cut` holds all six rule
 | `filler` | `on=<bool>`: filler words |
 | `idle-screen` | `on=<bool> min=<time>`: screen without change for at least `min` |
 
-The four presets ship in `crates/shot-core/formats/` (`reaction`, `opinion`, `product-tour`, `tutorial`) and are copied into a channel's `formats/` and then into each video. This example is an opinion video with tighter thresholds than the preset:
+The four presets ship in `crates/shot-core/formats/` (`reaction`, `opinion`, `product-tour`, `tutorial`) and are copied into a channel's `formats/` and then into each video. `reaction` and `opinion` also punch in at 112% on every other silence with `on silence min=600_000 every=2 { zoom 112 hold=3_000_000 }`, the jump cuts the pacing makes. This example is an opinion video with tighter thresholds than the preset:
 
 ```kdl
 prompter beats
@@ -205,7 +205,7 @@ on click {
 }
 ```
 
-The example video's `format.kdl` softens the pacing, changes the accent, replaces the channel's three pacing rules with rules at 80 percent and more breath, adds a rule for long silences and switches off the brand's punchline pop:
+The example video's `format.kdl` softens the pacing, changes the accent, replaces the channel's three pacing rules with rules at 80 percent and more breath, adds a rule for long silences, punches in on every other silence and switches off the brand's punchline pop:
 
 ```kdl
 pacing natural
@@ -223,6 +223,9 @@ on pause min=1_000_000 {
 }
 on silence min=4_000_000 confidence=50 {
     cut breath=250_000
+}
+on silence min=500_000 every=2 {
+    zoom 112 hold=3_000_000
 }
 on punchline off
 ```
@@ -528,7 +531,7 @@ A rule selects elements and applies effects: `on <selector> { <effects> }`. Rule
 
 ### Selectors
 
-`on <target> [attribute=value ...] [min=<time>] [confidence=<0..100>]`. The target is an element kind, or one of `chapter-start` (the first kept moment of each chapter), `chapter-end` (the last), `video-start` and `video-end`. Filters narrow it, written in this order: attributes of that kind that must equal the value (text bare when it is an id, otherwise quoted), `min` for span kinds, the shortest span the rule is about, and `confidence`, the lowest confidence; a fact without a confidence always passes. A filter the target does not have is an error. The selector is the rule's identity: one rule per selector in a file.
+`on <target> [attribute=value ...] [min=<time>] [confidence=<0..100>] [every=<n>]`. The target is an element kind, or one of `chapter-start` (the first kept moment of each chapter), `chapter-end` (the last), `video-start` and `video-end`. Filters narrow it, written in this order: attributes of that kind that must equal the value (text bare when it is an id, otherwise quoted), `min` for span kinds, the shortest span the rule is about, and `confidence`, the lowest confidence; a fact without a confidence always passes. `every` thins what the other filters left: within a take it matches the 1st, the (n+1)-th, the (2n+1)-th and so on of the elements of that target, counted in time order over the take's kept material, so `every=2` is the 1st, 3rd, 5th. The other filters apply first (an element they drop is not counted), and so does the main cut: an element in material it does not keep is not counted, but a cut or an override on an element does not uncount it. `every` is a whole number from 1 and works on any target, moments included. A filter the target does not have is an error. The selector is the rule's identity: one rule per selector in a file.
 
 ### Effects
 
@@ -642,7 +645,7 @@ Every build writes `cut.lock` from the layers, `cut.kdl` and the elements, with 
 - `brand { ... }`: the brand after the cascade, imports and rules removed.
 - `take <id> { ... }` per take of the main cut, in cut order. Each child is one instance: the effect's node with its resolved values (`from`, `to` or `at`, `x`, `y`, a template's parameters as children), then its provenance: `on=<kind> t=<time>` names the element, `layer=` the layer, and either `rule="<selector>"` or, for an override, `override=<at>`. `review` instances are the queue: elements the pacing was not sure about, which play. `cut` instances may overlap, the timeline removes their union. Instances are sorted by start, then node, then template or sound. `orphan <kind> at=<time>` lists an override that found no element.
 
-This is the example video's lock, built from the files above. The video's accent replaced the channel's, the import's `on chapter-start` rule lost to the brand's while its `on chapter-end` survived, the override at 22 s replaced the link card, the one at 45 s cut an unsure pause, the one at 9.8 s kept a filler so nothing of it appears, and the override in `t02` is an orphan.
+This is the example video's lock, built from the files above. The video's accent replaced the channel's, its `every=2` rule punches in on the first long silence (the 0.4 s one at 50 s fails `min` and is not counted), the import's `on chapter-start` rule lost to the brand's while its `on chapter-end` survived, the override at 22 s replaced the link card, the one at 45 s cut an unsure pause, the one at 9.8 s kept a filler so nothing of it appears, and the override in `t02` is an orphan.
 
 ```kdl
 lock 1
@@ -676,6 +679,7 @@ take t01 {
     overlay chapter-band from=0 to=2_500_000 on=chapter-start t=0 layer=brand rule="chapter-start"
     sfx swoosh at=0 on=chapter-start t=0 layer=brand rule="chapter-start"
     transition dip at=0 length=500_000 on=chapter-start t=0 layer=brand rule="chapter-start"
+    zoom 112 from=4_200_000 to=7_200_000 on=silence t=4_200_000 layer=video rule="silence min=500_000 every=2"
     cut from=4_450_000 to=4_850_000 on=silence t=4_200_000 layer=video rule="silence min=500_000"
     zoom 112 from=8_000_000 to=9_500_000 on=emphasis t=8_000_000 layer=format rule="emphasis"
     overlay chapter-band from=12_000_000 to=14_500_000 on=chapter-start t=12_000_000 layer=brand rule="chapter-start"
@@ -714,9 +718,9 @@ Shipping freezes the lock at the release tag. A rule change reaches unshipped vi
 | `ignore from= to= by=<rule>` | `override <take> <kind> at=<element t> { keep }` |
 | `zoom ... by=<what>` | dropped when a rule's zoom equals it (scale, range, center). Otherwise `{ zoom <scale> hold=... lead=... }` on an element inside it whose point is its center (the trigger's kind, a `word` for `jump-cut` and `emphasis`), else kept as a person's zoom. A rule zoom the old cut did not have gets `zoom off` |
 | `overlay link-card`, `highlight`, `b-roll` | dropped when a rule's overlay equals it. Otherwise `{ overlay <template> for=... { <params> } }` on an element of its kind starting with it, else kept as a person's overlay in its drawing order. A rule overlay the old cut did not have gets `overlay <template> off` |
-| `auto-cut`, `auto-zoom`, `pacing` in `format.kdl` | a channel `formats/<format>.kdl` without rules gets the rules its settings stand for, the rules the shipped presets carry. The video's `format.kdl` keeps only the settings that differ from the channel's, its own rules where its settings stood for other rules, and `on <selector> off` for the channel's cut and zoom rules it never had |
+| `auto-cut`, `auto-zoom`, `pacing` in `format.kdl` | a channel `formats/<format>.kdl` without rules gets the rules its settings stand for, the rules the shipped presets carry except the jump-cut punch-in. The video's `format.kdl` keeps only the settings that differ from the channel's, its own rules where its settings stood for other rules, and `on <selector> off` for the channel's cut and zoom rules it never had |
 
-Two choices keep the frames equal. A cut keeps its breath only on a side that borders kept material, so a silence that opens or ends the take's material goes whole there, as the pacing did. Chapter and video edges sit on the first and last moments the cuts leave. The jump-cut punch-in on every other cut has no rule, since a selector does not count (0019); migrated ones become overrides, new videos get none.
+Two choices keep the frames equal. A cut keeps its breath only on a side that borders kept material, so a silence that opens or ends the take's material goes whole there, as the pacing did. Chapter and video edges sit on the first and last moments the cuts leave. The jump-cut punch-in on every other cut is the presets' `on silence min=600_000 every=2` rule. Migration does not add it, so a migrated video keeps its jump-cut zooms as overrides and its frames.
 
 A migrated video has a `cut.lock`. `shot style build`, `shot export` and `shot check` rebuild it from the files unless the video shipped; the old rule commands (`shot autocut`, `shot autozoom`, `shot overlays find`) refuse a migrated video, and a build refuses a video whose `cut.kdl` still holds rule removals, review items or rule zooms.
 

@@ -29,6 +29,7 @@ take t01 {
     overlay chapter-band from=0 to=2_500_000 on=chapter-start t=0 layer=brand rule="chapter-start"
     sfx swoosh at=0 on=chapter-start t=0 layer=brand rule="chapter-start"
     transition dip at=0 length=500_000 on=chapter-start t=0 layer=brand rule="chapter-start"
+    zoom 112 from=4_200_000 to=7_200_000 on=silence t=4_200_000 layer=video rule="silence min=500_000 every=2"
     cut from=4_450_000 to=4_850_000 on=silence t=4_200_000 layer=video rule="silence min=500_000"
     zoom 112 from=8_000_000 to=9_500_000 on=emphasis t=8_000_000 layer=format rule="emphasis"
     overlay chapter-band from=12_000_000 to=14_500_000 on=chapter-start t=12_000_000 layer=brand rule="chapter-start"
