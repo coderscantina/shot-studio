@@ -313,7 +313,12 @@ impl MaterialPass {
                     f64::from(shadow.offset[0] - area.left),
                     f64::from(shadow.offset[1] - area.top),
                 ));
-            vector.render(device, queue, &shadow.shapes, at, size, &mask)?;
+            match snap_masks(&shadow.shapes, at) {
+                Some(snapped) => {
+                    vector.render(device, queue, &snapped, Affine::IDENTITY, size, &mask)?
+                }
+                None => vector.render(device, queue, &shadow.shapes, at, size, &mask)?,
+            }
             let blur = self.blur(
                 device,
                 index,
@@ -678,6 +683,34 @@ fn whole(r: Rect) -> Rect {
 
 /// Texels covering `area` at `scale` canvas pixels per texel, rounded up to a multiple of 32 so
 /// a moving material keeps its textures instead of allocating new ones every frame.
+/// Shadow rectangles in mask texels, snapped to whole texels with square corners, `None` when
+/// a shape is not a rectangle. vello sums a pixel's coverage over its path segments in an order
+/// that varies between runs, so a partly covered texel can differ in its last bit, while whole
+/// texels cover exactly. The blur hides the corners.
+fn snap_masks(shapes: &[Shape], at: Affine) -> Option<Vec<Shape>> {
+    shapes
+        .iter()
+        .map(|shape| match shape {
+            Shape::Rect { rect, color, .. } => {
+                let corner =
+                    |x: f32, y: f32| at * vello::kurbo::Point::new(f64::from(x), f64::from(y));
+                let (a, b) = (corner(rect.left, rect.top), corner(rect.right, rect.bottom));
+                Some(Shape::Rect {
+                    rect: Rect::new(
+                        a.x.round() as f32,
+                        a.y.round() as f32,
+                        b.x.round() as f32,
+                        b.y.round() as f32,
+                    ),
+                    radius: 0.0,
+                    color: *color,
+                })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 fn texels(area: Rect, scale: f32) -> (u32, u32) {
     let round = |pixels: f32| ((pixels / scale).ceil().max(1.0) as u32).next_multiple_of(32);
     (round(area.width()), round(area.height()))

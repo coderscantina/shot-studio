@@ -8,7 +8,7 @@
 
 use parley::{FontContext, GenericFamily, LayoutContext, PositionedLayoutItem, StyleProperty};
 use vello::kurbo::{Affine, BezPath, Circle, Rect as KRect, RoundedRect, Stroke};
-use vello::peniko::{Color, Fill, ImageBrush};
+use vello::peniko::{Color, Fill, Gradient, ImageBrush};
 use vello::{AaConfig, AaSupport, RenderParams, Renderer, RendererOptions, Scene};
 
 use crate::RenderError;
@@ -175,6 +175,7 @@ impl VectorPass {
                 .is_some_and(|(drawn, at)| drawn == shapes && *at == area);
             if !fresh {
                 self.scene.reset();
+                keep_atlas(&mut self.scene);
                 let origin = Affine::translate((-f64::from(area.left), -f64::from(area.top)));
                 for shape in shapes {
                     draw(&mut self.scene, &mut self.ink, origin, shape);
@@ -257,6 +258,7 @@ impl VectorPass {
         view: &wgpu::TextureView,
     ) -> Result<(), RenderError> {
         self.scene.reset();
+        keep_atlas(&mut self.scene);
         for shape in shapes {
             draw(&mut self.scene, &mut self.ink, transform, shape);
         }
@@ -305,6 +307,22 @@ fn new_target(device: &wgpu::Device, canvas: Canvas) -> Target {
         view,
         drawn: None,
     }
+}
+
+/// vello 0.11 replaces its image atlas with an empty one whenever it renders a scene of solid
+/// fills only, while its image cache still counts earlier images as uploaded, so the next scene
+/// with such an image draws it blank. A transparent gradient in every scene keeps vello on the
+/// path that keeps the atlas.
+fn keep_atlas(scene: &mut Scene) {
+    let clear = Gradient::new_linear((0.0, 0.0), (1.0, 0.0))
+        .with_stops([Color::TRANSPARENT, Color::TRANSPARENT]);
+    scene.fill(
+        Fill::NonZero,
+        Affine::IDENTITY,
+        &clear,
+        None,
+        &KRect::new(0.0, 0.0, 1.0, 1.0),
+    );
 }
 
 /// The whole-pixel rectangle of the canvas `shapes` cover, `None` when they cover none of it.
