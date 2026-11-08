@@ -13,6 +13,7 @@ const LINE_WORDS: usize = 8;
 
 /// A run of words of one take, by their numbers in the take's transcript, both included.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct WordSpan {
     /// The take id, for example `t01`.
     pub take: String,

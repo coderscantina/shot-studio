@@ -13,6 +13,7 @@
 
 pub mod agents;
 pub mod bridge;
+mod confine;
 pub mod style;
 mod tee;
 pub mod text;
@@ -24,9 +25,16 @@ use std::path::PathBuf;
 
 use base64::Engine;
 use rmcp::handler::server::router::tool::ToolRouter;
+use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig};
-use rmcp::{ServerHandler, ServiceExt, schemars, tool, tool_handler, tool_router};
+use rmcp::model::{
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
+    ServerCapabilities, ServerConfig,
+};
+use rmcp::service::RequestContext;
+use rmcp::{
+    ErrorData, RoleServer, ServerHandler, ServiceExt, schemars, tool, tool_handler, tool_router,
+};
 use serde::Deserialize;
 use shot_board::Board;
 use shot_core::{
@@ -41,6 +49,8 @@ const VIDEO_FILES: [&str; 4] = ["video.kdl", "script.md", "cut.kdl", "format.kdl
 const DEFAULT_ACTIVITY_LIMIT: usize = 20;
 /// The most elements or instances one style tool prints.
 const STYLE_LIMIT: usize = 300;
+/// Where `shot thumbnails` writes its candidates, below the video folder.
+const THUMBNAILS: &str = ".shot/cache/thumbnails";
 
 /// How a server session runs.
 #[derive(Debug, Clone, Default)]
@@ -78,18 +88,21 @@ pub struct ShotServer {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ListVideosArgs {
     /// Only videos in this column: ideas, scripting, ready, recorded, editing or shipped.
     status: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct VideoArgs {
     /// The video slug, for example `why-we-deploy-on-fridays`.
     slug: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct MoveCardArgs {
     /// The video slug.
     slug: String,
@@ -98,18 +111,21 @@ struct MoveCardArgs {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ActivityArgs {
     /// Maximum number of commits, newest first. Defaults to 20.
     limit: Option<usize>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ListProposalsArgs {
     /// Only proposals of this video.
     slug: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct CreateProposalArgs {
     /// The video the proposal changes.
     slug: String,
@@ -122,6 +138,7 @@ struct CreateProposalArgs {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ProposalArgs {
     /// The video slug.
     slug: String,
@@ -130,6 +147,7 @@ struct ProposalArgs {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ProposeCutArgs {
     /// The video slug.
     slug: String,
@@ -146,6 +164,7 @@ struct ProposeCutArgs {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ReviewDecision {
     /// The item number from `review_queue`.
     item: usize,
@@ -154,6 +173,7 @@ struct ReviewDecision {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ProposeReviewArgs {
     /// The video slug.
     slug: String,
@@ -166,6 +186,7 @@ struct ProposeReviewArgs {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ProposeScriptArgs {
     /// The video slug.
     slug: String,
@@ -175,13 +196,14 @@ struct ProposeScriptArgs {
     subject: String,
     /// The whole new script.md: `# title`, `## chapter`, `- beat` with `[label](source)` links.
     script: String,
-    /// Text files to add to the video's `sources/` with the script, by file name, for example
-    /// a snapshot of an article the beats link to as `sources/article.md`.
+    /// Text files to add to the video's `sources/` with the script, by path below `sources/`,
+    /// for example a snapshot of an article the beats link to as `sources/article.md`.
     #[serde(default)]
     sources: BTreeMap<String, String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ReadElementsArgs {
     /// The video slug.
     slug: String,
@@ -197,6 +219,7 @@ struct ReadElementsArgs {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ReadLockArgs {
     /// The video slug.
     slug: String,
@@ -209,6 +232,7 @@ struct ReadLockArgs {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ExplainArgs {
     /// The video slug.
     slug: String,
@@ -219,12 +243,14 @@ struct ExplainArgs {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct RuleScopeArgs {
     /// The rule's selector as the lock writes it, for example `silence min=500_000`.
     selector: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ProposeRuleArgs {
     /// The video the proposal branches off. A `format` or `brand` rule applies to every
     /// unshipped video of the channel once accepted.
@@ -243,6 +269,7 @@ struct ProposeRuleArgs {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ProposeOverrideArgs {
     /// The video slug.
     slug: String,
@@ -264,10 +291,13 @@ struct ProposeOverrideArgs {
 #[tool_router]
 impl ShotServer {
     pub fn new(repo: PathBuf) -> Self {
+        let tool_router = Self::tool_router();
+        #[cfg(test)]
+        let tool_router = tool_router + Self::panic_router();
         Self {
             repo,
             frame_task: false,
-            tool_router: Self::tool_router(),
+            tool_router,
         }
     }
 
@@ -278,7 +308,13 @@ impl ShotServer {
     }
 
     #[tool(
-        description = "List the videos of the channel by board column with title, format and target date. Videos whose video.kdl cannot be parsed are listed separately with file:line:column."
+        description = "List the videos of the channel by board column with title, format and target date. Videos whose video.kdl cannot be parsed are listed separately with file:line:column.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false,
+        )
     )]
     fn list_videos(&self, Parameters(args): Parameters<ListVideosArgs>) -> Result<String, String> {
         let only = args.status.as_deref().map(text::parse_status).transpose()?;
@@ -290,14 +326,26 @@ impl ShotServer {
     }
 
     #[tool(
-        description = "Read the text of one video from its branch tip: video.kdl, script.md, cut.kdl and format.kdl. Files that do not exist yet are marked as missing."
+        description = "Read the text of one video from its branch tip: video.kdl, script.md, cut.kdl and format.kdl. Files that do not exist yet are marked as missing.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false,
+        )
     )]
     fn read_video(&self, Parameters(args): Parameters<VideoArgs>) -> Result<String, String> {
         self.read_video_files(&args.slug)
     }
 
     #[tool(
-        description = "Move a video to another board column. This is one commit on the video's branch."
+        description = "Move a video to another board column. This is one commit on the video's branch.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false,
+        )
     )]
     fn move_card(&self, Parameters(args): Parameters<MoveCardArgs>) -> Result<String, String> {
         let status = text::parse_status(&args.status)?;
@@ -312,7 +360,13 @@ impl ShotServer {
     }
 
     #[tool(
-        description = "The newest commits across all video branches, newest first, with time, author and subject."
+        description = "The newest commits across all video branches, newest first, with time, author and subject.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false,
+        )
     )]
     fn activity(&self, Parameters(args): Parameters<ActivityArgs>) -> Result<String, String> {
         let limit = args.limit.unwrap_or(DEFAULT_ACTIVITY_LIMIT);
@@ -320,7 +374,15 @@ impl ShotServer {
         Ok(text::activity(&entries))
     }
 
-    #[tool(description = "List open proposals, optionally of one video.")]
+    #[tool(
+        description = "List open proposals, optionally of one video.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false,
+        )
+    )]
     fn list_proposals(
         &self,
         Parameters(args): Parameters<ListProposalsArgs>,
@@ -333,13 +395,20 @@ impl ShotServer {
     }
 
     #[tool(
-        description = "Propose changes to a video's text files as a branch with one commit. Every known project file must parse. Nothing changes on the video until the human accepts the proposal in the app or with `shot proposal accept`. Prefer propose_cut for cuts and propose_script for the script."
+        description = "Propose changes to a video's text files as a branch with one commit. Every known project file must parse. Nothing changes on the video until the human accepts the proposal in the app or with `shot proposal accept`. Prefer propose_cut for cuts and propose_script for the script.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false,
+        )
     )]
     fn create_proposal(
         &self,
         Parameters(args): Parameters<CreateProposalArgs>,
     ) -> Result<String, String> {
         for (file, text) in &args.files {
+            confine::relative(file)?;
             validate(file, text)?;
         }
         let proposal = self
@@ -355,7 +424,13 @@ impl ShotServer {
     }
 
     #[tool(
-        description = "The unified diff of a proposal against the point where it branched off the video."
+        description = "The unified diff of a proposal against the point where it branched off the video.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false,
+        )
     )]
     fn proposal_diff(&self, Parameters(args): Parameters<ProposalArgs>) -> Result<String, String> {
         let files = self
@@ -366,7 +441,13 @@ impl ShotServer {
     }
 
     #[tool(
-        description = "The transcript of a video in cut order. Each line starts with the edited time of its first kept word and the number of its first word in the take (w12); count on from there. Removed words are in brackets with what removed them: [um so](filler)."
+        description = "The transcript of a video in cut order. Each line starts with the edited time of its first kept word and the number of its first word in the take (w12); count on from there. Removed words are in brackets with what removed them: [um so](filler).",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false,
+        )
     )]
     fn read_transcript(&self, Parameters(args): Parameters<VideoArgs>) -> Result<String, String> {
         let cut = self.cut(&args.slug)?;
@@ -375,7 +456,13 @@ impl ShotServer {
     }
 
     #[tool(
-        description = "Propose a cut as a branch: remove spans of recorded words, or restore removed ones, by word number from read_transcript. A cut can only drop or bring back what was recorded, never add words. Replies with the words each span covers, so check them."
+        description = "Propose a cut as a branch: remove spans of recorded words, or restore removed ones, by word number from read_transcript. A cut can only drop or bring back what was recorded, never add words. Replies with the words each span covers, so check them.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false,
+        )
     )]
     fn propose_cut(&self, Parameters(args): Parameters<ProposeCutArgs>) -> Result<String, String> {
         let cut = self.cut(&args.slug)?;
@@ -395,7 +482,13 @@ impl ShotServer {
     }
 
     #[tool(
-        description = "The open review queue of a video: findings an auto-cut rule was not sure about, numbered, with their edited time, rule and words."
+        description = "The open review queue of a video: findings an auto-cut rule was not sure about, numbered, with their edited time, rule and words.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false,
+        )
     )]
     fn review_queue(&self, Parameters(args): Parameters<VideoArgs>) -> Result<String, String> {
         let cut = self.cut(&args.slug)?;
@@ -420,7 +513,13 @@ impl ShotServer {
     }
 
     #[tool(
-        description = "Propose answers to review items as a branch: keep leaves the material in and tells the rule to leave it alone, cut removes it. Only answer items you are sure about."
+        description = "Propose answers to review items as a branch: keep leaves the material in and tells the rule to leave it alone, cut removes it. Only answer items you are sure about.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false,
+        )
     )]
     fn propose_review(
         &self,
@@ -452,7 +551,13 @@ impl ShotServer {
     }
 
     #[tool(
-        description = "The caption fixes dictionary of a video and the words recognized with low confidence that no fix covers yet. Suggest new fixes in your reply as heard -> said; a person adds them in Caption fixes. Fixes are never proposals."
+        description = "The caption fixes dictionary of a video and the words recognized with low confidence that no fix covers yet. Suggest new fixes in your reply as heard -> said; a person adds them in Caption fixes. Fixes are never proposals.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false,
+        )
     )]
     fn caption_fixes(&self, Parameters(args): Parameters<VideoArgs>) -> Result<String, String> {
         let cut = self.cut(&args.slug)?;
@@ -465,7 +570,7 @@ impl ShotServer {
             let _ = writeln!(out, "  \"{}\" -> \"{}\"", fix.heard, fix.said);
         }
         let project = self.project(&args.slug, cut)?;
-        let timeline = shot_ship::lock::timeline(&self.video_dir(&args.slug), &project)
+        let timeline = shot_ship::lock::timeline(&self.video_dir(&args.slug)?, &project)
             .map_err(|e| e.to_string())?;
         let main = timeline.main();
         let words = shot_ship::spoken::spoken_words(main, &transcripts);
@@ -482,7 +587,13 @@ impl ShotServer {
     }
 
     #[tool(
-        description = "Checks on a video's script.md: estimated spoken length per chapter, hook length, beats without a source and long stretches without a visual."
+        description = "Checks on a video's script.md: estimated spoken length per chapter, hook length, beats without a source and long stretches without a visual.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false,
+        )
     )]
     fn script_checks(&self, Parameters(args): Parameters<VideoArgs>) -> Result<String, String> {
         let script = self.script(&args.slug)?;
@@ -501,7 +612,13 @@ impl ShotServer {
     }
 
     #[tool(
-        description = "Propose a new script.md as a branch, optionally with text files for sources/ that its beats link to. The script must follow the script.md shape. Name alternatives you offer side by side alike, for example hook-a, hook-b and hook-c; the person accepts one."
+        description = "Propose a new script.md as a branch, optionally with text files for sources/ that its beats link to. The script must follow the script.md shape. Name alternatives you offer side by side alike, for example hook-a, hook-b and hook-c; the person accepts one.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false,
+        )
     )]
     fn propose_script(
         &self,
@@ -510,10 +627,7 @@ impl ShotServer {
         validate("script.md", &args.script)?;
         let mut files = BTreeMap::new();
         for (name, text) in args.sources {
-            let plain = !name.is_empty() && !name.starts_with('.') && !name.contains(['/', '\\']);
-            if !plain {
-                return Err(format!("`{name}` is not a plain file name for sources/"));
-            }
+            confine::relative(&name)?;
             files.insert(format!("sources/{name}"), text);
         }
         files.insert("script.md".to_owned(), args.script);
@@ -521,13 +635,19 @@ impl ShotServer {
     }
 
     #[tool(
-        description = "A draft title and description for the upload: the hook, chapters at the moment their first word is heard or their intro starts, and the links the video shows or the script cites."
+        description = "A draft title and description for the upload: the hook, chapters at the moment their first word is heard or their intro starts, and the links the video shows or the script cites.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false,
+        )
     )]
     fn describe(&self, Parameters(args): Parameters<VideoArgs>) -> Result<String, String> {
         let cut = self.cut(&args.slug)?;
         let transcripts = self.transcripts(&args.slug, &cut)?;
         let project = self.project(&args.slug, cut)?;
-        let dir = self.video_dir(&args.slug);
+        let dir = self.video_dir(&args.slug)?;
         let timeline = shot_ship::lock::timeline(&dir, &project).map_err(|e| e.to_string())?;
         // A brand export cannot place yet still leaves a draft, its chapters said to be early.
         let (bookends, note) = match shot_ship::lock::bookends(&dir, &project) {
@@ -548,7 +668,13 @@ impl ShotServer {
     }
 
     #[tool(
-        description = "The elements (facts) of one take as JSON lines, in take media time: clicks, silences, fillers, urls and the rest, with their t, to, confidence and source. Words are left out unless asked for. Use their t as the identity of an override."
+        description = "The elements (facts) of one take as JSON lines, in take media time: clicks, silences, fillers, urls and the rest, with their t, to, confidence and source. Words are left out unless asked for. Use their t as the identity of an override.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false,
+        )
     )]
     fn read_elements(
         &self,
@@ -584,7 +710,13 @@ impl ShotServer {
     }
 
     #[tool(
-        description = "The lock of a video, built from its files: every instance (cut, review, zoom, overlay, sfx, transition, layout, captions) with its resolved values and its provenance, `on=` the element, `layer=` and the `rule=` or `override=` that made it. Narrow it by take and time window."
+        description = "The lock of a video, built from its files: every instance (cut, review, zoom, overlay, sfx, transition, layout, captions) with its resolved values and its provenance, `on=` the element, `layer=` and the `rule=` or `override=` that made it. Narrow it by take and time window.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false,
+        )
     )]
     fn read_lock(&self, Parameters(args): Parameters<ReadLockArgs>) -> Result<String, String> {
         let take = args.take.as_deref().map(take_id).transpose()?;
@@ -600,7 +732,13 @@ impl ShotServer {
     }
 
     #[tool(
-        description = "Why a moment looks the way it does: the instances at a time in a take with the layer and rule or override behind each, and the overrides in cut.kdl there (an `off` leaves no instance)."
+        description = "Why a moment looks the way it does: the instances at a time in a take with the layer and rule or override behind each, and the overrides in cut.kdl there (an `off` leaves no instance).",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false,
+        )
     )]
     fn explain_instance(
         &self,
@@ -613,7 +751,13 @@ impl ShotServer {
     }
 
     #[tool(
-        description = "How far a rule reaches: the instances and elements the rule with this selector produces now, in how many of the channel's unshipped videos. Shipped videos keep their lock."
+        description = "How far a rule reaches: the instances and elements the rule with this selector produces now, in how many of the channel's unshipped videos. Shipped videos keep their lock.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false,
+        )
     )]
     fn rule_scope(&self, Parameters(args): Parameters<RuleScopeArgs>) -> Result<String, String> {
         let selector = Selector::parse(&args.selector).map_err(|e| e.to_string())?;
@@ -623,7 +767,13 @@ impl ShotServer {
     }
 
     #[tool(
-        description = "Propose a change of one style rule as a branch, at the layer you choose: this video's format.kdl, the channel's format or the brand. The reply and the proposal's description state the scope: how many instances change in how many videos. Pick the narrowest layer that fits the person's intent."
+        description = "Propose a change of one style rule as a branch, at the layer you choose: this video's format.kdl, the channel's format or the brand. The reply and the proposal's description state the scope: how many instances change in how many videos. Pick the narrowest layer that fits the person's intent.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false,
+        )
     )]
     fn propose_rule(
         &self,
@@ -637,7 +787,13 @@ impl ShotServer {
     }
 
     #[tool(
-        description = "Propose an override for one element as a branch: what this single element gets instead of what the rules gave it, written to cut.kdl. The element must exist (read_elements). The reply states the instances it changes."
+        description = "Propose an override for one element as a branch: what this single element gets instead of what the rules gave it, written to cut.kdl. The element must exist (read_elements). The reply states the instances it changes.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false,
+        )
     )]
     fn propose_override(
         &self,
@@ -660,7 +816,13 @@ impl ShotServer {
     }
 
     #[tool(
-        description = "Frame task: the thumbnail candidates of a video as still images, best first. Runs only when the person started a thumbnail pick in the app; otherwise it refuses."
+        description = "Frame task: the thumbnail candidates of a video as still images, best first. Runs only when the person started a thumbnail pick in the app; otherwise it refuses.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false,
+        )
     )]
     fn thumbnail_frames(
         &self,
@@ -674,8 +836,7 @@ impl ShotServer {
             );
         }
         Board::open(&self.repo).map_err(|e| e.to_string())?;
-        shot_board_check_name(&args.slug)?;
-        let dir = self.video_dir(&args.slug).join(".shot/cache/thumbnails");
+        let dir = confine::resolve(&self.repo, &args.slug, THUMBNAILS)?;
         let mut stills: Vec<PathBuf> = std::fs::read_dir(&dir)
             .map_err(|_| {
                 format!(
@@ -689,8 +850,9 @@ impl ShotServer {
         stills.sort();
         let mut content = Vec::new();
         for still in stills {
-            let bytes = std::fs::read(&still).map_err(|e| format!("{}: {e}", still.display()))?;
             let name = still.file_name().unwrap_or_default().to_string_lossy();
+            let real = confine::resolve(&self.repo, &args.slug, &format!("{THUMBNAILS}/{name}"))?;
+            let bytes = std::fs::read(&real).map_err(|e| format!("{}: {e}", real.display()))?;
             content.push(ContentBlock::text(format!("candidate {name}")));
             content.push(ContentBlock::image(
                 base64::engine::general_purpose::STANDARD.encode(bytes),
@@ -705,8 +867,8 @@ impl ShotServer {
             .map_err(|e| format!("{} is not a channel repo: {e}", self.repo.display()))
     }
 
-    fn video_dir(&self, slug: &str) -> PathBuf {
-        self.repo.join("videos").join(slug)
+    fn video_dir(&self, slug: &str) -> Result<PathBuf, String> {
+        confine::resolve(&self.repo, slug, "")
     }
 
     /// The cut at the video's tip, empty when it has none yet.
@@ -752,13 +914,15 @@ impl ShotServer {
 
     /// The cached transcripts of the takes `cut` uses, from the working tree.
     fn transcripts(&self, slug: &str, cut: &Cut) -> Result<HashMap<Id, Transcript>, String> {
-        shot_board_check_name(slug)?;
-        let dir = self.video_dir(slug);
+        let dir = self.video_dir(slug)?;
         let mut found = HashMap::new();
         for take in cut.chapters.iter().flat_map(|c| &c.takes).map(|t| &t.take) {
             if found.contains_key(take) {
                 continue;
             }
+            let cache = shot_analyze::cache::cache_path(&dir, take);
+            let relative = cache.strip_prefix(&dir).unwrap_or(&cache);
+            confine::resolve(&self.repo, slug, &relative.to_string_lossy())?;
             if let Some(transcript) =
                 shot_analyze::cache::read_cached(&dir, take).map_err(|e| e.to_string())?
             {
@@ -837,6 +1001,35 @@ impl ShotServer {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for ShotServer {
+    /// Runs the tool on its own task, so a panic in it is an error result and the session
+    /// keeps serving.
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        let server = self.clone();
+        let name = request.name.to_string();
+        let ran = tokio::spawn(async move {
+            let call = ToolCallContext::new(&server, request, context);
+            server.tool_router.call(call).await
+        })
+        .await;
+        ran.unwrap_or_else(|e| {
+            let cause = e.try_into_panic().ok().map_or_else(String::new, |p| {
+                match (p.downcast_ref::<&str>(), p.downcast_ref::<String>()) {
+                    (Some(m), _) => format!(": {m}"),
+                    (_, Some(m)) => format!(": {m}"),
+                    _ => String::new(),
+                }
+            });
+            Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                "tool {name} failed unexpectedly{cause}"
+            ))])
+            .into())
+        })
+    }
+
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("shot", env!("CARGO_PKG_VERSION")))
@@ -897,20 +1090,63 @@ fn take_id(text: &str) -> Result<Id, String> {
     Id::new(text).ok_or_else(|| format!("`{text}` is not a take id"))
 }
 
-/// Slugs end up in paths, so they are checked before touching the working tree.
-fn shot_board_check_name(slug: &str) -> Result<(), String> {
-    let valid = !slug.is_empty()
-        && !slug.starts_with('-')
-        && slug
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
-    if valid {
-        Ok(())
-    } else {
-        Err(format!("`{slug}` is not a valid name"))
-    }
-}
-
 fn short(sha: &str) -> &str {
     &sha[..sha.len().min(7)]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A tool that only exists in this crate's unit tests.
+    #[tool_router(router = panic_router, vis = "pub(crate)")]
+    impl ShotServer {
+        #[tool(
+            description = "Panics.",
+            annotations(
+                read_only_hint = true,
+                destructive_hint = false,
+                idempotent_hint = true,
+                open_world_hint = false,
+            )
+        )]
+        fn panics(&self) -> Result<String, String> {
+            panic!("boom")
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct Client;
+
+    impl rmcp::ClientHandler for Client {
+        fn get_info(&self) -> rmcp::model::ClientConfig {
+            rmcp::model::ClientConfig::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_panicking_tool_is_an_error_and_the_session_keeps_working() {
+        let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+        let server = ShotServer::new(PathBuf::from("/nowhere"));
+        tokio::spawn(async move {
+            if let Ok(running) = server.serve(server_io).await {
+                let _ = running.waiting().await;
+            }
+        });
+        let client = Client.serve(client_io).await.unwrap();
+
+        let result = client
+            .call_tool(CallToolRequestParams::new("panics"))
+            .await
+            .unwrap();
+        assert_eq!(result.is_error, Some(true));
+        let text = format!("{:?}", result.content);
+        assert!(text.contains("panics failed unexpectedly: boom"), "{text}");
+
+        let after = client
+            .call_tool(CallToolRequestParams::new("list_videos"))
+            .await
+            .unwrap();
+        assert!(format!("{:?}", after.content).contains("not a channel repo"));
+    }
 }

@@ -327,7 +327,7 @@ async fn scripts_are_checked_and_proposed_only_when_they_parse() {
                 "script": script, "sources": { "../escape.md": "x" } }),
     )
     .await;
-    assert!(error && text.contains("not a plain file name"), "{text}");
+    assert!(error && text.contains("not a relative path"), "{text}");
     let (error, _) = call(
         &client,
         "propose_script",
@@ -405,5 +405,92 @@ async fn lists_the_demo_channel() {
         "shipped",
     ] {
         assert!(text.contains(&format!("{column} (")), "no {column} column");
+    }
+}
+
+#[tokio::test]
+async fn every_tool_sets_all_four_hints() {
+    let dir = channel();
+    let client = connect(dir.path()).await;
+    for tool in client.list_all_tools().await.unwrap() {
+        let a = tool
+            .annotations
+            .unwrap_or_else(|| panic!("{} has no annotations", tool.name));
+        for (hint, value) in [
+            ("read_only_hint", a.read_only_hint),
+            ("destructive_hint", a.destructive_hint),
+            ("idempotent_hint", a.idempotent_hint),
+            ("open_world_hint", a.open_world_hint),
+        ] {
+            assert!(value.is_some(), "{} does not set {hint}", tool.name);
+        }
+    }
+}
+
+#[tokio::test]
+async fn unknown_arguments_are_refused_and_the_accepted_ones_named() {
+    let dir = channel();
+    let client = connect(dir.path()).await;
+    let (error, text) = call(
+        &client,
+        "move_card",
+        json!({ "slug": "alpha", "status": "ready", "stauts": "x" }),
+    )
+    .await;
+    assert!(error);
+    assert!(
+        text.contains("unknown field `stauts`") && text.contains("expected `slug` or `status`"),
+        "{text}"
+    );
+
+    for tool in client.list_all_tools().await.unwrap() {
+        assert_eq!(
+            tool.input_schema.get("additionalProperties"),
+            Some(&json!(false)),
+            "{} accepts unknown properties",
+            tool.name
+        );
+    }
+}
+
+#[tokio::test]
+async fn paths_and_slugs_stay_inside_the_video_folder() {
+    let dir = channel();
+    let client = connect(dir.path()).await;
+    for slug in ["../alpha", "/etc", "alpha/../alpha", "a\\b"] {
+        for tool in ["read_video", "read_transcript", "script_checks", "describe"] {
+            let (error, text) = call(&client, tool, json!({ "slug": slug })).await;
+            assert!(error && text.contains("not a valid name"), "{tool} {slug}");
+        }
+    }
+    for path in [
+        "/etc/passwd",
+        "../alpha/video.kdl",
+        "a/../../x",
+        "sources/../../x",
+    ] {
+        let (error, text) = call(
+            &client,
+            "create_proposal",
+            json!({ "slug": "alpha", "name": "p", "subject": "s", "files": { path: "x" } }),
+        )
+        .await;
+        assert!(
+            error && text.contains("not a relative path"),
+            "{path}: {text}"
+        );
+    }
+    for name in ["../x", "/abs", "a/../../x"] {
+        let (error, text) = call(
+            &client,
+            "propose_script",
+            json!({ "slug": "alpha", "name": "p", "subject": "s", "script": "# T\n",
+                    "sources": { name: "x" } }),
+        )
+        .await;
+        assert!(
+            error && text.contains("not a relative path"),
+            "{name}: {text}"
+        );
     }
 }
