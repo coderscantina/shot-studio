@@ -6,12 +6,18 @@
 //! changed: every action writes `cut.kdl`. Find runs [`overlay_rules::run`], picking b-roll
 //! fills a slot from the files the video can use, a boolean parameter toggles in place, and
 //! remove drops the overlay. The lock's say which rule or override made them.
+//!
+//! Add places an overlay at the playhead: one of the channel's overlay presets, written as a
+//! normal `overlay` node with its parameters, or a template with example values. Edit opens a
+//! person's overlay in the overlay editor ([`crate::brand::overlay`]).
 
 use std::path::Path;
 
 use gpui::{App, Context, Entity, FontWeight, Hsla, Window, div, prelude::*, px, rgb};
-use gpui_component::menu::{PopupMenu, PopupMenuItem};
-use shot_core::{Applied, Cut, DerivedKind, Overlay, ParamValue, TakeAt};
+use gpui_component::Sizable;
+use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
+use shot_core::{Applied, Cut, DerivedKind, Id, Overlay, OverlayPreset, ParamValue, TakeAt};
 use shot_render::overlay::{self, Params, broll, highlight, link_card};
 use shot_render::overlay_rules;
 
@@ -210,6 +216,53 @@ impl EditScreen {
         );
     }
 
+    /// Places `draft` at the playhead and opens it in the overlay editor.
+    fn place_draft(&mut self, draft: crate::brand::overlay::Draft, cx: &mut Context<Self>) {
+        let Some((at, t)) = self.map.source_at(self.playhead) else {
+            self.overlay_note = Some("Move the playhead onto the cut to place an overlay".into());
+            cx.notify();
+            return;
+        };
+        let overlay = draft.overlay(t);
+        self.edit(cx, |cut| crate::place::with_overlay(cut, at, overlay));
+        let index = self
+            .folder
+            .read(cx)
+            .project
+            .cut
+            .chapters
+            .get(at.chapter)
+            .and_then(|c| c.takes.get(at.take))
+            .map_or(0, |b| b.overlays.len().saturating_sub(1));
+        self.edit_overlay(at, index, cx);
+    }
+
+    fn place_preset(&mut self, preset: OverlayPreset, cx: &mut Context<Self>) {
+        self.overlay_note = Some(format!("Placed {}", preset.name));
+        self.place_draft(
+            crate::brand::overlay::Draft {
+                name: None,
+                template: preset.template,
+                params: preset.params,
+                length: preset.length,
+            },
+            cx,
+        );
+    }
+
+    fn place_template(&mut self, template: Id, cx: &mut Context<Self>) {
+        self.overlay_note = None;
+        self.place_draft(crate::brand::overlay::starter(None, &template), cx);
+    }
+
+    /// Opens a person's overlay `index` of the block at `at` in the overlay editor.
+    pub fn edit_overlay(&mut self, at: TakeAt, index: usize, cx: &mut Context<Self>) {
+        if let Err(error) = crate::brand::overlay::open_placed(self.folder.clone(), at, index, cx) {
+            self.error = Some(error);
+            cx.notify();
+        }
+    }
+
     /// Runs the overlay rules off the UI thread, since Vision reads the screen, then writes the
     /// cut they return unless it changed meanwhile.
     fn find_overlays(&mut self, cx: &mut Context<Self>) {
@@ -274,6 +327,11 @@ pub fn menu_items(
         return menu;
     };
     let mut menu = menu;
+    let editing = screen.clone();
+    menu =
+        menu.item(PopupMenuItem::new("Edit…").on_click(move |_, _, cx| {
+            editing.update(cx, |this, cx| this.edit_overlay(at, index, cx))
+        }));
     if overlay.template.as_str() == broll::TEMPLATE {
         let files = candidates(&dir);
         let current = Params(&overlay).text("file").map(str::to_owned);
@@ -420,6 +478,7 @@ pub fn pane(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement
                         .child("Overlays"),
                 )
                 .child(div().flex_1())
+                .child(add_menu(this, cx))
                 .child(
                     div()
                         .id("find-overlays")
@@ -446,6 +505,71 @@ pub fn pane(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement
             div().flex().flex_col().gap(px(4.)).children(rows),
         ))
         .child(derived_cuts(&cut, cx))
+}
+
+/// The Add menu: the channel's overlay presets, the templates, and the way to the presets.
+fn add_menu(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement {
+    let folder = this.folder.read(cx);
+    let repo = crate::brand::overlay::repo_of(&folder.dir);
+    let channel = repo
+        .as_deref()
+        .map(crate::brand::channel_brand)
+        .unwrap_or_default();
+    let brand = folder
+        .lock()
+        .map_or_else(|| channel.clone(), |l| l.brand.clone());
+    let presets = channel.overlay_presets;
+    let templates = crate::brand::overlay::templates(&brand);
+    let screen = cx.entity();
+    Button::new("add-overlay")
+        .label("Add")
+        .small()
+        .ghost()
+        .dropdown_menu(move |menu, _, _| {
+            let mut menu = menu.label("Presets");
+            if presets.is_empty() {
+                menu = menu.item(PopupMenuItem::new("None yet").disabled(true));
+            }
+            for preset in &presets {
+                let (screen, preset) = (screen.clone(), preset.clone());
+                menu = menu.item(
+                    PopupMenuItem::new(format!(
+                        "{}  ·  {}, {}",
+                        preset.name,
+                        preset.template,
+                        crate::model::seconds(preset.length)
+                    ))
+                    .on_click(move |_, _, cx| {
+                        let preset = preset.clone();
+                        screen.update(cx, |this, cx| this.place_preset(preset, cx))
+                    }),
+                );
+            }
+            menu = menu.separator().label("Templates");
+            for template in &templates {
+                let (screen, template) = (screen.clone(), template.clone());
+                menu = menu.item(PopupMenuItem::new(template.to_string()).on_click(
+                    move |_, _, cx| {
+                        let template = template.clone();
+                        screen.update(cx, |this, cx| this.place_template(template, cx))
+                    },
+                ));
+            }
+            if let Some(repo) = repo.clone() {
+                menu = menu
+                    .separator()
+                    .item(
+                        PopupMenuItem::new("Edit presets…").on_click(move |_, _, cx| {
+                            if let Err(error) =
+                                crate::brand::open_overlay_preset(&repo, None, None, cx)
+                            {
+                                eprintln!("{error}");
+                            }
+                        }),
+                    );
+            }
+            menu
+        })
 }
 
 /// Who made an overlay the pane lists.
@@ -483,6 +607,9 @@ fn overlay_row(
     for (name, value) in &overlay.params {
         let shown = match value {
             ParamValue::Text(text) => text.clone(),
+            ParamValue::Integer(n) if is_time(template, name.as_str()) => {
+                format!("{:.2} s", *n as f64 / 1e6)
+            }
             ParamValue::Integer(n) => n.to_string(),
             ParamValue::Bool(b) => if *b { "on" } else { "off" }.to_owned(),
         };
@@ -578,6 +705,20 @@ fn overlay_row(
                 .when(yours, |row| {
                     row.child(
                         div()
+                            .id(("edit", key))
+                            .px(px(6.))
+                            .rounded(px(6.))
+                            .hover(|s| s.bg(FLOAT))
+                            .cursor_pointer()
+                            .text_size(TEXT_XS)
+                            .text_color(BODY)
+                            .child("Edit")
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.edit_overlay(at, index, cx)),
+                            ),
+                    )
+                    .child(
+                        div()
                             .id(("remove", key))
                             .px(px(6.))
                             .rounded(px(6.))
@@ -621,6 +762,17 @@ fn overlay_row(
         )
         .child(params)
         .into_any_element()
+}
+
+/// Whether parameter `name` of `template` is a time in microseconds, shown in seconds.
+fn is_time(template: &str, name: &str) -> bool {
+    let keyframes = overlay::KEYFRAME_PARAMS.iter();
+    overlay::spec(template).is_some_and(|spec| {
+        spec.params
+            .iter()
+            .chain(keyframes)
+            .any(|p| p.name == name && p.kind == overlay::ParamKind::Time)
+    })
 }
 
 fn params_index(overlay: &Overlay, name: &str) -> usize {

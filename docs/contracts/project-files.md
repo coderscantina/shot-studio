@@ -9,6 +9,7 @@ This contract owns the files a video consists of and what each one means. `shot-
   .gitignore            ignores media/ and .shot/
   brand/
     brand.kdl           the channel's style: fonts, colors, logo, sounds, bookends, rules
+    themes/<id>.kdl     the channel's other saved themes, see themes below
     fonts/ sounds/      in git
     media/              bumper videos (ignored)
   formats/<format>.kdl  the channel's copy of each preset, with the format's rules
@@ -680,6 +681,7 @@ chapter "Intro" {
 | Node | Meaning |
 | --- | --- |
 | `import "<url>" rev="<commit>" style=<id>` | zero or more. A brand file read from the repo's `styles/<id>.kdl` at that commit, the lowest layer. The build records the commit in the lock. Imports are not followed further |
+| `theme <id>` | the name of the theme the look in this file is, see [themes](#themes). Not part of the resolved brand |
 | `fonts heading=<font> body=<font> mono=<font>` | each optional. A bundled OFL font bare (`inter`, `geist`, `geist-mono`, `jetbrains-mono`) or a file in the repo by path, quoted, hashed by content |
 | `colors accent= text= card= background=` | each optional, `"#rrggbb"` |
 | `logo "<path>"` | an SVG or PNG in the repo |
@@ -693,12 +695,14 @@ chapter "Intro" {
 | `preset <name> tempo= bounce= density= stagger= beat-sync=<bool>` | one per preset, feel controls 0 to 100, each optional and defaulting to the preset's own, see [feel controls](#feel-controls) |
 | `transition stinger="<path>" peak=<time>` | the Lottie stinger and the time its frame fully covers the picture, where the cut happens |
 | `template <id> file="<path>" { slot <id> <text,color,integer,time> required=<bool> ... }` | a Lottie template with typed slots, the spec the renderer checks overlays against. Declaring a built-in template's name re-skins it |
+| `overlay-preset <id> template=<template> length=<time> { <param> <value> ... }` | zero or more. A reusable overlay: a template, its parameters (`enter` and `exit` among them) as in an [`overlay`](#overlay-templates) node, and how long it shows. Placing it writes an `overlay` node with the parameters, from the moment for `length`. Checked against the template's spec where it is placed. Not part of the resolved brand |
 | `on ...` | the channel's rules |
 
 The lock lists every file the resolved brand names, by content hash, so a changed font or Lottie file changes the chunks it draws on. Font and Lottie paths are relative to the channel repo. This is the example channel's brand:
 
 ```kdl
 import "https://github.com/coderscantina/shot-styles" rev="3f2a91c" style=cantina
+theme cantina-dark
 fonts heading="brand/fonts/Display-Bold.otf" body=geist mono=geist-mono
 colors accent="#c8f25a" text="#f4f6f8" card="#141821" background="#101418"
 logo "brand/logo.svg"
@@ -715,6 +719,11 @@ template quote-card file="brand/quote-card.json" {
     slot quote text required=#true
     slot author text
     slot accent color
+}
+overlay-preset speaker template=lower-third length=5_000_000 {
+    text "Mike Wallner"
+    subtitle "Coder's Cantina"
+    enter 400_000
 }
 on chapter-start {
     overlay chapter-band for=2_500_000
@@ -761,6 +770,19 @@ A video that uses karaoke captions, larger, at the top:
 
 ```kdl
 captions karaoke size=120 position=top
+```
+
+### Themes
+
+A channel can keep several looks and switch between them ([0029](../decisions/0029-several-themes-per-channel.md)). `brand/brand.kdl` holds the active one, so the build reads one brand as before, with `theme` naming it. Every other theme is a file `brand/themes/<id>.kdl` with the grammar of a format layer's `brand` block: no imports, rules, `theme` or `overlay-preset`, those stay with the channel. A brand without `theme` is one theme named `default`. Switching writes the active look to its own file, replaces the look in `brand.kdl` with the chosen file's and removes that file. Imports, rules and overlay presets stay in `brand.kdl` through a switch. This is the example channel's other theme:
+
+```kdl
+fonts heading=inter body=inter mono=jetbrains-mono
+colors accent="#3d7a00" text="#14181f" card="#ffffff" background="#eef1f4"
+logo "brand/logo.svg"
+camera shape=circle corners=0 border=6 shadow=soft
+motion reaction=reactive opinion=editorial product-tour=launch tutorial=calm
+preset editorial tempo=55 bounce=10
 ```
 
 ### Feel controls

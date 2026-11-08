@@ -86,6 +86,7 @@ pub fn init(cx: &mut App) {
             MenuItem::action("Redo", crate::studio::Redo),
         ]),
         crate::prompter::menu(),
+        crate::brand::menu(),
     ]);
 }
 

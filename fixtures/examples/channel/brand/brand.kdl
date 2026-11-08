@@ -1,4 +1,5 @@
 import "https://github.com/coderscantina/shot-styles" rev="3f2a91c" style=cantina
+theme cantina-dark
 fonts heading="brand/fonts/Display-Bold.otf" body=geist mono=geist-mono
 colors accent="#c8f25a" text="#f4f6f8" card="#141821" background="#101418"
 logo "brand/logo.svg"
@@ -15,6 +16,11 @@ template quote-card file="brand/quote-card.json" {
     slot quote text required=#true
     slot author text
     slot accent color
+}
+overlay-preset speaker template=lower-third length=5_000_000 {
+    text "Mike Wallner"
+    subtitle "Coder's Cantina"
+    enter 400_000
 }
 on chapter-start {
     overlay chapter-band for=2_500_000

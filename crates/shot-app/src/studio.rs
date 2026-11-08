@@ -433,6 +433,16 @@ impl Studio {
         self.cut.update(cx, |cut, cx| cut.forget_note(cx));
     }
 
+    /// Opens the channel's theme window on `section`. A video outside a channel has no brand.
+    fn open_brand(&mut self, section: crate::brand::Section, cx: &mut Context<Self>) {
+        let Some(planning) = &self.planning else {
+            return;
+        };
+        if let Err(error) = crate::brand::open(&planning.repo, section, cx) {
+            self.report(error, cx);
+        }
+    }
+
     /// The Board screen of a video outside a channel: why there is no board, and the way into
     /// one.
     fn no_channel(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -766,12 +776,39 @@ impl Render for Studio {
             .flex_col()
             .on_action(cx.listener(|this, _: &Undo, _, cx| this.step_history(true, cx)))
             .on_action(cx.listener(|this, _: &Redo, _, cx| this.step_history(false, cx)))
+            .on_action(cx.listener(|this, _: &crate::brand::OpenTheme, _, cx| {
+                this.open_brand(crate::brand::Section::Colors, cx)
+            }))
+            .on_action(cx.listener(|this, _: &crate::brand::OpenOverlays, _, cx| {
+                this.open_brand(crate::brand::Section::Overlays, cx)
+            }))
             .bg(FRAME)
             .text_color(TEXT)
             .font_family(SANS)
             .text_size(TEXT_BASE)
             .child(self.title_bar(compact, cx))
             .child(div().flex_1().min_h_0().flex().flex_col().child(screen))
+    }
+}
+
+/// Rebuilds the lock of every open video of the channel at `repo` after its brand changed, so
+/// their screens draw the new look.
+pub fn brand_changed(repo: &Path, cx: &mut App) {
+    let videos = key(repo).join("videos");
+    let folders: Vec<Entity<VideoFolder>> = cx
+        .try_global::<Studios>()
+        .into_iter()
+        .flat_map(|studios| &studios.0)
+        .filter(|(dir, ..)| dir.starts_with(&videos))
+        .filter_map(|(_, _, studio)| studio.upgrade())
+        .map(|studio| studio.read(cx).folder.clone())
+        .collect();
+    for folder in folders {
+        folder.update(cx, |folder, cx| {
+            // A video whose lock cannot be built shows why on its next edit.
+            let _ = folder.rebuild_lock();
+            cx.notify();
+        });
     }
 }
 

@@ -1,0 +1,6 @@
+fonts heading=inter body=inter mono=jetbrains-mono
+colors accent="#3d7a00" text="#14181f" card="#ffffff" background="#eef1f4"
+logo "brand/logo.svg"
+camera shape=circle corners=0 border=6 shadow=soft
+motion reaction=reactive opinion=editorial product-tour=launch tutorial=calm
+preset editorial tempo=55 bounce=10

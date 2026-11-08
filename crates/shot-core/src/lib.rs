@@ -24,8 +24,8 @@ mod video;
 
 pub use brand::{
     Bookend, Brand, BundledFont, Camera, CameraShape, Colors, CustomLayout, Font, Fonts, Import,
-    LayoutSlot, LottieTemplate, Motion, Phase, Preset, PresetName, Slot, SlotType, SoundEffect,
-    SoundKey, Stinger, Track,
+    LayoutSlot, LottieTemplate, Motion, OverlayPreset, Phase, Preset, PresetName, Slot, SlotType,
+    SoundEffect, SoundKey, Stinger, Track,
 };
 pub use captions::{
     CaptionBack, CaptionCase, CaptionDesign, CaptionFont, CaptionLook, CaptionPosition, Emphasis,
