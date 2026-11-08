@@ -35,8 +35,8 @@ fn removed_by(target: Target) -> RemovedBy {
 }
 
 /// The cut as the screens show a migrated video: each block's kept ranges less the lock's cuts
-/// of its take, removed by the rule of their element's kind; the lock's review items that play
-/// in the block; and the lock's zooms and overlays after a person's.
+/// of its take, removed by the rule of their element's kind; and the lock's review items, zooms
+/// and overlays that play in the block, the zooms and overlays after a person's.
 pub fn shown(cut: &Cut, lock: &Lock) -> Cut {
     let mut shown = cut.clone();
     for block in shown.chapters.iter_mut().flat_map(|c| &mut c.takes) {
@@ -52,6 +52,7 @@ pub fn shown(cut: &Cut, lock: &Lock) -> Cut {
             })
             .collect();
         block.ranges = fold_cuts(&block.ranges, styled);
+        let plays = |range: &TimeRange| kept.iter().any(|k| k.overlaps(*range));
         for instance in &styled.instances {
             match &instance.applied {
                 Applied::Review(range) => {
@@ -60,7 +61,7 @@ pub fn shown(cut: &Cut, lock: &Lock) -> Cut {
                         _ => None,
                     };
                     if let Some(by) = by
-                        && kept.iter().any(|k| k.overlaps(*range))
+                        && plays(range)
                     {
                         block.reviews.push(Review {
                             range: *range,
@@ -73,7 +74,7 @@ pub fn shown(cut: &Cut, lock: &Lock) -> Cut {
                     scale,
                     range,
                     center,
-                } => block.zooms.push(Zoom {
+                } if plays(range) => block.zooms.push(Zoom {
                     scale: *scale,
                     range: *range,
                     center: *center,
@@ -83,7 +84,7 @@ pub fn shown(cut: &Cut, lock: &Lock) -> Cut {
                     template,
                     range,
                     params,
-                } => block.overlays.push(Overlay {
+                } if plays(range) => block.overlays.push(Overlay {
                     template: template.clone(),
                     range: *range,
                     params: params.clone(),
@@ -338,6 +339,27 @@ mod tests {
         assert_eq!(
             Timeline::evaluate(&project(shown)),
             Timeline::styled(&project(cut), &lock)
+        );
+    }
+
+    #[test]
+    fn a_take_in_two_blocks_gets_each_block_only_the_zooms_that_play_in_it() {
+        let cut = Cut::parse(
+            "chapter \"A\" {\n    take t01 {\n        keep from=0 to=10_000_000\n    }\n    take t01 {\n        keep from=20_000_000 to=30_000_000\n    }\n}\n",
+        )
+        .unwrap();
+        let lock = Lock::parse("lock 1\n\ntake t01 {\n    zoom 112 from=8_000_000 to=9_000_000 on=emphasis t=8_000_000 layer=format rule=\"emphasis\"\n    zoom 112 from=25_000_000 to=26_000_000 on=emphasis t=25_000_000 layer=format rule=\"emphasis\"\n}\n").unwrap();
+        let takes = &shown(&cut, &lock).chapters[0].takes;
+        let zooms: Vec<_> = takes
+            .iter()
+            .map(|b| b.zooms.iter().map(|z| z.range).collect::<Vec<_>>())
+            .collect();
+        assert_eq!(
+            zooms,
+            [
+                vec![range(8_000_000, 9_000_000)],
+                vec![range(25_000_000, 26_000_000)]
+            ]
         );
     }
 

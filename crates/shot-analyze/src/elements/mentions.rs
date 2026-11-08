@@ -14,15 +14,22 @@ pub struct SaidUrl {
 }
 
 /// Spoken punctuation in URLs and what it writes.
-const SPOKEN: [(&[&str], &str); 7] = [
+const SPOKEN: [(&[&str], &str); 11] = [
     (&["dot"], "."),
+    (&["period"], "."),
+    (&["forward", "slash"], "/"),
     (&["slash"], "/"),
+    (&["/"], "/"),
+    (&["underscore"], "_"),
     (&["dash"], "-"),
     (&["hyphen"], "-"),
     (&["question", "mark"], "?"),
     (&["equals"], "="),
     (&["colon"], ":"),
 ];
+
+/// What spoken punctuation writes, which a link may end a word on.
+const SYMBOLS: [char; 7] = ['.', '/', '-', '?', '=', ':', '_'];
 
 /// Hosts a spoken URL may start with, so "go dot dev" is not taken for a link.
 const HOSTS: [&str; 7] = [
@@ -35,10 +42,14 @@ const HOSTS: [&str; 7] = [
     "www.github.com",
 ];
 
+/// Top level domains whisper may split off a host with a full stop ("github. com").
+const TLDS: [&str; 5] = ["com", "org", "io", "dev", "net"];
+
 /// Every URL said in `words`, in order. A written URL is any word that reads as a link with a
 /// dotted host; a spoken one must start with a known host.
 pub fn urls(words: &[Word]) -> Vec<SaidUrl> {
     let tokens: Vec<String> = words.iter().map(|w| token(&w.text)).collect();
+    let stops: Vec<bool> = words.iter().map(|w| w.text.ends_with('.')).collect();
     let mut found = Vec::new();
     let mut i = 0;
     while i < words.len() {
@@ -56,15 +67,19 @@ pub fn urls(words: &[Word]) -> Vec<SaidUrl> {
                 continue;
             }
             let word = tokens[j].as_str();
-            let joins = text.is_empty() || text.ends_with(['.', '/', '-', '?', '=', ':']);
+            let split_host = j > i && stops[j - 1] && TLDS.contains(&word);
+            let joins = text.is_empty() || split_host || text.ends_with(SYMBOLS);
             if !joins || word.is_empty() {
                 break;
+            }
+            if split_host {
+                text.push('.');
             }
             text.push_str(word);
             j += 1;
             end = j;
         }
-        let text = text.trim_end_matches(['.', '/', '-', '?', '=', ':']);
+        let text = text.trim_end_matches(SYMBOLS);
         let url = if text.starts_with("http") {
             text.to_owned()
         } else {
@@ -170,5 +185,18 @@ mod tests {
             ]
         );
         assert_eq!(found[1].words.from(), Micros(3 * 400_000));
+    }
+
+    #[test]
+    fn joins_whispers_half_spoken_forms_into_the_whole_url() {
+        for said in [
+            "github.com slash zedindustry slash zed.",
+            "github dot com forward slash zedindustry / zed.",
+            "Github. com slash zedindustry slash zed.",
+        ] {
+            let found = urls(&words(said));
+            assert_eq!(found.len(), 1, "{said}");
+            assert_eq!(found[0].url, "https://github.com/zedindustry/zed", "{said}");
+        }
     }
 }

@@ -60,15 +60,12 @@ Waiting for Mike. One line each with a recommendation and a link to its record. 
 
 Found by agents and waiting for a task. Remove a line when it's fixed.
 
-- Record does not warn when the camera delivers black frames.
-- The live URL reader turns whisper's half-joined "github.com slash zedindustry slash zed." into just `https://github.com`. Captions draw over the link card on the monitor (export keeps main-cut captions in the sidecar). The Record layout switcher from the mockup is not built; the Styled/Raw switch takes its place.
-- Proposal cache folders under `.shot/cache/proposals/` are never cleaned up after accept or reject, and the contract does not name that folder yet.
+- Captions draw over the link card on the monitor (export keeps main-cut captions in the sidecar). The Record layout switcher from the mockup is not built; the Styled/Raw switch takes its place.
 - The painter has no prefetch for the second side of a two-sided transition (the engine queues 18 frames instead), and `paint` does not return the screen layer it drew, so the engine lays out paused frames twice to map callout clicks. `--bench-edit --glass` draws its own pass although `Painter::set_decoration` now exists.
 - Stingers and derived cuts do not snap to the beat. The bookend title and word-pop captions have no phase sounds. The contract's `sounds` row does not yet say which templates count as cards or pops, that clicks need a ripple, or that a phase plays on its first frame.
 - The shot-app watchdog test (`the_watchdog_names_where_a_stalled_thread_waits_or_runs`) fails about one run in three at load average 15.
 - The contract does not yet describe which transition joins a bookend, where the intro goes, what each title shows, or take handles. Bumpers are cached per video, not per channel as decision 0021 says.
 - Placed sounds and lock overlays cannot be removed in the app yet; that waits for the provenance and scope design round. The transition mark style and Picture's placement buttons are not in the mockup and need Mike's design call.
-- `style::shown` copies every lock instance of a take into every block of that take: frames are right, counts inflate (the bench reports 67 overlays).
 - The app's sound, callout, pop and Lottie placement were driven by an in-app script calling the button handlers, not by real clicks; the Lottie import is covered only by its unit test.
 - The end card does not draw the brand logo yet, and a brand font file has only gone through a unit test, not a real export.
 - vello's coverage order varies between runs; rectangle shadows are snapped to whole pixels, but a rare one-bit flip in text or other shapes is still possible.
@@ -88,8 +85,7 @@ Found by agents and waiting for a task. Remove a line when it's fixed.
 - Element gaps: two `{name}` tags on one beat collide on (kind, t), cursor dwell has no element kind, M markers carry no label, `code` and `expression` have no detector, takes recorded without the prompter get no beat or chapter elements.
 - Brand imports are read from `styles/<id>.kdl` in the repo; nothing fetches or pins them from git yet (milestone 10 item 4).
 - The Edit screen writes `cut.kdl` on the checked-out branch while proposals merge into `video/<slug>`, so the two can drift.
-- The music bed detects the end of its file by 10 s of digital silence; `PcmReader::ended_before` now gives the real end.
-- The thumbnail is written to `.shot/export/main.png`; the contract does not name where thumbnails live.
+- The music bed detects the end of its file by 10 s of digital silence; `PcmReader::ended_before` and `PcmReader::len` now give the real end.
 - Agents sharing the target dir overwrite each other's `release/shot`; copy the binary before measuring or running it from a worktree.
 - Linear ideas are not wired: no Linear MCP server or CLI was available.
 - Face reframing is untested on a real face; Vision does not detect the fixture's pixel face.
@@ -97,7 +93,6 @@ Found by agents and waiting for a task. Remove a line when it's fixed.
 - The export job queue starts with the shortest jobs although its comment says longest first.
 - The b-roll lane color and the Overlays pane icons are local stand-ins, not theme tokens and Hugeicons.
 - The app cannot preview a derived cut.
-- The inline retake toast exists in the prompter but nothing calls it: the live retake rule should call `PrompterPane::live().caught(...)`.
 - `PcmReader` in `shot-media` does not expose its length, so the music bed detects the end by looking for 10 s of digital silence.
 - Filler learning only uses Keeps from the current video, not the channel. N markers (next beat) are not used by any rule yet.
 - A `code-diff` chunk's hash covers the snapshot's path, not its content, so rewriting a snapshot in place reuses stale chunks.

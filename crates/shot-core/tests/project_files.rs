@@ -358,6 +358,18 @@ fn script_parses_chapters_beats_and_sources() {
 }
 
 #[test]
+fn text_between_a_chapter_heading_and_its_first_beat_is_the_chapter_note() {
+    let script = Script::parse(
+        "# T\n\n## One\nWhy this matters\nto us.\n\nSecond paragraph.\n\n- a beat\nits script\n",
+    )
+    .unwrap();
+    let chapter = &script.chapters[0];
+    assert_eq!(chapter.note, "Why this matters to us.\nSecond paragraph.");
+    assert_eq!(chapter.beats[0].script, "its script");
+    assert!(Script::parse("# T\nloose text\n## One\n").is_err());
+}
+
+#[test]
 fn deleting_words_changes_only_the_hashes_of_its_chapter() {
     let mut project = project();
     let before = Timeline::evaluate(&project);

@@ -12,6 +12,8 @@ use git2::{BranchType, Commit, Delta, Diff, Patch};
 use crate::{Board, Error, Result, branch_name, check_name, video_dir, video_path};
 
 const PROPOSAL_PREFIX: &str = "proposal/";
+/// Where export renders a proposal's preview, inside the video folder, one folder per name.
+const PROPOSAL_CACHE: &str = ".shot/cache/proposals";
 
 /// A proposal waiting for review.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -287,10 +289,16 @@ impl Board {
             })
     }
 
+    /// Deletes the branch and the proposal's render cache in the checked-out video folder.
     fn delete_proposal(&self, slug: &str, name: &str) -> Result<()> {
         self.repo
             .find_branch(&proposal_branch(slug, name), BranchType::Local)?
             .delete()?;
+        if let Some(work) = self.repo.workdir() {
+            // The cache is derived and safe to delete, so a failure to remove it is not one.
+            let _ =
+                std::fs::remove_dir_all(work.join(video_dir(slug)).join(PROPOSAL_CACHE).join(name));
+        }
         Ok(())
     }
 }

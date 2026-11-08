@@ -11,6 +11,9 @@ pub struct Script {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScriptChapter {
     pub title: String,
+    /// Text between the heading and the first beat. Lines join with spaces, paragraphs with a
+    /// newline.
+    pub note: String,
     pub beats: Vec<Beat>,
 }
 
@@ -67,6 +70,7 @@ impl Script {
                     }
                     _ => chapters.push(ScriptChapter {
                         title: heading.to_owned(),
+                        note: String::new(),
                         beats: Vec::new(),
                     }),
                 }
@@ -85,14 +89,17 @@ impl Script {
                     script: String::new(),
                 });
             } else {
-                let beat = chapters
+                let chapter = chapters
                     .last_mut()
-                    .and_then(|c| c.beats.last_mut())
-                    .ok_or_else(|| error(line, "text belongs to a beat (a bullet)"))?;
-                if !beat.script.is_empty() {
-                    beat.script.push(if paragraph_break { '\n' } else { ' ' });
+                    .ok_or_else(|| error(line, "text belongs to a chapter (`##`)"))?;
+                let text = match chapter.beats.last_mut() {
+                    Some(beat) => &mut beat.script,
+                    None => &mut chapter.note,
+                };
+                if !text.is_empty() {
+                    text.push(if paragraph_break { '\n' } else { ' ' });
                 }
-                beat.script.push_str(trimmed);
+                text.push_str(trimmed);
             }
             paragraph_break = false;
         }

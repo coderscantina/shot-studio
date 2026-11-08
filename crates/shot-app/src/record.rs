@@ -399,6 +399,7 @@ fn record(
         screen_size,
         heard: heard_rx,
         styled: shared.styled.clone(),
+        prompter: live.clone(),
     });
     *shared.monitor.lock().expect("monitor") = Some(live_take.view());
     shared.set(Phase::Recording {
@@ -578,6 +579,14 @@ impl RecordScreen {
         };
         let level = f32::from_bits(self.shared.level.load(Ordering::Relaxed));
         let recording = self.is_recording();
+        let camera_black = recording
+            && self
+                .shared
+                .monitor
+                .lock()
+                .expect("monitor")
+                .as_ref()
+                .is_some_and(|view| view.camera_black());
         let dir = self.folder.read(cx).dir.clone();
         let take = match self.phase() {
             Phase::Recording { take, .. } => take,
@@ -611,15 +620,25 @@ impl RecordScreen {
                 busy,
                 cx,
             ))
-            .child(self.source(
-                Picker::Camera,
-                "camera",
-                "Camera",
-                String::new(),
-                name_of(&self.devices.cameras, &self.choice.camera),
-                busy,
-                cx,
-            ))
+            .child(
+                self.source(
+                    Picker::Camera,
+                    "camera",
+                    "Camera",
+                    String::new(),
+                    name_of(&self.devices.cameras, &self.choice.camera),
+                    busy,
+                    cx,
+                )
+                .when(camera_black, |card| {
+                    card.child(
+                        div()
+                            .text_size(TEXT_SM)
+                            .text_color(WARN)
+                            .child("Black frames. Check the lens cover. The take still records."),
+                    )
+                }),
+            )
             .child(
                 self.source(
                     Picker::Mic,

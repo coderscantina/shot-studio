@@ -25,7 +25,8 @@ This contract owns the files a video consists of and what each one means. `shot-
         <take>/         one folder per take, named by its take id
           events.jsonl  cursor and key events, see below
       .shot/cache/      SQLite and rendered chunks (ignored, safe to delete)
-      .shot/export/     rendered cuts, caption sidecar, thumbnail (ignored), see ship artifacts
+        proposals/<name>/  a proposal's preview chunks, removed when it is accepted or rejected
+      .shot/export/     rendered cuts, caption sidecar, thumbnail `main.png` (ignored), see ship artifacts
       .shot/ship/       the upload record (ignored), see ship artifacts
 ```
 
@@ -727,7 +728,8 @@ Markdown with a fixed shape, read line by line:
 - `## <chapter>` starts a chapter.
 - A bullet (`- ` or `* `) inside a chapter is a beat. Every `[label](target)` link in it is a source, usually a file in `sources/`. The prompter shows the bullet with links replaced by their labels.
 - Any other text after a beat, indented or not, is that beat's full script for full-script mode. Lines in a paragraph join with spaces, paragraphs with a line break.
-- Blank lines separate paragraphs. Other headings (`###` and deeper), text before the first beat of a chapter and beats before the first chapter are errors with a line number.
+- Text between a chapter heading and its first beat is the chapter's note, joined like a beat's script.
+- Blank lines separate paragraphs. Other headings (`###` and deeper), text before the first chapter and beats before the first chapter are errors with a line number.
 
 `shot-core` only reads this file. The script agent writes it as plain text.
 
