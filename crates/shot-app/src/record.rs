@@ -492,6 +492,7 @@ fn recorder(commands: Receiver<Command>, shared: &Shared) {
                 // The old inputs stop before the new ones start on the same devices.
                 drop(standby.take());
                 shared.show(None);
+                shared.standby_error.lock().expect("standby error").take();
                 shared.standby_since.lock().expect("standby start").take();
                 standby = Some(watch(*setup, take, &choice, shared));
             }
@@ -535,7 +536,7 @@ fn watch(setup: Setup, take: Id, choice: &Choice, shared: &Shared) -> Inputs {
         .errors()
         .iter()
         .find(|e| !matches!(e, CaptureError::Permission(_)))
-        .map(ToString::to_string);
+        .map(preview_failure);
     let preview = capture.preview();
     let rehearsal = Rehearsal::start(
         setup,
@@ -549,6 +550,28 @@ fn watch(setup: Setup, take: Id, choice: &Choice, shared: &Shared) -> Inputs {
     Inputs {
         _rehearsal: rehearsal,
         _capture: capture,
+    }
+}
+
+/// What a standby error means for the person in front of the stage, and what to do about it.
+fn preview_failure(error: &CaptureError) -> String {
+    match error {
+        CaptureError::Source {
+            what: "screen capture",
+            ..
+        } => "The screen preview did not start. \
+            Another app may be capturing the screen. Try again, or quit the other app."
+            .into(),
+        CaptureError::Source {
+            what: "camera and mic capture",
+            ..
+        } => "The camera and mic preview did not start. Another app may be using them. \
+            Try again, or quit the other app."
+            .into(),
+        CaptureError::NoDisplay(_) | CaptureError::NoDevice { .. } => {
+            "A chosen screen, camera or mic is not connected. Pick another one in Tracks.".into()
+        }
+        other => format!("The preview did not start: {other}."),
     }
 }
 
@@ -921,7 +944,7 @@ impl RecordScreen {
     fn preview_problem(&self, screen: bool, camera: bool) -> Option<String> {
         let shared = &self.shared;
         if let Some(error) = shared.standby_error.lock().expect("standby error").clone() {
-            return Some(format!("The preview could not start: {error}"));
+            return Some(error);
         }
         let since = (*shared.standby_since.lock().expect("standby start"))?;
         if since.elapsed() < SILENT_AFTER {
@@ -1190,11 +1213,20 @@ impl RecordScreen {
     }
 
     fn stage(&self, phase: &Phase, cx: &mut Context<Self>) -> impl IntoElement {
+        let live = self.shared.preview.lock().expect("preview").clone();
+        let screen = live.as_ref().and_then(Preview::screen);
+        let camera = live.as_ref().and_then(Preview::camera);
+        let problem = self
+            .preview_problem(screen.is_some(), camera.is_some())
+            .filter(|_| !busy_stage(phase));
         let (title, detail): (String, String) = match phase {
             Phase::Idle | Phase::Failed(_) | Phase::Finished { .. } => (
                 format!("Take {}", self.next_take(cx)),
                 if self.standby_starting() {
                     "Starting the preview.".into()
+                } else if problem.is_some() {
+                    "Check the problem above first. Space still records the inputs that started."
+                        .into()
                 } else {
                     "Press Space or the record button to start.".into()
                 },
@@ -1221,9 +1253,11 @@ impl RecordScreen {
             _ => Duration::ZERO,
         };
         let recording = matches!(phase, Phase::Recording { .. });
-        let live = self.shared.preview.lock().expect("preview").clone();
-        let screen = live.as_ref().and_then(Preview::screen);
-        let camera = live.as_ref().and_then(Preview::camera);
+        let start = if problem.is_some() {
+            "Record anyway"
+        } else {
+            "Start"
+        };
         let styled = self.shared.styled.load(Ordering::Relaxed);
         let monitor = self.shared.monitor.lock().expect("monitor").clone();
         let monitor_error = monitor.as_ref().and_then(|m| m.error()).filter(|_| styled);
@@ -1280,18 +1314,14 @@ impl RecordScreen {
                     .child(format!("Showing the raw feed: {e}"))
             }))
             .children(self.failure())
-            .children(
-                self.preview_problem(screen.is_some(), camera.is_some())
-                    .filter(|_| !busy_stage(phase))
-                    .map(|problem| {
-                        alert(problem).child(
-                            Button::new("retry-preview")
-                                .small()
-                                .label("Try again")
-                                .on_click(cx.listener(|this, _, _, cx| this.restart(cx))),
-                        )
-                    }),
-            )
+            .children(problem.map(|problem| {
+                alert(problem).child(
+                    Button::new("retry-preview")
+                        .small()
+                        .label("Try again")
+                        .on_click(cx.listener(|this, _, _, cx| this.restart(cx))),
+                )
+            }))
             .child(
                 div()
                     .flex_1()
@@ -1405,7 +1435,7 @@ impl RecordScreen {
                             .justify_center()
                             .when(recording, |row| row.child(self.prompter.read(cx).legend())),
                     )
-                    .child(hint("Space", if recording { "Stop" } else { "Start" })),
+                    .child(hint("Space", if recording { "Stop" } else { start })),
             )
     }
 
