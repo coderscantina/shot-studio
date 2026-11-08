@@ -5,26 +5,29 @@ Updated 2026-11-08. Read by agents at the start of a thread; rewrite it before h
 ## Branches
 
 - `main`: milestones 01 to 08, plus the plan for 10 to 12 and the mockup.
-- `milestone/10-12`: milestone 10 items 1 to 6 and 8, milestone 11 items 1 to 4 and 10, the editor bench. fmt, clippy and `cargo test --workspace` pass. Not yet merged into `main`.
-- `task/m10-applock` in `.claude/worktrees/m10-applock`: running agent putting the app, `shot describe`, thumbnails and the ship plan on the lock, the fixture generator on migrated videos, and preview audio on the export mix.
-- `task/m11-templates` in `.claude/worktrees/m11-templates`: running agent rebuilding the 07 templates on the motion system and adding chapter-band, end-card, callout and pop.
+- `milestone/10-12`: milestones 10 to 12 built except what waits on Mike, and milestone 09's release machinery (items 1 to 3 and 6). fmt, clippy and `cargo test --workspace --no-fail-fast` pass on an idle machine. Not merged into `main`; waiting on Mike's go.
+
+No task branches, no worktrees.
 
 ## Uncommitted work
 
-None besides this file.
+None.
 
 ## Running
 
-The two agents above. Generated media in `$HOME/.cache/shot-studio-fixtures`, the shared build cache in `$HOME/.cache/shot-studio-target` (debug cleared before each wave). Screenshots in `docs/evidence/` (git-ignored).
+None. Generated media in `$HOME/.cache/shot-studio-fixtures`, the shared build cache in `$HOME/.cache/shot-studio-target` (clear its `debug/` when disk runs low). Reels and screenshots in `docs/evidence/` (git-ignored).
 
 ## Waiting on Mike
 
-- Merge `milestone/10-12` into `main` when this wave lands.
-- Milestone 10 item 7 starts with a design-variants round: provenance, the scope choice and the rule editor.
-- Listen to the bundled sounds and music beds (loop seams, bed-lofi most of all).
-- The prompter beam splitter check, the [open decisions](milestones/README.md#open-decisions) (0011, 0013 to 0025, the pacing and punch-in note), the YouTube OAuth client, and the prerequisites for 09.
+See the [open decisions](milestones/README.md#open-decisions) and [prerequisites](milestones/README.md#prerequisites-from-mike). In short:
+- Merge `milestone/10-12` into `main`.
+- Milestone 10 item 7: a design-variants round for provenance, the scope choice and the rule editor; also the transition mark style and Picture's placement buttons.
+- Score the four reels (milestone 11) and listen to the bundled sounds and beds.
+- Decide: URL card latency target, golden-frame ±1 tolerance, codec headroom 1.5 dB, the pacing and punch-in note, and the Proposed records 0011, 0013 to 0018, 0022, 0024, 0025 (0019 to 0021, 0023 from the grills).
+- The prompter beam splitter check. Click Don't Allow on the QuickTime automation prompt a test left on screen.
+- Credentials: YouTube OAuth client, the GitHub repo, the Apple secrets, the Homebrew tap.
 
 ## Next
 
-1. Milestone 11 items 7 to 9 (transitions, intro and outro, camera styling) in `shot-render`, then 11 and 12 (Sound and Overlays lanes, derived cuts, the reel for Mike to score).
-2. [Milestone 12](milestones/12-styled-monitor-and-watch-builds.md), then [09](milestones/09-release-gate.md).
+1. Milestone 10 item 7 after the design round.
+2. [Milestone 09](milestones/09-release-gate.md) items 4 and 5: measure every target on the idle reference machine, then one full video from board to a private upload.
