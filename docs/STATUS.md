@@ -4,19 +4,23 @@ Updated 2026-11-08. Read by agents at the start of a thread; rewrite it before h
 
 ## Branches
 
-`main` is the branch of record and is public at https://github.com/coderscantina/shot-studio. It holds milestones 01 to 08, milestones 10 to 12 built except what waits on Mike, and milestone 09's release machinery. fmt, clippy and `cargo test --workspace` pass. No other branches, no worktrees.
+`main` is the branch of record and is public at https://github.com/coderscantina/shot-studio. It holds milestones 01 to 08, milestones 10 to 12 built except what waits on Mike, milestone 09's release machinery, the welcome window, and timeline editing with undo.
+
+`polish/integration` (local, not pushed) is `main` plus the polish wave of 2026-11-08, waiting for Mike's go to merge into `main`. fmt, workspace clippy and `cargo test --workspace` pass except the flaky watchdog test (see known gaps). It holds:
+- Timeline: context-aware right-click menus on every lane element, layout from the Layout lane, adding, replacing and removing a music bed with its gain, a zoom slider, a draggable overview frame, zoom to selection or chapter (⌥Z), and a resizable split between the top row and the lanes.
+- Sound: the picker auditions sounds and explains when placing needs a migrated channel video, the preview's loudness gain fades in without a seek, a broken music file no longer silences the voice, pausing fades out instead of clicking.
+- Text and Picture: panes resize by their edges and keep their widths in `layout.json`, a useful inspector without a selection, working layout buttons, an outline with paragraphs, a Picture stage that fills the space.
+- Cut: each review item plays in context (Space) or as cut (⇧Space), with K, C, arrows, ⌘Z and ⌘↩, progress, clear empty states and a note on migrated videos.
+- Prompter: the output only shows on Record, never covers the app's own display unless asked, closes with Esc, its close control or ⌘⇧P, and follows displays coming and going. New controls: text size, line height, margins, width, reading line, speed, countdown, mirror, colors.
+- Board: its own window per channel, reachable from the welcome window, ⌘O, "New Channel…" and `shot-app <channel-repo>`; new videos, keyboard moves, opening a card into its studio, moving a loose video into a channel.
+- Ship: a setup card when there is no OAuth client, progress with Stop for export, upload and thumbnails, disk space and stale-export warnings, all seven checks; export stops between chunks.
+- Undo covers `format.kdl`, so a pacing or rule change undoes together with the cut it made.
+
+Checked with real clicks on the target project and a copy of the demo channel: timeline menus, layout submenu, music bed, split and overview drags, Cut, Record to Edit with the prompter output, board drag and drop, pane resizing. No worktrees.
 
 ## Uncommitted work
 
-On `main`: the welcome window (`crates/shot-app/src/welcome.rs`) that the app opens without a folder: open a video folder (⌘O), create one from a format preset, reopen a recent one. Checked with clippy, `cargo test -p shot-app` and clicks in the real app. Waits for Mike's review and a commit.
-
-Also on `main`, uncommitted on top of the welcome window: an editable Timeline and undo.
-- Undo and redo (⌘Z, ⇧⌘Z and an Edit menu) for every write of `cut.kdl`, on every screen (`VideoFolder::undo`, `redo`).
-- `shot-core` gains `Cut::add_zoom`, `set_range` and `remove_placed` over a `Placed` zoom or overlay.
-- The Timeline lanes edit: click or drag the ruler or a lane to move the playhead, drag across the lanes to select words, Z adds a zoom over the selection, click a zoom or overlay to pick it, drag its edges to trim and its middle to move (snapping to words and the playhead), Backspace removes it, click a cut seam to pick it and R restores it. `=`, `-` and ⇧Z zoom the lanes, scrolling pans, ⌘-scroll and pinch zoom, playback pages the view. A toolbar under the lanes shows what the selection or the pick can do.
-- The Text toolbar's Cut, Restore and a new Zoom are clickable. The Timeline's top row shrinks on short windows, and the workspace switcher shows icons only below 1500 px so the title bar fits at 1280.
-
-Checked with fmt, workspace clippy, `cargo test --workspace` (333 passed) and real clicks on the target project at 1600x1000 and 1280x800. Waits for Mike's review and a commit.
+None.
 
 ## Running
 
@@ -25,6 +29,8 @@ The demo app on `/tmp/shot-demo` (a copy of the target project), PID in `.demo/p
 ## Waiting on Mike
 
 See the [open decisions](milestones/README.md#open-decisions) and [prerequisites](milestones/README.md#prerequisites-from-mike):
+- Merge `polish/integration` into `main`.
+- How studio edits reach a video's branch so the board shows them (known gaps).
 - Score the four reels and listen to the bundled sounds and beds.
 - The design-variants round for milestone 10 item 7.
 - The website domain (postponed).
