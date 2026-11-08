@@ -35,7 +35,7 @@ use shot_capture::{
     Access, CaptureError, Devices, Permission, Preview, PreviewFrame, Session, SessionConfig,
     Source, Standby,
 };
-use shot_core::{Id, Micros, Transcript};
+use shot_core::{Id, Inputs, Micros, Transcript};
 
 use crate::folder::VideoFolder;
 use crate::live::{Feeds, Heard, LiveTake, Rehearsal, Setup, View};
@@ -128,13 +128,94 @@ fn settings_url(permission: Permission) -> &'static str {
     }
 }
 
-/// Sources picked for the next take.
+/// Sources picked for the next take: the devices, and the tracks switched on in `format.kdl`.
 #[derive(Clone)]
 struct Choice {
     display: Option<u32>,
     camera: Option<String>,
     mic: Option<String>,
-    system_audio: bool,
+    inputs: Inputs,
+}
+
+impl Choice {
+    /// The camera the take records: the picked one while the camera is on.
+    fn camera(&self) -> Option<&String> {
+        self.camera.as_ref().filter(|_| self.inputs.camera)
+    }
+
+    fn mic(&self) -> Option<&String> {
+        self.mic.as_ref().filter(|_| self.inputs.mic)
+    }
+
+    fn camera_source(&self) -> Source {
+        self.camera().cloned().map_or(Source::Off, Source::Named)
+    }
+
+    fn mic_source(&self) -> Source {
+        self.mic().cloned().map_or(Source::Off, Source::Named)
+    }
+
+    /// Why a take cannot start with these tracks, if it cannot.
+    fn nothing_to_record(&self) -> Option<&'static str> {
+        let records = self.inputs.screen
+            || self.inputs.system_audio
+            || self.camera().is_some()
+            || self.mic().is_some();
+        (!records).then_some(if self.inputs.any() {
+            "The tracks that are on have no device. Connect one, or turn on another track."
+        } else {
+            "Every track is off. Turn on the screen, camera, mic or system audio to record."
+        })
+    }
+}
+
+/// A track the Record screen switches on and off.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Track {
+    Screen,
+    Camera,
+    Mic,
+    SystemAudio,
+}
+
+impl Track {
+    fn get(self, inputs: Inputs) -> bool {
+        match self {
+            Self::Screen => inputs.screen,
+            Self::Camera => inputs.camera,
+            Self::Mic => inputs.mic,
+            Self::SystemAudio => inputs.system_audio,
+        }
+    }
+
+    fn set(self, inputs: &mut Inputs, on: bool) {
+        match self {
+            Self::Screen => inputs.screen = on,
+            Self::Camera => inputs.camera = on,
+            Self::Mic => inputs.mic = on,
+            Self::SystemAudio => inputs.system_audio = on,
+        }
+    }
+
+    /// What the switch says to VoiceOver.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Screen => "Record the screen",
+            Self::Camera => "Record the camera",
+            Self::Mic => "Record the mic",
+            Self::SystemAudio => "Record system audio",
+        }
+    }
+
+    /// The tile's line while the track is off.
+    fn off(self) -> &'static str {
+        match self {
+            Self::Screen => "Off. Layouts show the face only.",
+            Self::Camera => "Off. Layouts show the content only.",
+            Self::Mic => "Off. The take has no words.",
+            Self::SystemAudio => "Off. Only your voice is recorded.",
+        }
+    }
 }
 
 enum Command {
@@ -147,7 +228,7 @@ enum Command {
 }
 
 /// The inputs on standby and the style painted over them. The painter stops first.
-struct Inputs {
+struct OnStandby {
     _rehearsal: Rehearsal,
     _capture: Standby,
 }
@@ -250,7 +331,7 @@ impl RecordScreen {
                 .iter()
                 .find(|d| d.default)
                 .map(|d| d.unique_id.clone()),
-            system_audio: true,
+            inputs: folder.read(cx).project.format.inputs(),
         };
         let shared = Arc::new(Shared {
             phase: Mutex::new(Phase::Idle),
@@ -364,6 +445,8 @@ impl RecordScreen {
 
     fn toggle(&mut self, _: &ToggleRecording, _: &mut Window, cx: &mut Context<Self>) {
         match self.phase() {
+            Phase::Idle | Phase::Failed(_) | Phase::Finished { .. }
+                if self.choice.nothing_to_record().is_some() => {}
             Phase::Idle | Phase::Failed(_) | Phase::Finished { .. } => {
                 self.shared.words.lock().expect("words").clear();
                 self.error = None;
@@ -461,6 +544,36 @@ impl RecordScreen {
     fn next_take(&self, cx: &App) -> Id {
         next_take_id(&self.folder.read(cx).dir)
     }
+
+    /// Switches `track` for this video's next takes, in its `format.kdl`, so it undoes like any
+    /// edit. The standby follows on the next render.
+    fn switch(&mut self, track: Track, on: bool, cx: &mut Context<Self>) {
+        let result = self.folder.update(cx, |folder, cx| {
+            let mut format = folder.project.format.clone();
+            let mut inputs = format.inputs();
+            track.set(&mut inputs, on);
+            format.inputs = Some(inputs);
+            let result = folder.write_format(format);
+            cx.notify();
+            result
+        });
+        if let Err(error) = result {
+            self.error = Some(error.into());
+        }
+        cx.notify();
+    }
+
+    /// Picks up switches changed by an undo or another screen, and restarts the standby with them.
+    fn follow_inputs(&mut self, busy: bool, cx: &mut Context<Self>) {
+        let inputs = self.folder.read(cx).project.format.inputs();
+        if inputs != self.choice.inputs && !busy {
+            self.choice.inputs = inputs;
+            self.open = None;
+            if self.on_screen {
+                self.restart(cx);
+            }
+        }
+    }
 }
 
 fn next_take_id(dir: &std::path::Path) -> Id {
@@ -485,7 +598,7 @@ fn free_space(dir: &std::path::Path) -> Option<u64> {
 }
 
 fn recorder(commands: Receiver<Command>, shared: &Shared) {
-    let mut standby: Option<Inputs> = None;
+    let mut standby: Option<OnStandby> = None;
     while let Ok(command) = commands.recv() {
         match command {
             Command::Watch(setup, take, choice) => {
@@ -523,12 +636,13 @@ fn recorder(commands: Receiver<Command>, shared: &Shared) {
 }
 
 /// Starts `choice` on standby and shows it on the stage.
-fn watch(setup: Setup, take: Id, choice: &Choice, shared: &Shared) -> Inputs {
+fn watch(setup: Setup, take: Id, choice: &Choice, shared: &Shared) -> OnStandby {
     let level = shared.level.clone();
     let capture = Standby::start(
+        choice.inputs.screen,
         choice.display,
-        &choice.camera.clone().map_or(Source::Off, Source::Named),
-        &choice.mic.clone().map_or(Source::Off, Source::Named),
+        &choice.camera_source(),
+        &choice.mic_source(),
         move |peak| level.store(peak.to_bits(), Ordering::Relaxed),
     );
     // Missing permissions show in Tracks; anything else above the stage.
@@ -547,7 +661,7 @@ fn watch(setup: Setup, take: Id, choice: &Choice, shared: &Shared) -> Inputs {
     );
     shared.show(Some((preview, rehearsal.view())));
     *shared.standby_since.lock().expect("standby start") = Some(Instant::now());
-    Inputs {
+    OnStandby {
         _rehearsal: rehearsal,
         _capture: capture,
     }
@@ -585,10 +699,11 @@ fn screen_size(display: Option<u32>) -> (u32, u32) {
 }
 
 /// Whether the take's own preview shows what the standby showed, so the standby can stop.
-fn caught_up(preview: &Preview, view: &View, camera: bool, styled: bool) -> bool {
-    preview.screen().is_some()
+/// The styled monitor paints over the screen, so without one there is nothing to wait for.
+fn caught_up(preview: &Preview, view: &View, screen: bool, camera: bool, styled: bool) -> bool {
+    (!screen || preview.screen().is_some())
         && (!camera || preview.camera().is_some())
-        && (!styled || view.frame().is_some() || view.error().is_some())
+        && (!screen || !styled || view.frame().is_some() || view.error().is_some())
 }
 
 /// Records one take, from loading the model to the cached transcript. The standby keeps the
@@ -600,7 +715,7 @@ fn record(
     hotkeys: Vec<Hotkey>,
     commands: &Receiver<Command>,
     shared: &Shared,
-    standby: &mut Option<Inputs>,
+    standby: &mut Option<OnStandby>,
 ) -> Result<(Id, Micros), Failure> {
     let dir = setup.dir.clone();
     let dir = dir.as_path();
@@ -609,7 +724,7 @@ fn record(
     let expected = next_take_id(dir);
     let mut live_take = LiveTake::start(setup, expected.clone());
     let (heard, heard_rx) = mpsc::channel();
-    let transcriber = match &choice.mic {
+    let transcriber = match choice.mic() {
         Some(_) => {
             let model_dir = models::models_dir();
             let fetch = |spec: models::ModelSpec| {
@@ -661,12 +776,14 @@ fn record(
         None => None,
     };
 
-    let camera_on = choice.camera.is_some();
+    let camera_on = choice.camera().is_some();
+    let screen_on = choice.inputs.screen;
     let mut config = SessionConfig::new(dir);
+    config.screen = screen_on;
     config.display = choice.display;
-    config.camera = choice.camera.map_or(Source::Off, Source::Named);
-    config.mic = choice.mic.map_or(Source::Off, Source::Named);
-    config.system_audio = choice.system_audio;
+    config.camera = choice.camera_source();
+    config.mic = choice.mic_source();
+    config.system_audio = choice.inputs.system_audio;
     config.hotkeys = hotkeys;
     let level = shared.level.clone();
     let transcriber = transcriber.map(|(transcriber, sink, listener)| {
@@ -725,7 +842,7 @@ fn record(
         last = Instant::now();
         let styled = shared.styled.load(Ordering::Relaxed);
         if standby.is_some()
-            && (caught_up(&preview, &view, camera_on, styled)
+            && (caught_up(&preview, &view, screen_on, camera_on, styled)
                 || switched.elapsed() > Duration::from_secs(2))
         {
             *shared.preview.lock().expect("preview") = Some(preview.clone());
@@ -844,6 +961,7 @@ impl Render for RecordScreen {
             self.error.get_or_insert_with(|| error.clone());
         }
         let busy = busy_stage(&phase);
+        self.follow_inputs(busy, cx);
         let has_beats = self
             .folder
             .read(cx)
@@ -950,9 +1068,10 @@ impl RecordScreen {
         if since.elapsed() < SILENT_AFTER {
             return None;
         }
-        let screen_silent = self.permissions.screen == Access::Allowed && !screen;
+        let screen_silent =
+            self.choice.inputs.screen && self.permissions.screen == Access::Allowed && !screen;
         let camera_silent =
-            self.choice.camera.is_some() && self.permissions.camera == Access::Allowed && !camera;
+            self.choice.camera().is_some() && self.permissions.camera == Access::Allowed && !camera;
         let (silent, it) = match (screen_silent, camera_silent) {
             (true, true) => ("The screen and the camera send", "them"),
             (true, false) => ("The screen sends", "it"),
@@ -978,18 +1097,19 @@ impl RecordScreen {
         )
     }
     fn tracks(&self, busy: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let inputs = self.choice.inputs;
         let display = self
             .devices
             .displays
             .iter()
             .find(|d| Some(d.id) == self.choice.display);
-        let name_of = |list: &[shot_capture::Device], id: &Option<String>| {
+        let name_of = |list: &[shot_capture::Device], id: &Option<String>, none: &str| {
             id.as_ref()
                 .and_then(|id| list.iter().find(|d| &d.unique_id == id))
-                .map_or("Off".to_owned(), |d| d.name.clone())
+                .map_or(none.to_owned(), |d| d.name.clone())
         };
         let level = f32::from_bits(self.shared.level.load(Ordering::Relaxed));
-        let camera_black = self.choice.camera.is_some()
+        let camera_black = self.choice.camera().is_some()
             && self
                 .shared
                 .monitor
@@ -1014,6 +1134,7 @@ impl RecordScreen {
             .child(
                 self.source(
                     Picker::Display,
+                    Track::Screen,
                     "display",
                     "Screen",
                     display.map_or(String::new(), |d| format!("{}x{}", d.width, d.height)),
@@ -1021,19 +1142,26 @@ impl RecordScreen {
                     busy,
                     cx,
                 )
-                .child(access(Permission::ScreenRecording, self.permissions.screen)),
+                .when(inputs.screen, |card| {
+                    card.child(access(Permission::ScreenRecording, self.permissions.screen))
+                }),
             )
             .child(
                 self.source(
                     Picker::Camera,
+                    Track::Camera,
                     "camera",
                     "Camera",
                     String::new(),
-                    name_of(&self.devices.cameras, &self.choice.camera),
+                    name_of(
+                        &self.devices.cameras,
+                        &self.choice.camera,
+                        "No camera connected",
+                    ),
                     busy,
                     cx,
                 )
-                .when(self.choice.camera.is_some(), |card| {
+                .when(self.choice.camera().is_some(), |card| {
                     card.child(access(Permission::Camera, self.permissions.camera))
                 })
                 .when(camera_black, |card| {
@@ -1048,43 +1176,39 @@ impl RecordScreen {
             .child(
                 self.source(
                     Picker::Mic,
+                    Track::Mic,
                     "mic",
                     "Mic",
-                    if level.is_finite() {
+                    if level.is_finite() && self.choice.mic().is_some() {
                         format!("{level:.0} dB")
                     } else {
                         String::new()
                     },
-                    name_of(&self.devices.mics, &self.choice.mic),
+                    name_of(&self.devices.mics, &self.choice.mic, "No mic connected"),
                     busy,
                     cx,
                 )
-                .when(self.choice.mic.is_some(), |card| {
+                .when(self.choice.mic().is_some(), |card| {
                     card.child(meter(level))
                         .child(access(Permission::Microphone, self.permissions.mic))
                 }),
             )
             .child(
-                card().child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .child(icon("system-audio", ICON, TEXT))
-                        .child(div().font_weight(FontWeight::MEDIUM).child("System audio"))
-                        .child(div().flex_1())
-                        .child(
-                            Switch::new("system-audio")
-                                .small()
-                                .checked(self.choice.system_audio)
-                                .disabled(busy)
-                                .accessibility_label("Record system audio")
-                                .on_click(cx.listener(|this, on: &bool, _, cx| {
-                                    this.choice.system_audio = *on;
-                                    cx.notify();
-                                })),
-                        ),
-                ),
+                card()
+                    .when(!inputs.system_audio, |card| card.bg(WELL))
+                    .child(self.track_head(
+                        Track::SystemAudio,
+                        "system-audio",
+                        "System audio",
+                        String::new(),
+                        busy,
+                        cx,
+                    ))
+                    .child(if inputs.system_audio {
+                        card_value("Sound the Mac plays")
+                    } else {
+                        off_line(Track::SystemAudio)
+                    }),
             )
             .child(
                 card()
@@ -1109,10 +1233,56 @@ impl RecordScreen {
             )
     }
 
+    /// A tile's head: the track's icon and name, its reading, and the switch that turns it on
+    /// or off for the next take.
+    fn track_head(
+        &self,
+        track: Track,
+        icon_name: &'static str,
+        name: &'static str,
+        meta: String,
+        busy: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let on = track.get(self.choice.inputs);
+        div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .child(icon(icon_name, ICON, if on { TEXT } else { FAINT }))
+            .child(
+                div()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(if on { TEXT } else { MUTED })
+                    .child(name),
+            )
+            .child(div().flex_1())
+            .when(on, |row| {
+                row.child(mono(meta).text_size(TEXT_SM).text_color(MUTED))
+            })
+            .child(
+                // Its own element, so a click on the switch does not open the device list.
+                div()
+                    .id((name, 1usize))
+                    .on_click(|_, _, cx| cx.stop_propagation())
+                    .child(
+                        Switch::new((name, 0usize))
+                            .small()
+                            .checked(on)
+                            .disabled(busy)
+                            .accessibility_label(track.label())
+                            .on_click(cx.listener(move |this, on: &bool, _, cx| {
+                                this.switch(track, *on, cx)
+                            })),
+                    ),
+            )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn source(
         &self,
         picker: Picker,
+        track: Track,
         icon_name: &'static str,
         name: &'static str,
         meta: String,
@@ -1120,7 +1290,9 @@ impl RecordScreen {
         busy: bool,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<Div> {
-        let open = self.open == Some(picker);
+        let on = track.get(self.choice.inputs);
+        let pickable = !busy && on;
+        let open = self.open == Some(picker) && pickable;
         let options: Vec<(Option<String>, String)> = match picker {
             Picker::Display => self
                 .devices
@@ -1139,11 +1311,8 @@ impl RecordScreen {
                 } else {
                     &self.devices.mics
                 };
-                std::iter::once((None, "Off".to_owned()))
-                    .chain(
-                        list.iter()
-                            .map(|d| (Some(d.unique_id.clone()), d.name.clone())),
-                    )
+                list.iter()
+                    .map(|d| (Some(d.unique_id.clone()), d.name.clone()))
                     .collect()
             }
         };
@@ -1154,7 +1323,8 @@ impl RecordScreen {
         };
         card()
             .id(name)
-            .when(!busy, |card| {
+            .when(!on, |card| card.bg(WELL))
+            .when(pickable, |card| {
                 card.cursor_pointer()
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.open = if this.open == Some(picker) {
@@ -1165,22 +1335,28 @@ impl RecordScreen {
                         cx.notify();
                     }))
             })
-            .child(card_head(icon_name, name, meta))
+            .child(self.track_head(track, icon_name, name, meta, busy, cx))
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(6.))
-                    .child(card_value(value))
+                    .child(if on {
+                        card_value(value)
+                    } else {
+                        off_line(track)
+                    })
                     .child(div().flex_1())
-                    .when(!busy, |row| row.child(icon("chevron-down", ICON_SM, MUTED))),
+                    .when(pickable, |row| {
+                        row.child(icon("chevron-down", ICON_SM, MUTED))
+                    }),
             )
             .when(open, |card| {
                 card.child(div().flex().flex_col().gap(px(1.)).pt(px(4.)).children(
                     options.into_iter().enumerate().map(|(index, (id, text))| {
                         let on = id == selected;
                         div()
-                            .id((name, index))
+                            .id((name, index + 2))
                             .flex()
                             .items_center()
                             .gap(px(8.))
@@ -1219,10 +1395,15 @@ impl RecordScreen {
         let problem = self
             .preview_problem(screen.is_some(), camera.is_some())
             .filter(|_| !busy_stage(phase));
+        let blocked = self.choice.nothing_to_record();
         let (title, detail): (String, String) = match phase {
             Phase::Idle | Phase::Failed(_) | Phase::Finished { .. } => (
                 format!("Take {}", self.next_take(cx)),
-                if self.standby_starting() {
+                if let Some(reason) = blocked {
+                    reason.into()
+                } else if !self.choice.inputs.screen && self.choice.camera().is_none() {
+                    "Sound only: this take records no picture. Press Space to start.".into()
+                } else if self.standby_starting() {
                     "Starting the preview.".into()
                 } else if problem.is_some() {
                     "Check the problem above first. Space still records the inputs that started."
@@ -1333,12 +1514,13 @@ impl RecordScreen {
                     .items_center()
                     .justify_center()
                     .gap(px(14.))
-                    .map(|stage| match (monitored, screen.clone()) {
-                        (Some(frame), _) => stage.child(styled_screen(frame)),
-                        (None, Some(screen)) => stage.child(live_screen(screen, camera)),
-                        (None, None) => stage,
+                    .map(|stage| match (monitored, screen.clone(), camera.clone()) {
+                        (Some(frame), _, _) => stage.child(styled_screen(frame)),
+                        (None, Some(screen), camera) => stage.child(live_screen(screen, camera)),
+                        (None, None, Some(camera)) => stage.child(live_camera(camera)),
+                        (None, None, None) => stage,
                     })
-                    .when(recording && screen.is_none(), |stage| {
+                    .when(recording && screen.is_none() && camera.is_none(), |stage| {
                         stage.child(
                             div()
                                 .size(px(14.))
@@ -1376,7 +1558,7 @@ impl RecordScreen {
                             )
                         },
                     )
-                    .when(screen.is_none(), |stage| {
+                    .when(screen.is_none() && camera.is_none(), |stage| {
                         stage.child(div().text_color(MUTED).child(detail))
                     }),
             )
@@ -1398,6 +1580,7 @@ impl RecordScreen {
                             .child(
                                 Button::new("record-button")
                                     .danger()
+                                    .disabled(blocked.is_some() && !recording)
                                     .accessibility_label(if recording {
                                         "Stop recording"
                                     } else {
@@ -1435,14 +1618,16 @@ impl RecordScreen {
                             .justify_center()
                             .when(recording, |row| row.child(self.prompter.read(cx).legend())),
                     )
-                    .child(hint("Space", if recording { "Stop" } else { start })),
+                    .when(blocked.is_none() || recording, |row| {
+                        row.child(hint("Space", if recording { "Stop" } else { start }))
+                    }),
             )
     }
 
     fn transcript(&self, phase: &Phase) -> impl IntoElement {
         let words = self.shared.words.lock().expect("words").join(" ");
-        let empty = match (&self.choice.mic, phase) {
-            (None, _) => Some("Turn on a mic to see the transcript while you talk."),
+        let empty = match (self.choice.mic(), phase) {
+            (None, _) => Some("Turn on the mic to see the transcript while you talk."),
             (Some(_), Phase::Recording { .. }) if words.is_empty() => {
                 Some("Words appear here once they are stable, a second or two after you say them.")
             }
@@ -1491,6 +1676,22 @@ fn styled_screen(frame: objc2_core_foundation::CFRetained<objc2_core_video::CVPi
         .overflow_hidden()
         .shadow_lg()
         .child(surface(frame).size_full().object_fit(ObjectFit::Contain))
+}
+
+/// The camera alone, for a take without the screen: the face fills the frame.
+fn live_camera(camera: PreviewFrame) -> Div {
+    div()
+        .h(relative(0.92))
+        .max_w(relative(0.8))
+        .aspect_ratio(16. / 9.)
+        .rounded(px(8.))
+        .overflow_hidden()
+        .shadow_lg()
+        .child(
+            surface(camera.buffer)
+                .size_full()
+                .object_fit(ObjectFit::Cover),
+        )
 }
 
 /// The screen, 80% of the stage wide, with the camera as a rounded square in its corner.
@@ -1554,6 +1755,14 @@ fn card_head(icon_name: &'static str, name: &'static str, meta: String) -> Div {
         .child(div().font_weight(FontWeight::MEDIUM).child(name))
         .child(div().flex_1())
         .child(mono(meta).text_size(TEXT_SM).text_color(MUTED))
+}
+
+/// What a switched-off track means for the next take. It wraps, the tile is narrow.
+fn off_line(track: Track) -> Div {
+    div()
+        .text_size(TEXT_SM)
+        .text_color(MUTED)
+        .child(track.off())
 }
 
 fn card_value(text: impl Into<gpui::SharedString>) -> Div {

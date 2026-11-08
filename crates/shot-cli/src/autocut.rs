@@ -41,6 +41,12 @@ pub fn run(args: AutocutArgs) -> Result<(), String> {
     };
     let take_dir = args.video.join("media").join(args.take.as_str());
     let mic = take_dir.join("mic.mp4");
+    if shot_capture::take::not_recorded(&args.video, &args.take, "mic.mp4") {
+        return Err(format!(
+            "take {} was recorded without a mic, so the rules have no words to cut by",
+            args.take
+        ));
+    }
 
     let transcript = match cache::read_cached(&args.video, &args.take).map_err(fail)? {
         Some(transcript) if !args.realtime => Some(transcript),

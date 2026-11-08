@@ -721,6 +721,26 @@ fn raw_length(cut: &Cut) -> Micros {
     )
 }
 
+/// "Take t03 was" or "Takes t03, t05 were", for the takes of `cut` recorded with the mic off.
+fn without_mic(folder: &VideoFolder, cut: &Cut) -> Option<String> {
+    let mut takes: Vec<&Id> = Vec::new();
+    for (_, block) in model::blocks(cut) {
+        if !takes.contains(&&block.take) && folder.without_mic(&block.take) {
+            takes.push(&block.take);
+        }
+    }
+    let names = takes
+        .iter()
+        .map(|t| t.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    match takes.len() {
+        0 => None,
+        1 => Some(format!("Take {names} was")),
+        _ => Some(format!("Takes {names} were")),
+    }
+}
+
 fn timecode(t: Micros) -> String {
     model::timecode(t.0 * u64::from(FPS) / 1_000_000)
 }
@@ -1343,6 +1363,18 @@ impl CutScreen {
                 "The rules and the text editor work from the words. Transcribe the take on the \
                  left, and the rules make a rough cut."
                     .to_owned(),
+            )
+        } else if removed == 0
+            && let Some(takes) = without_mic(folder, cut)
+        {
+            (
+                "mic",
+                false,
+                "No words to cut by",
+                format!(
+                    "{takes} recorded without a mic, so the rules have nothing to cut. \
+                     Trim by hand on the timeline."
+                ),
             )
         } else if removed == 0 {
             (

@@ -8,6 +8,9 @@
 //! - `camera.mp4`: HEVC at the camera's format (the briefing's ProRes camera track is out for now)
 //! - `mic.mp4`, `system.mp4`: AAC 48 kHz
 //!
+//! Each track records only when it is on in the [`SessionConfig`], so a take may lack any of
+//! them, never all.
+//!
 //! Video has a 0.5 s GOP and no B-frames. Each file is written as an init segment plus `moof`
 //! and `mdat` fragments of about 0.5 s, appended as the encoder emits them, so a killed process
 //! loses at most the last fragment. All tracks and the event log share one media clock that
@@ -62,6 +65,9 @@ pub type MicTap = Box<dyn FnMut(Micros, &[f32], u32) + Send>;
 pub struct SessionConfig {
     /// The video folder. The take goes into `media/<take>/` inside it.
     pub video_dir: PathBuf,
+    /// Records `display` into `screen.mp4`. Off, the display still gives the event log its
+    /// geometry, and system audio still needs the display stream.
+    pub screen: bool,
     /// CoreGraphics display id. `None` records the main display.
     pub display: Option<u32>,
     pub camera: Source,
@@ -78,6 +84,7 @@ impl SessionConfig {
     pub fn new(video_dir: impl Into<PathBuf>) -> Self {
         Self {
             video_dir: video_dir.into(),
+            screen: true,
             display: None,
             camera: Source::Default,
             mic: Source::Default,
@@ -191,6 +198,8 @@ pub enum CaptureError {
     TakeDir(#[from] std::io::Error),
     #[error("{what} failed: {message}")]
     Source { what: &'static str, message: String },
+    #[error("every track is off, turn on the screen, camera, mic or system audio")]
+    NothingToRecord,
     #[error("writing {file} failed: {message}")]
     Write { file: &'static str, message: String },
 }

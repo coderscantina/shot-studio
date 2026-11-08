@@ -91,6 +91,18 @@ impl Layout {
     pub fn shows_screen(self) -> bool {
         !matches!(self, Self::Face)
     }
+
+    /// The layout a take with only these tracks draws: content only without a camera, the
+    /// face only without a screen. A take with neither keeps the layout, it has no picture.
+    pub fn for_tracks(self, screen: bool, camera: bool) -> Self {
+        match (screen, camera) {
+            (true, false) if !matches!(self, Self::Content | Self::Screen | Self::Window) => {
+                Self::Content
+            }
+            (false, true) => Self::Face,
+            _ => self,
+        }
+    }
 }
 
 keyword_enum! {
@@ -200,6 +212,36 @@ pub struct Format {
     pub cursor: Option<CursorStyle>,
     pub keystrokes: Option<Keystrokes>,
     pub window: Option<WindowStyle>,
+    /// The tracks a take records. `None` records every track.
+    pub inputs: Option<Inputs>,
+}
+
+/// The tracks a new take records, switched on the Record screen. An off track is not captured
+/// at all, so its file is missing from the take folder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Inputs {
+    pub screen: bool,
+    pub camera: bool,
+    pub mic: bool,
+    pub system_audio: bool,
+}
+
+impl Default for Inputs {
+    fn default() -> Self {
+        Self {
+            screen: true,
+            camera: true,
+            mic: true,
+            system_audio: true,
+        }
+    }
+}
+
+impl Inputs {
+    /// Whether a take would record anything at all.
+    pub fn any(self) -> bool {
+        self.screen || self.camera || self.mic || self.system_audio
+    }
 }
 
 /// The auto-zoom rule: what it reacts to and the zooms it writes.
@@ -302,6 +344,7 @@ pub struct FormatLayer {
     pub cursor: Option<CursorStyle>,
     pub keystrokes: Option<Keystrokes>,
     pub window: Option<WindowStyle>,
+    pub inputs: Option<Inputs>,
     /// Fields of the brand this layer changes.
     pub brand: Option<Brand>,
     pub rules: StyleSheet,
@@ -352,6 +395,7 @@ impl FormatLayer {
                     node.set_once(&mut layer.keystrokes, node.arg(0)?)?;
                 }
                 "window" => node.set_once(&mut layer.window, WindowStyle::read(node)?)?,
+                "record" => node.set_once(&mut layer.inputs, Inputs::read(node)?)?,
                 "brand" if style => {
                     node.expect_block(0, &[])?;
                     let patch = Brand::read(node.children(), BrandScope::Patch)?;
@@ -399,6 +443,7 @@ impl FormatLayer {
         opt(&mut format.cursor, &self.cursor);
         opt(&mut format.keystrokes, &self.keystrokes);
         opt(&mut format.window, &self.window);
+        opt(&mut format.inputs, &self.inputs);
         format
     }
 
@@ -418,6 +463,7 @@ impl FormatLayer {
             cursor: self.cursor,
             keystrokes: self.keystrokes,
             window: self.window,
+            inputs: self.inputs,
         })
     }
 
@@ -484,6 +530,14 @@ impl FormatLayer {
                 .prop("frame", &win.frame)
                 .end();
         }
+        if let Some(inputs) = &self.inputs {
+            w.node("record")
+                .prop("screen", &inputs.screen)
+                .prop("camera", &inputs.camera)
+                .prop("mic", &inputs.mic)
+                .prop("system-audio", &inputs.system_audio)
+                .end();
+        }
         if let Some(brand) = &self.brand {
             w.node("brand").open();
             brand.write(&mut w);
@@ -511,6 +565,7 @@ impl From<&Format> for FormatLayer {
             cursor: format.cursor,
             keystrokes: format.keystrokes,
             window: format.window,
+            inputs: format.inputs,
             brand: None,
             rules: StyleSheet::default(),
         }
@@ -550,6 +605,11 @@ impl Format {
     pub fn to_kdl(&self) -> String {
         FormatLayer::from(self).to_kdl()
     }
+
+    /// The tracks a new take records, every one when the format says nothing.
+    pub fn inputs(&self) -> Inputs {
+        self.inputs.unwrap_or_default()
+    }
 }
 
 impl AutoZoom {
@@ -581,6 +641,18 @@ impl CursorStyle {
             size: node.prop("size")?,
             smoothing: node.prop("smoothing")?,
             ripple: node.prop("ripple")?,
+        })
+    }
+}
+
+impl Inputs {
+    fn read(node: Node<'_>) -> Result<Self, ParseError> {
+        node.expect(0, &["screen", "camera", "mic", "system-audio"])?;
+        Ok(Self {
+            screen: node.prop("screen")?,
+            camera: node.prop("camera")?,
+            mic: node.prop("mic")?,
+            system_audio: node.prop("system-audio")?,
         })
     }
 }

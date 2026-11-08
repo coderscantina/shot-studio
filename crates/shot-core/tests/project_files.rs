@@ -399,3 +399,36 @@ fn deleting_words_changes_only_the_hashes_of_its_chapter() {
     assert_ne!(chapter_keys(&before, 1), chapter_keys(&after, 1));
     assert_eq!(chapter_keys(&before, 2), chapter_keys(&after, 2));
 }
+
+/// A talking-head video that records no screen and no system audio.
+const RECORD_LAYER: &str = "record screen=#false camera=#true mic=#true system-audio=#false\n";
+
+#[test]
+fn the_record_node_round_trips_and_switches_tracks_per_video() {
+    assert_in_contract(RECORD_LAYER);
+    let layer = shot_core::FormatLayer::parse(RECORD_LAYER).unwrap();
+    assert_eq!(layer.to_kdl(), RECORD_LAYER);
+    let channel = Format::parse(FORMAT).unwrap();
+    assert_eq!(channel.inputs(), shot_core::Inputs::default());
+    let video = channel.resolve([&layer]);
+    let inputs = video.inputs();
+    assert!(!inputs.screen && inputs.camera && inputs.mic && !inputs.system_audio);
+    let full = video.to_kdl();
+    assert!(
+        full.ends_with(RECORD_LAYER),
+        "written after the settings:\n{full}"
+    );
+    assert_eq!(Format::parse(&full).unwrap(), video);
+    assert!(shot_core::FormatLayer::parse("record screen=#false\n").is_err());
+}
+
+#[test]
+fn a_take_without_a_track_falls_back_to_the_layout_it_can_draw() {
+    assert_eq!(Layout::FaceContent.for_tracks(true, false), Layout::Content);
+    assert_eq!(Layout::Split.for_tracks(true, false), Layout::Content);
+    assert_eq!(Layout::Window.for_tracks(true, false), Layout::Window);
+    assert_eq!(Layout::Split.for_tracks(false, true), Layout::Face);
+    assert_eq!(Layout::Window.for_tracks(false, true), Layout::Face);
+    assert_eq!(Layout::Split.for_tracks(true, true), Layout::Split);
+    assert_eq!(Layout::Split.for_tracks(false, false), Layout::Split);
+}

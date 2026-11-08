@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::f32::consts::FRAC_PI_2;
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use shot_core::{Id, TransitionKind};
 use shot_media::audio::{AudioError, PcmReader, SAMPLE_RATE};
@@ -93,9 +93,10 @@ impl Join {
 pub struct TimelineAudio {
     segments: Vec<Placed>,
     track: Box<dyn Fn(&Id) -> PathBuf>,
-    readers: HashMap<Id, PcmReader>,
+    /// `None` for a take recorded without a mic, which reads as silence.
+    readers: HashMap<Id, Option<PcmReader>>,
     /// Read the material past the segments' edges, so the segments' readers read on.
-    handles: HashMap<Id, PcmReader>,
+    handles: HashMap<Id, Option<PcmReader>>,
     scratch: Vec<f32>,
     /// Output samples the voice is silenced over, in order.
     bleeps: Vec<Range<u64>>,
@@ -289,14 +290,10 @@ impl TimelineAudio {
             let offset = at - segment.output.start;
             let source = segment.source_start + offset;
             let path = (self.track)(&segment.take);
-            let reader = match self.readers.entry(segment.take.clone()) {
-                std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    entry.insert(PcmReader::open(&path).map_err(|source| TimelineAudioError {
-                        path: path.clone(),
-                        source,
-                    })?)
-                }
+            let Some(reader) = open(&mut self.readers, &segment.take, &path)? else {
+                out.resize(out.len() + (end - at) as usize, 0.0);
+                at = end;
+                continue;
             };
             self.scratch.clear();
             reader
@@ -384,22 +381,39 @@ impl TimelineAudio {
     /// `count` samples of `take`'s mic from source sample `from`, through the handle reader.
     fn handle(&mut self, take: &Id, from: u64, count: u64) -> Result<Vec<f32>, TimelineAudioError> {
         let path = (self.track)(take);
-        let reader = match self.handles.entry(take.clone()) {
-            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert(PcmReader::open(&path).map_err(|source| TimelineAudioError {
-                    path: path.clone(),
-                    source,
-                })?)
-            }
-        };
         let mut samples = Vec::with_capacity(count as usize);
-        reader
-            .read(from, from + count, &mut samples)
-            .map_err(|source| TimelineAudioError { path, source })?;
+        if let Some(reader) = open(&mut self.handles, take, &path)? {
+            reader
+                .read(from, from + count, &mut samples)
+                .map_err(|source| TimelineAudioError { path, source })?;
+        }
         samples.resize(count as usize, 0.0);
         Ok(samples)
     }
+}
+
+/// The reader of `take`'s mic at `path`, opened on first use. A take recorded without a mic
+/// has none.
+fn open<'a>(
+    readers: &'a mut HashMap<Id, Option<PcmReader>>,
+    take: &Id,
+    path: &Path,
+) -> Result<Option<&'a mut PcmReader>, TimelineAudioError> {
+    let reader = match readers.entry(take.clone()) {
+        std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            let reader = path
+                .exists()
+                .then(|| PcmReader::open(path))
+                .transpose()
+                .map_err(|source| TimelineAudioError {
+                    path: path.to_owned(),
+                    source,
+                })?;
+            entry.insert(reader)
+        }
+    };
+    Ok(reader.as_mut())
 }
 
 /// Fades `samples`, which start `offset` samples into a segment of `length`, over
@@ -548,6 +562,25 @@ mod tests {
         assert!((out[1_500 * 48] - 0.5 * std::f32::consts::SQRT_2).abs() < 1e-2);
         assert!((at(1_740) - 0.5).abs() < 0.02);
         assert!((at(2_000) - 0.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_take_recorded_without_a_mic_reads_as_silence() {
+        let dir = tempfile::tempdir().unwrap();
+        constant_wav(&dir.path().join("t01.wav"), 1, 0.5);
+        let segment = |take: &str| AudioSegment {
+            take: Id::new(take).unwrap(),
+            source_frames: 0..30,
+        };
+        let root = dir.path().to_owned();
+        let mut audio = TimelineAudio::new([segment("t01"), segment("t02")], 60, move |take| {
+            root.join(format!("{take}.wav"))
+        });
+        let mut out = Vec::new();
+        audio.read(0..audio.len(), &mut out).unwrap();
+        assert_eq!(out.len(), 48_000);
+        assert!((out[12_000] - 0.5).abs() < 1e-3);
+        assert!(out[24_000..].iter().all(|&s| s == 0.0));
     }
 
     #[test]

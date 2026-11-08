@@ -369,8 +369,12 @@ fn screen_map(
     let Some(span) = plan.map.span_at(frame) else {
         return Ok(None);
     };
-    let spec = LayoutSpec::styled(span.layout, &plan.effects.window).map_err(|e| e.to_string())?;
     let take = plan.dir.join("media").join(span.take.as_str());
+    let layout = span.layout.for_tracks(
+        take.join("screen.mp4").exists(),
+        take.join("camera.mp4").exists(),
+    );
+    let spec = LayoutSpec::styled(layout, &plan.effects.window).map_err(|e| e.to_string())?;
     let mut size_of = |source, file| -> Result<Option<(u32, u32)>, String> {
         let path = take.join(file);
         if !spec.uses(source) || !path.exists() {
@@ -396,7 +400,7 @@ fn screen_map(
         .look(&span.take, &span.overlays, plan.effects)
         .map_err(|e| e.to_string())?;
     let shot = Shot {
-        layout: span.layout,
+        layout,
         zooms: &span.zooms,
         overlays: &span.overlays,
         time: frame_time(span.source_frame(frame), FPS),

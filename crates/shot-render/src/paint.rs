@@ -286,13 +286,17 @@ impl Painter {
         canvas: Canvas,
     ) -> Result<Drawn, PaintError> {
         let segment = &plan.segments[index].segment;
-        let spec = LayoutSpec::styled(segment.layout, &self.effects.window)?;
         let take = self.dir.join("media").join(segment.take.as_str());
+        // A take recorded without the camera or the screen draws the layout it can.
+        let layout = segment.layout.for_tracks(
+            take.join(SCREEN_FILE).exists(),
+            take.join(CAMERA_FILE).exists(),
+        );
+        let spec = LayoutSpec::styled(layout, &self.effects.window)?;
         let time = frame_time(source_frame, plan.fps);
         let mut decoded = Sources::<Option<Decoded>>::default();
         for (source, file) in [(Source::Screen, SCREEN_FILE), (Source::Camera, CAMERA_FILE)] {
             let path = take.join(file);
-            // A take recorded without a camera draws its layouts without the camera slot.
             if !spec.uses(source) || !path.exists() {
                 continue;
             }
@@ -310,7 +314,7 @@ impl Painter {
             .assets
             .look(&segment.take, &segment.overlays, self.effects)?;
         let shot = Shot {
-            layout: segment.layout,
+            layout,
             zooms: &segment.zooms,
             overlays: &segment.overlays,
             time,

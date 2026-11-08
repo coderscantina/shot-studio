@@ -376,6 +376,7 @@ fn settings_diff(old: &Format, channel: &Format) -> FormatLayer {
         cursor: (old.cursor != channel.cursor).then_some(effects.cursor),
         keystrokes: (old.keystrokes != channel.keystrokes).then_some(effects.keystrokes),
         window: (old.window != channel.window).then_some(effects.window),
+        inputs: differs(old.inputs(), channel.inputs()),
         brand: None,
         rules: StyleSheet::default(),
     }

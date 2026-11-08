@@ -42,7 +42,8 @@ pub struct Session {
     id: Id,
     dir: std::path::PathBuf,
     started: Instant,
-    screen: Screen,
+    /// The display stream, while the screen or system audio records.
+    screen: Option<Screen>,
     av: Option<AvCapture>,
     events: EventTap,
     tracks: Vec<Arc<Track>>,
@@ -50,9 +51,13 @@ pub struct Session {
 }
 
 impl Session {
-    /// Checks permissions and devices, creates the take folder and starts recording.
+    /// Checks permissions and devices, creates the take folder and starts recording. A session
+    /// records at least one track.
     pub fn start(config: SessionConfig) -> Result<Self, CaptureError> {
-        screen::check_permission()?;
+        let display_stream = config.screen || config.system_audio;
+        if display_stream {
+            screen::check_permission()?;
+        }
         event_tap::check_permission()?;
         let camera = av::resolve(Kind::Camera, &config.camera)?;
         let mic = av::resolve(Kind::Mic, &config.mic)?;
@@ -62,18 +67,23 @@ impl Session {
         if mic.is_some() {
             av::authorize(Kind::Mic)?;
         }
+        if !display_stream && camera.is_none() && mic.is_none() {
+            return Err(CaptureError::NothingToRecord);
+        }
         let display = screen::display_id(config.display);
-        screen::pixel_mode(display).ok_or(CaptureError::NoDisplay(display))?;
+        let geometry = screen::geometry(display).ok_or(CaptureError::NoDisplay(display))?;
 
         let (id, dir) = crate::take::create_take_dir(&config.video_dir)?;
         let track = |file, spec| Arc::new(Track::new(&dir, file, spec));
-        let screen_track = track(
-            "screen.mp4",
-            Spec::Video {
-                fps: screen::FPS,
-                bits_per_pixel: SCREEN_BPP,
-            },
-        );
+        let screen_track = config.screen.then(|| {
+            track(
+                "screen.mp4",
+                Spec::Video {
+                    fps: screen::FPS,
+                    bits_per_pixel: SCREEN_BPP,
+                },
+            )
+        });
         let system_track = config.system_audio.then(|| {
             track(
                 "system.mp4",
@@ -98,9 +108,7 @@ impl Session {
             };
             (device, track("mic.mp4", spec), config.mic_tap)
         });
-        let screen_tracks: Vec<_> = std::iter::once(screen_track.clone())
-            .chain(system_track.clone())
-            .collect();
+        let screen_tracks: Vec<_> = screen_track.iter().chain(&system_track).cloned().collect();
         let av_tracks: Vec<_> = camera
             .iter()
             .map(|(_, t, _)| t.clone())
@@ -133,14 +141,17 @@ impl Session {
         });
 
         let started = (|| {
-            let mut screen =
-                Screen::start(display, screen_track, system_track, frames.screen.clone())?;
+            let mut screen = display_stream
+                .then(|| Screen::start(display, screen_track, system_track, frames.screen.clone()))
+                .transpose()?;
             let av = match (camera.is_some(), mic.is_some()) {
                 (false, false) => None,
                 _ => match AvCapture::start(camera, mic) {
                     Ok(av) => Some(av),
                     Err(e) => {
-                        screen.stop();
+                        if let Some(screen) = &mut screen {
+                            screen.stop();
+                        }
                         return Err(e);
                     }
                 },
@@ -163,11 +174,13 @@ impl Session {
             Some(clock) => unsafe { CMSyncConvertTime(origin, &host, &clock) },
             None => origin,
         };
-        let screen_origin = in_clock(screen.clock());
-        screen_tracks
-            .iter()
-            .for_each(|t| t.set_origin(screen_origin));
-        screen.pace(origin_instant);
+        if let Some(screen) = &mut screen {
+            let screen_origin = in_clock(screen.clock());
+            screen_tracks
+                .iter()
+                .for_each(|t| t.set_origin(screen_origin));
+            screen.pace(origin_instant);
+        }
         if let Some(av) = &av {
             let av_origin = in_clock(av.clock());
             av_tracks.iter().for_each(|t| t.set_origin(av_origin));
@@ -176,12 +189,14 @@ impl Session {
         let events = match EventTap::start(
             &dir.join("events.jsonl"),
             crate::clock::nanos(origin.value, origin.timescale),
-            screen.geometry,
+            geometry,
             config.hotkeys,
         ) {
             Ok(events) => events,
             Err(e) => {
-                screen.stop();
+                if let Some(screen) = &mut screen {
+                    screen.stop();
+                }
                 if let Some(av) = &av {
                     av.stop();
                 }
@@ -233,7 +248,9 @@ impl Session {
     /// Stops every source and finishes the files.
     pub fn stop(mut self) -> Result<Take, CaptureError> {
         let duration = self.elapsed();
-        self.screen.stop();
+        if let Some(screen) = &mut self.screen {
+            screen.stop();
+        }
         if let Some(av) = &self.av {
             av.stop();
         }
@@ -268,10 +285,11 @@ pub struct Standby {
 }
 
 impl Standby {
-    /// Starts `display` (the main one for `None`), `camera` and `mic`. Asks for camera and mic
-    /// access when macOS has not asked yet, which waits for the answer. `on_peak` gets the
-    /// mic's peak of each buffer in dBFS, on the mic's capture queue.
+    /// Starts `display` (the main one for `None`, none at all without `screen`), `camera` and
+    /// `mic`. Asks for camera and mic access when macOS has not asked yet, which waits for the
+    /// answer. `on_peak` gets the mic's peak of each buffer in dBFS, on the mic's capture queue.
     pub fn start(
+        screen: bool,
         display: Option<u32>,
         camera: &Source,
         mic: &Source,
@@ -279,15 +297,15 @@ impl Standby {
     ) -> Self {
         let frames = Sources::default();
         let mut errors = Vec::new();
-        let screen = (|| {
+        let screen = screen.then(|| {
             screen::check_permission()?;
             let display = screen::display_id(display);
             let (width, height, _) =
                 screen::pixel_mode(display).ok_or(CaptureError::NoDisplay(display))?;
             let size = tap::fit(width, height, tap::SCREEN_MAX);
             screen::Stream::start(display, size, STANDBY_FPS, frames.screen.clone(), None)
-        })();
-        let screen = screen.map_err(|e| errors.push(e)).ok();
+        });
+        let screen = screen.and_then(|screen| screen.map_err(|e| errors.push(e)).ok());
         let mut device = |kind, source| {
             av::resolve(kind, source)
                 .and_then(|device| {

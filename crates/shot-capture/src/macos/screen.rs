@@ -30,16 +30,21 @@ use crate::{Access, CaptureError, Permission};
 
 pub const FPS: u32 = 60;
 const TIMEOUT: Duration = Duration::from_secs(10);
+/// The picture ScreenCaptureKit delivers while only system audio is recorded: it needs a video
+/// output to run, and this is the cheapest one.
+const AUDIO_ONLY_SIZE: (usize, usize) = (64, 36);
+const AUDIO_ONLY_FPS: u32 = 1;
 
 /// A running display capture.
 ///
 /// ScreenCaptureKit only delivers a frame when the screen changes. A pacer thread writes the
 /// newest frame on a fixed 60 fps grid instead, so `screen.mp4` is constant frame rate and gets
 /// a keyframe and a fragment every 0.5 s even while the screen is idle.
+///
+/// Without a screen track it records only system audio, from a tiny stream nobody writes.
 pub struct Screen {
     stream: Stream,
-    pub geometry: DisplayGeometry,
-    track: Arc<Track>,
+    track: Option<Arc<Track>>,
     latest: Arc<Latest>,
     pacer: Option<(Arc<AtomicBool>, JoinHandle<()>)>,
 }
@@ -83,33 +88,44 @@ pub fn pixel_mode(id: u32) -> Option<(usize, usize, f64)> {
     ))
 }
 
+/// Where `display` sits in global points and its pixels per point, for the event log.
+pub fn geometry(display: u32) -> Option<DisplayGeometry> {
+    let (width, _, _) = pixel_mode(display)?;
+    let bounds = CGDisplayBounds(display);
+    Some(DisplayGeometry {
+        origin: (bounds.origin.x, bounds.origin.y),
+        scale: width as f64 / bounds.size.width,
+    })
+}
+
 impl Screen {
-    /// Starts capturing `display` into `screen`, and system audio into `system` if given.
+    /// Starts capturing `display` into `screen` if given, and system audio into `system` if
+    /// given. One of them is.
     pub fn start(
         display: u32,
-        screen: Arc<Track>,
+        screen: Option<Arc<Track>>,
         system: Option<Arc<Track>>,
         latest: Arc<Latest>,
     ) -> Result<Self, CaptureError> {
         let (width, height, _) = pixel_mode(display).ok_or(CaptureError::NoDisplay(display))?;
-        let bounds = CGDisplayBounds(display);
-        let geometry = DisplayGeometry {
-            origin: (bounds.origin.x, bounds.origin.y),
-            scale: width as f64 / bounds.size.width,
+        let (size, fps) = match &screen {
+            Some(_) => ((width, height), FPS),
+            None => (AUDIO_ONLY_SIZE, AUDIO_ONLY_FPS),
         };
-        let stream = Stream::start(display, (width, height), FPS, latest.clone(), system)?;
+        let stream = Stream::start(display, size, fps, latest.clone(), system)?;
         // Open the writer on the first frame now, so the pacer starts on schedule.
-        let first_frame = Instant::now() + TIMEOUT;
-        while Instant::now() < first_frame {
-            if let Some(image) = latest.get() {
-                screen.prepare(&image);
-                break;
+        if let Some(screen) = &screen {
+            let first_frame = Instant::now() + TIMEOUT;
+            while Instant::now() < first_frame {
+                if let Some(image) = latest.get() {
+                    screen.prepare(&image);
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
             }
-            std::thread::sleep(Duration::from_millis(5));
         }
         Ok(Self {
             stream,
-            geometry,
             track: screen,
             latest,
             pacer: None,
@@ -123,11 +139,14 @@ impl Screen {
 
     /// Starts writing frames, frame `k` at media time `k / FPS` after `origin`.
     pub fn pace(&mut self, origin: Instant) {
+        let Some(track) = self.track.clone() else {
+            return;
+        };
         let stop = Arc::new(AtomicBool::new(false));
         let thread = std::thread::Builder::new()
             .name("screen.mp4 pacer".into())
             .spawn({
-                let (stop, track, latest) = (stop.clone(), self.track.clone(), self.latest.clone());
+                let (stop, latest) = (stop.clone(), self.latest.clone());
                 move || {
                     let tick = |k: u64| Duration::from_nanos(k * 1_000_000_000 / u64::from(FPS));
                     let duration = unsafe { CMTime::new(1, FPS as i32) };

@@ -107,7 +107,8 @@ impl Monitor {
                 .look(&segment.take, &segment.overlays, styled.effects)?
         };
         let shot = Shot {
-            layout: segment.layout,
+            // With the camera off the monitor shows the content only, as the take will.
+            layout: segment.layout.for_tracks(true, feed.camera.is_some()),
             zooms: &segment.zooms,
             overlays: &segment.overlays,
             time: feed.time,

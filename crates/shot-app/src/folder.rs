@@ -186,7 +186,7 @@ impl VideoFolder {
     }
 
     /// Reads the cached transcript of every take the cut uses that has none loaded, as after
-    /// transcribing.
+    /// transcribing. A take recorded without a mic has no words, so its transcript is empty.
     pub fn load_transcripts(&mut self) -> Result<(), String> {
         for chapter in &self.project.cut.chapters {
             for edit in &chapter.takes {
@@ -197,10 +197,18 @@ impl VideoFolder {
                     .map_err(|e| e.to_string())?
                 {
                     self.transcripts.insert(edit.take.clone(), transcript);
+                } else if self.without_mic(&edit.take) {
+                    let silent = shot_core::Transcript::new(edit.take.clone());
+                    self.transcripts.insert(edit.take.clone(), silent);
                 }
             }
         }
         Ok(())
+    }
+
+    /// Whether `take` was recorded with the mic off, so it has no words.
+    pub fn without_mic(&self, take: &Id) -> bool {
+        shot_capture::take::not_recorded(&self.dir, take, "mic.mp4")
     }
 
     /// Reads `elements/<take>.jsonl` of every take the cut uses.
@@ -484,6 +492,32 @@ mod tests {
         assert!(!folder.undo().unwrap(), "one step for both writes");
         let written = fs::read_to_string(dir.path().join("format.kdl")).unwrap();
         assert_eq!(Format::parse(&written).unwrap(), format);
+    }
+
+    #[test]
+    fn a_take_recorded_without_a_mic_has_no_words_and_needs_no_transcription() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = |name: &str, text: &str| fs::write(dir.path().join(name), text).unwrap();
+        file("video.kdl", "title \"A\"\nstatus editing\nformat opinion\n");
+        file("script.md", "# A\n");
+        file(
+            "format.kdl",
+            &shot_core::FormatKind::Opinion.preset().to_kdl(),
+        );
+        file(
+            "cut.kdl",
+            "chapter \"A\" {\n    take t01 {\n        keep from=0 to=20_000_000\n    }\n}\n\
+             chapter \"B\" {\n    take t02 {\n        keep from=0 to=20_000_000\n    }\n}\n",
+        );
+        fs::create_dir_all(dir.path().join("media/t01")).unwrap();
+        fs::write(dir.path().join("media/t01/screen.mp4"), b"").unwrap();
+        let folder = VideoFolder::open(dir.path()).unwrap();
+        let (silent, cloned) = (Id::new("t01").unwrap(), Id::new("t02").unwrap());
+        assert!(folder.without_mic(&silent));
+        assert_eq!(folder.transcripts[&silent].words().len(), 0);
+        // Without its take folder the take may have had a mic: it still wants transcribing.
+        assert!(!folder.without_mic(&cloned));
+        assert!(!folder.transcripts.contains_key(&cloned));
     }
 
     #[test]

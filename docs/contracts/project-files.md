@@ -146,8 +146,9 @@ Optional nodes after `auto-cut`, in this order. A missing node means its default
 | `cursor size=<percent> smoothing=<time> ripple=<bool>` | the cursor's size as a percent of the recorded size (0 hides it), the window its path is averaged over (0 draws the raw path), and a ripple on every click | `size=100 smoothing=0 ripple=#false` |
 | `keystrokes` | the keystroke overlay: `off`, `shortcuts` (keys with a modifier held) or `all` | `off` |
 | `window padding=<px> corners=<px> shadow=<shadow> background="#rrggbb" frame=<frame>` | how the `window` layout places the captured window: padding and corner radius in output pixels, a shadow of `none`, `soft` or `hard`, the background color, and a device bezel of `none`, `macbook` or `iphone` | `padding=48 corners=12 shadow=soft background="#101418" frame=none` |
+| `record screen=<bool> camera=<bool> mic=<bool> system-audio=<bool>` | the tracks a new take records, switched on the Record screen. An off track is not captured at all, so its file is missing from the take folder. At least one is on | every track on |
 
-`auto-zoom` is a rule like the auto-cut rules: it writes nodes and changes no pixels by itself. The other four reach the renderer, and each enters a chunk's hash only where it draws, see [timeline evaluation](#timeline-evaluation). This example is the product tour preset:
+`auto-zoom` is a rule like the auto-cut rules: it writes nodes and changes no pixels by itself. `record` only changes what the next take captures, never a take already recorded. The other four reach the renderer, and each enters a chunk's hash only where it draws, see [timeline evaluation](#timeline-evaluation). This example is the product tour preset:
 
 ```kdl
 prompter full-script
@@ -171,7 +172,11 @@ window padding=64 corners=12 shadow=soft background="#141821" frame=none
 
 ### Format layers
 
-A format file is one layer of the style cascade. The shipped presets above set every setting. The channel's `formats/<format>.kdl` starts as a copy of a preset and adds the format's style rules. The video's `format.kdl` holds only what differs from the channel's: any of the settings, a `brand` block with the brand fields it changes (same grammar as [`brand.kdl`](#brandkdl), without `import` and without rules, at least one field), and style rules. Canonical order: the settings in the order above, then `brand`, then the rules. A video with nothing to change has an empty `format.kdl`.
+A format file is one layer of the style cascade. The shipped presets above set every setting. The channel's `formats/<format>.kdl` starts as a copy of a preset and adds the format's style rules. The video's `format.kdl` holds only what differs from the channel's: any of the settings, a `brand` block with the brand fields it changes (same grammar as [`brand.kdl`](#brandkdl), without `import` and without rules, at least one field), and style rules. Canonical order: the settings in the order above, then `brand`, then the rules. A video with nothing to change has an empty `format.kdl`. A talking-head video that records no screen and no system audio has this one line:
+
+```kdl
+record screen=#false camera=#true mic=#true system-audio=#false
+```
 
 The resolved settings are the preset with the channel's layer and then the video's laid over it, setting by setting. A `layouts` node replaces the whole list. The brand fields and the rules are not part of the resolved settings; the [cascade](#style-rules) orders those. This is the channel's opinion format, the preset plus the rules that replace the preset's auto-cut and auto-zoom behavior:
 
@@ -764,7 +769,7 @@ Markdown with a fixed shape, read line by line:
 
 ```
 media/t03/
-  screen.mp4    the display without the cursor: HEVC, display resolution, constant 60 fps
+  screen.mp4    the display without the cursor: HEVC, display resolution, constant 60 fps, when the screen was recorded
   camera.mp4    HEVC at the camera's format, when a camera was recorded
   mic.mp4       AAC 48 kHz mono, when a mic was recorded
   system.mp4    AAC 48 kHz stereo, when system audio was recorded
@@ -774,7 +779,7 @@ media/t03/
 - **Take ids** are `t` and a number, at least two digits: `t01`, `t02`, ... `t100`. A new take gets the number after the highest take folder in `media/`, so an id is never reused while its folder exists, and a gap left by a deleted take is never filled. Deleting the newest take frees its id for the next recording. Cache keys hash the take's media identity as well as its id, so the new recording never reuses the old one's cache.
 - **One clock.** Every track and the event log share the take's media time, 0 at session start. A track may begin a little after 0 when its device delivers its first sample late.
 - **Fragmented MP4.** Each file is an initialization segment (`ftyp`, `moov`) followed by `moof` and `mdat` fragments of about 0.5 s, appended as they are encoded. Video has a keyframe every 0.5 s and no B-frames. A killed recording keeps every complete fragment and stays playable.
-- A track that is missing was not recorded. Readers do not assume a camera or system audio.
+- A track that is missing was not recorded, see `record` in [`format.kdl`](#formatkdl). Readers assume no track: without `camera.mp4` a layout draws content only, without `screen.mp4` the face only, and without `mic.mp4` the take has no words and its voice is silence.
 
 ## Cursor and key event log
 
