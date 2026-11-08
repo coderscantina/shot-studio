@@ -353,6 +353,37 @@ fn reject_leaves_no_branch() {
 }
 
 #[test]
+fn accepting_or_rejecting_removes_the_proposals_render_cache() {
+    let channel = Channel::new(&[("alpha", VIDEO)]);
+    let board = channel.board();
+    board.move_card("alpha", Status::Scripting).unwrap();
+    let cache = |name: &str| {
+        let dir = channel
+            .dir
+            .path()
+            .join("videos/alpha/.shot/cache/proposals")
+            .join(name);
+        std::fs::create_dir_all(dir.join("chunks")).unwrap();
+        dir
+    };
+    for name in ["tighter", "longer"] {
+        board
+            .create_proposal(
+                "alpha",
+                name,
+                "💡 edit",
+                &files(&[("script.md", "# Other\n")]),
+            )
+            .unwrap();
+    }
+    let (tighter, longer) = (cache("tighter"), cache("longer"));
+    board.accept_proposal("alpha", "tighter").unwrap();
+    assert!(!tighter.exists() && longer.exists());
+    board.reject_proposal("alpha", "longer").unwrap();
+    assert!(!longer.exists());
+}
+
+#[test]
 fn conflicting_accept_returns_the_paths_and_changes_nothing() {
     let channel = Channel::new(&[("alpha", VIDEO)]);
     let board = channel.board();

@@ -11,6 +11,7 @@
 //! only when the elements change. The thread never touches the capture queues: it reads the
 //! preview's converted frames, so a slow frame skips a refresh and never holds up the recording.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -20,6 +21,7 @@ use std::time::{Duration, Instant};
 
 use objc2_core_foundation::CFRetained;
 use objc2_core_video::CVPixelBuffer;
+use shot_analyze::autocut::heard_retakes;
 use shot_analyze::elements::Stream;
 use shot_capture::Preview;
 use shot_capture::events::Marker;
@@ -27,10 +29,14 @@ use shot_core::{
     Applied, Elements, Id, Micros, Project, StyleInput, TimeRange, Timeline, Transcript, Word,
 };
 use shot_mcp::style::{self, Disk, Inputs};
+use shot_prompter::Retake;
 use shot_render::events::EventLog;
 use shot_render::layout::Canvas;
 use shot_render::monitor::{Feed, Monitor, Styled};
 use shot_render::theme::Theme;
+use shot_ship::media::Planes;
+
+use crate::prompter::Live as Prompter;
 
 /// The monitor's render size; the stage shows it at about 900 points, 1800 pixels.
 const CANVAS: Canvas = Canvas {
@@ -38,6 +44,12 @@ const CANVAS: Canvas = Canvas {
     height: 1080,
 };
 const REFRESH: Duration = Duration::from_micros(16_667);
+/// A camera frame whose mean luma (0 to 255, full range) is under this is black.
+const BLACK_LUMA: u8 = 6;
+/// How long the camera must deliver black frames before the Record screen warns.
+const BLACK_FOR: Duration = Duration::from_secs(2);
+/// Settled words the retake rule reads: enough for a restarted sentence and its repeat.
+const RETAKE_WINDOW: usize = 80;
 /// The live take's kept range: longer than any take.
 const OPEN_END: Micros = Micros(24 * 3600 * 1_000_000);
 
@@ -59,6 +71,7 @@ pub struct Setup {
 pub struct View {
     frame: Mutex<Option<CFRetained<CVPixelBuffer>>>,
     error: Mutex<Option<String>>,
+    camera_black: AtomicBool,
 }
 
 // SAFETY: CoreVideo buffers are reference counted atomically and the thread never writes a
@@ -75,6 +88,11 @@ impl View {
     /// Why the monitor cannot show the style, when it cannot.
     pub fn error(&self) -> Option<String> {
         self.error.lock().expect("monitor error").clone()
+    }
+
+    /// Whether the camera has delivered black frames for a couple of seconds.
+    pub fn camera_black(&self) -> bool {
+        self.camera_black.load(Ordering::Relaxed)
     }
 
     fn fail(&self, error: String) {
@@ -101,6 +119,25 @@ pub struct Feeds {
     pub heard: Receiver<Heard>,
     /// Whether the monitor shows the style, switchable while recording.
     pub styled: Arc<AtomicBool>,
+    /// Gets the inline retakes the retake rule hears.
+    pub prompter: Arc<Prompter>,
+}
+
+/// Tells when the camera has delivered nothing but black frames for [`BLACK_FOR`].
+#[derive(Default)]
+struct BlackWatch {
+    since: Option<Instant>,
+}
+
+impl BlackWatch {
+    /// Feeds the mean luma of a new camera frame and returns whether the camera is black now.
+    fn frame(&mut self, luma: u8, now: Instant) -> bool {
+        if luma >= BLACK_LUMA {
+            self.since = None;
+            return false;
+        }
+        now.duration_since(*self.since.get_or_insert(now)) >= BLACK_FOR
+    }
 }
 
 impl LiveTake {
@@ -158,6 +195,7 @@ fn run(
     view: &View,
     quit: &AtomicBool,
 ) {
+    let confidence = setup.project.format.auto_cut.confidence;
     let mut stream = match Stream::create(&setup.dir, &feeds.take) {
         Ok(stream) => stream,
         Err(e) => return view.fail(format!("elements: {e}")),
@@ -176,15 +214,43 @@ fn run(
     }
     let mut styled: Option<Styled> = None;
     let mut events: Option<Arc<EventLog>> = None;
+    let mut settled: Vec<Word> = Vec::new();
+    let mut shown: HashSet<Micros> = HashSet::new();
+    let mut black = BlackWatch::default();
+    let mut camera_seen = 0;
     let mut next = Instant::now();
     while !quit.load(Ordering::Relaxed) {
         next += REFRESH;
         std::thread::sleep(next.saturating_duration_since(Instant::now()));
+        let mut spoke = false;
         while let Ok(heard) = feeds.heard.try_recv() {
             match heard {
-                Heard::Word(word) => stream.word(word),
+                Heard::Word(word) => {
+                    settled.push(word.clone());
+                    stream.word(word);
+                    spoke = true;
+                }
                 Heard::Tentative(words) => stream.tentative(words),
             }
+        }
+        if spoke {
+            let window = &settled[settled.len().saturating_sub(RETAKE_WINDOW)..];
+            for retake in heard_retakes(window, confidence) {
+                if shown.insert(retake.range.from()) {
+                    feeds.prompter.lock().caught(Retake {
+                        heard: retake.heard,
+                        kept: retake.kept,
+                    });
+                }
+            }
+        }
+        if let Some(camera) = feeds.preview.camera()
+            && camera.sequence != camera_seen
+        {
+            camera_seen = camera.sequence;
+            let luma = Planes::lock(&camera.buffer).mean();
+            view.camera_black
+                .store(black.frame(luma, Instant::now()), Ordering::Relaxed);
         }
         // A failed read or write is tried again on the next refresh; the stop path writes
         // the elements once more.
@@ -364,4 +430,23 @@ impl LiveStyle {
 
 fn open_range() -> TimeRange {
     TimeRange::new(Micros(0), OPEN_END).expect("the open range is not empty")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_camera_is_black_after_two_seconds_of_black_frames() {
+        let (mut watch, start) = (BlackWatch::default(), Instant::now());
+        let at = |ms| start + Duration::from_millis(ms);
+        assert!(!watch.frame(0, at(0)));
+        assert!(!watch.frame(2, at(1_900)));
+        assert!(watch.frame(2, at(2_000)));
+        assert!(
+            !watch.frame(80, at(2_100)),
+            "a lit frame clears the warning"
+        );
+        assert!(!watch.frame(0, at(2_200)), "and the count starts again");
+    }
 }

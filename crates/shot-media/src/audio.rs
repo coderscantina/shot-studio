@@ -54,6 +54,7 @@ pub struct PcmReader {
     buffer: Vec<f32>,
     buffer_start: u64,
     end_of_track: bool,
+    length: u64,
 }
 
 impl PcmReader {
@@ -67,6 +68,12 @@ impl PcmReader {
             .firstObject()
             .ok_or_else(|| AudioError::NoAudioTrack(path.display().to_string()))?;
         let (reader, output) = start_reader(&asset, &track, 0)?;
+        let span = unsafe { track.timeRange() }.duration;
+        let length = if span.timescale > 0 && span.value > 0 {
+            (span.value as i128 * i128::from(SAMPLE_RATE) / i128::from(span.timescale)) as u64
+        } else {
+            0
+        };
         Ok(Self {
             asset,
             track,
@@ -75,7 +82,17 @@ impl PcmReader {
             buffer: Vec::new(),
             buffer_start: 0,
             end_of_track: false,
+            length,
         })
+    }
+
+    /// The track's length in samples, from the container, so known before any read.
+    pub fn len(&self) -> u64 {
+        self.length
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.length == 0
     }
 
     /// Appends samples `from..to` to `out`, as silence past the end of the track.
@@ -491,6 +508,32 @@ fn audio_specific_config(sample_rate: u32) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_reader_knows_the_track_length_before_reading() {
+        let samples = 24_000u32;
+        let mut wav = Vec::new();
+        wav.extend(b"RIFF");
+        wav.extend((36 + samples * 2).to_le_bytes());
+        wav.extend(b"WAVEfmt ");
+        wav.extend(16u32.to_le_bytes());
+        wav.extend(1u16.to_le_bytes());
+        wav.extend(1u16.to_le_bytes());
+        wav.extend(SAMPLE_RATE.to_le_bytes());
+        wav.extend((SAMPLE_RATE * 2).to_le_bytes());
+        wav.extend(2u16.to_le_bytes());
+        wav.extend(16u16.to_le_bytes());
+        wav.extend(b"data");
+        wav.extend((samples * 2).to_le_bytes());
+        wav.extend(std::iter::repeat_n(0u8, samples as usize * 2));
+        let path = std::env::temp_dir().join(format!("shot-pcm-len-{}.wav", std::process::id()));
+        std::fs::write(&path, wav).unwrap();
+        let reader = PcmReader::open(&path);
+        std::fs::remove_file(&path).unwrap();
+        let reader = reader.unwrap();
+        assert_eq!(reader.len(), u64::from(samples));
+        assert!(!reader.is_empty());
+    }
 
     #[test]
     fn mono_48k_aac_lc_config() {

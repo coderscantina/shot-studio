@@ -533,6 +533,57 @@ fn similarity(a: &str, b: &str) -> f64 {
     }
 }
 
+/// An inline retake heard while recording: the words that go and the clean version after them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeardRetake {
+    pub range: TimeRange,
+    pub heard: String,
+    pub kept: String,
+}
+
+/// The retakes in `words`, the words said so far, that the retake rule is at least
+/// `confidence` sure of. Only those whose clean version has started are found, so the list
+/// only grows as words arrive.
+pub fn heard_retakes(words: &[Word], confidence: u8) -> Vec<HeardRetake> {
+    let words: Vec<W> = words
+        .iter()
+        .map(|word| W {
+            word,
+            text: normalize(&word.text),
+        })
+        .filter(|w| !w.text.is_empty())
+        .collect();
+    let fluent: Vec<&W> = words.iter().collect();
+    let mut found = repeats(&fluent);
+    found.extend(restarts(&words));
+    found.retain(|f| f.confidence >= confidence);
+    found.sort_by_key(|f| f.range.from());
+    let said = |range: TimeRange, skip: usize, take: usize| {
+        words
+            .iter()
+            .filter(|w| w.word.range.to() > range.from())
+            .skip(skip)
+            .take(take)
+            .map(|w| w.word.text.trim())
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    found
+        .into_iter()
+        .map(|f| {
+            let count = words
+                .iter()
+                .filter(|w| f.range.overlaps(w.word.range))
+                .count();
+            HeardRetake {
+                range: f.range,
+                heard: said(f.range, 0, count),
+                kept: said(f.range, count, count),
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -616,6 +667,24 @@ mod tests {
                 RuleKind::Retake,
                 "The first thing we do is create a new project.".into(),
                 92
+            )]
+        );
+    }
+
+    #[test]
+    fn a_retake_is_heard_once_its_clean_version_has_started() {
+        let words = |text: &str| transcript(text).words().to_vec();
+        let said = "Welcome back. The first thing we do is create a new project.";
+        assert!(heard_retakes(&words(said), 85).is_empty());
+        let again = format!("{said} The first thing we do is create a new project from");
+        assert_eq!(
+            heard_retakes(&words(&again), 85)
+                .into_iter()
+                .map(|r| (r.heard, r.kept))
+                .collect::<Vec<_>>(),
+            [(
+                "The first thing we do is create a new project.".to_owned(),
+                "The first thing we do is create a new project".to_owned()
             )]
         );
     }

@@ -20,7 +20,7 @@ use shot_core::{
     Transcript,
 };
 
-pub use rules::Voice;
+pub use rules::{HeardRetake, Voice, heard_retakes};
 pub use zoom::PUNCH_IN;
 
 use crate::{Error, Speech, again_markers, idle, normalize};
