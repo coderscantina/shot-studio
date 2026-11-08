@@ -226,6 +226,7 @@ impl Renderer {
                 .get(layer.source)
                 .ok_or(RenderError::MissingSource(layer.source))?;
             let source_range = Range::of(source)?;
+            let source_size = size(source);
             let [source_kr, source_kb] = Matrix::of(source).weights();
             let [target_kr, target_kb] = target_matrix.weights();
             let views = Plane::BOTH.map(|plane| {
@@ -287,8 +288,8 @@ impl Renderer {
                 quad.right,
                 quad.bottom,
                 layer.turn,
-                0.0,
-                0.0,
+                source_size.0 as f32,
+                source_size.1 as f32,
                 0.0,
             ];
             let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_ne_bytes()).collect();
