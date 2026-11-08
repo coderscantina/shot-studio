@@ -9,7 +9,8 @@
 //! - **Audio** is cut from each take's mic track and encoded to AAC once per export, on its own
 //!   thread while video renders. One continuous AAC stream has no encoder delay or padding at the
 //!   joins, so they cannot click or drift. Where the source jumps, the cut fades over 5 ms. The
-//!   voice chain, music bed and loudness of [`crate::voice`] finish it.
+//!   voice chain, music bed and loudness of [`crate::voice`] finish it, and the encoded stream
+//!   is measured and finished again lower when it peaks over -1 dBTP.
 //! - **Captions** of the main cut go next to the output as a WebVTT sidecar, `<out>.vtt`.
 //! - **Derived cuts** render in two passes, see [`crate::derived`]: the main chunks they draw
 //!   from first, then their own chunks from those.
@@ -57,6 +58,7 @@ const AUDIO_BITRATE: u32 = 128_000;
 
 /// Rendered chunks, inside a video folder or the channel repo.
 const CHUNKS_DIR: &str = ".shot/cache/chunks";
+const BEATS_DIR: &str = ".shot/cache/beats";
 /// The tracks of a take, by file name inside `media/<take>/`.
 const SCREEN_FILE: &str = "screen.mp4";
 const CAMERA_FILE: &str = "camera.mp4";
@@ -446,6 +448,8 @@ struct Media {
     dir: PathBuf,
     /// The channel repo, which bumpers are relative to.
     channel: PathBuf,
+    /// Where beats are cached, see [`tracks`].
+    beats: PathBuf,
 }
 
 /// The plan of the main cut as export draws it, for the preview: the timeline styled by the
@@ -480,6 +484,44 @@ pub fn preview_plan(video_dir: &Path, project: &Project) -> Result<ExportPlan, E
         Some(snapped) => plan_of(&snapped),
         None => plan,
     })
+}
+
+/// The voice of `plan` for the video in `video_dir`, as export and the preview read it: each
+/// take's mic placed and blended by the plan, silent under the bleeps.
+pub fn plan_audio(video_dir: &Path, plan: &ExportPlan) -> TimelineAudio {
+    let root = video_dir.join("media");
+    let audio = TimelineAudio::of_plan(plan, move |take| root.join(take.as_str()).join(MIC_FILE));
+    let mut bleeps: Vec<(Id, shot_core::TimeRange)> = plan
+        .segments
+        .iter()
+        .flat_map(|planned| {
+            crate::overlay::redact::bleeps(&planned.segment.overlays)
+                .into_iter()
+                .map(|range| (planned.segment.take.clone(), range))
+        })
+        .collect();
+    bleeps.sort_by_key(|(take, range)| (take.to_string(), range.from()));
+    bleeps.dedup();
+    audio.with_bleeps(&bleeps)
+}
+
+/// What plays with the voice of `plan`, the [`preview_plan`] of the video in `video_dir`, as
+/// export mixes it: the music cues, the lock's sounds, the brand's sounds on every move and the
+/// bumpers' own sound. The preview mixes it from any sample with [`voice::Score::mix_from`].
+pub fn preview_score(
+    video_dir: &Path,
+    project: &Project,
+    plan: &ExportPlan,
+) -> Result<voice::Score, ExportError> {
+    let lock = crate::lock::read(video_dir)?;
+    let timeline = match &lock {
+        Some(lock) => shot_core::Timeline::styled(project, lock),
+        None => shot_core::Timeline::evaluate(project),
+    };
+    let theme = Theme::load(video_dir, project.video.format, &project.cut)?;
+    let media = Media::new(video_dir, project, lock.as_ref());
+    let music = music(plan, None, &media)?;
+    score(plan, &music, &media, &theme, &timeline.main().effects)
 }
 
 /// What the lock's brand and transitions put around and between the main cut's segments, with
@@ -611,9 +653,10 @@ fn output_samples(plan: &ExportPlan, take: &Id, at: Micros) -> Vec<u64> {
         .collect()
 }
 
-/// Music files decoded with their beats, detected once per file ([0023]) and kept for the next
-/// export or preview plan, which is why the snapped entrances cost a preview nothing. Only the
-/// files the last call used are kept.
+/// Music files decoded with their beats, kept for the next export or preview plan, so the
+/// snapped entrances cost a preview nothing. Only the files the last call used are kept.
+/// Beats are detected once per file content ([0023]): `.shot/cache/beats/<hash>-<detector>.txt`
+/// in the channel repo, shared by its videos, or in the video folder outside a channel.
 ///
 /// [0023]: ../../../docs/decisions/0023-motion-system-and-lottie-templates.md
 mod tracks {
@@ -622,7 +665,10 @@ mod tracks {
     use std::sync::{Mutex, MutexGuard};
     use std::time::SystemTime;
 
-    use super::{ExportError, TimelineAudioError, voice};
+    use shot_audio::beats::{self, Beats};
+    use shot_core::ContentHash;
+
+    use super::{ExportError, TimelineAudioError, io_error, voice};
 
     type Cache = BTreeMap<PathBuf, ((u64, SystemTime), shot_audio::Track)>;
 
@@ -634,8 +680,9 @@ mod tracks {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// The file at `path` with its beats, by its size and modification time.
-    pub(super) fn load(path: &Path) -> Result<shot_audio::Track, ExportError> {
+    /// The file at `path` with its beats, by its size and modification time, its beats cached
+    /// in `beats_dir`.
+    pub(super) fn load(path: &Path, beats_dir: &Path) -> Result<shot_audio::Track, ExportError> {
         let metadata = std::fs::metadata(path).map_err(super::io_error(path))?;
         let identity = (
             metadata.len(),
@@ -650,7 +697,27 @@ mod tracks {
             path: path.to_owned(),
             source,
         })?;
-        let beats = shot_audio::beats::detect(&samples);
+        let bytes = std::fs::read(path).map_err(io_error(path))?;
+        let file = beats_dir.join(format!(
+            "{}-{}.txt",
+            ContentHash::of(&bytes),
+            beats::DETECTOR
+        ));
+        let cached = std::fs::read_to_string(&file)
+            .ok()
+            .and_then(|text| Beats::parse(&text));
+        let beats = match cached {
+            Some(beats) => beats,
+            None => {
+                let beats = beats::detect(&samples);
+                std::fs::create_dir_all(beats_dir).map_err(io_error(beats_dir))?;
+                // Written aside and renamed, so a reader never sees half a file.
+                let part = file.with_extension("part");
+                std::fs::write(&part, beats.to_text()).map_err(io_error(&part))?;
+                std::fs::rename(&part, &file).map_err(io_error(&file))?;
+                beats
+            }
+        };
         let track = shot_audio::Track::new(shot_audio::sound::Sound::new(samples), beats);
         cache().insert(path.to_owned(), (identity, track.clone()));
         Ok(track)
@@ -678,7 +745,7 @@ fn music(
         music.push(shot_audio::MusicCue {
             at: 0,
             play: Some(shot_audio::Play {
-                track: tracks::load(path)?,
+                track: tracks::load(path, &media.beats)?,
                 gain_db: *gain,
                 duck_db: *duck,
             }),
@@ -692,7 +759,7 @@ fn music(
             Some(track) => track.clone(),
             None => {
                 let path = media.dir.join(file);
-                let track = tracks::load(&path)?;
+                let track = tracks::load(&path, &media.beats)?;
                 used.push(path);
                 loaded.insert(index, track.clone());
                 track
@@ -845,12 +912,14 @@ fn snap_entrances(
 }
 
 /// Sound effects and bumpers over `music`: the lock's sounds where their moments play, the
-/// brand's transition sounds on each transition and the bumpers' own sound, which the music
+/// brand's sounds on every move ([`crate::sounds`]) and the bumpers' own sound, which the music
 /// ducks under.
 fn score(
     plan: &ExportPlan,
     music: &shot_audio::Music,
     media: &Media,
+    theme: &Theme,
+    effects: &Effects,
 ) -> Result<voice::Score, ExportError> {
     let read = |path: &Path| {
         voice::read_samples(path).map_err(|source| TimelineAudioError {
@@ -858,28 +927,39 @@ fn score(
             source,
         })
     };
-    let find = |name: &Id| -> Result<shot_audio::sound::Sound, ExportError> {
-        Ok(match media.sounds.find(name) {
+    let mut found: HashMap<Id, shot_audio::sound::Sound> = HashMap::new();
+    let mut find = |name: &Id| -> Result<shot_audio::sound::Sound, ExportError> {
+        if let Some(sound) = found.get(name) {
+            return Ok(sound.clone());
+        }
+        let sound = match media.sounds.find(name) {
             Some(shot_audio::sound::Source::File(path)) => {
                 shot_audio::sound::Sound::new(read(&path)?)
             }
             Some(shot_audio::sound::Source::Bundled(bundled)) => bundled.decode(),
             None => return Err(ExportError::UnknownSound(name.clone())),
-        })
+        };
+        found.insert(name.clone(), sound.clone());
+        Ok(sound)
     };
     let per_frame = u64::from(SAMPLE_RATE) / u64::from(FPS);
-    let mut sfx = Vec::new();
-    for transition in &plan.transitions {
-        let travel = shot_audio::phases::Move {
-            effect: shot_core::SoundEffect::Transition,
-            start: transition.window.start * per_frame,
-            impact: transition.edge * per_frame,
-            settle: transition.window.end * per_frame,
-            exit: None,
-        };
-        for (name, anchor) in shot_audio::phases::move_sounds(&travel, &media.brand_sounds) {
-            sfx.push(shot_audio::SfxCue::new(find(name)?, anchor, 0.0));
+    let mut assets = crate::assets::Assets::new(&media.dir);
+    let mut failed = None;
+    let mut clicks = |take: &Id| match assets.events(take) {
+        Ok(events) => events.map_or_else(Vec::new, |e| e.clicks().iter().map(|c| c.t).collect()),
+        Err(e) => {
+            failed.get_or_insert(e);
+            Vec::new()
         }
+    };
+    let automatic =
+        crate::sounds::automatic(plan, theme, effects, &media.brand_sounds, &mut clicks);
+    if let Some(e) = failed {
+        return Err(e.into());
+    }
+    let mut sfx = Vec::with_capacity(automatic.len());
+    for (name, anchor) in automatic {
+        sfx.push(shot_audio::SfxCue::new(find(name)?, anchor, 0.0));
     }
     let mut bumpers = Vec::new();
     for bookend in &plan.bookends {
@@ -941,6 +1021,10 @@ impl Media {
             channel: crate::theme::channel_root(video_dir)
                 .unwrap_or(video_dir)
                 .to_owned(),
+            beats: channel_brand(video_dir)
+                .and_then(|brand| brand.parent().map(Path::to_owned))
+                .unwrap_or_else(|| video_dir.to_owned())
+                .join(BEATS_DIR),
         }
     }
 
@@ -1123,8 +1207,12 @@ fn run(
     let (audio_out, audio_in) = mpsc::channel();
     std::thread::scope(|scope| {
         let pending = &pending;
-        let audio =
-            scope.spawn(move || pending.guard(|| encode_audio(plan, media, music, &audio_out)));
+        let audio = scope.spawn(move || {
+            pending.guard(|| {
+                let score = score(plan, music, media, theme, &effects)?;
+                encode_audio(plan, media, &score, &audio_out)
+            })
+        });
         let joiner =
             scope.spawn(move || pending.guard(|| join(plan, cache, pending, audio_in, out)));
         let workers: Vec<_> = (0..options.jobs.max(1))
@@ -1414,36 +1502,106 @@ fn video_track(hvcc: Vec<u8>, canvas: Canvas) -> Track {
 
 /// The mic audio of every segment, in output order, as one AAC stream sent to `out` piece by
 /// piece. The first piece carries the format and no packets.
+///
+/// The encoder's output peaks higher than its input, most on hard-limited transients such as
+/// many loud sound effects, by more than the limiter's codec headroom. So the stream is decoded
+/// and measured before it is sent, and finished again with the limiter lower by what it overshot
+/// until it is under [`CHECKED_CEILING_DBTP`].
 fn encode_audio(
     plan: &ExportPlan,
     media: &Media,
-    music: &shot_audio::Music,
+    score: &voice::Score,
     out: &mpsc::Sender<AacStream>,
 ) -> Result<(), ExportError> {
-    let send = |stream| out.send(stream).map_err(|_| ExportError::Cancelled);
-    let mut encoder =
-        AacEncoder::new(SAMPLE_RATE, AUDIO_BITRATE).map_err(ExportError::AudioEncode)?;
-    send(encoder.take())?;
-    let root = media.root.clone();
-    let audio = TimelineAudio::of_plan(plan, move |take| root.join(take.as_str()).join(MIC_FILE));
-    let mut bleeps: Vec<(Id, shot_core::TimeRange)> = plan
-        .segments
-        .iter()
-        .flat_map(|planned| {
-            crate::overlay::redact::bleeps(&planned.segment.overlays)
+    let mut audio = plan_audio(&media.dir, plan);
+    let mut ceiling = shot_audio::CEILING_DBTP;
+    for attempt in 0.. {
+        let mut encoder =
+            AacEncoder::new(SAMPLE_RATE, AUDIO_BITRATE).map_err(ExportError::AudioEncode)?;
+        let mut pieces = vec![encoder.take()];
+        voice::finish_under(&mut audio, score, ceiling, |samples| {
+            encoder.push(samples).map_err(ExportError::AudioEncode)?;
+            pieces.push(encoder.take());
+            Ok::<_, ExportError>(())
+        })?;
+        pieces.push(encoder.finish().map_err(ExportError::AudioEncode)?);
+        let peak = encoded_true_peak(&pieces, &media.dir)?;
+        if peak <= CHECKED_CEILING_DBTP || attempt == ENCODE_ATTEMPTS - 1 {
+            return pieces
                 .into_iter()
-                .map(|range| (planned.segment.take.clone(), range))
-        })
-        .collect();
-    bleeps.sort_by_key(|(take, range)| (take.to_string(), range.from()));
-    bleeps.dedup();
-    let mut audio = audio.with_bleeps(&bleeps);
-    let score = score(plan, music, media)?;
-    voice::finish(&mut audio, &score, |samples| {
-        encoder.push(samples).map_err(ExportError::AudioEncode)?;
-        send(encoder.take())
-    })?;
-    send(encoder.finish().map_err(ExportError::AudioEncode)?)
+                .try_for_each(|piece| out.send(piece).map_err(|_| ExportError::Cancelled));
+        }
+        ceiling -= peak - CHECKED_CEILING_DBTP + 0.1;
+    }
+    unreachable!("the last attempt returns")
+}
+
+/// The ceiling an encoded stream is held to by the in-repo meter: -1 dBTP less a margin for
+/// other meters and decoders, which measure up to about 0.1 dB higher.
+const CHECKED_CEILING_DBTP: f64 = shot_audio::CEILING_DBTP - 0.2;
+/// Encodes at most, the last one sent whatever it measures.
+const ENCODE_ATTEMPTS: usize = 3;
+
+/// The true peak of the AAC `pieces` decoded, in dBTP. The stream is written to a scratch file
+/// in the video's cache for the system decoder to read, and removed.
+fn encoded_true_peak(pieces: &[AacStream], video_dir: &Path) -> Result<f64, ExportError> {
+    use std::io::Write;
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let path = video_dir.join(".shot/cache").join(format!(
+        "encoded-{}-{}.aac",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let written = (|| {
+        fs::create_dir_all(path.parent().expect("a parent"))?;
+        let mut file = BufWriter::new(File::create(&path)?);
+        for piece in pieces {
+            let mut offset = 0;
+            for &size in &piece.sizes {
+                // An ADTS header: AAC-LC, 48 kHz (index 3), mono, no CRC.
+                let length = size as usize + 7;
+                file.write_all(&[
+                    0xff,
+                    0xf1,
+                    (1 << 6) | (3 << 2),
+                    (1 << 6) | (length >> 11) as u8,
+                    (length >> 3) as u8,
+                    ((length & 7) << 5) as u8 | 0x1f,
+                    0xfc,
+                ])?;
+                file.write_all(&piece.data[offset..offset + size as usize])?;
+                offset += size as usize;
+            }
+        }
+        file.flush()
+    })();
+    let measured = written.map_err(io_error(&path)).and_then(|()| {
+        let packets: usize = pieces.iter().map(|p| p.sizes.len()).sum();
+        let total = (packets * AAC_PACKET_SAMPLES as usize) as u64;
+        let mut reader =
+            shot_media::audio::PcmReader::open(&path).map_err(|source| TimelineAudioError {
+                path: path.clone(),
+                source,
+            })?;
+        let mut meter = shot_audio::Meter::new();
+        let mut block = Vec::new();
+        let mut at = 0;
+        while at < total {
+            let end = (at + u64::from(SAMPLE_RATE)).min(total);
+            block.clear();
+            reader
+                .read(at, end, &mut block)
+                .map_err(|source| TimelineAudioError {
+                    path: path.clone(),
+                    source,
+                })?;
+            meter.add(&block);
+            at = end;
+        }
+        Ok(meter.true_peak())
+    });
+    let _ = fs::remove_file(&path);
+    measured
 }
 
 /// Writes the output: one init segment, then every chunk's video fragments by stream copy,
@@ -1829,6 +1987,44 @@ on chapter-start {
             snapped.chapters[0].segments[0].source,
             output.chapters[0].segments[0].source
         );
+    }
+
+    #[test]
+    fn beats_are_detected_once_per_file_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let bed = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../shot-audio/assets/sounds/bed-pulse.flac");
+        let (first, copy) = (dir.path().join("a.flac"), dir.path().join("b.flac"));
+        fs::copy(&bed, &first).unwrap();
+        fs::copy(&bed, &copy).unwrap();
+        let cache = dir.path().join("beats");
+        tracks::load(&first, &cache).unwrap();
+        let files: Vec<PathBuf> = fs::read_dir(&cache)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        let hash = ContentHash::of(&fs::read(&bed).unwrap());
+        assert_eq!(
+            files,
+            [cache.join(format!("{hash}-{}.txt", shot_audio::beats::DETECTOR))]
+        );
+        assert!(shot_audio::beats::Beats::parse(&fs::read_to_string(&files[0]).unwrap()).is_some());
+
+        // Another file with the same content reads its beats from the cache, not the music.
+        fs::write(&files[0], "bpm 60\n100000\n").unwrap();
+        let track = tracks::load(&copy, &cache).unwrap();
+        let music = shot_audio::Music::new(
+            vec![shot_audio::MusicCue {
+                at: 0,
+                play: Some(shot_audio::Play {
+                    track,
+                    gain_db: 0.0,
+                    duck_db: 0.0,
+                }),
+            }],
+            shot_audio::CROSSFADE,
+        );
+        assert_eq!(music.snap(104_000, 800), 100_000);
     }
 
     #[test]

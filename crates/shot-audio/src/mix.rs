@@ -207,6 +207,13 @@ impl Mix {
         }
     }
 
+    /// The same mix with its next sample at output sample `at`, for a stream that starts there.
+    /// The ducking starts released.
+    pub fn starting_at(mut self, at: u64) -> Self {
+        self.pos = at;
+        self
+    }
+
     /// Adds the next `voice.len()` samples of music and sound effects to `voice`, ducking the
     /// music on `voice` itself. The result does not depend on how the stream is split.
     pub fn mix(&mut self, voice: &mut [f32]) {
@@ -287,6 +294,28 @@ mod tests {
             );
         }
         assert_eq!(out[10_000 + fade as usize], 0.5, "b alone after the fade");
+    }
+
+    #[test]
+    fn a_mix_started_late_plays_what_the_whole_mix_plays_there() {
+        let music = || {
+            let a = track((0..700).map(|i| (i as f32 * 0.1).sin()).collect(), vec![]);
+            Music::new(vec![cue(0, a.clone()), cue(9_000, a)], 480)
+        };
+        let sfx = || {
+            vec![SfxCue::new(
+                Sound::new(vec![0.5; 3_000]),
+                Anchor::Start(8_000),
+                0.0,
+            )]
+        };
+        let mut whole = vec![0.0; 12_000];
+        Mix::new(music(), sfx(), []).mix(&mut whole);
+        let mut late = vec![0.0; 3_500];
+        Mix::new(music(), sfx(), [])
+            .starting_at(8_500)
+            .mix(&mut late);
+        assert_eq!(late, whole[8_500..]);
     }
 
     #[test]

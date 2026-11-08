@@ -284,6 +284,19 @@ impl Motion {
         if rest <= t && t < leave { rest } else { t }
     }
 
+    /// When `part` of an element on screen over `range` starts, first reaches its place, rests
+    /// and starts to exit: the edges of [`Motion::phase`], for sounds that follow a move.
+    pub fn times(&self, range: TimeRange, part: Part) -> Times {
+        let start = self.enter_start(range, part);
+        let at = |seconds: f32| Micros(start.0 + seconds_to_micros(seconds));
+        Times {
+            start,
+            impact: at(self.enter.impact()),
+            settle: at(self.enter.settle()),
+            exit: self.exit_start(range, part),
+        }
+    }
+
     /// Which phase `part` is in at `t`, for sounds that follow a move.
     pub fn phase(&self, range: TimeRange, part: Part, t: Micros) -> Phase {
         if t < range.from() || t >= range.to() {
@@ -365,6 +378,15 @@ impl Pose {
     pub fn visible(self) -> bool {
         self.presence() > 0.0
     }
+}
+
+/// The media times a part's move changes phase, see [`Motion::times`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Times {
+    pub start: Micros,
+    pub impact: Micros,
+    pub settle: Micros,
+    pub exit: Micros,
 }
 
 /// The phase of a part's move.

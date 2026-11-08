@@ -38,6 +38,31 @@ pub struct Beats {
     pub at: Vec<u64>,
 }
 
+impl Beats {
+    /// The beats as text for a cache file: `bpm <tempo>`, then one beat sample per line.
+    pub fn to_text(&self) -> String {
+        let mut text = format!("bpm {}\n", self.bpm);
+        for at in &self.at {
+            text.push_str(&format!("{at}\n"));
+        }
+        text
+    }
+
+    /// Beats written by [`Beats::to_text`], `None` for anything else.
+    pub fn parse(text: &str) -> Option<Self> {
+        let mut lines = text.lines();
+        let bpm = lines.next()?.strip_prefix("bpm ")?.parse().ok()?;
+        let at = lines
+            .map(|l| l.parse().ok())
+            .collect::<Option<Vec<u64>>>()?;
+        at.is_sorted().then_some(Self { bpm, at })
+    }
+}
+
+/// The version of [`detect`]'s results, part of a beat cache's key: bump it when a change moves
+/// any beat.
+pub const DETECTOR: u32 = 1;
+
 /// Detects the beats of mono 48 kHz `samples`.
 pub fn detect(samples: &[f32]) -> Beats {
     let none = Beats {
@@ -316,6 +341,15 @@ mod tests {
     #[test]
     fn silence_has_no_beats() {
         assert!(detect(&vec![0.0; SAMPLE_RATE as usize * 5]).at.is_empty());
+    }
+
+    #[test]
+    fn beats_read_back_exactly_from_their_text_and_nothing_else_reads() {
+        let (track, _) = click_track(93.0, 1_234, 10);
+        let beats = detect(&track);
+        assert_eq!(Beats::parse(&beats.to_text()), Some(beats));
+        assert_eq!(Beats::parse("bpm 120\n24000\n12000\n"), None);
+        assert_eq!(Beats::parse("120\n"), None);
     }
 
     #[test]
