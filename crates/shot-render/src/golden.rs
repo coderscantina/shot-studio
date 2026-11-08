@@ -23,6 +23,41 @@ pub fn assert_match(label: &str, a: &[[u8; 3]], b: &[[u8; 3]]) {
     );
 }
 
+/// The frames of a played pass, for tests that seek to frames afterwards: a hash of every frame,
+/// and the pixels of the ones that will be sought.
+pub struct Played {
+    hashes: Vec<blake3::Hash>,
+    kept: std::collections::HashMap<u64, Vec<[u8; 3]>>,
+}
+
+impl Played {
+    /// Keeps the pixels of the `sought` frames out of `frames`.
+    pub fn new(frames: u64, sought: impl IntoIterator<Item = u64>) -> Self {
+        Self {
+            hashes: Vec::with_capacity(frames as usize),
+            kept: sought.into_iter().map(|f| (f, Vec::new())).collect(),
+        }
+    }
+
+    /// Records the next frame of the pass, in order.
+    pub fn push(&mut self, pixels: &[[u8; 3]]) {
+        let frame = self.hashes.len() as u64;
+        self.hashes.push(blake3::hash(pixels.as_flattened()));
+        if let Some(kept) = self.kept.get_mut(&frame) {
+            *kept = pixels.to_vec();
+        }
+    }
+
+    /// Passes at once on equal pixels, otherwise holds `pixels` to [`assert_match`].
+    pub fn assert_same(&self, label: &str, frame: u64, pixels: &[[u8; 3]]) {
+        if blake3::hash(pixels.as_flattened()) == self.hashes[frame as usize] {
+            return;
+        }
+        let played = self.kept.get(&frame).expect("a sought frame was kept");
+        assert_match(&format!("{label} frame {frame}"), played, pixels);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
