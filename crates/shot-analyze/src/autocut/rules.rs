@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use shot_core::{AutoCut, Micros, Pacing, RuleKind, TimeRange, Word};
+use shot_core::{AutoCut, Micros, RuleKind, TimeRange, Word};
 
 use super::{Finding, TakeFacts};
 use crate::normalize;
@@ -232,26 +232,23 @@ impl Gaps {
     }
 
     /// Where the cut `range` of a gap rule goes when the pacing's breath changes from `before`
-    /// to `breath`. An edge within the widest breath of the voice moves by the difference,
-    /// staying inside the gap; an edge further in stays, since a person shortened the cut there
-    /// or a block ends there.
+    /// to `breath`. Only an edge exactly where the old pacing put it, `before` from the voice,
+    /// moves to `breath` from the voice; any other edge stays, since a person moved it or a
+    /// block ends there. That makes a change and its way back give the same cut.
     pub fn place(&self, range: TimeRange, before: Micros, breath: Micros) -> Option<TimeRange> {
         let at = self.gaps.partition_point(|g| g.range.to() <= range.from());
         let gap = self
             .gaps
             .get(at)
             .filter(|gap| gap.range.intersect(range) == Some(range))?;
-        let reach = Pacing::Loose.breath().0;
         let (start, end) = (gap.range.from().0, gap.range.to().0);
-        let from = if gap.voiced_before && range.from().0 <= start + reach {
-            (range.from().0 + breath.0)
-                .saturating_sub(before.0)
-                .max(start)
+        let from = if gap.voiced_before && range.from().0 == start + before.0 {
+            start + breath.0
         } else {
             range.from().0
         };
-        let to = if gap.voiced_after && range.to().0 + reach >= end {
-            (range.to().0 + before.0).saturating_sub(breath.0).min(end)
+        let to = if gap.voiced_after && range.to().0 + before.0 == end {
+            end.saturating_sub(breath.0)
         } else {
             range.to().0
         };

@@ -18,7 +18,7 @@ use std::path::Path;
 
 use shot_core::{
     Cut, Format, Id, Layout, Micros, Pacing, RangeEdit, RemovedBy, RuleKind, TakeEdit, TimeRange,
-    Transcript,
+    Transcript, ZoomBy,
 };
 
 pub use rules::{HeardRetake, Voice, heard_retakes};
@@ -136,8 +136,15 @@ pub fn rerun(
             for &rule in RuleKind::ALL.iter().filter(|r| !on(**r)) {
                 edit::strip(block, rule);
             }
+            // A pacing change keeps the picture as it was, unless the rules already punch in
+            // on this block's jump cuts; then those follow the moved edges.
+            let mut place_zooms = true;
             if let Change::Pacing(before) = change {
                 repace(block, &gaps, before.breath(), breath);
+                place_zooms = block
+                    .zooms
+                    .iter()
+                    .any(|z| matches!(z.by, Some(ZoomBy::JumpCut | ZoomBy::Emphasis)));
             }
             let Some(material) = material(block) else {
                 continue;
@@ -157,7 +164,9 @@ pub fn rerun(
                     edit::review(block, range, finding.rule);
                 }
             }
-            zoom::place(block, facts.transcript.words(), facts.speech);
+            if place_zooms {
+                zoom::place(block, facts.transcript.words(), facts.speech);
+            }
         }
     }
     cut
@@ -416,5 +425,19 @@ mod tests {
             }
         );
         assert_eq!(pace(&natural, Pacing::Natural, Pacing::Tight), tight);
+        let loose = pace(&tight, Pacing::Tight, Pacing::Loose);
+        assert_eq!(pace(&loose, Pacing::Loose, Pacing::Tight), tight);
+
+        // An edge a person set 0.3 s from the voice is not where any pacing puts it: it stays.
+        let mut moved = tight.clone();
+        moved.chapters[0].takes[0].ranges = vec![
+            RangeEdit::Keep(range(0, 2_200_000)),
+            RangeEdit::Remove {
+                range: range(2_200_000, 5_000_000),
+                by: RemovedBy::Rule(RuleKind::Silence),
+            },
+            RangeEdit::Keep(range(5_000_000, 20_000_000)),
+        ];
+        assert_eq!(pace(&moved, Pacing::Tight, Pacing::Loose), moved);
     }
 }
