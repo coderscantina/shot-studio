@@ -29,6 +29,7 @@ use shot_core::{Layout, Project};
 use shot_prompter::{Pace, Prompter};
 
 pub use native::display_names;
+pub use output::PrompterOutput;
 pub use pane::PrompterPane;
 pub use settings::Settings;
 

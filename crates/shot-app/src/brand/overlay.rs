@@ -636,7 +636,7 @@ impl Render for OverlayEditor {
 }
 
 /// The window that edits an overlay placed in a video: the overlay `index` of the block `at`.
-struct PlacedWindow {
+pub(crate) struct PlacedWindow {
     folder: Entity<VideoFolder>,
     at: TakeAt,
     index: usize,

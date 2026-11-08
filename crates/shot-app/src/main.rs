@@ -3,6 +3,7 @@
 //! `shot-app <video-folder>` opens a video folder on its Edit screen, with Record one click away.
 //! `shot-app <channel-repo>` opens the channel's board.
 //! Without arguments, as when started from Finder, it opens the welcome window.
+//! With `SHOT_CONTROL=1` these windows also take requests on a socket, see [`control`].
 //!
 //! `shot-app [flags] <video.mp4>` opens the preview spike window on one file:
 //!
@@ -23,6 +24,7 @@ mod agent;
 mod bench;
 mod board;
 mod brand;
+mod control;
 mod cut;
 mod edit;
 mod edit_bench;
@@ -114,12 +116,15 @@ fn studio_app() -> gpui::Application {
     app
 }
 
-/// Fonts, theme, menus and key bindings, once per app run.
+/// Fonts, theme, menus, key bindings and the control channel, once per app run.
 fn init(cx: &mut gpui::App) {
     theme::init(cx);
     keymap::bind(cx);
     about::init(cx);
     welcome::init(cx);
+    if control::enabled() {
+        control::listen(cx);
+    }
 }
 
 fn parse_args(args: impl Iterator<Item = String>) -> Result<Options, String> {
