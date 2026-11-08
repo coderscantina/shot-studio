@@ -7,16 +7,16 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use gpui::{
-    App, Bounds, Context, Div, FontWeight, KeyBinding, PathPromptOptions, SharedString,
-    TitlebarOptions, Window, WindowBounds, WindowOptions, actions, div, point, prelude::*, px,
-    size,
+    App, Bounds, Context, Div, FontWeight, Hsla, KeyBinding, PathPromptOptions, SharedString,
+    TitlebarOptions, Window, WindowBounds, WindowOptions, actions, div, linear_color_stop,
+    linear_gradient, point, prelude::*, px, size,
 };
 use shot_core::{FormatKind, Status, Video};
 
 use crate::board::channel;
 use crate::board::{FORMATS, format_color, format_name};
 use crate::theme::*;
-use crate::ui::{ActionLook, alert, icon, label, mono, pane, proposal_action};
+use crate::ui::{ActionLook, alert, icon, label, pane, proposal_action};
 
 actions!(shot_app, [ShowWelcome, OpenVideo, NewChannel]);
 
@@ -409,6 +409,12 @@ impl WelcomeView {
                     cx.notify();
                 }))
         };
+        // Without recent videos there is little to open yet: creating is the main action.
+        let (open_look, create_look) = if self.recent.is_empty() {
+            (ActionLook::Plain, ActionLook::Accent)
+        } else {
+            (ActionLook::Accent, ActionLook::Plain)
+        };
         div()
             .w(px(300.))
             .flex_none()
@@ -442,7 +448,7 @@ impl WelcomeView {
             )
             .child(
                 div().pt(px(24.)).child(
-                    proposal_action("open-video", "Open…", None, Some("⌘O"), ActionLook::Accent)
+                    proposal_action("open-video", "Open…", None, Some("⌘O"), open_look)
                         .justify_center()
                         .on_click(|_, _, cx| pick_folder(None, cx)),
                 ),
@@ -458,19 +464,20 @@ impl WelcomeView {
             .children(FORMATS.map(|format| format_row(format, cx)))
             .child(
                 div().pt(px(8.)).child(
-                    proposal_action(
-                        "new-video",
-                        "Create video folder",
-                        None,
-                        None,
-                        ActionLook::Plain,
-                    )
-                    .justify_center()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.error = None;
-                        pick_folder(Some(this.format), cx);
-                    })),
+                    proposal_action("new-video", "Create video folder", None, None, create_look)
+                        .justify_center()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.error = None;
+                            pick_folder(Some(this.format), cx);
+                        })),
                 ),
+            )
+            .child(
+                div()
+                    .pt(px(6.))
+                    .text_size(TEXT_SM)
+                    .text_color(MUTED)
+                    .child("Script and Board come with a channel"),
             )
     }
 
@@ -635,13 +642,17 @@ impl WelcomeView {
                 )
                 .on_click(cx.listener(move |this, _, window, cx| this.open_video(&dir, window, cx)))
         };
-        pane()
+        // The list scrolls under a fade at the bottom edge, so a cut-off row reads as more to
+        // scroll to. The end padding lets the last row clear the fade.
+        let fade = px(40.);
+        let list = pane()
             .id("recent")
-            .flex_1()
+            .size_full()
             .flex()
             .flex_col()
             .overflow_y_scroll()
             .p(px(12.))
+            .pb(fade)
             .child(self.channel_list(cx))
             .child(
                 div()
@@ -663,7 +674,21 @@ impl WelcomeView {
                     .iter()
                     .enumerate()
                     .map(|(index, recent)| row(index, recent, cx)),
-            )
+            );
+        div().flex_1().min_w_0().relative().child(list).child(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom_0()
+                .h(fade)
+                .rounded_b(RADIUS_LG)
+                .bg(linear_gradient(
+                    180.,
+                    linear_color_stop(Hsla::from(SURFACE).opacity(0.), 0.),
+                    linear_color_stop(SURFACE, 1.),
+                )),
+        )
     }
 }
 
@@ -706,11 +731,9 @@ impl Render for WelcomeView {
                     .gap(px(6.))
                     .text_size(TEXT_SM)
                     .text_color(MUTED)
-                    .child("A video folder holds")
-                    .child(mono("video.kdl,").text_color(BODY))
-                    .child(mono("script.md").text_color(BODY))
-                    .child("and")
-                    .child(mono("format.kdl").text_color(BODY)),
+                    .child(
+                        "A video folder holds the script, the format and the takes of one video",
+                    ),
             )
     }
 }
