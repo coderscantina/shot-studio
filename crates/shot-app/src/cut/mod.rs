@@ -1,40 +1,59 @@
-//! The Cut screen: the auto-cut rules with their switches and counts, the pacing, and the review
-//! queue with Keep (K) and Cut (C).
+//! The Cut screen, where the auto-cut rules' rough cut is reviewed right after recording. The
+//! middle shows one review item at a time: what the rule found and why it asks, the words around
+//! it, its picture and waveform. Space plays it with a little of what plays before and after,
+//! ⇧Space plays it as it would sound cut. K keeps it, C cuts it, and the next item plays. The
+//! rules with their switches and the pacing sit on the left, the queue on the right.
 //!
 //! The queue is the `review` nodes of `cut.kdl`, or a migrated video's `review` instances of
 //! its lock, read through [`Cut::review_queue`] of the shown cut; every answer goes through
 //! [`VideoFolder::decide`], which writes `ignore` or a rule removal before migration and an
 //! `override { keep }` or `{ cut }` after. The screen keeps only which item is on show and the
-//! answers given since it opened, so the list can show them dimmed like the mockup.
+//! answers given since it opened, so the list can show them dimmed. An answer undone with ⌘Z
+//! brings its item back on show.
 
+pub mod player;
 pub mod run;
 
+use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use gpui::{
-    App, Context, Div, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla, KeyBinding,
-    SharedString, Window, actions, div, prelude::*, px, relative,
+    App, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla, KeyBinding,
+    ObjectFit, ScrollHandle, SharedString, Subscription, Window, actions, div, prelude::*, px,
+    relative, surface,
 };
 use shot_analyze::autocut::{self, RuleCount};
 use shot_analyze::{Speech, cache};
 use shot_core::{
-    Cut, Decision, Id, Micros, Pacing, RangeEdit, Review, RuleKind, TakeAt, TimeRange,
+    Cut, Decision, Id, Micros, Pacing, RangeEdit, Review, RuleKind, TakeAt, TimeRange, Word,
 };
 
 use crate::folder::VideoFolder;
 use crate::model::{self, FPS};
+use crate::peaks::Peaks;
 use crate::theme::*;
-use crate::ui::{Segment, kbd, label, mono, pane, segmented};
+use crate::ui::{Segment, icon, kbd, label, mono, pane, segmented};
+use player::{Hear, ItemKey, Player};
 
 const CONTEXT: &str = "CutScreen";
-/// Words of context shown on each side of a finding.
+/// Words of context shown on each side of an item.
 const CONTEXT_WORDS: usize = 8;
-/// Bars of the waveform under a finding.
-const BARS: usize = 90;
-/// Media shown on each side of a finding in the waveform.
-const WAVE_MARGIN: Micros = Micros(2_000_000);
+/// Bars of the waveform under an item.
+const BARS: usize = 120;
 
-actions!(cut, [KeepItem, CutItem, NextItem, PreviousItem]);
+actions!(
+    cut,
+    [
+        KeepItem,
+        CutItem,
+        NextItem,
+        PreviousItem,
+        PlayAround,
+        PlayCut,
+        Continue
+    ]
+);
 
 pub fn bind_keys(cx: &mut App) {
     let context = Some(CONTEXT);
@@ -43,13 +62,16 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("c", CutItem, context),
         KeyBinding::new("down", NextItem, context),
         KeyBinding::new("up", PreviousItem, context),
+        KeyBinding::new("space", PlayAround, context),
+        KeyBinding::new("shift-space", PlayCut, context),
+        KeyBinding::new("cmd-enter", Continue, context),
     ]);
 }
 
 /// Asks the studio to show the Edit screen.
 pub struct ContinueToEdit;
 
-/// A finding answered on this screen, shown dimmed in the list.
+/// An item answered on this screen, shown dimmed in the list.
 struct Answered {
     review: Review,
     take: Id,
@@ -58,7 +80,7 @@ struct Answered {
 
 /// One row of the list: an open item from the cut, or one answered here.
 enum Row {
-    Open(TakeAt, Review),
+    Open(usize),
     Answered(usize),
 }
 
@@ -66,13 +88,24 @@ pub struct CutScreen {
     folder: Entity<VideoFolder>,
     /// The open item on show, by its place in the cut.
     current: Option<(TakeAt, TimeRange)>,
+    /// Where the item on show sat in the queue, so the next one takes its place when it goes.
+    index: usize,
     answered: Vec<Answered>,
     speech: HashMap<Id, Option<Speech>>,
+    peaks: HashMap<Id, Option<Arc<Peaks>>>,
+    player: Player,
+    /// Play the next item shown this way: set by answers and moves, not by opening the screen.
+    autoplay: Option<Hear>,
+    /// What the last rule switch or pacing change did to the cut.
+    note: Option<String>,
     error: Option<String>,
     focus: FocusHandle,
+    list: ScrollHandle,
+    /// The item the list last scrolled to.
+    scrolled: Option<ItemKey>,
+    /// Pauses playback when another screen takes the focus.
+    _blur: Option<Subscription>,
 }
-
-use gpui::Entity;
 
 impl EventEmitter<ContinueToEdit> for CutScreen {}
 
@@ -84,14 +117,28 @@ impl Focusable for CutScreen {
 
 impl CutScreen {
     pub fn new(folder: Entity<VideoFolder>, cx: &mut Context<Self>) -> Self {
-        cx.observe(&folder, |_, _, cx| cx.notify()).detach();
+        cx.observe(&folder, |this, _, cx| {
+            this.bring_back_undone(cx);
+            // The clip of the item on show may have changed with the cut.
+            this.player.unload();
+            cx.notify();
+        })
+        .detach();
         Self {
             folder,
             current: None,
+            index: 0,
             answered: Vec::new(),
             speech: HashMap::new(),
+            peaks: HashMap::new(),
+            player: Player::default(),
+            autoplay: None,
+            note: None,
             error: None,
             focus: cx.focus_handle(),
+            list: ScrollHandle::new(),
+            scrolled: None,
+            _blur: None,
         }
     }
 
@@ -99,11 +146,41 @@ impl CutScreen {
         self.folder.read(cx).shown.cut.review_queue().collect()
     }
 
-    /// The open item on show: the one picked, else the first.
+    /// The open item on show: the one picked, else the one that took its place.
     fn shown(&self, queue: &[(TakeAt, Review)]) -> Option<usize> {
+        let last = queue.len().checked_sub(1)?;
         self.current
             .and_then(|(at, range)| queue.iter().position(|(a, r)| *a == at && r.range == range))
-            .or((!queue.is_empty()).then_some(0))
+            .or(Some(self.index.min(last)))
+    }
+
+    fn show(&mut self, queue: &[(TakeAt, Review)], index: usize, play: bool) {
+        if let Some((at, review)) = queue.get(index) {
+            self.current = Some((*at, review.range));
+            self.index = index;
+            self.autoplay = play.then_some(Hear::Around);
+        }
+    }
+
+    /// Drops answers that ⌘Z took back from the dimmed list and shows the newest of their items.
+    fn bring_back_undone(&mut self, cx: &mut Context<Self>) {
+        let cut = &self.folder.read(cx).shown.cut;
+        let queue: Vec<(TakeAt, Review)> = cut.review_queue().collect();
+        let mut back = None;
+        self.answered.retain(|answered| {
+            let open = queue.iter().find(|(at, review)| {
+                review.range == answered.review.range
+                    && review.by == answered.review.by
+                    && cut.chapters[at.chapter].takes[at.take].take == answered.take
+            });
+            if let Some((at, review)) = open {
+                back = Some((*at, review.range));
+            }
+            open.is_none()
+        });
+        if let Some(back) = back {
+            self.current = Some(back);
+        }
     }
 
     fn decide(&mut self, decision: Decision, cx: &mut Context<Self>) {
@@ -113,7 +190,7 @@ impl CutScreen {
         };
         let (at, review) = queue[index];
         let result = self.folder.update(cx, |folder, cx| {
-            let take = folder.project.cut.chapters[at.chapter].takes[at.take]
+            let take = folder.shown.cut.chapters[at.chapter].takes[at.take]
                 .take
                 .clone();
             folder.decide(at, review.range, decision)?;
@@ -122,16 +199,19 @@ impl CutScreen {
         });
         match result {
             Ok(take) => {
+                self.error = None;
                 self.answered.push(Answered {
                     review,
                     take,
                     decision,
                 });
-                // The next open item takes the place of the answered one.
+                // The next open item takes the place of the answered one, and plays.
                 let queue = self.queue(cx);
-                self.current = queue
-                    .get(index.min(queue.len().saturating_sub(1)))
-                    .map(|(at, r)| (*at, r.range));
+                self.current = None;
+                self.index = index;
+                if let Some(next) = self.shown(&queue) {
+                    self.show(&queue, next, true);
+                }
             }
             Err(error) => self.error = Some(error),
         }
@@ -143,30 +223,135 @@ impl CutScreen {
         let Some(index) = self.shown(&queue) else {
             return;
         };
-        let next = (index as isize + by).clamp(0, queue.len() as isize - 1) as usize;
-        self.current = Some((queue[next].0, queue[next].1.range));
+        let next = index.saturating_add_signed(by).min(queue.len() - 1);
+        if next != index {
+            self.show(&queue, next, true);
+            cx.notify();
+        }
+    }
+
+    /// Plays the item on show as `hear`, or pauses it when it plays that way.
+    fn play(&mut self, hear: Hear, cx: &mut Context<Self>) {
+        let queue = self.queue(cx);
+        let Some(index) = self.shown(&queue) else {
+            return;
+        };
+        if self.player.is_playing() && self.player.loaded().is_some_and(|(_, h)| h == hear) {
+            self.player.pause();
+        } else {
+            let (at, review) = queue[index];
+            match self
+                .player
+                .load(self.folder.read(cx), at, review.range, hear)
+            {
+                Ok(()) => self.player.play(),
+                Err(error) => self.error = Some(error),
+            }
+        }
         cx.notify();
     }
 
+    fn continue_to_edit(&mut self, cx: &mut Context<Self>) {
+        self.player.pause();
+        cx.emit(ContinueToEdit);
+    }
+
+    /// Runs a rule switch or pacing change and notes what it did to the length of the cut.
     fn change(
         &mut self,
+        what: String,
         cx: &mut Context<Self>,
         edit: impl FnOnce(&mut VideoFolder) -> Result<(), String>,
     ) {
+        let before = kept_length(&self.folder.read(cx).shown.cut);
         let result = self.folder.update(cx, |folder, cx| {
             let result = edit(folder);
             cx.notify();
             result
         });
+        let after = kept_length(&self.folder.read(cx).shown.cut);
+        self.note = result.is_ok().then(|| match after.cmp(&before) {
+            Ordering::Less => format!(
+                "{what}: the cut is {} shorter.",
+                length(Micros(before.0 - after.0))
+            ),
+            Ordering::Greater => format!(
+                "{what}: the cut is {} longer.",
+                length(Micros(after.0 - before.0))
+            ),
+            Ordering::Equal => format!("{what}: the length did not change."),
+        });
         self.error = result.err();
         cx.notify();
     }
 
-    fn speech(&mut self, take: &Id, dir: &std::path::Path) -> Option<&Speech> {
+    fn speech(&mut self, take: &Id, cx: &App) -> Option<&Speech> {
+        let dir = &self.folder.read(cx).dir;
         self.speech
             .entry(take.clone())
             .or_insert_with(|| cache::read_speech(dir, take).ok().flatten())
             .as_ref()
+    }
+
+    /// Reads the peaks of `take`'s mic on a background thread, once.
+    fn load_peaks(&mut self, take: &Id, cx: &mut Context<Self>) {
+        if self.peaks.contains_key(take) {
+            return;
+        }
+        self.peaks.insert(take.clone(), None);
+        let folder = self.folder.read(cx);
+        let path = folder.media(take, "mic.mp4");
+        let length = model::blocks(&folder.project.cut)
+            .filter(|(_, edit)| edit.take == *take)
+            .filter_map(|(_, edit)| edit.ranges.last().map(|r| r.range().to()))
+            .max()
+            .unwrap_or_default();
+        if !path.exists() {
+            return;
+        }
+        let take = take.clone();
+        cx.spawn(async move |this, cx| {
+            let peaks = cx
+                .background_spawn(async move { Peaks::read(&path, length) })
+                .await;
+            this.update(cx, |this, cx| {
+                if let Ok(peaks) = peaks {
+                    this.peaks.insert(take, Some(Arc::new(peaks)));
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Loads the item on show into the player, and plays it when an answer or a move asked.
+    fn sync_player(&mut self, queue: &[(TakeAt, Review)], cx: &mut Context<Self>) {
+        let Some(index) = self.shown(queue) else {
+            self.autoplay = None;
+            self.player.unload();
+            return;
+        };
+        let (at, review) = queue[index];
+        let take = self.folder.read(cx).shown.cut.chapters[at.chapter].takes[at.take]
+            .take
+            .clone();
+        self.load_peaks(&take, cx);
+        let key = (take, review.range);
+        let loaded = self.player.loaded().map(|(key, _)| key.clone());
+        if loaded.as_ref() == Some(&key) && self.autoplay.is_none() {
+            return;
+        }
+        let play = self.autoplay.take();
+        let hear = play.unwrap_or(Hear::Around);
+        match self
+            .player
+            .load(self.folder.read(cx), at, review.range, hear)
+        {
+            Ok(()) if play.is_some() => self.player.play(),
+            Ok(()) => {}
+            Err(error) => self.error = Some(error),
+        }
     }
 }
 
@@ -182,47 +367,73 @@ fn rule_name(rule: RuleKind) -> &'static str {
     }
 }
 
-/// What a finding of the rule is called, why the rule asks, and the reason in a sentence.
-fn finding_text(rule: RuleKind, length: Micros) -> (&'static str, &'static str, String) {
-    let seconds = model::seconds(length);
+/// What an item of the rule is called.
+fn kind_name(rule: RuleKind) -> &'static str {
     match rule {
-        RuleKind::Silence => (
-            "Silence",
-            "A sound without words",
-            format!("A {seconds} gap between sentences holds a sound the transcript has no word for. It may be a breath, or a word the recognizer missed."),
+        RuleKind::Silence => "Silence",
+        RuleKind::Retake => "Inline retake",
+        RuleKind::Misspoken => "Misspoken word",
+        RuleKind::Pause => "Long pause",
+        RuleKind::Filler => "Filler",
+        RuleKind::IdleScreen => "Idle screen",
+    }
+}
+
+/// Why the rule asks, in a sentence. `murmur` says whether the mic hears speech in a silence,
+/// `None` when the take has no speech analysis.
+fn reason(rule: RuleKind, length: Micros, murmur: Option<bool>) -> String {
+    let seconds = self::length(length);
+    match rule {
+        RuleKind::Silence => match murmur {
+            Some(true) => format!(
+                "{seconds} without words, but the mic hears something. It may be a breath, or a word the recognizer missed."
+            ),
+            Some(false) => format!(
+                "{seconds} without words or voice. The rules were not sure enough to cut it on their own."
+            ),
+            None => format!(
+                "{seconds} without words. It may hold a breath, or a word the recognizer missed."
+            ),
+        },
+        RuleKind::Retake => "You said this more than once. The later version is usually the clean one, so the earlier one would go.".to_owned(),
+        RuleKind::Misspoken => {
+            "A correction follows these words. Cutting them keeps only what you meant to say.".to_owned()
+        }
+        RuleKind::Pause => format!(
+            "A {seconds} pause in the middle of a sentence. It may be a dramatic beat, so it was not cut on its own."
         ),
-        RuleKind::Retake => (
-            "Inline retake",
-            "Unsure which take is better",
-            "You said this more than once. The later version is usually the clean one, so the earlier one would go.".to_owned(),
-        ),
-        RuleKind::Misspoken => (
-            "Misspoken word",
-            "You corrected yourself",
-            "A correction follows these words. Cutting them keeps only what you meant to say.".to_owned(),
-        ),
-        RuleKind::Pause => (
-            "Long pause",
-            "Could be on purpose",
-            format!("A {seconds} pause in the middle of a sentence. It may be a dramatic beat, so it was not cut automatically."),
-        ),
-        RuleKind::Filler => (
-            "Filler",
-            "Might be your voice",
-            "Words like this often carry emphasis. Keep it a few more times and the rule stops asking.".to_owned(),
-        ),
-        RuleKind::IdleScreen => (
-            "Idle screen",
-            "Screen idle while you talk",
-            format!("The screen does not change for {seconds} while you talk. A jump cut or b-roll could cover it."),
+        RuleKind::Filler => "Words like this often carry emphasis. Keep the same words three times and the rule stops asking.".to_owned(),
+        RuleKind::IdleScreen => format!(
+            "The screen does not change for {seconds} while you talk. A jump cut or b-roll could cover it."
         ),
     }
 }
 
-/// `M:SS` of a length, for the rule counts.
+/// `M:SS` of a length.
 fn minutes(t: Micros) -> String {
     let seconds = t.0 / 1_000_000;
     format!("{}:{:02}", seconds / 60, seconds % 60)
+}
+
+/// A length as "2.1 s" under a minute, "1:48" from there.
+fn length(t: Micros) -> String {
+    if t.0 < 60_000_000 {
+        model::seconds(t)
+    } else {
+        minutes(t)
+    }
+}
+
+/// The words whose middle lies in `range`, and the index of the first word after it.
+fn words_in(words: &[Word], range: TimeRange) -> (std::ops::Range<usize>, Vec<&str>) {
+    let middle = |w: &Word| Micros((w.range.from().0 + w.range.to().0) / 2);
+    let before = words.partition_point(|w| middle(w) < range.from());
+    let after = words.partition_point(|w| middle(w) < range.to());
+    let inside = words[before..after]
+        .iter()
+        .map(|w| w.text.as_str())
+        .collect();
+    (before..after, inside)
 }
 
 /// The edited time where `t` of the block at `at` plays, or where the material after it starts.
@@ -269,6 +480,27 @@ fn timecode(t: Micros) -> String {
     model::timecode(t.0 * u64::from(FPS) / 1_000_000)
 }
 
+/// What a rule did, for its row: "12 cuts, 2:41 · 3 to review", or "Off".
+fn rule_detail(count: &RuleCount, on: bool) -> String {
+    let mut parts = Vec::new();
+    if count.removed > 0 {
+        let cuts = if count.removed == 1 { "cut" } else { "cuts" };
+        parts.push(format!(
+            "{} {cuts}, {}",
+            count.removed,
+            length(count.removed_time)
+        ));
+    }
+    if count.queued > 0 {
+        parts.push(format!("{} to review", count.queued));
+    }
+    match (on, parts.is_empty()) {
+        (false, true) => "Off".to_owned(),
+        (true, true) => "Nothing found".to_owned(),
+        _ => parts.join(" · "),
+    }
+}
+
 /// A small on/off switch, lime when on.
 fn switch(on: bool) -> Div {
     div()
@@ -288,59 +520,68 @@ fn switch(on: bool) -> Div {
         )
 }
 
+/// A 42 px button with an optional icon and its key hint, lime when `accent`.
 fn button(
     id: &'static str,
+    icon_name: Option<&'static str>,
     text: impl Into<SharedString>,
     keys: &'static str,
     accent: bool,
 ) -> gpui::Stateful<Div> {
+    let color: Hsla = if accent {
+        ON_ACCENT.into()
+    } else {
+        TEXT.into()
+    };
     div()
         .id(id)
+        .flex_none()
         .h(px(42.))
-        .px(px(18.))
+        .px(px(16.))
         .flex()
         .items_center()
-        .gap(px(10.))
+        .justify_center()
+        .gap(px(9.))
         .rounded(RADIUS_MD)
         .cursor_pointer()
+        .text_color(color)
         .font_weight(if accent {
             FontWeight::SEMIBOLD
         } else {
             FontWeight::MEDIUM
         })
-        .when(accent, |this| {
-            this.bg(ACCENT)
-                .text_color(ON_ACCENT)
-                .hover(|s| s.opacity(0.9))
-        })
-        .when(!accent, |this| {
-            this.bg(RAISED).text_color(TEXT).hover(|s| s.bg(FLOAT))
-        })
+        .when(accent, |this| this.bg(ACCENT).hover(|s| s.opacity(0.9)))
+        .when(!accent, |this| this.bg(RAISED).hover(|s| s.bg(FLOAT)))
+        .when_some(icon_name, |this, name| this.child(icon(name, ICON, color)))
         .child(text.into())
-        .child(kbd(keys))
+        .child(if accent {
+            kbd(keys)
+                .bg(Hsla::from(ON_ACCENT).opacity(0.14))
+                .text_color(ON_ACCENT)
+        } else {
+            kbd(keys)
+        })
 }
 
 impl CutScreen {
-    fn rules_pane(&self, counts: &[RuleCount], cx: &mut Context<Self>) -> Div {
+    fn rules_pane(&self, counts: &[RuleCount], cx: &mut Context<Self>) -> gpui::Stateful<Div> {
         let folder = self.folder.read(cx);
-        // A migrated video's cuts come from the style rules of its layers, which the rule
-        // editor (milestone 10 item 7) will change; until then the switches only show.
+        // A migrated video's cuts come from the style rules of its channel's format, which the
+        // rule editor (milestone 10 item 7) will change; until then the rules only show here.
         let editable = !folder.is_migrated();
         let format = &folder.project.format;
         let pacing = format.pacing;
+        let format_name = folder.project.video.format;
+        let mut untranscribed: Vec<String> = Vec::new();
+        for (_, block) in model::blocks(&folder.project.cut) {
+            let take = block.take.to_string();
+            if !folder.transcripts.contains_key(&block.take) && !untranscribed.contains(&take) {
+                untranscribed.push(take);
+            }
+        }
         let rows = counts.iter().map(|count| {
             let rule = count.rule;
             let on = run::rule_on(format, rule);
-            let numbers = if count.queued > 0 {
-                format!(
-                    "{} · {} · {} to review",
-                    count.removed,
-                    minutes(count.removed_time),
-                    count.queued
-                )
-            } else {
-                format!("{} · {}", count.removed, minutes(count.removed_time))
-            };
             div()
                 .id(SharedString::from(format!("rule-{rule}")))
                 .flex()
@@ -349,21 +590,30 @@ impl CutScreen {
                 .px(px(12.))
                 .py(px(10.))
                 .rounded(RADIUS_MD)
-                .bg(RAISED)
+                .bg(CARD)
                 .child(
                     div()
                         .flex_1()
+                        .min_w_0()
                         .flex()
                         .flex_col()
                         .gap(px(2.))
                         .child(div().font_weight(FontWeight::MEDIUM).child(rule_name(rule)))
-                        .child(mono(numbers).text_size(TEXT_SM).text_color(MUTED)),
+                        .child(
+                            div()
+                                .text_size(TEXT_SM)
+                                .text_color(if editable && !on { FAINT } else { MUTED })
+                                .child(rule_detail(count, on || !editable)),
+                        ),
                 )
                 .when(editable, |this| {
                     this.cursor_pointer()
+                        .hover(|s| s.bg(RAISED))
                         .child(switch(on))
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.change(cx, |folder| run::set_rule(folder, rule, !on));
+                            let what =
+                                format!("{} {}", rule_name(rule), if on { "off" } else { "on" });
+                            this.change(what, cx, |folder| run::set_rule(folder, rule, !on));
                         }))
                 })
         });
@@ -377,17 +627,30 @@ impl CutScreen {
                 name,
                 pacing == value,
                 cx.listener(move |this, _, _, cx| {
-                    this.change(cx, |folder| run::set_pacing(folder, value));
+                    if pacing != value {
+                        this.change(format!("{name} pacing"), cx, |folder| {
+                            run::set_pacing(folder, value)
+                        });
+                    }
                 }),
             )
         };
+        let note = |text: String| {
+            div()
+                .text_size(TEXT_SM)
+                .line_height(px(19.))
+                .text_color(MUTED)
+                .child(text)
+        };
         pane()
+            .id("rules")
             .w(px(316.))
             .flex_none()
             .p(px(14.))
             .flex()
             .flex_col()
             .gap(px(6.))
+            .overflow_y_scroll()
             .child(
                 div()
                     .flex()
@@ -405,47 +668,70 @@ impl CutScreen {
                     .child(
                         div()
                             .text_size(px(14.))
+                            .line_height(px(20.))
                             .text_color(MUTED)
-                            .child(if editable {
-                                "Applied when confident. The rest waits for you."
-                            } else {
-                                "From the format's style rules. The rest waits for you."
-                            }),
+                            .child("Applied when confident. The rest waits for you."),
                     ),
             )
             .children(rows)
-            .when(editable, |this| {
-                this.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(8.))
-                        .px(px(4.))
-                        .pt(px(14.))
-                        .child(label("Pacing"))
-                        .child(segmented(
-                            "pacing",
-                            WELL,
-                            vec![
-                                segment("Loose", Pacing::Loose, cx),
-                                segment("Natural", Pacing::Natural, cx),
-                                segment("Tight", Pacing::Tight, cx),
-                            ],
-                        ))
-                        .child(
-                            div()
-                                .text_size(TEXT_SM)
-                                .text_color(MUTED)
-                                .child(pacing_note),
-                        ),
-                )
+            .map(|this| {
+                if editable {
+                    this.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(8.))
+                            .px(px(4.))
+                            .pt(px(14.))
+                            .child(label("Pacing"))
+                            .child(segmented(
+                                "pacing",
+                                WELL,
+                                vec![
+                                    segment("Loose", Pacing::Loose, cx),
+                                    segment("Natural", Pacing::Natural, cx),
+                                    segment("Tight", Pacing::Tight, cx),
+                                ],
+                            ))
+                            .child(note(pacing_note.to_owned())),
+                    )
+                } else {
+                    let format_file = format!("formats/{format_name}.kdl");
+                    this.child(
+                        div()
+                            .mt(px(8.))
+                            .p(px(12.))
+                            .rounded(RADIUS_MD)
+                            .bg(WELL)
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.))
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child("Set by the channel"),
+                            )
+                            .child(note(format!(
+                                "This video follows the style rules of its channel's format, so the rules and the pacing change in {format_file}, for every video at once. Your answers here are saved for this video."
+                            ))),
+                    )
+                }
+            })
+            .when_some(self.note.clone(), |this, text| {
+                this.child(div().px(px(4.)).pt(px(6.)).child(note(text).text_color(BODY)))
+            })
+            .when(!untranscribed.is_empty(), |this| {
+                this.child(div().px(px(4.)).pt(px(6.)).child(note(format!(
+                    "No transcript for {}, so the rules skip it. Transcribe it with shot transcribe.",
+                    untranscribed.join(", ")
+                ))))
             })
     }
 
-    fn finding_pane(&mut self, queue: &[(TakeAt, Review)], cx: &mut Context<Self>) -> Div {
-        let folder = self.folder.read(cx);
-        let cut = folder.shown.cut.clone();
-        let dir = folder.dir.clone();
+    fn progress(&self, queue: &[(TakeAt, Review)], cx: &App) -> Div {
+        let cut = &self.folder.read(cx).shown.cut;
+        let answered = self.answered.len();
+        let total = answered + queue.len();
         let stat = |value: String, name: &'static str, color: Hsla| {
             div()
                 .flex()
@@ -459,73 +745,61 @@ impl CutScreen {
                 )
                 .child(label(name))
         };
-        let shown = self.shown(queue);
-        let stats = div()
-            .flex()
-            .items_end()
-            .gap(px(28.))
-            .child(stat(timecode(raw_length(&cut)), "Raw", TEXT.into()))
-            .child(stat(timecode(kept_length(&cut)), "Cut", ACCENT.into()))
-            .child(stat(queue.len().to_string(), "Need your call", TEXT.into()))
-            .child(
-                div()
-                    .ml_auto()
-                    .text_size(px(14.))
-                    .text_color(MUTED)
-                    .children(shown.map(|i| format!("{} of {}", i + 1, queue.len()))),
-            );
-        let body = pane()
-            .flex_1()
-            .min_w(px(520.))
-            .px(px(22.))
-            .py(px(20.))
+        div()
             .flex()
             .flex_col()
-            .gap(px(16.))
-            .child(stats);
-        let Some(index) = shown else {
-            return body.child(
+            .gap(px(12.))
+            .child(
                 div()
-                    .flex_1()
                     .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .gap(px(6.))
-                    .child(
+                    .items_end()
+                    .gap(px(28.))
+                    .child(stat(minutes(raw_length(cut)), "Raw", TEXT.into()))
+                    .child(stat(minutes(kept_length(cut)), "Cut", ACCENT.into()))
+                    .child(stat(queue.len().to_string(), "Need your call", TEXT.into()))
+                    .when(total > 0, |this| {
+                        this.child(
+                            div()
+                                .ml_auto()
+                                .text_size(px(14.))
+                                .text_color(MUTED)
+                                .child(format!("{answered} of {total} answered")),
+                        )
+                    }),
+            )
+            .when(total > 0, |this| {
+                this.child(
+                    div().h(px(4.)).rounded_full().bg(WELL).child(
                         div()
-                            .text_size(px(20.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child("Nothing needs your call"),
-                    )
-                    .child(div().text_color(MUTED).child(
-                        "Every confident cut is applied. Continue to edit when you are ready.",
-                    )),
-            );
-        };
+                            .h_full()
+                            .rounded_full()
+                            .bg(ACCENT)
+                            .w(relative(answered as f32 / total as f32)),
+                    ),
+                )
+            })
+    }
+
+    fn item(&mut self, queue: &[(TakeAt, Review)], index: usize, cx: &mut Context<Self>) -> Div {
         let (at, review) = queue[index];
-        let take = cut.chapters[at.chapter].takes[at.take].take.clone();
+        let folder = self.folder.read(cx);
+        let cut = &folder.shown.cut;
+        let block = &cut.chapters[at.chapter].takes[at.take];
+        let take = block.take.clone();
         let chapter = cut.chapters[at.chapter].title.clone();
-        let (kind, _, why) = finding_text(review.by, review.range.duration());
+        let at_text = timecode(edited_time(cut, at, review.range.from()));
         let words = folder
             .transcripts
             .get(&take)
             .map(|t| t.words().to_vec())
             .unwrap_or_default();
-        let middle = |w: &shot_core::Word| Micros((w.range.from().0 + w.range.to().0) / 2);
-        let inside: Vec<&str> = words
-            .iter()
-            .filter(|w| review.range.from() <= middle(w) && middle(w) < review.range.to())
-            .map(|w| w.text.as_str())
-            .collect();
-        let before = words.partition_point(|w| middle(w) < review.range.from());
-        let after = words.partition_point(|w| middle(w) < review.range.to());
-        // Context is what plays around the finding, so removed words stay out of it.
-        let block = &cut.chapters[at.chapter].takes[at.take];
-        let plays = |w: &&shot_core::Word| {
-            TimeRange::new(middle(w), Micros(middle(w).0 + 1)).is_some_and(|t| block.keeps(t))
+        let (inside, inside_text) = words_in(&words, review.range);
+        // Context is what plays around the item, so removed words stay out of it.
+        let plays = |w: &&Word| {
+            let middle = Micros((w.range.from().0 + w.range.to().0) / 2);
+            TimeRange::new(middle, Micros(middle.0 + 1)).is_some_and(|t| block.keeps(t))
         };
-        let mut pre: Vec<&str> = words[..before]
+        let mut pre: Vec<&str> = words[..inside.start]
             .iter()
             .rev()
             .filter(plays)
@@ -533,162 +807,299 @@ impl CutScreen {
             .map(|w| w.text.as_str())
             .collect();
         pre.reverse();
-        let post: Vec<&str> = words[after..]
+        let post: Vec<&str> = words[inside.end..]
             .iter()
             .filter(plays)
             .take(CONTEXT_WORDS)
             .map(|w| w.text.as_str())
             .collect();
-        let cut_text = if inside.is_empty() {
-            match review.by {
-                RuleKind::IdleScreen => {
-                    format!("[screen idle {}]", model::seconds(review.range.duration()))
-                }
-                _ => format!("[pause {}]", model::seconds(review.range.duration())),
-            }
-        } else {
-            inside.join(" ")
+        let duration = length(review.range.duration());
+        let cut_text = match (inside_text.is_empty(), review.by) {
+            (false, _) => inside_text.join(" "),
+            (true, RuleKind::IdleScreen) => format!("[screen idle {duration}]"),
+            (true, RuleKind::Silence) => format!("[silence {duration}]"),
+            (true, _) => format!("[pause {duration}]"),
         };
-        let length = model::seconds(review.range.duration());
+        let (pre, post) = (pre.join(" "), post.join(" "));
+        let murmur = (review.by == RuleKind::Silence)
+            .then(|| {
+                self.speech(&take, cx)
+                    .map(|s| s.ranges.iter().any(|r| r.overlaps(review.range)))
+            })
+            .flatten();
+        let why = reason(review.by, review.range.duration(), murmur);
 
-        let window = TimeRange::new(
-            Micros(review.range.from().0.saturating_sub(WAVE_MARGIN.0)),
-            Micros(review.range.to().0 + WAVE_MARGIN.0),
-        )
-        .expect("the window holds the finding");
-        let speech = self.speech(&take, &dir).cloned();
-        let bars: Vec<f32> = (0..BARS)
-            .map(|i| {
-                let step = window.duration().0 / BARS as u64;
-                let from = Micros(window.from().0 + i as u64 * step);
-                let level = speech
-                    .as_ref()
-                    .and_then(|s| s.level(TimeRange::new(from, Micros(from.0 + step.max(1)))?));
-                level.map_or(0.0, |db| ((db + 60.0) / 60.0).clamp(0.0, 1.0))
+        let peaks = self.peaks.get(&take).cloned().flatten();
+        let bars: Vec<f32> = self
+            .player
+            .columns(BARS)
+            .into_iter()
+            .map(|column| match (column, &peaks) {
+                (Some((from, to)), Some(peaks)) => peaks.over(from, to).clamp(0.0, 1.0),
+                _ => 0.0,
             })
             .collect();
-        let region_from =
-            (review.range.from().0 - window.from().0) as f32 / window.duration().0 as f32;
-        let region_width = review.range.duration().0 as f32 / window.duration().0 as f32;
+        let (playhead, region) = self.player.marks().unwrap_or((0.0, 0.0..0.0));
+        let playing = self.player.is_playing();
+        let hearing = self.player.loaded().map(|(_, hear)| hear);
         let wave = div()
             .relative()
-            .h(px(84.))
+            .h(px(56.))
             .flex()
             .items_center()
             .gap(px(2.))
             .children(
                 bars.into_iter()
-                    .map(|h| div().flex_1().rounded(px(1.)).bg(WAVE).h(px(6. + h * 72.))),
+                    .map(|h| div().flex_1().rounded(px(1.)).bg(WAVE).h(px(3. + h * 53.))),
             )
             .child(
                 div()
                     .absolute()
                     .top(px(-6.))
                     .bottom(px(-6.))
-                    .left(relative(region_from))
-                    .w(relative(region_width))
+                    .left(relative(region.start))
+                    .w(relative(region.end - region.start))
                     .rounded(RADIUS_SM)
                     .bg(CUT_TINT)
                     .border_1()
                     .border_color(Hsla::from(CUT).opacity(0.45)),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top(px(-8.))
+                    .bottom(px(-8.))
+                    .left(relative(playhead))
+                    .w(px(2.))
+                    .rounded(px(1.))
+                    .bg(ACCENT),
             );
-        let at_text = timecode(edited_time(&cut, at, review.range.from()));
-        body.child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(6.))
-                .child(
-                    div()
-                        .flex()
-                        .items_baseline()
-                        .gap(px(12.))
-                        .child(
-                            div()
-                                .text_size(px(20.))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child(kind),
-                        )
-                        .child(mono(at_text.clone()).text_color(MUTED))
-                        .child(div().text_color(MUTED).child(chapter)),
-                )
-                .child(div().text_color(BODY).line_height(px(23.)).child(why)),
-        )
-        .child(
-            div()
-                .px(px(20.))
-                .py(px(18.))
-                .rounded(RADIUS_LG)
-                .bg(RAISED)
-                .text_size(px(19.))
-                .line_height(px(31.))
-                .flex()
-                .flex_wrap()
-                .gap_x(px(6.))
-                .when(!pre.is_empty(), |this| {
-                    this.child(div().text_color(MUTED).child(pre.join(" ")))
-                })
-                .child(
-                    div()
-                        .px(px(4.))
-                        .rounded(px(5.))
-                        .bg(CUT_TINT)
-                        .text_color(CUT_TEXT)
-                        .line_through()
-                        .text_decoration_color(CUT)
-                        .child(cut_text),
-                )
-                .when(!post.is_empty(), |this| {
-                    this.child(div().text_color(STRONG).child(post.join(" ")))
-                }),
-        )
-        .child(
-            div()
-                .px(px(18.))
-                .py(px(16.))
-                .rounded(RADIUS_LG)
-                .bg(WELL)
-                .flex()
-                .flex_col()
-                .gap(px(10.))
-                .child(wave)
-                .child(
-                    div()
-                        .flex()
-                        .justify_between()
-                        .text_size(TEXT_SM)
-                        .text_color(MUTED)
-                        .child(mono(at_text))
-                        .child(mono(length.clone())),
-                ),
-        )
-        .child(
-            div()
-                .flex()
-                .justify_end()
-                .gap(px(10.))
-                .child(
-                    button("keep", "Keep", "K", false)
-                        .on_click(cx.listener(|this, _, _, cx| this.decide(Decision::Keep, cx))),
-                )
-                .child(
-                    button("cut", format!("Cut {length}"), "C", true)
-                        .on_click(cx.listener(|this, _, _, cx| this.decide(Decision::Cut, cx))),
-                ),
-        )
+        let frame = self.player.frame().map(|frame| frame.buffer.clone());
+        let play_button = |hear: Hear, id: &'static str, name: &'static str, keys| {
+            let on = playing && hearing == Some(hear);
+            button(
+                id,
+                Some(if on { "pause" } else { "play" }),
+                if on { "Pause" } else { name },
+                keys,
+                false,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| this.play(hear, cx)))
+        };
+
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .gap(px(14.))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .flex()
+                            .items_baseline()
+                            .gap(px(12.))
+                            .child(
+                                div()
+                                    .text_size(px(20.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(kind_name(review.by)),
+                            )
+                            .child(mono(at_text.clone()).text_color(MUTED))
+                            .child(div().min_w_0().truncate().text_color(MUTED).child(chapter)),
+                    )
+                    .child(div().text_color(BODY).line_height(px(23.)).child(why)),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .px(px(20.))
+                    .py(px(14.))
+                    .rounded(RADIUS_LG)
+                    .bg(RAISED)
+                    .text_size(px(19.))
+                    .line_height(px(30.))
+                    .flex()
+                    .flex_wrap()
+                    .gap_x(px(6.))
+                    .when(!pre.is_empty(), |this| {
+                        this.child(div().text_color(MUTED).child(pre))
+                    })
+                    .child(
+                        div()
+                            .px(px(4.))
+                            .rounded(px(5.))
+                            .bg(CUT_TINT)
+                            .text_color(CUT_TEXT)
+                            .line_through()
+                            .text_decoration_color(CUT)
+                            .child(cut_text),
+                    )
+                    .when(!post.is_empty(), |this| {
+                        this.child(div().text_color(STRONG).child(post))
+                    }),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h(px(120.))
+                    .rounded(RADIUS_LG)
+                    .overflow_hidden()
+                    .bg(gpui::black())
+                    .children(frame.map(|f| surface(f).size_full().object_fit(ObjectFit::Contain))),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .px(px(16.))
+                    .pt(px(14.))
+                    .pb(px(10.))
+                    .rounded(RADIUS_LG)
+                    .bg(WELL)
+                    .flex()
+                    .flex_col()
+                    .gap(px(10.))
+                    .child(wave)
+                    .child(
+                        div()
+                            .flex()
+                            .justify_between()
+                            .text_size(TEXT_SM)
+                            .text_color(MUTED)
+                            .child(mono(at_text))
+                            .child(match hearing {
+                                Some(Hear::Cut) => "As cut, with 2 s before and after",
+                                _ => "As recorded, with 2 s before and after",
+                            })
+                            .child(mono(duration.clone())),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(play_button(
+                        Hear::Around,
+                        "play-around",
+                        "Play around it",
+                        "Space",
+                    ))
+                    .child(play_button(Hear::Cut, "play-cut", "Play as cut", "⇧Space"))
+                    .child(div().flex_1())
+                    .child(
+                        button("keep", None, "Keep", "K", false).on_click(
+                            cx.listener(|this, _, _, cx| this.decide(Decision::Keep, cx)),
+                        ),
+                    )
+                    .child(
+                        button("cut", None, format!("Cut {duration}"), "C", true)
+                            .on_click(cx.listener(|this, _, _, cx| this.decide(Decision::Cut, cx))),
+                    ),
+            )
     }
 
-    fn queue_pane(&self, queue: &[(TakeAt, Review)], cx: &mut Context<Self>) -> Div {
+    /// The middle when nothing waits: what happened, and the way on to Edit.
+    fn done(&self, cx: &mut Context<Self>) -> Div {
+        let folder = self.folder.read(cx);
+        let cut = &folder.shown.cut;
+        let kept = self
+            .answered
+            .iter()
+            .filter(|a| a.decision == Decision::Keep)
+            .count();
+        let cuts = self.answered.len() - kept;
+        let counts = autocut::rule_counts(cut);
+        let removed: usize = counts.iter().map(|c| c.removed).sum();
+        let removed_time = Micros(counts.iter().map(|c| c.removed_time.0).sum());
+        let (title, text) = if cut.chapters.is_empty() {
+            (
+                "Nothing recorded yet",
+                "Record a take, and the rules make a rough cut of it here.".to_owned(),
+            )
+        } else if !self.answered.is_empty() {
+            (
+                "All answered",
+                format!(
+                    "You kept {kept} and cut {cuts}. The cut runs {}.",
+                    minutes(kept_length(cut))
+                ),
+            )
+        } else if removed == 0 {
+            (
+                "Nothing needs your call",
+                "The rules found nothing to cut.".to_owned(),
+            )
+        } else {
+            (
+                "Nothing needs your call",
+                format!(
+                    "The rules cut {removed} places, {} in all, and were sure about each. Switch a rule off to give its cuts back.",
+                    length(removed_time)
+                ),
+            )
+        };
+        div()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(8.))
+            .child(
+                div()
+                    .size(px(44.))
+                    .mb(px(6.))
+                    .rounded_full()
+                    .bg(SELECTION)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(icon("check", px(22.), ACCENT)),
+            )
+            .child(
+                div()
+                    .text_size(px(20.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(title),
+            )
+            .child(
+                div()
+                    .max_w(px(460.))
+                    .text_center()
+                    .line_height(px(22.))
+                    .text_color(BODY)
+                    .child(text),
+            )
+            .child(
+                div().pt(px(14.)).child(
+                    button(
+                        "done-continue",
+                        Some("edit"),
+                        "Continue to edit",
+                        "⌘↩",
+                        true,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.continue_to_edit(cx))),
+                ),
+            )
+    }
+
+    fn list_pane(&mut self, queue: &[(TakeAt, Review)], cx: &mut Context<Self>) -> Div {
         let folder = self.folder.read(cx);
         let cut = &folder.shown.cut;
         let shown = self.shown(queue);
+        let take_of = |at: TakeAt| &cut.chapters[at.chapter].takes[at.take].take;
         let mut rows: Vec<(Row, Micros)> = queue
             .iter()
-            .map(|(at, review)| {
-                (
-                    Row::Open(*at, *review),
-                    edited_time(cut, *at, review.range.from()),
-                )
+            .enumerate()
+            .map(|(index, (at, review))| {
+                (Row::Open(index), edited_time(cut, *at, review.range.from()))
             })
             .collect();
         for (i, answered) in self.answered.iter().enumerate() {
@@ -709,75 +1120,114 @@ impl CutScreen {
             rows.push((Row::Answered(i), time));
         }
         rows.sort_by_key(|(_, t)| *t);
-        let items = rows.into_iter().enumerate().map(|(n, (row, time))| {
-            let (review, status, on, open_index) = match row {
-                Row::Open(at, review) => {
-                    let index = queue
-                        .iter()
-                        .position(|(a, r)| *a == at && r.range == review.range);
-                    (
-                        review,
-                        model::seconds(review.range.duration()),
-                        index == shown,
-                        index,
+        // The words cut, or for a gap the words it follows.
+        let detail = |take: &Id, review: &Review| {
+            let words = folder.transcripts.get(take).map_or(&[][..], |t| t.words());
+            let (inside, text) = words_in(words, review.range);
+            let before = &words[inside.start.saturating_sub(3)..inside.start];
+            match (text.is_empty(), before.is_empty()) {
+                (false, _) => format!("\"{}\"", text.join(" ")),
+                (true, true) => "At the start of the take".to_owned(),
+                (true, false) => {
+                    let before: Vec<&str> = before.iter().map(|w| w.text.as_str()).collect();
+                    format!("After \"{}\"", before.join(" "))
+                }
+            }
+        };
+        let mut on_row = None;
+        let items: Vec<_> = rows
+            .into_iter()
+            .enumerate()
+            .map(|(n, (row, time))| {
+                let (take, review, status, open) = match row {
+                    Row::Open(index) => {
+                        let (at, review) = queue[index];
+                        if Some(index) == shown {
+                            on_row = Some((n, (take_of(at).clone(), review.range)));
+                        }
+                        (
+                            take_of(at),
+                            review,
+                            length(review.range.duration()),
+                            Some(index),
+                        )
+                    }
+                    Row::Answered(i) => {
+                        let answered = &self.answered[i];
+                        let status = match answered.decision {
+                            Decision::Keep => "Kept",
+                            Decision::Cut => "Cut",
+                        };
+                        (&answered.take, answered.review, status.to_owned(), None)
+                    }
+                };
+                let on = open.is_some() && open == shown;
+                div()
+                    .id(("item", n))
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .px(px(12.))
+                    .py(px(10.))
+                    .rounded(RADIUS_MD)
+                    .when(on, |this| this.bg(FLOAT))
+                    .when(open.is_none(), |this| this.opacity(0.5))
+                    .when(open.is_some() && !on, |this| {
+                        this.cursor_pointer().hover(|s| s.bg(RAISED))
+                    })
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(kind_name(review.by)),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(TEXT_SM)
+                                    .text_color(MUTED)
+                                    .child(detail(take, &review)),
+                            ),
                     )
-                }
-                Row::Answered(i) => {
-                    let answered = &self.answered[i];
-                    let status = match answered.decision {
-                        Decision::Keep => "Kept",
-                        Decision::Cut => "Cut",
-                    };
-                    (answered.review, status.to_owned(), false, None)
-                }
-            };
-            let (kind, source, _) = finding_text(review.by, review.range.duration());
-            let answered = open_index.is_none();
-            div()
-                .id(("finding", n))
-                .flex()
-                .items_center()
-                .gap(px(10.))
-                .px(px(12.))
-                .py(px(10.))
-                .rounded(RADIUS_MD)
-                .when(on, |this| this.bg(RAISED))
-                .when(answered, |this| this.opacity(0.5))
-                .when(!answered, |this| {
-                    this.cursor_pointer().hover(|s| s.bg(RAISED))
-                })
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap(px(2.))
-                        .child(div().font_weight(FontWeight::MEDIUM).child(kind))
-                        .child(div().text_size(TEXT_SM).text_color(MUTED).child(source)),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .items_end()
-                        .gap(px(2.))
-                        .child(mono(timecode(time)).text_size(px(14.)))
-                        .child(
-                            div()
-                                .text_size(TEXT_SM)
-                                .text_color(if answered { FAINT } else { BODY })
-                                .child(status),
-                        ),
-                )
-                .when_some(open_index, |this, index| {
-                    let (at, review) = queue[index];
-                    this.on_click(cx.listener(move |this, _, _, cx| {
-                        this.current = Some((at, review.range));
-                        cx.notify();
-                    }))
-                })
-        });
+                    .child(
+                        div()
+                            .flex_none()
+                            .flex()
+                            .flex_col()
+                            .items_end()
+                            .gap(px(2.))
+                            .child(mono(timecode(time)).text_size(px(14.)))
+                            .child(
+                                div()
+                                    .text_size(TEXT_SM)
+                                    .text_color(if open.is_some() { BODY } else { FAINT })
+                                    .child(status),
+                            ),
+                    )
+                    .when_some(open, |this, index| {
+                        let queue = queue.to_vec();
+                        this.on_click(cx.listener(move |this, _, _, cx| {
+                            this.show(&queue, index, true);
+                            cx.notify();
+                        }))
+                    })
+            })
+            .collect();
+        // Keep the item on show in view as answers and moves change it.
+        if let Some((n, key)) = on_row
+            && self.scrolled.as_ref() != Some(&key)
+        {
+            self.list.scroll_to_item(n);
+            self.scrolled = Some(key);
+        }
+        let empty = items.is_empty();
+        let open = queue.len();
         pane()
             .w(px(330.))
             .flex_none()
@@ -788,52 +1238,73 @@ impl CutScreen {
             .child(
                 div()
                     .flex()
+                    .items_center()
                     .justify_between()
                     .px(px(12.))
                     .pt(px(4.))
                     .pb(px(8.))
                     .child(label("Needs your call"))
-                    .child(label("↑ ↓")),
+                    .when(open > 1, |this| {
+                        this.child(div().flex().gap(px(4.)).child(kbd("↑")).child(kbd("↓")))
+                    }),
             )
             .child(
                 div()
-                    .id("findings")
+                    .id("items")
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
+                    .track_scroll(&self.list)
                     .flex()
                     .flex_col()
                     .gap(px(2.))
-                    .children(items),
+                    .children(items)
+                    .when(empty, |this| {
+                        this.child(
+                            div()
+                                .px(px(12.))
+                                .py(px(10.))
+                                .text_color(MUTED)
+                                .child("Nothing waits for you."),
+                        )
+                    }),
             )
-            .child(
-                div().pt(px(12.)).px(px(4.)).child(
-                    div()
-                        .id("continue")
-                        .h(px(42.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(RADIUS_MD)
-                        .bg(ACCENT)
-                        .text_color(ON_ACCENT)
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .cursor_pointer()
-                        .hover(|s| s.opacity(0.9))
-                        .child("Continue to edit")
-                        .on_click(cx.listener(|_, _, _, cx| cx.emit(ContinueToEdit))),
-                ),
-            )
+            // With nothing open the middle offers it.
+            .when(open > 0, |this| {
+                this.child(
+                    div().pt(px(12.)).px(px(4.)).flex().flex_col().child(
+                        button("continue", Some("edit"), "Continue to edit", "⌘↩", false)
+                            .on_click(cx.listener(|this, _, _, cx| this.continue_to_edit(cx))),
+                    ),
+                )
+            })
     }
 }
 
 impl Render for CutScreen {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self._blur.is_none() {
+            self._blur = Some(cx.on_focus_out(&self.focus, window, |this, _, _, cx| {
+                this.player.pause();
+                cx.notify();
+            }));
+        }
         let queue = self.queue(cx);
+        self.sync_player(&queue, cx);
+        if self.player.advance() || self.player.is_playing() {
+            window.request_animation_frame();
+        }
+        if let Some(error) = self.player.error() {
+            self.error.get_or_insert(error);
+        }
         let counts = autocut::rule_counts(&self.folder.read(cx).shown.cut);
         let rules = self.rules_pane(&counts, cx);
-        let finding = self.finding_pane(&queue, cx);
-        let list = self.queue_pane(&queue, cx);
+        let progress = self.progress(&queue, cx);
+        let body = match self.shown(&queue) {
+            Some(index) => self.item(&queue, index, cx),
+            None => self.done(cx),
+        };
+        let list = self.list_pane(&queue, cx);
         div()
             .id("cut")
             .key_context(CONTEXT)
@@ -848,6 +1319,9 @@ impl Render for CutScreen {
             .on_action(cx.listener(|this, _: &CutItem, _, cx| this.decide(Decision::Cut, cx)))
             .on_action(cx.listener(|this, _: &NextItem, _, cx| this.step(1, cx)))
             .on_action(cx.listener(|this, _: &PreviousItem, _, cx| this.step(-1, cx)))
+            .on_action(cx.listener(|this, _: &PlayAround, _, cx| this.play(Hear::Around, cx)))
+            .on_action(cx.listener(|this, _: &PlayCut, _, cx| this.play(Hear::Cut, cx)))
+            .on_action(cx.listener(|this, _: &Continue, _, cx| this.continue_to_edit(cx)))
             .children(self.error.clone().map(crate::ui::alert))
             .child(
                 div()
@@ -856,7 +1330,18 @@ impl Render for CutScreen {
                     .flex()
                     .gap(px(8.))
                     .child(rules)
-                    .child(finding)
+                    .child(
+                        pane()
+                            .flex_1()
+                            .min_w(px(480.))
+                            .px(px(22.))
+                            .py(px(20.))
+                            .flex()
+                            .flex_col()
+                            .gap(px(18.))
+                            .child(progress)
+                            .child(body),
+                    )
                     .child(list),
             )
     }
@@ -868,7 +1353,7 @@ mod tests {
     use shot_core::RemovedBy;
 
     #[test]
-    fn a_finding_shows_at_its_edited_time() {
+    fn an_item_shows_at_its_edited_time() {
         let range = |from: u64, to: u64| TimeRange::new(Micros(from), Micros(to)).unwrap();
         let take = Id::new("t01").unwrap();
         let cut = Cut::default()
@@ -892,5 +1377,23 @@ mod tests {
         );
         assert_eq!(kept_length(&cut), Micros(18_000_000));
         assert_eq!(raw_length(&cut), Micros(20_000_000));
+    }
+
+    #[test]
+    fn lengths_and_rule_rows_read_plainly() {
+        assert_eq!(length(Micros(800_000)), "0.8 s");
+        assert_eq!(length(Micros(108_400_000)), "1:48");
+        let count = |removed, queued| RuleCount {
+            rule: RuleKind::Silence,
+            removed,
+            removed_time: Micros(161_000_000),
+            queued,
+        };
+        assert_eq!(
+            rule_detail(&count(12, 3), true),
+            "12 cuts, 2:41 · 3 to review"
+        );
+        assert_eq!(rule_detail(&count(0, 0), true), "Nothing found");
+        assert_eq!(rule_detail(&count(0, 0), false), "Off");
     }
 }
