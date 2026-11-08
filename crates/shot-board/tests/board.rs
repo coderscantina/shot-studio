@@ -303,6 +303,31 @@ fn reads_a_proposal_file_where_it_branched_and_at_its_head() {
 }
 
 #[test]
+fn lists_the_files_a_proposal_writes_by_repo_path_at_its_head() {
+    let channel = Channel::new(&[("alpha", VIDEO)]);
+    let board = channel.board();
+    board
+        .create_proposal(
+            "alpha",
+            "cut",
+            "✂️ first cut",
+            &files(&[
+                ("script.md", "# Shorter\n"),
+                ("cut.kdl", "captions clean\n"),
+            ]),
+        )
+        .unwrap();
+    board.move_card("alpha", Status::Recorded).unwrap();
+    assert_eq!(
+        board.proposal_files("alpha", "cut").unwrap(),
+        files(&[
+            ("videos/alpha/cut.kdl", "captions clean\n"),
+            ("videos/alpha/script.md", "# Shorter\n"),
+        ])
+    );
+}
+
+#[test]
 fn reject_leaves_no_branch() {
     let channel = Channel::new(&[("alpha", VIDEO)]);
     let board = channel.board();

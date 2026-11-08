@@ -10,22 +10,31 @@
 //! head, so it shows on the cut on disk even after other edits. A cut proposal only removes or
 //! restores recorded words, so that is all this shows.
 //!
+//! Play on a card previews the proposal: the preview plays the plan of the proposal's files on
+//! top of the video's, styled by a lock built in memory, from a little before its first change.
+//! Esc returns to the branch. The branch's `cut.lock` and cache are never written.
+//!
 //! [0004]: ../../../../docs/decisions/0004-proposals-as-branches.md
 
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::Path;
+use std::sync::Arc;
 
 use gpui::{
     Context, Div, FontWeight, Hsla, MouseButton, SharedString, Stateful, div, prelude::*, px,
 };
 use shot_board::Board;
-use shot_core::{Cut, Id, Micros, RangeEdit, TakeAt, TimeRange, Transcript, WordState};
+use shot_core::{
+    Cut, Id, Lock, Micros, Project, RangeEdit, TakeAt, TimeRange, Transcript, WordState,
+};
 use shot_mcp::agents::ScriptCommand;
+use shot_mcp::style::{self, Disk, Patched};
 
 use super::{EditScreen, Workspace};
 use crate::agent::{self, AgentRun};
-use crate::model::{self, BlockDoc, DocWord, Item, Paragraph, timecode};
+use crate::engine::Plan;
+use crate::model::{self, BlockDoc, DocWord, EditMap, FPS, Item, Paragraph, timecode};
 use crate::script::proposal::{self as words, Piece};
 use crate::theme::*;
 use crate::ui::{ActionLook, icon, kbd, proposal_action};
@@ -673,6 +682,7 @@ pub fn card_element(
         })
     });
     let running = this.run.as_ref().is_some_and(AgentRun::running);
+    let playing = this.previewing.as_deref() == Some(name.as_str());
     div()
         .id(SharedString::from(format!("proposal-{key}")))
         .min_w_0()
@@ -764,7 +774,7 @@ pub fn card_element(
                         format!("reject-{key}"),
                         "Reject",
                         Some("close"),
-                        Some("Esc"),
+                        (!playing).then_some("Esc"),
                         ActionLook::Plain,
                     )
                     .on_click(cx.listener({
@@ -772,6 +782,30 @@ pub fn card_element(
                         move |this, _, _, cx| this.reject_proposal(&name, cx)
                     })),
                 )
+                .child(if playing {
+                    proposal_action(
+                        format!("play-{key}"),
+                        "Back to the cut",
+                        Some("pause"),
+                        Some("Esc"),
+                        ActionLook::Plain,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.stop_proposal(cx);
+                    }))
+                } else {
+                    proposal_action(
+                        format!("play-{key}"),
+                        "Play",
+                        Some("play"),
+                        None,
+                        ActionLook::Plain,
+                    )
+                    .on_click(cx.listener({
+                        let (name, card) = (name.clone(), card.clone());
+                        move |this, _, _, cx| this.play_proposal(&name, &card, cx)
+                    }))
+                })
                 .child(
                     proposal_action(
                         format!("again-{key}"),
@@ -813,6 +847,133 @@ pub fn card_element(
                     )
                 }),
         )
+}
+
+/// The cut and lock of the video in `dir` as proposal `name` has them: its files on top of the
+/// video's. A migrated video's lock is built from them like its own; one without a lock plays
+/// the proposal's `cut.kdl` alone.
+fn proposal_version(
+    repo: &Path,
+    slug: &str,
+    name: &str,
+    dir: &Path,
+    current: &Cut,
+    migrated: bool,
+) -> Result<(Cut, Option<Lock>), String> {
+    let files = Board::open(repo)
+        .and_then(|board| board.proposal_files(slug, name))
+        .map_err(|e| e.to_string())?;
+    if !migrated {
+        let path = style::video_path(slug, "cut.kdl");
+        let cut = match files.get(&path) {
+            Some(text) => Cut::parse(text).map_err(|e| format!("{path}:{e}"))?,
+            None => current.clone(),
+        };
+        return Ok((cut, None));
+    }
+    let (disk, slug) = Disk::locate(dir)?;
+    let built = style::build_video(
+        &Patched {
+            inner: &disk,
+            files: &files,
+        },
+        &slug,
+    )?;
+    Ok((built.cut, Some(built.lock)))
+}
+
+/// How far before its first change a proposal's preview starts.
+const LEAD_IN: Micros = Micros(2_000_000);
+
+impl EditScreen {
+    /// Plays proposal `name` in the preview, from a little before the first change of `card`.
+    fn play_proposal(&mut self, name: &str, card: &Card, cx: &mut Context<Self>) {
+        let Some((repo, slug)) = self.channel.clone() else {
+            return;
+        };
+        let folder = self.folder.read(cx);
+        let dir = folder.dir.clone();
+        let built = proposal_version(
+            &repo,
+            &slug,
+            name,
+            &dir,
+            &folder.project.cut,
+            folder.lock().is_some(),
+        )
+        .and_then(|(cut, lock)| {
+            let project = Project {
+                cut,
+                ..folder.project.clone()
+            };
+            let shown = match &lock {
+                Some(lock) => crate::style::shown(&project.cut, lock),
+                None => project.cut.clone(),
+            };
+            let fail = |e: shot_render::export::ExportError| e.to_string();
+            let plan = shot_render::export::preview_plan_with(&dir, &project, lock.as_ref())
+                .map_err(fail)?;
+            let theme = shot_render::export::theme(&dir, lock.as_ref(), &project)
+                .map_err(|e| e.to_string())?;
+            let map = EditMap::new(&shown, plan);
+            if map.spans.len() != map.plan.segments.len() {
+                return Err("the proposal's preview could not place its segments".to_owned());
+            }
+            Ok((project, lock, map, theme))
+        });
+        let (project, lock, map, theme) = match built {
+            Ok(built) => built,
+            Err(e) => {
+                self.error = Some(format!("the proposal does not play: {e}"));
+                cx.notify();
+                return;
+            }
+        };
+        // The same media a little before the change, found on the branch's map, then on the
+        // proposal's.
+        let from = card
+            .frame
+            .map(|f| f.saturating_sub(LEAD_IN.0 * u64::from(FPS) / 1_000_000))
+            .and_then(|f| self.map.source_at(f))
+            .and_then(|(at, time)| map.output_frame(at, time))
+            .unwrap_or_default();
+        let folder = self.folder.read(cx);
+        self.doc = model::document(
+            &folder.shown.cut,
+            &folder.transcripts,
+            &map,
+            self.view,
+            folder.shown.format.default_layout,
+        );
+        let effects = project.format.effects();
+        self.sound
+            .set_plan_with(&map, dir.clone(), project, lock, from);
+        self.engine.set_plan(
+            Plan {
+                map: map.clone(),
+                dir,
+                effects,
+                theme: Ok(Arc::new(theme)),
+            },
+            from,
+        );
+        self.map = map;
+        self.previewing = Some(name.to_owned());
+        self.proposal = Some(name.to_owned());
+        self.seek(from);
+        self.set_playing(true);
+        cx.notify();
+    }
+
+    /// Esc while a proposal plays: back to the branch's plan. Returns false when none plays.
+    pub fn stop_proposal(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.previewing.take().is_none() {
+            return false;
+        }
+        self.set_playing(false);
+        self.rebuild(cx);
+        true
+    }
 }
 
 /// While Claude writes another take: a quiet line with its latest step.

@@ -167,6 +167,8 @@ pub struct EditScreen {
     cards: Vec<proposals::Card>,
     /// The proposal Tab and Esc act on.
     proposal: Option<String>,
+    /// The proposal the preview plays instead of the branch.
+    previewing: Option<String>,
     /// Scroll the transcript to the selected proposal on the next render.
     scroll_to_card: bool,
     claude: Option<Claude>,
@@ -221,6 +223,7 @@ impl EditScreen {
             proposals: Vec::new(),
             cards: Vec::new(),
             proposal: None,
+            previewing: None,
             scroll_to_card: false,
             claude: Claude::find(),
             run: None,
@@ -231,6 +234,7 @@ impl EditScreen {
 
     /// Re-derives everything from the files, keeping the playhead on the same media.
     fn rebuild(&mut self, cx: &mut Context<Self>) {
+        self.previewing = None;
         let keep = self.map.source_at(self.playhead);
         let folder = self.folder.read(cx);
         let project = &folder.shown;
@@ -648,7 +652,7 @@ impl Render for EditScreen {
             .on_action(cx.listener(Self::delete_selection))
             .on_action(cx.listener(Self::restore_selection))
             .on_action(cx.listener(|this, _: &ClearSelection, _, cx| {
-                if !this.close_picker() && !this.reject_selected(cx) {
+                if !this.close_picker() && !this.stop_proposal(cx) && !this.reject_selected(cx) {
                     this.selection = None;
                 }
                 cx.notify();

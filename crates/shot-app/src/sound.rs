@@ -37,7 +37,9 @@ const FEED_INTERVAL: Duration = Duration::from_millis(10);
 struct State {
     /// The edit, where its takes live and what plays with the voice; `None` before the first
     /// plan.
-    plan: Option<(EditMap, PathBuf, Project)>,
+    /// The map, the video folder, the project and, for a proposal, the lock it plays instead of
+    /// the folder's.
+    plan: Option<(EditMap, PathBuf, Project, Option<shot_core::Lock>)>,
     /// The loudness gain of the last measured plan, in dB.
     gain: Option<f64>,
     /// Counts plan changes, so the feeder rebuilds its reader.
@@ -91,8 +93,20 @@ impl Sound {
     /// Plays the audio of `map`'s plan of `project`, the video in `dir`, from output frame
     /// `frame`.
     pub fn set_plan(&self, map: &EditMap, dir: PathBuf, project: Project, frame: u64) {
+        self.set_plan_with(map, dir, project, None, frame);
+    }
+
+    /// [`Sound::set_plan`] styled by `lock` instead of the folder's `cut.lock`, for a proposal.
+    pub fn set_plan_with(
+        &self,
+        map: &EditMap,
+        dir: PathBuf,
+        project: Project,
+        lock: Option<shot_core::Lock>,
+        frame: u64,
+    ) {
         let mut state = self.shared.lock();
-        state.plan = Some((map.clone(), dir, project));
+        state.plan = Some((map.clone(), dir, project, lock));
         state.plan_generation += 1;
         state.error = None;
         Self::restart(&mut state, frame);
@@ -176,9 +190,17 @@ fn feed(shared: Arc<Shared>) {
                 plan_generation = state.plan_generation;
                 let plan = state.plan.clone();
                 drop(state);
-                let placed = plan.map(|(map, dir, project)| {
-                    let score = shot_render::export::preview_score(&dir, &project, &map.plan)
-                        .map_err(|e| e.to_string())?;
+                let placed = plan.map(|(map, dir, project, lock)| {
+                    let score = match &lock {
+                        Some(lock) => shot_render::export::preview_score_with(
+                            &dir,
+                            &project,
+                            &map.plan,
+                            Some(lock),
+                        ),
+                        None => shot_render::export::preview_score(&dir, &project, &map.plan),
+                    }
+                    .map_err(|e| e.to_string())?;
                     measure(&shared, &measuring, plan_generation, &map, &dir, &score);
                     Ok::<_, String>((shot_render::export::plan_audio(&dir, &map.plan), score))
                 });

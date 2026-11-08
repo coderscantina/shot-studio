@@ -24,6 +24,8 @@ use shot_core::Status;
 use shot_mcp::text;
 
 #[cfg(target_os = "macos")]
+mod build;
+#[cfg(target_os = "macos")]
 mod derived;
 #[cfg(target_os = "macos")]
 mod export;
@@ -77,6 +79,9 @@ enum Command {
     /// Render a video's cut to an MP4, reusing cached segments.
     #[cfg(target_os = "macos")]
     Export(export::ExportArgs),
+    /// Rebuild the lock and every cut, then check them; once, on every change, or a proposal's.
+    #[cfg(target_os = "macos")]
+    Build(build::BuildArgs),
     /// Write zooms on clicks, typing or the resting cursor, per format.kdl's auto-zoom rule.
     #[cfg(target_os = "macos")]
     Autozoom(product::AutoZoomArgs),
@@ -195,6 +200,10 @@ fn run(cli: Cli) -> Result<(), String> {
         return export::run(args);
     }
     #[cfg(target_os = "macos")]
+    if let Command::Build(args) = cli.command {
+        return build::run(args);
+    }
+    #[cfg(target_os = "macos")]
     if let Command::Autozoom(args) = cli.command {
         return product::auto_zoom(args);
     }
@@ -284,6 +293,7 @@ fn run(cli: Cli) -> Result<(), String> {
         }
         #[cfg(target_os = "macos")]
         Command::Export(_)
+        | Command::Build(_)
         | Command::Autozoom(_)
         | Command::CodeDiff(_)
         | Command::Overlays(_)

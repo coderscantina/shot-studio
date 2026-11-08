@@ -6374,6 +6374,7 @@ version = "26.11.7"
 dependencies = [
  "clap",
  "libc",
+ "notify",
  "serde_json",
  "shot-analyze",
  "shot-board",
