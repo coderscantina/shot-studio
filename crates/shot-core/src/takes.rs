@@ -313,26 +313,26 @@ fn align(words: &[Word], rows: &[Vec<String>]) -> Vec<(usize, TimeRange)> {
         .iter()
         .map(|r| r.iter().map(String::as_str).collect())
         .collect();
-    let score = |sentence: &[Word], row: &HashSet<&str>| {
-        let text: Vec<&str> = sentence.iter().map(|w| w.text.as_str()).collect();
-        content_words(&text.join(" "))
-            .iter()
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .filter(|w| row.contains(w.as_str()))
-            .count()
-    };
+    let said: Vec<HashSet<String>> = sentences
+        .iter()
+        .map(|sentence| {
+            let text: Vec<&str> = sentence.iter().map(|w| w.text.as_str()).collect();
+            content_words(&text.join(" ")).into_iter().collect()
+        })
+        .collect();
+    let score =
+        |j: usize, row: &HashSet<&str>| said[j].iter().filter(|w| row.contains(w.as_str())).count();
     // best[j][i]: the most shared words of sentences 0..=j with sentence j on row i.
     let n = rows.len();
     let mut best: Vec<Vec<usize>> = Vec::with_capacity(sentences.len());
-    for (j, sentence) in sentences.iter().enumerate() {
+    for j in 0..sentences.len() {
         let mut line = Vec::with_capacity(n);
         let mut before = 0;
         for (i, row) in rows.iter().enumerate() {
             if j > 0 {
                 before = before.max(best[j - 1][i]);
             }
-            line.push(score(sentence, row) + before);
+            line.push(score(j, row) + before);
         }
         best.push(line);
     }

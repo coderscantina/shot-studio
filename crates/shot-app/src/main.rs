@@ -42,6 +42,7 @@ mod ship;
 mod sound;
 mod studio;
 mod style;
+mod takes;
 mod theme;
 mod transcribe;
 mod ui;

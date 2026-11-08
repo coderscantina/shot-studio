@@ -655,7 +655,7 @@ impl Cut {
     /// A block of `take` over `range` with what the cut's blocks of that take have there: their
     /// keeps and removes, reviews, layouts, zooms and overlays. Where no block covers the take's
     /// media, the block keeps it.
-    fn material(&self, take: &Id, range: TimeRange) -> TakeEdit {
+    pub fn material(&self, take: &Id, range: TimeRange) -> TakeEdit {
         let mut out = TakeEdit {
             take: take.clone(),
             ranges: Vec::new(),

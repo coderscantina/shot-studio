@@ -36,6 +36,7 @@ use crate::folder::VideoFolder;
 use crate::model::{self, FPS};
 use crate::peaks::Peaks;
 use crate::studio::Screen;
+use crate::takes::{self, TakesView};
 use crate::theme::*;
 use crate::transcribe::{Transcribe, Transcribed};
 use crate::ui::{Segment, icon, kbd, label, mono, pane, segmented};
@@ -59,7 +60,9 @@ actions!(
         PlayAround,
         PlayCut,
         Continue,
-        ReviewApplied
+        ReviewApplied,
+        ShowReview,
+        ShowTakes
     ]
 );
 
@@ -74,11 +77,24 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-space", PlayCut, context),
         KeyBinding::new("cmd-enter", Continue, context),
         KeyBinding::new("r", ReviewApplied, context),
+        KeyBinding::new("alt-1", ShowReview, context),
+        KeyBinding::new("alt-2", ShowTakes, context),
+        KeyBinding::new("alt-1", ShowReview, Some(takes::CONTEXT)),
+        KeyBinding::new("alt-2", ShowTakes, Some(takes::CONTEXT)),
     ]);
+    takes::bind_keys(cx);
 }
 
 /// Asks the studio to show a screen: Edit when the review is done, Record before any take.
 pub struct GoTo(pub Screen);
+
+/// The two halves of the Cut screen: the review of the rules' findings, and the takes side by
+/// side to compose the cut from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Review,
+    Takes,
+}
 
 /// Which items the middle steps through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +123,8 @@ enum Row {
 
 pub struct CutScreen {
     folder: Entity<VideoFolder>,
+    tab: Tab,
+    takes: Entity<TakesView>,
     mode: Mode,
     /// The open item on show, by its place in the cut.
     current: Option<(TakeAt, TimeRange)>,
@@ -129,13 +147,17 @@ pub struct CutScreen {
     /// Pauses playback when another screen takes the focus.
     _blur: Option<Subscription>,
     _transcribed: Subscription,
+    _takes: Subscription,
 }
 
 impl EventEmitter<GoTo> for CutScreen {}
 
 impl Focusable for CutScreen {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus.clone()
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        match self.tab {
+            Tab::Review => self.focus.clone(),
+            Tab::Takes => self.takes.focus_handle(cx),
+        }
     }
 }
 
@@ -158,8 +180,18 @@ impl CutScreen {
                     .try_for_each(|take| run::rough_cut(folder, take))
             });
         });
+        let takes = cx.new(|cx| TakesView::new(folder.clone(), cx));
+        let forward = cx.subscribe(&takes, |_, _, GoTo(screen), cx| cx.emit(GoTo(*screen)));
+        // A video with several takes in the cut at the same beats opens on its takes.
+        let tab = if takes.read(cx).needs_composing(cx) {
+            Tab::Takes
+        } else {
+            Tab::Review
+        };
         Self {
             folder,
+            tab,
+            takes,
             mode: Mode::Open,
             current: None,
             index: 0,
@@ -176,7 +208,56 @@ impl CutScreen {
             transcribe,
             _blur: None,
             _transcribed: transcribed,
+            _takes: forward,
         }
+    }
+
+    fn set_tab(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tab == tab {
+            return;
+        }
+        self.tab = tab;
+        self.player.pause();
+        window.focus(&self.focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    /// After a new recording: shows the takes when the newest take repeats beats an earlier
+    /// take has, so the cut does not quietly play both.
+    pub fn recorded(&mut self, cx: &mut Context<Self>) {
+        if self.takes.update(cx, |takes, cx| takes.recorded(cx)) {
+            self.tab = Tab::Takes;
+            cx.notify();
+        }
+    }
+
+    /// The Review and Takes switch for the title bar.
+    pub fn title_controls(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let tab = self.tab;
+        let this = cx.entity().downgrade();
+        let switch = move |to: Tab| {
+            let this = this.clone();
+            move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut App| {
+                this.update(cx, |screen, cx| screen.set_tab(to, window, cx))
+                    .ok();
+            }
+        };
+        div()
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .child(segmented(
+                "cut-tab",
+                SURFACE,
+                vec![
+                    Segment::new("Review", tab == Tab::Review, switch(Tab::Review)).icon("cut"),
+                    Segment::new("Takes", tab == Tab::Takes, switch(Tab::Takes)).icon("takes"),
+                ],
+            ))
+            .child(kbd(match tab {
+                Tab::Review => "⌥2",
+                Tab::Takes => "⌥1",
+            }))
     }
 
     /// The items the middle steps through: the open review items, or the applied cuts not
@@ -1664,6 +1745,17 @@ impl CutScreen {
 
 impl Render for CutScreen {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.tab == Tab::Takes {
+            return div()
+                .size_full()
+                .px(px(8.))
+                .pb(px(8.))
+                .on_action(cx.listener(|this, _: &ShowReview, window, cx| {
+                    this.set_tab(Tab::Review, window, cx)
+                }))
+                .child(self.takes.clone())
+                .into_any_element();
+        }
         if self._blur.is_none() {
             self._blur = Some(cx.on_focus_out(&self.focus, window, |this, _, _, cx| {
                 this.player.pause();
@@ -1705,6 +1797,9 @@ impl Render for CutScreen {
             .on_action(cx.listener(|this, _: &PlayCut, _, cx| this.play(Hear::Cut, cx)))
             .on_action(cx.listener(|this, _: &Continue, _, cx| this.go_on(cx)))
             .on_action(cx.listener(|this, _: &ReviewApplied, _, cx| this.review_applied(0, cx)))
+            .on_action(
+                cx.listener(|this, _: &ShowTakes, window, cx| this.set_tab(Tab::Takes, window, cx)),
+            )
             .children(self.error.clone().map(crate::ui::alert))
             .child(
                 div()
@@ -1727,6 +1822,7 @@ impl Render for CutScreen {
                     )
                     .children(list),
             )
+            .into_any_element()
     }
 }
 
