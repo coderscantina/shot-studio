@@ -827,17 +827,11 @@ impl ShipScreen {
         let state = self.states.get(&cut.name);
         let export = state.and_then(|s| s.export.as_ref());
         let room = ship::export_room(cut.length);
-        let file = cut
-            .export
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
         let header = div()
             .flex()
             .items_baseline()
             .gap(px(10.))
             .child(div().font_weight(FontWeight::SEMIBOLD).child("Export"))
-            .child(mono(file).text_size(TEXT_SM).text_color(MUTED))
             .child(div().flex_1())
             .when_some(self.free, |this, free| {
                 this.child(
@@ -1338,7 +1332,8 @@ impl ShipScreen {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .child(side),
+                    .child(side)
+                    .child(self.destination(cx).px(px(14.)).pb(px(14.))),
             )
             .child(self.publish(cx).px(px(14.)).pt(px(4.)).pb(px(14.)))
     }
@@ -1501,13 +1496,14 @@ impl ShipScreen {
             })
     }
 
-    fn publish(&self, cx: &mut Context<Self>) -> Div {
-        let mut out = div().flex().flex_col().gap(px(10.));
-        let ready = self.channel.is_ok() && self.client.is_ok();
+    /// Where the video goes: the shipped links, why uploads wait, or the privacy to upload
+    /// with. It scrolls with the column, so it never covers the fields above it.
+    fn destination(&self, cx: &mut Context<Self>) -> Div {
+        let out = div().flex().flex_col().gap(px(10.));
         if self.shipped() {
-            out = out.child(self.shipped_card(cx));
+            out.child(self.shipped_card(cx))
         } else {
-            out = match (&self.channel, &self.client) {
+            match (&self.channel, &self.client) {
                 (Err(e), _) => out.child(card(
                     "Uploads need a channel",
                     vec![
@@ -1544,8 +1540,14 @@ impl ShipScreen {
                             .child(self.summary()),
                     )
                 }
-            };
+            }
         }
+    }
+
+    /// The pinned foot of the column: what a run is doing or did, and the main action.
+    fn publish(&self, cx: &mut Context<Self>) -> Div {
+        let mut out = div().flex().flex_col().gap(px(10.));
+        let ready = self.channel.is_ok() && self.client.is_ok();
         // A single cut's export shows its progress in the export pane only.
         if let Some(run) = self.run.as_ref().filter(|r| r.ship || r.cuts.len() > 1) {
             let line = if run.signing_in {
