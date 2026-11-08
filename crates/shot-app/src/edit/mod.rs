@@ -187,7 +187,9 @@ pub struct EditScreen {
     scroll: ScrollHandle,
     /// Where the Text workspace's document pane was last painted, for its columns.
     document_bounds: Rc<Cell<Bounds<Pixels>>>,
-    /// The last selected word and the selection toolbar's size, for placing the toolbar.
+    /// The first and last selected words and the selection toolbar's size, for placing the
+    /// toolbar.
+    selection_start: text::Anchor,
     selection_anchor: text::Anchor,
     toolbar_bounds: Rc<Cell<Bounds<Pixels>>>,
     /// The Timeline's change list and overlay list, for their fades.
@@ -263,6 +265,7 @@ impl EditScreen {
             focus: cx.focus_handle().tab_stop(true),
             scroll: ScrollHandle::new(),
             document_bounds: Rc::default(),
+            selection_start: Rc::default(),
             selection_anchor: Rc::default(),
             toolbar_bounds: Rc::default(),
             changes_scroll: ScrollHandle::new(),

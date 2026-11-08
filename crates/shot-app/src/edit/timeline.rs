@@ -546,6 +546,8 @@ impl EditScreen {
             .map(|index| Pick::Placed(at, Placed::Zoom(index)));
     }
 
+    /// Sets a zoom's scale. When the playhead is outside the zoom, seeks to its middle, inside
+    /// its hold, so the preview shows the new scale.
     pub(super) fn set_zoom_scale(
         &mut self,
         at: TakeAt,
@@ -554,6 +556,33 @@ impl EditScreen {
         cx: &mut Context<Self>,
     ) {
         self.edit(cx, |cut| cut.set_zoom_scale(at, index, scale));
+        if let Some(frames) = self.zoom_frames(at, index, cx)
+            && !frames.contains(&self.playhead)
+        {
+            self.seek((frames.start + frames.end) / 2);
+            cx.notify();
+        }
+    }
+
+    /// Seeks to where a zoom starts in the output.
+    pub(super) fn seek_to_zoom(&mut self, at: TakeAt, index: usize, cx: &mut Context<Self>) {
+        if let Some(frames) = self.zoom_frames(at, index, cx) {
+            self.seek(frames.start);
+            cx.notify();
+        }
+    }
+
+    /// A zoom's output frames, `None` when it was removed.
+    fn zoom_frames(&self, at: TakeAt, index: usize, cx: &App) -> Option<Range<u64>> {
+        let cut = &self.folder.read(cx).project.cut;
+        let zoom = cut
+            .chapters
+            .get(at.chapter)?
+            .takes
+            .get(at.take)?
+            .zooms
+            .get(index)?;
+        self.map.output_range(at, zoom.range)
     }
 
     /// The pick after the map changed: a layout stretch becomes the stretch that now holds

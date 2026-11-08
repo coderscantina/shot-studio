@@ -8,7 +8,8 @@ use gpui::{
     AnyElement, App, Bounds, Context, Div, Entity, FontWeight, Hsla, MouseButton, MouseDownEvent,
     MouseMoveEvent, Pixels, ScrollHandle, Stateful, Window, div, prelude::*, px,
 };
-use shot_core::{Placed, TakeAt, TimeRange, WordState, Zoom};
+use gpui_component::tooltip::Tooltip;
+use shot_core::{Placed, RangeEdit, TakeAt, TimeRange, WordState, Zoom};
 
 use super::EditScreen;
 use super::parts::{self, layout_name, row};
@@ -345,11 +346,11 @@ fn word_key(at: TakeAt, index: usize) -> usize {
     at.chapter * 1_000_000 + at.take * 100_000 + index
 }
 
-/// Where the last selected word sits, by its key and its bounds in the transcript's scrolled
+/// Where a selected word sits, by its key and its bounds in the transcript's scrolled
 /// content, so the selection toolbar scrolls with it.
 pub type Anchor = Rc<Cell<Option<(usize, Bounds<Pixels>)>>>;
 
-/// An invisible canvas over the last selected word that records it in `anchor`. A new place
+/// An invisible canvas over a selected word that records it in `anchor`. A new place
 /// draws one more frame, so the toolbar is never a frame behind the selection.
 fn anchor(anchor: Anchor, key: usize, scroll: ScrollHandle) -> gpui::Canvas<()> {
     gpui::canvas(
@@ -368,28 +369,30 @@ fn anchor(anchor: Anchor, key: usize, scroll: ScrollHandle) -> gpui::Canvas<()> 
 /// Room kept between the toolbar and the selection or the pane's edge.
 const CLEAR: f32 = 8.;
 
-/// The selection toolbar over the transcript: under the last selected word, above it when
-/// there is no room below, inside the pane's side padding. It covers the text under it and
-/// never moves it. Hidden for the one frame before the selected word is measured.
+/// The selection toolbar over the transcript: above the first selected word, below the last
+/// when there is no room above in the pane, inside the pane's side padding and [`CLEAR`] off the
+/// words. It covers the text under it and never moves it. Hidden for the one frame before the
+/// selected words are measured.
 fn floating_toolbar(this: &EditScreen, pad: f32, cx: &mut Context<EditScreen>) -> Option<Div> {
     let selection = this.selection?;
     this.selected()?;
-    let key = word_key(selection.at, *selection.words().end());
+    let words = selection.words();
+    let first = word_key(selection.at, *words.start());
+    let last = word_key(selection.at, *words.end());
     let viewport = this.scroll.bounds().size;
     let offset = f32::from(this.scroll.offset().y);
     let room = f32::from(viewport.width) - 2. * pad;
     let size = this.toolbar_bounds.get().size;
     let (width, height) = (f32::from(size.width), f32::from(size.height));
-    let measured = this.selection_anchor.get().filter(|(k, _)| *k == key);
-    let (left, top) = measured.map_or((pad, 0.), |(_, word)| {
-        let below = f32::from(word.bottom()) + CLEAR;
-        let above = f32::from(word.top()) - CLEAR - height;
-        let fits_below = below + offset + height + CLEAR <= f32::from(viewport.height);
-        let fits_above = above + offset >= CLEAR;
-        let top = if fits_below || !fits_above {
-            below
+    let start = this.selection_start.get().filter(|(k, _)| *k == first);
+    let end = this.selection_anchor.get().filter(|(k, _)| *k == last);
+    let measured = start.zip(end);
+    let (left, top) = measured.map_or((pad, 0.), |((_, first), (_, last))| {
+        let above = f32::from(first.top()) - CLEAR - height;
+        let (word, top) = if above + offset >= 0. {
+            (first, above)
         } else {
-            above
+            (last, f32::from(last.bottom()) + CLEAR)
         };
         let left = f32::from(word.left()).min(pad + room - width).max(pad);
         (left, top)
@@ -576,13 +579,24 @@ fn word(
     });
     let removed = word.state != WordState::Kept;
     let key = word_key(at, index);
-    let ends_selection = this
+    let (starts_selection, ends_selection) = this
         .selection
-        .is_some_and(|s| s.at == at && *s.words().end() == index);
+        .filter(|s| s.at == at)
+        .map_or((false, false), |s| {
+            (*s.words().start() == index, *s.words().end() == index)
+        });
     div()
         .id(("word", key))
+        .when(starts_selection || ends_selection, |w| w.relative())
+        .when(starts_selection, |w| {
+            w.child(
+                anchor(this.selection_start.clone(), key, this.scroll.clone())
+                    .absolute()
+                    .size_full(),
+            )
+        })
         .when(ends_selection, |w| {
-            w.relative().child(
+            w.child(
                 anchor(this.selection_anchor.clone(), key, this.scroll.clone())
                     .absolute()
                     .size_full(),
@@ -875,7 +889,7 @@ fn inspector(this: &EditScreen, cx: &mut Context<EditScreen>) -> Stateful<Div> {
                 .children(zoom.map(|zoom| zoom_section(this, zoom, false, cx))),
             // Nothing recorded: the document says what to do, so no word keys here.
             None if this.map.chapters.is_empty() => pane,
-            None => pane.child(chapter_summary(this)).child(
+            None => pane.child(chapter_summary(this, cx)).child(
                 div()
                     .flex()
                     .flex_col()
@@ -998,7 +1012,20 @@ fn zoom_section(
             section
                 .child(row(
                     "Starts at",
-                    mono(start.map_or("removed".into(), timecode)).text_color(TEXT),
+                    mono(start.map_or("removed".into(), timecode))
+                        .id("text-zoom-start")
+                        .text_color(TEXT)
+                        .when(start.is_some(), |time| {
+                            time.underline()
+                                .cursor_pointer()
+                                .hover(|s| s.text_color(STRONG))
+                                .tooltip(|window, cx| {
+                                    Tooltip::new("Go to the zoom").build(window, cx)
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.seek_to_zoom(at, index, cx)
+                                }))
+                        }),
                 ))
                 .child(row(
                     "Length",
@@ -1024,23 +1051,31 @@ fn zoom_section(
 /// Words of a long selection the inspector quotes.
 const QUOTE_WORDS: usize = 40;
 
-/// The chapter on show: its length and what the cuts took out of it.
-fn chapter_summary(this: &EditScreen) -> Div {
+/// The chapter on show: its length and what the cuts took out of it. Counts from the cut list,
+/// so takes without a transcript count too; back-to-back removals are one cut.
+fn chapter_summary(this: &EditScreen, cx: &App) -> Div {
     let Some(chapter) = this.map.chapters.get(this.chapter) else {
         return div();
     };
-    let runs: Vec<&CutRun> = this
-        .doc
-        .iter()
-        .filter(|b| b.at.chapter == this.chapter)
-        .flat_map(|b| &b.paragraphs)
-        .flat_map(|p| &p.items)
-        .filter_map(|item| match item {
-            Item::Cut(run) => Some(run),
-            Item::Word(_) => None,
-        })
-        .collect();
-    let removed = shot_core::Micros(runs.iter().map(|r| r.removed.0).sum());
+    let cut = &this.folder.read(cx).project.cut;
+    let (mut cuts, mut removed) = (0, 0);
+    for take in cut
+        .chapters
+        .get(this.chapter)
+        .into_iter()
+        .flat_map(|c| &c.takes)
+    {
+        let mut previous_removed = false;
+        for edit in &take.ranges {
+            let is_removed = matches!(edit, RangeEdit::Remove { .. });
+            if is_removed {
+                cuts += usize::from(!previous_removed);
+                removed += edit.range().duration().0;
+            }
+            previous_removed = is_removed;
+        }
+    }
+    let removed = shot_core::Micros(removed);
     div()
         .flex()
         .flex_col()
@@ -1057,7 +1092,7 @@ fn chapter_summary(this: &EditScreen) -> Div {
         ))
         .child(row(
             "Cut out",
-            div().text_color(TEXT).child(match runs.len() {
+            div().text_color(TEXT).child(match cuts {
                 0 => "Nothing yet".to_owned(),
                 1 => format!("{} in 1 cut", seconds(removed)),
                 n => format!("{} in {n} cuts", seconds(removed)),

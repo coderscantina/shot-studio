@@ -20,8 +20,10 @@ pub const FPS: u32 = 60;
 const SEAM_MAX: Micros = Micros(1_000_000);
 /// A pause this long between two words starts a new paragraph.
 const PARAGRAPH_GAP: Micros = Micros(1_500_000);
-/// Paragraphs break after this many words even without a pause.
+/// After this many recorded words, a paragraph breaks at the next sentence end.
 const PARAGRAPH_WORDS: usize = 60;
+/// A paragraph without a sentence end breaks after this many recorded words.
+const PARAGRAPH_WORDS_MAX: usize = 120;
 
 /// Whether timecodes and the preview follow the edit or the whole recording.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -539,11 +541,11 @@ fn paragraphs(
     words: &[DocWord],
     layout_at: impl Fn(Micros) -> Layout,
 ) -> Vec<Paragraph> {
+    let length_breaks = length_breaks(words, &layout_at);
     let gap_frames = PARAGRAPH_GAP.0 * u64::from(FPS) / 1_000_000;
     let mut out: Vec<Paragraph> = Vec::new();
     let mut leading = Vec::new();
     let mut last_word: Option<usize> = None;
-    let mut count = 0;
     for item in items {
         let Item::Word(index) = item else {
             match out.last_mut() {
@@ -564,8 +566,9 @@ fn paragraphs(
                 _ => word.range.from().0.saturating_sub(last.range.to().0) > PARAGRAPH_GAP.0,
             }
         });
+        let long = last_word.is_some_and(|last| length_breaks[last + 1..=index].contains(&true));
         let breaks = match out.last() {
-            Some(paragraph) => paused || layout != paragraph.layout || count >= PARAGRAPH_WORDS,
+            Some(paragraph) => paused || layout != paragraph.layout || long,
             None => true,
         };
         if breaks {
@@ -574,12 +577,10 @@ fn paragraphs(
                 start: None,
                 layout,
             });
-            count = 0;
         }
         let paragraph = out.last_mut().expect("pushed above");
         paragraph.start = paragraph.start.or(word.output);
         paragraph.items.push(item);
-        count += 1;
         last_word = Some(index);
     }
     if !leading.is_empty() {
@@ -590,6 +591,28 @@ fn paragraphs(
         });
     }
     out
+}
+
+/// Marks the words that start a paragraph because the one before it ran long. Counts every
+/// recorded word, cut or kept, so cutting words never moves a break, and breaks after the first
+/// sentence end past `PARAGRAPH_WORDS`, or at `PARAGRAPH_WORDS_MAX` without one. A recorded pause
+/// or layout change restarts the count.
+fn length_breaks(words: &[DocWord], layout_at: impl Fn(Micros) -> Layout) -> Vec<bool> {
+    let mut breaks = vec![false; words.len()];
+    let mut count = 0;
+    for (index, pair) in words.windows(2).enumerate() {
+        let [last, word] = pair else { continue };
+        count += 1;
+        let restarts = word.range.from().0.saturating_sub(last.range.to().0) > PARAGRAPH_GAP.0
+            || layout_at(word.range.from()) != layout_at(last.range.from());
+        let sentence_end = last.text.trim_end().ends_with(['.', '?', '!']);
+        let long = count >= PARAGRAPH_WORDS_MAX || (count >= PARAGRAPH_WORDS && sentence_end);
+        breaks[index + 1] = long && !restarts;
+        if restarts || long {
+            count = 0;
+        }
+    }
+    breaks
 }
 
 /// Selected words of one take block, from the word the selection started at to the word it
@@ -1012,6 +1035,35 @@ mod tests {
                 (1, Layout::Split, Some(600))
             ]
         );
+    }
+
+    #[test]
+    fn paragraphs_break_at_a_sentence_end_and_ignore_cuts() {
+        let words: Vec<DocWord> = (0..200u64)
+            .map(|i| DocWord {
+                text: if i == 64 { "end.".into() } else { "w".into() },
+                range: range(i * 300_000, i * 300_000 + 250_000),
+                state: WordState::Kept,
+                output: None,
+            })
+            .collect();
+        let starts = |kept: &dyn Fn(usize) -> bool| -> Vec<usize> {
+            let items = (0..words.len())
+                .filter(|&i| kept(i))
+                .map(Item::Word)
+                .collect();
+            paragraphs(items, &words, |_| Layout::Face)
+                .iter()
+                .map(|p| match p.items[0] {
+                    Item::Word(index) => index,
+                    Item::Cut(_) => unreachable!(),
+                })
+                .collect()
+        };
+        // Breaks after the sentence end, then after the hard limit without one.
+        assert_eq!(starts(&|_| true), [0, 65, 185]);
+        // Cutting words inside the first paragraph moves no break.
+        assert_eq!(starts(&|i| !(10..14).contains(&i)), [0, 65, 185]);
     }
 
     #[test]
