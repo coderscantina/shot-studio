@@ -240,7 +240,10 @@ impl Studio {
                 this.show(*screen, window, cx);
             });
         window.focus(&edit.focus_handle(cx), cx);
-        let mut subscriptions = vec![recorded, continue_to_edit];
+        // Focus that drops out of the window, as when the focused element stops rendering,
+        // goes back to the shown screen instead of leaving its shortcuts dead.
+        let focus_lost = cx.on_focus_lost(window, |this, window, cx| this.focus_screen(window, cx));
+        let mut subscriptions = vec![recorded, continue_to_edit, focus_lost];
         // Cards move on the board and in other windows: the nav catches up when this comes back.
         subscriptions.push(cx.observe_window_activation(window, |this, window, cx| {
             if window.is_window_active() {
@@ -358,6 +361,9 @@ impl Studio {
             (Screen::Script, None) => Screen::Edit,
             _ => screen,
         };
+        if self.screen == Screen::Cut && screen != Screen::Cut {
+            self.cut.update(cx, |cut, cx| cut.forget_note(cx));
+        }
         self.screen = screen;
         self.refresh_status();
         match screen {
@@ -365,25 +371,28 @@ impl Studio {
                 if let Some(Planning { board, script, .. }) = &self.planning {
                     board.update(cx, |board, _| board.reload());
                     script.update(cx, |script, _| script.reload());
-                    let focus = match screen {
-                        Screen::Board => board.focus_handle(cx),
-                        _ => script.focus_handle(cx),
-                    };
-                    window.focus(&focus, cx);
                 }
             }
-            Screen::Record => window.focus(&self.record.focus_handle(cx), cx),
-            Screen::Cut => window.focus(&self.cut.focus_handle(cx), cx),
-            Screen::Edit => {
-                self.edit.update(cx, |edit, cx| edit.reload_proposals(cx));
-                window.focus(&self.edit.focus_handle(cx), cx);
-            }
-            Screen::Ship => {
-                self.ship.update(cx, |ship, cx| ship.reload(cx));
-                window.focus(&self.ship.focus_handle(cx), cx);
-            }
+            Screen::Record | Screen::Cut => {}
+            Screen::Edit => self.edit.update(cx, |edit, cx| edit.reload_proposals(cx)),
+            Screen::Ship => self.ship.update(cx, |ship, cx| ship.reload(cx)),
         }
+        self.focus_screen(window, cx);
         cx.notify();
+    }
+
+    /// Gives the shown screen the keyboard, so its single-key shortcuts work right away.
+    fn focus_screen(&self, window: &mut Window, cx: &mut App) {
+        let focus = match (self.screen, &self.planning) {
+            (Screen::Board, Some(planning)) => planning.board.focus_handle(cx),
+            (Screen::Script, Some(planning)) => planning.script.focus_handle(cx),
+            (Screen::Board | Screen::Script, None) => return,
+            (Screen::Record, _) => self.record.focus_handle(cx),
+            (Screen::Cut, _) => self.cut.focus_handle(cx),
+            (Screen::Edit, _) => self.edit.focus_handle(cx),
+            (Screen::Ship, _) => self.ship.focus_handle(cx),
+        };
+        window.focus(&focus, cx);
     }
 
     /// Undoes or redoes the last change of `cut.kdl`, while nothing records.
@@ -398,6 +407,7 @@ impl Studio {
         });
         self.edit
             .update(cx, |edit, cx| edit.stepped_history(result.err(), cx));
+        self.cut.update(cx, |cut, cx| cut.forget_note(cx));
     }
 
     /// The Board screen of a video outside a channel: why there is no board, and the way into
@@ -580,12 +590,7 @@ impl Studio {
     fn title_bar(&mut self, compact: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let folder = self.folder.read(cx);
         let title = folder.project.video.title.clone();
-        let format = match folder.project.video.format {
-            shot_core::FormatKind::Reaction => "Reaction",
-            shot_core::FormatKind::Opinion => "Opinion",
-            shot_core::FormatKind::ProductTour => "Product tour",
-            shot_core::FormatKind::Tutorial => "Tutorial",
-        };
+        let format = board::format_name(folder.project.video.format);
         let recording = self.record.read(cx).is_recording();
         let trailing = match self.screen {
             Screen::Edit => self.edit.update(cx, |edit, cx| {
