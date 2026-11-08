@@ -1,15 +1,16 @@
-//! Overlays and derived cuts in the Timeline workspace: the B-roll and Highlight lanes, and a
+//! Overlays and derived cuts in the Timeline workspace: the Overlays and Highlight lanes, and a
 //! pane listing the overlays around the playhead with their template parameters, the overlay
 //! rules, and the Shorts and X clips with their export.
 //!
-//! Every action writes `cut.kdl`: Find runs [`overlay_rules::run`], picking b-roll fills a slot
-//! from the files the video can use, a boolean parameter toggles in place, and remove drops the
-//! overlay.
+//! The lanes and the pane show a person's overlays and the lock's alike. A person's can be
+//! changed: every action writes `cut.kdl`. Find runs [`overlay_rules::run`], picking b-roll
+//! fills a slot from the files the video can use, a boolean parameter toggles in place, and
+//! remove drops the overlay. The lock's say which rule or override made them.
 
 use std::path::Path;
 
 use gpui::{Context, FontWeight, div, prelude::*, px, rgb};
-use shot_core::{Cut, DerivedKind, Overlay, ParamValue, TakeAt};
+use shot_core::{Applied, Cut, DerivedKind, Overlay, ParamValue, TakeAt};
 use shot_render::overlay::{self, Params, broll, highlight, link_card};
 use shot_render::overlay_rules;
 use shot_render::plan::snap;
@@ -60,44 +61,62 @@ fn placed(this: &EditScreen) -> Vec<Placed<'_>> {
     out
 }
 
-/// The B-roll or Highlight lane: blocks of `template` overlays in the lane window.
+/// The Overlays lane, every template but `highlight` in violet, or with `highlight` the
+/// Highlight lane in lime. Overlays that overlap share the lane in two rows.
 pub fn lane(
     this: &EditScreen,
     window: &std::ops::Range<u64>,
     x: impl Fn(u64) -> f32,
-    template: &str,
+    highlight: bool,
 ) -> impl IntoElement {
-    let (fill, text) = if template == broll::TEMPLATE {
-        (rgb(BROLL).alpha(0.3), rgb(BROLL))
-    } else {
+    let (fill, text) = if highlight {
         (SELECTION, ACCENT)
+    } else {
+        (rgb(BROLL).alpha(0.3), rgb(BROLL))
     };
-    div().size_full().children(
-        placed(this)
-            .into_iter()
-            .filter(|p| p.overlay.template.as_str() == template)
-            .filter(|p| p.frames.end > window.start && p.frames.start < window.end)
-            .map(move |p| {
-                let left = x(p.frames.start.max(window.start));
-                let right = x(p.frames.end.min(window.end));
-                div()
-                    .absolute()
-                    .top_0()
-                    .bottom_0()
-                    .left(gpui::relative(left))
-                    .w(gpui::relative((right - left).max(0.002)))
-                    .rounded(px(6.))
-                    .px(px(8.))
-                    .bg(fill)
-                    .text_color(text)
-                    .text_size(TEXT_XS)
-                    .font_weight(FontWeight::MEDIUM)
-                    .line_height(px(36.))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .child(summary(p.overlay))
-            }),
-    )
+    let mut shown: Vec<(Placed, usize)> = Vec::new();
+    let mut ends = [0u64; 2];
+    for p in placed(this) {
+        let is_highlight = p.overlay.template.as_str() == highlight::TEMPLATE;
+        if is_highlight != highlight || p.frames.end <= window.start || p.frames.start >= window.end
+        {
+            continue;
+        }
+        let row = ends
+            .iter()
+            .position(|end| *end <= p.frames.start)
+            .unwrap_or(1);
+        ends[row] = ends[row].max(p.frames.end);
+        shown.push((p, row));
+    }
+    let rows = if shown.iter().any(|(_, row)| *row == 1) {
+        2.
+    } else {
+        1.
+    };
+    let height = (36. - 2. * (rows - 1.)) / rows;
+    div()
+        .size_full()
+        .children(shown.into_iter().map(move |(p, row)| {
+            let left = x(p.frames.start.max(window.start));
+            let right = x(p.frames.end.min(window.end));
+            div()
+                .absolute()
+                .top(px((height + 2.) * row as f32))
+                .h(px(height))
+                .left(gpui::relative(left))
+                .w(gpui::relative((right - left).max(0.002)))
+                .rounded(px(6.))
+                .px(px(8.))
+                .bg(fill)
+                .text_color(text)
+                .text_size(TEXT_XS)
+                .font_weight(FontWeight::MEDIUM)
+                .line_height(px(height))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .child(summary(p.overlay))
+        }))
 }
 
 /// One line about an overlay: what it shows.
@@ -112,6 +131,13 @@ fn summary(overlay: &Overlay) -> String {
             Some(file) => file.rsplit('/').next().unwrap_or(file).to_owned(),
             None => "Empty slot".into(),
         },
+        overlay::callout::TEMPLATE => p.text("text").unwrap_or("Callout").to_owned(),
+        overlay::pop::TEMPLATE => p
+            .text("sticker")
+            .or(p.text("text"))
+            .unwrap_or("Pop")
+            .to_owned(),
+        overlay::chapter_band::TEMPLATE => p.text("text").unwrap_or("Chapter band").to_owned(),
         _ => p
             .text("text")
             .or(p.text("diff"))
@@ -229,8 +255,9 @@ pub fn pane(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement
     let cut = folder.project.cut.clone();
     let window =
         this.playhead.saturating_sub(u64::from(FPS) * 5)..this.playhead + u64::from(FPS) * 20;
-    let mut near: Vec<(Placed, usize)> = Vec::new();
-    for p in placed(this) {
+    let lock = folder.lock();
+    let mut entries = Vec::new();
+    for mut p in placed(this) {
         if p.frames.end <= window.start || p.frames.start >= window.end {
             continue;
         }
@@ -241,15 +268,42 @@ pub fn pane(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement
         else {
             continue;
         };
-        if let Some(index) = block.overlays.iter().position(|o| o == p.overlay) {
-            near.push((Placed { index, ..p }, near.len()));
-        }
+        let made = match block.overlays.iter().position(|o| o == p.overlay) {
+            Some(index) => {
+                p.index = index;
+                Made::Yours
+            }
+            None => Made::Lock(
+                lock.and_then(|l| l.take(&block.take))
+                    .and_then(|t| {
+                        t.instances.iter().find(|i| {
+                            matches!(&i.applied, Applied::Overlay { template, range, params }
+                                if *template == p.overlay.template
+                                    && *range == p.overlay.range
+                                    && *params == p.overlay.params)
+                        })
+                    })
+                    .map_or_else(
+                        || "From the style rules".to_owned(),
+                        |i| crate::place::provenance(&i.provenance),
+                    ),
+            ),
+        };
+        let checked = match &folder.theme {
+            Ok(theme) => theme
+                .check(p.overlay, &block.take)
+                .map(|()| about(p.overlay))
+                .map_err(|e| e.to_string()),
+            Err(error) => Err(error.clone()),
+        };
+        entries.push((p, made, checked));
     }
     let files = candidates(&dir);
-    let mut rows = Vec::with_capacity(near.len());
-    for (p, key) in &near {
-        rows.push(overlay_row(p, *key, &files, cx));
-    }
+    let rows: Vec<_> = entries
+        .into_iter()
+        .enumerate()
+        .map(|(key, (p, made, checked))| overlay_row(&p, key, &files, &made, checked, cx))
+        .collect();
     ui::pane()
         .w(px(400.))
         .flex_none()
@@ -305,20 +359,34 @@ pub fn pane(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement
         .child(derived_cuts(&cut, cx))
 }
 
+/// Who made an overlay the pane lists.
+enum Made {
+    /// A person's overlay in the take block, which the pane can change.
+    Yours,
+    /// The lock's, with the rule or override that made it.
+    Lock(String),
+}
+
+/// What an overlay's template is, for a built-in one or a brand Lottie.
+fn about(overlay: &Overlay) -> &'static str {
+    overlay::spec(overlay.template.as_str()).map_or("a Lottie template of the brand", |s| s.about)
+}
+
 fn overlay_row(
     p: &Placed,
     key: usize,
     files: &[String],
+    made: &Made,
+    checked: Result<&'static str, String>,
     cx: &mut Context<EditScreen>,
 ) -> gpui::AnyElement {
     let overlay = p.overlay;
     let template = overlay.template.as_str();
     let color = match template {
-        broll::TEMPLATE => rgb(BROLL),
         highlight::TEMPLATE => ACCENT,
-        _ => BODY,
+        _ => rgb(BROLL),
     };
-    let checked = overlay::check(overlay);
+    let yours = matches!(made, Made::Yours);
     let (at, index) = (p.at, p.index);
     let mut params = div().flex().flex_col().gap(px(2.)).pl(px(26.));
     for (name, value) in &overlay.params {
@@ -339,7 +407,7 @@ fn overlay_row(
                     .overflow_hidden()
                     .whitespace_nowrap(),
             );
-        if let ParamValue::Bool(on) = value {
+        if let (ParamValue::Bool(on), true) = (value, yours) {
             let name = name.clone();
             let on = *on;
             line = line
@@ -363,7 +431,7 @@ fn overlay_row(
         }
         params = params.child(line);
     }
-    let slot = template == broll::TEMPLATE && !files.is_empty();
+    let slot = yours && template == broll::TEMPLATE && !files.is_empty();
     let next_file = {
         let current = Params(overlay).text("file");
         let position = current.and_then(|c| files.iter().position(|f| f == c));
@@ -427,36 +495,48 @@ fn overlay_row(
                             );
                         }))
                 }))
-                .child(
-                    div()
-                        .id(("remove", key))
-                        .px(px(6.))
-                        .rounded(px(6.))
-                        .hover(|s| s.bg(FLOAT))
-                        .cursor_pointer()
-                        .text_size(TEXT_XS)
-                        .text_color(MUTED)
-                        .child("Remove")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.change_overlay(
-                                at,
-                                index,
-                                |overlays, i| {
-                                    overlays.remove(i);
-                                },
-                                cx,
-                            );
-                        })),
-                ),
+                .when(yours, |row| {
+                    row.child(
+                        div()
+                            .id(("remove", key))
+                            .px(px(6.))
+                            .rounded(px(6.))
+                            .hover(|s| s.bg(FLOAT))
+                            .cursor_pointer()
+                            .text_size(TEXT_XS)
+                            .text_color(MUTED)
+                            .child("Remove")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.change_overlay(
+                                    at,
+                                    index,
+                                    |overlays, i| {
+                                        overlays.remove(i);
+                                    },
+                                    cx,
+                                );
+                            })),
+                    )
+                }),
         )
         .child(
             div()
                 .pl(px(26.))
                 .text_size(TEXT_XS)
                 .text_color(MUTED)
-                .child(match &checked {
-                    Ok(spec) => spec.about.to_owned(),
-                    Err(e) => e.to_string(),
+                .child(match checked {
+                    Ok(about) => about.to_owned(),
+                    Err(e) => e,
+                }),
+        )
+        .child(
+            div()
+                .pl(px(26.))
+                .text_size(TEXT_XS)
+                .text_color(MUTED)
+                .child(match made {
+                    Made::Yours => "Yours, in cut.kdl".to_owned(),
+                    Made::Lock(provenance) => provenance.clone(),
                 }),
         )
         .child(params)

@@ -186,6 +186,16 @@ impl EditMap {
             .map(|s| s.output_frame + (frame - s.source_frames.start))
     }
 
+    /// Every output frame showing take time `at` of `take`, once per span that keeps it, as
+    /// export places the lock's moments.
+    pub fn outputs_of<'a>(&'a self, take: &'a Id, at: Micros) -> impl Iterator<Item = u64> + 'a {
+        let frame = at.0 * u64::from(FPS) / 1_000_000;
+        self.spans
+            .iter()
+            .filter(move |s| s.take == *take && s.source_frames.contains(&frame))
+            .map(move |s| s.output_frame + (frame - s.source_frames.start))
+    }
+
     /// The block and media time output frame `frame` shows.
     pub fn source_at(&self, frame: u64) -> Option<(TakeAt, Micros)> {
         self.span_at(frame)

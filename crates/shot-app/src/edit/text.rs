@@ -294,7 +294,7 @@ fn paragraph_element(
                 .children(children),
         )
         .when(ends_selection, |this_paragraph| {
-            this_paragraph.child(selection_toolbar(this))
+            this_paragraph.child(selection_toolbar(this, cx))
         })
 }
 
@@ -401,42 +401,61 @@ fn cut(at: TakeAt, run: &CutRun, open: bool, cx: &mut Context<EditScreen>) -> im
 }
 
 /// Anchored under the paragraph that holds the end of the selection, 8 px clear of the text.
-fn selection_toolbar(this: &EditScreen) -> impl IntoElement {
+fn selection_toolbar(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement {
     let Some((_, range, kept, removed)) = this.selected() else {
         return div();
     };
+    let sound_open = this.place.picker == Some(super::place::Picker::Sound);
     let count = this.selection.map_or(0, |s| s.words().count());
     let words = if count == 1 { "word" } else { "words" };
-    div().flex().child(
-        div()
-            .flex()
-            .items_center()
-            .gap(px(2.))
-            .p(px(4.))
-            .rounded(px(11.))
-            .bg(FLOAT)
-            .shadow_lg()
-            .text_size(TEXT_SM)
-            .child(
-                div()
-                    .px(px(10.))
-                    .pl(px(8.))
-                    .child(format!("{count} {words}, {}", seconds(range.duration()))),
-            )
-            .when(kept, |bar| bar.child(tool("cut", "Cut", "⌫")))
-            .when(removed, |bar| bar.child(tool("restore", "Restore", "R")))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .h(px(28.))
-                    .px(px(10.))
-                    .text_color(MUTED)
-                    .child("Layout")
-                    .child(kbd("1–4")),
-            ),
-    )
+    div()
+        .flex()
+        .flex_col()
+        .items_start()
+        .gap(px(8.))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(2.))
+                .p(px(4.))
+                .rounded(px(11.))
+                .bg(FLOAT)
+                .shadow_lg()
+                .text_size(TEXT_SM)
+                .child(
+                    div()
+                        .px(px(10.))
+                        .pl(px(8.))
+                        .child(format!("{count} {words}, {}", seconds(range.duration()))),
+                )
+                .when(kept, |bar| bar.child(tool("cut", "Cut", "⌫")))
+                .when(removed, |bar| bar.child(tool("restore", "Restore", "R")))
+                .child(
+                    tool("system-audio", "Sound", "S")
+                        .id("tool-sound")
+                        .cursor_pointer()
+                        .hover(|s| s.bg(FLOAT_ON))
+                        .when(sound_open, |t| t.bg(FLOAT_ON))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.toggle_picker(super::place::Picker::Sound, cx)
+                        })),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .h(px(28.))
+                        .px(px(10.))
+                        .text_color(MUTED)
+                        .child("Layout")
+                        .child(kbd("1–4")),
+                ),
+        )
+        .when(sound_open, |bar| {
+            bar.child(super::place::sound_picker(this, cx).max_w(px(560.)))
+        })
 }
 
 fn tool(name: &'static str, text: &'static str, keys: &'static str) -> Div {

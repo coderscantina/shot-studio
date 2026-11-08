@@ -157,7 +157,7 @@ fn block_take(cut: &Cut, at: TakeAt) -> Result<&Id, EditError> {
 
 /// `cut` with the override of (`take`, `kind`, `at`) changed by `change`, added when there is
 /// none, in canonical order.
-fn with_override(
+pub(crate) fn with_override(
     cut: &Cut,
     take: &Id,
     kind: ElementKind,

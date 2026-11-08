@@ -7,6 +7,7 @@
 mod overlays;
 mod parts;
 mod picture;
+mod place;
 mod product;
 mod proposals;
 mod text;
@@ -61,6 +62,7 @@ actions!(
         ExtendNext,
         AcceptProposal,
         ShowProposal,
+        PickSound,
     ]
 );
 
@@ -84,6 +86,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-right", ExtendNext, context),
         KeyBinding::new("tab", AcceptProposal, context),
         KeyBinding::new("g", ShowProposal, context),
+        KeyBinding::new("s", PickSound, context),
     ]);
 }
 
@@ -154,6 +157,11 @@ pub struct EditScreen {
     product: product::ProductState,
     /// What the overlay rules last added, for the Overlays pane.
     overlay_note: Option<String>,
+    /// The sound and pop pickers and the callout tool.
+    place: place::PlaceState,
+    /// Where the Picture preview and the Sound lane were last painted, for mouse mapping.
+    preview_bounds: Rc<Cell<Bounds<Pixels>>>,
+    sound_lane_bounds: Rc<Cell<Bounds<Pixels>>>,
     /// The channel repo and slug when the folder is a video of one, for agent proposals.
     channel: Option<(PathBuf, String)>,
     proposals: Vec<proposals::CutProposal>,
@@ -211,6 +219,9 @@ impl EditScreen {
             overview_bounds: Rc::default(),
             product: product::ProductState::default(),
             overlay_note: None,
+            place: place::PlaceState::default(),
+            preview_bounds: Rc::default(),
+            sound_lane_bounds: Rc::default(),
             channel,
             proposals: Vec::new(),
             cards: Vec::new(),
@@ -252,6 +263,7 @@ impl EditScreen {
                 map: self.map.clone(),
                 media,
                 effects: project.format.effects(),
+                theme: folder.theme.clone(),
             },
             frame,
         );
@@ -634,10 +646,13 @@ impl Render for EditScreen {
             .on_action(cx.listener(Self::delete_selection))
             .on_action(cx.listener(Self::restore_selection))
             .on_action(cx.listener(|this, _: &ClearSelection, _, cx| {
-                if !this.reject_selected(cx) {
+                if !this.close_picker() && !this.reject_selected(cx) {
                     this.selection = None;
                 }
                 cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &PickSound, _, cx| {
+                this.toggle_picker(place::Picker::Sound, cx)
             }))
             .on_action(cx.listener(|this, _: &AcceptProposal, _, cx| this.accept_selected(cx)))
             .on_action(cx.listener(|this, _: &ShowProposal, _, cx| this.show_next_proposal(cx)))

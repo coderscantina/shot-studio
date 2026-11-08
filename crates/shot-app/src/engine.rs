@@ -19,9 +19,10 @@ use shot_render::assets::Assets;
 use shot_render::cursor::FrameCursor;
 use shot_render::frame::{Frame, Shot, compose};
 use shot_render::graph::Renderer;
-use shot_render::layout::{Canvas, LayoutSpec, Source, Sources};
+use shot_render::layout::{Canvas, LayoutSpec, Rect, Source, Sources};
 use shot_render::plan::frame_time;
 use shot_render::surface::{BufferPool, Matrix, Range, size};
+use shot_render::theme::Theme;
 
 use crate::model::{EditMap, FPS};
 
@@ -37,6 +38,38 @@ const CANVAS: Canvas = Canvas {
 pub struct PreviewFrame {
     pub frame: u64,
     pub buffer: CFRetained<CVPixelBuffer>,
+    /// Where the take's screen recording sits in the frame, when it shows.
+    pub screen: Option<ScreenMap>,
+}
+
+/// The screen layer of a drawn frame: its place on the canvas and the part of the screen
+/// recording it shows, so a point on the preview maps back to screen pixels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenMap {
+    /// Canvas pixels of [`CANVAS`].
+    frame: Rect,
+    /// Texture coordinates of the recording.
+    crop: Rect,
+    /// The recording's size in pixels.
+    size: (u32, u32),
+}
+
+impl ScreenMap {
+    /// The screen pixel under `at`, a fraction of the preview's width and height, if the
+    /// screen shows there.
+    pub fn screen_point(&self, at: (f32, f32)) -> Option<shot_core::Point> {
+        let (x, y) = (at.0 * CANVAS.width as f32, at.1 * CANVAS.height as f32);
+        let f = self.frame;
+        if x < f.left || x > f.right || y < f.top || y > f.bottom {
+            return None;
+        }
+        let u = self.crop.left + (x - f.left) / f.width() * self.crop.width();
+        let v = self.crop.top + (y - f.top) / f.height() * self.crop.height();
+        Some(shot_core::Point {
+            x: (u * self.size.0 as f32).round() as i32,
+            y: (v * self.size.1 as f32).round() as i32,
+        })
+    }
 }
 
 // SAFETY: CoreVideo buffers are reference counted atomically and the render thread never touches
@@ -46,12 +79,15 @@ unsafe impl Send for PreviewFrame {}
 /// Adds drawing to a composed frame, given its media time and the canvas.
 pub type Decoration = fn(Micros, Canvas, &mut Frame);
 
-/// What one preview plays: where each output frame comes from, where the takes live, and the
-/// format's effects.
+/// What one preview plays: where each output frame comes from, where the takes live, the
+/// format's effects and the brand's theme.
 pub struct Plan {
     pub map: EditMap,
     pub media: PathBuf,
     pub effects: Effects,
+    /// The render [`Assets`] are made again whenever this changes, that is when `cut.kdl` or
+    /// `cut.lock` changed, and kept across plans that only move the playhead or the view.
+    pub theme: Result<Arc<Theme>, String>,
 }
 
 #[derive(Default)]
@@ -184,8 +220,8 @@ fn render_loop(shared: &Shared) {
     let mut renderer = None;
     let mut pool = None;
     let mut tracks: HashMap<PathBuf, FrameCursor> = HashMap::new();
-    // Event logs and snapshots, read again for each new plan.
-    let mut assets: Option<(Arc<Plan>, Assets)> = None;
+    // Event logs, snapshots and stills, read again for each new theme.
+    let mut assets: Option<(Arc<Theme>, Assets)> = None;
     loop {
         let (plan, frame, generation, decoration) = {
             let mut state = shared.lock();
@@ -219,11 +255,13 @@ fn render_loop(shared: &Shared) {
                         .map_err(|e| e.to_string())?,
                 ),
             };
+            let theme = plan.theme.as_ref().map_err(Clone::clone)?;
             let assets = match &mut assets {
-                Some((current, assets)) if Arc::ptr_eq(current, &plan) => assets,
+                Some((current, assets)) if Arc::ptr_eq(current, theme) => assets,
                 _ => {
                     let dir = plan.media.parent().unwrap_or(&plan.media);
-                    &mut assets.insert((plan.clone(), Assets::new(dir))).1
+                    let fresh = Assets::with_theme(dir, theme.clone());
+                    &mut assets.insert((theme.clone(), fresh)).1
                 }
             };
             render(
@@ -242,8 +280,12 @@ fn render_loop(shared: &Shared) {
             continue;
         }
         match rendered {
-            Ok(buffer) => {
-                state.queue.push_back(PreviewFrame { frame, buffer });
+            Ok((buffer, screen)) => {
+                state.queue.push_back(PreviewFrame {
+                    frame,
+                    buffer,
+                    screen,
+                });
                 state.position = frame + 1;
             }
             Err(error) => state.error = Some(error),
@@ -260,7 +302,7 @@ fn render(
     pool: &BufferPool,
     tracks: &mut HashMap<PathBuf, FrameCursor>,
     assets: &mut Assets,
-) -> Result<CFRetained<CVPixelBuffer>, String> {
+) -> Result<(CFRetained<CVPixelBuffer>, Option<ScreenMap>), String> {
     let span = plan
         .map
         .span_at(frame)
@@ -356,6 +398,19 @@ fn render(
         .scene
         .layers
         .retain(|layer| frames.get(layer.source).is_some());
+    let screen = match (&cutaway, sizes.screen) {
+        (None, size) if available(Source::Screen) => drawn
+            .scene
+            .layers
+            .iter()
+            .find(|l| l.source == Source::Screen)
+            .map(|l| ScreenMap {
+                frame: l.frame,
+                crop: l.crop,
+                size,
+            }),
+        _ => None,
+    };
     let target = pool.buffer().map_err(|e| e.to_string())?;
     renderer
         .draw(
@@ -367,5 +422,5 @@ fn render(
             &target,
         )
         .map_err(|e| e.to_string())?;
-    Ok(target)
+    Ok((target, screen))
 }
