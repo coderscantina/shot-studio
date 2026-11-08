@@ -60,6 +60,7 @@ Waiting for Mike. One line each with a recommendation and a link to its record. 
 Found by agents and waiting for a task. Remove a line when it's fixed.
 
 - Record does not warn when the camera delivers black frames.
+- The painter has no prefetch for the second side of a two-sided transition (the engine queues 18 frames instead), and `paint` does not return the screen layer it drew, so the engine lays out paused frames twice to map callout clicks. `--bench-edit --glass` draws its own pass although `Painter::set_decoration` now exists.
 - True peak measured -0.7 dBFS after AAC on the full-effects export, above the -1 dBTP ceiling the limiter met before transitions and bookends joined the mix.
 - Phase sounds for cards, zooms, pops and clicks are not wired; only transition sounds play. Stingers and derived cuts do not snap to the beat. The beat cache lives for one process instead of on disk by file hash (decision 0023).
 - The contract does not yet describe which transition joins a bookend, where the intro goes, what each title shows, or take handles. Bumpers are cached per video, not per channel as decision 0021 says.
