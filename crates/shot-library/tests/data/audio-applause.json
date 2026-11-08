@@ -1,0 +1,202 @@
+{
+ "result_count": 240,
+ "page_count": 12,
+ "page_size": 20,
+ "page": 1,
+ "results": [
+  {
+   "id": "baf7990c-657a-47ab-83c0-4ec2437095c3",
+   "title": "Applause 2.WAV",
+   "indexed_on": "2024-05-21T15:00:07.873258Z",
+   "foreign_landing_url": "https://freesound.org/people/Sandermotions/sounds/277021",
+   "url": "https://cdn.freesound.org/previews/277/277021_1402315-hq.mp3",
+   "creator": "Sandermotions",
+   "creator_url": "https://freesound.org/people/Sandermotions",
+   "license": "cc0",
+   "license_version": "1.0",
+   "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+   "provider": "freesound",
+   "source": "freesound",
+   "category": null,
+   "genres": null,
+   "filesize": 165600,
+   "filetype": "mp3",
+   "tags": [
+    {
+     "name": "Applause",
+     "accuracy": null,
+     "unstable__provider": "freesound"
+    },
+    {
+     "name": "applaud",
+     "accuracy": null,
+     "unstable__provider": "freesound"
+    },
+    {
+     "name": "applauding",
+     "accuracy": null,
+     "unstable__provider": "freesound"
+    }
+   ],
+   "alt_files": [
+    {
+     "url": "https://freesound.org/apiv2/sounds/277021/download/",
+     "bit_rate": 0,
+     "filesize": 1213484,
+     "filetype": "wav",
+     "sample_rate": 48000
+    }
+   ],
+   "attribution": "\"Applause 2.WAV\" by Sandermotions is marked with CC0 1.0. To view the terms, visit https://creativecommons.org/publicdomain/zero/1.0/.",
+   "fields_matched": [
+    "title",
+    "tags.name"
+   ],
+   "mature": false,
+   "audio_set": {
+    "title": "Applause",
+    "foreign_landing_url": "https://freesound.org/apiv2/packs/17090/",
+    "creator": "Sandermotions",
+    "creator_url": "https://freesound.org/people/Sandermotions/",
+    "url": null,
+    "filesize": null,
+    "filetype": null
+   },
+   "duration": 6320,
+   "bit_rate": 128000,
+   "sample_rate": null,
+   "thumbnail": null,
+   "detail_url": "https://api.openverse.org/v1/audio/baf7990c-657a-47ab-83c0-4ec2437095c3/",
+   "related_url": "https://api.openverse.org/v1/audio/baf7990c-657a-47ab-83c0-4ec2437095c3/related/",
+   "waveform": "https://api.openverse.org/v1/audio/baf7990c-657a-47ab-83c0-4ec2437095c3/waveform/",
+   "unstable__sensitivity": []
+  },
+  {
+   "id": "19d196c1-d231-4119-9ff1-2bb435e2b4e6",
+   "title": "applause 3.mp3",
+   "indexed_on": "2022-10-01T04:02:44.560321Z",
+   "foreign_landing_url": "https://freesound.org/people/Charel%20Sytze/sounds/35491",
+   "url": "https://cdn.freesound.org/previews/35/35491_117199-hq.mp3",
+   "creator": "Charel Sytze",
+   "creator_url": "https://freesound.org/people/Charel%20Sytze",
+   "license": "by",
+   "license_version": "3.0",
+   "license_url": "https://creativecommons.org/licenses/by/3.0/",
+   "provider": "freesound",
+   "source": "freesound",
+   "category": null,
+   "genres": null,
+   "filesize": 1369728,
+   "filetype": "mp3",
+   "tags": [
+    {
+     "name": "applause",
+     "accuracy": null,
+     "unstable__provider": "freesound"
+    },
+    {
+     "name": "audience",
+     "accuracy": null,
+     "unstable__provider": "freesound"
+    },
+    {
+     "name": "human",
+     "accuracy": null,
+     "unstable__provider": "freesound"
+    }
+   ],
+   "alt_files": [
+    {
+     "url": "https://freesound.org/apiv2/sounds/35491/download/",
+     "bit_rate": 320000,
+     "filesize": 2308800,
+     "filetype": "mp3",
+     "sample_rate": 48000
+    }
+   ],
+   "attribution": "\"applause 3.mp3\" by Charel Sytze is licensed under CC BY 3.0. To view a copy of this license, visit https://creativecommons.org/licenses/by/3.0/.",
+   "fields_matched": [
+    "description",
+    "title",
+    "tags.name"
+   ],
+   "mature": false,
+   "audio_set": null,
+   "duration": 57685,
+   "bit_rate": 128000,
+   "sample_rate": null,
+   "thumbnail": null,
+   "detail_url": "https://api.openverse.org/v1/audio/19d196c1-d231-4119-9ff1-2bb435e2b4e6/",
+   "related_url": "https://api.openverse.org/v1/audio/19d196c1-d231-4119-9ff1-2bb435e2b4e6/related/",
+   "waveform": "https://api.openverse.org/v1/audio/19d196c1-d231-4119-9ff1-2bb435e2b4e6/waveform/",
+   "unstable__sensitivity": []
+  },
+  {
+   "id": "d7b70792-b273-4386-b719-48ce9b81fd31",
+   "title": "Applause 1.WAV",
+   "indexed_on": "2024-05-21T15:00:07.873258Z",
+   "foreign_landing_url": "https://freesound.org/people/Sandermotions/sounds/277022",
+   "url": "https://cdn.freesound.org/previews/277/277022_1402315-hq.mp3",
+   "creator": "Sandermotions",
+   "creator_url": "https://freesound.org/people/Sandermotions",
+   "license": "cc0",
+   "license_version": "1.0",
+   "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+   "provider": "freesound",
+   "source": "freesound",
+   "category": null,
+   "genres": null,
+   "filesize": 172104,
+   "filetype": "mp3",
+   "tags": [
+    {
+     "name": "Applause",
+     "accuracy": null,
+     "unstable__provider": "freesound"
+    },
+    {
+     "name": "applaud",
+     "accuracy": null,
+     "unstable__provider": "freesound"
+    },
+    {
+     "name": "applauding",
+     "accuracy": null,
+     "unstable__provider": "freesound"
+    }
+   ],
+   "alt_files": [
+    {
+     "url": "https://freesound.org/apiv2/sounds/277022/download/",
+     "bit_rate": 0,
+     "filesize": 1259564,
+     "filetype": "wav",
+     "sample_rate": 48000
+    }
+   ],
+   "attribution": "\"Applause 1.WAV\" by Sandermotions is marked with CC0 1.0. To view the terms, visit https://creativecommons.org/publicdomain/zero/1.0/.",
+   "fields_matched": [
+    "title",
+    "tags.name"
+   ],
+   "mature": false,
+   "audio_set": {
+    "title": "Applause",
+    "foreign_landing_url": "https://freesound.org/apiv2/packs/17090/",
+    "creator": "Sandermotions",
+    "creator_url": "https://freesound.org/people/Sandermotions/",
+    "url": null,
+    "filesize": null,
+    "filetype": null
+   },
+   "duration": 6560,
+   "bit_rate": 128000,
+   "sample_rate": null,
+   "thumbnail": null,
+   "detail_url": "https://api.openverse.org/v1/audio/d7b70792-b273-4386-b719-48ce9b81fd31/",
+   "related_url": "https://api.openverse.org/v1/audio/d7b70792-b273-4386-b719-48ce9b81fd31/related/",
+   "waveform": "https://api.openverse.org/v1/audio/d7b70792-b273-4386-b719-48ce9b81fd31/waveform/",
+   "unstable__sensitivity": []
+  }
+ ]
+}

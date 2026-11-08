@@ -11,6 +11,7 @@ This contract owns the files a video consists of and what each one means. `shot-
     brand.kdl           the channel's style: fonts, colors, logo, sounds, bookends, rules
     fonts/ sounds/      in git
     media/              bumper videos (ignored)
+  library/              images for pops and b-roll, in git, see credits
   formats/<format>.kdl  the channel's copy of each preset, with the format's rules
   videos/
     <slug>/
@@ -449,7 +450,7 @@ Every template that draws moves on springs in the video's motion preset (the bra
 | `chapter-band` | `text`, `label` | The chapter's title on a band at the left as a chapter starts. Without `text` it shows the title of the chapter it opens, without `label` "Chapter" and the chapter's number |
 | `end-card` | `text`, `subtitle`, `videos` (0 to 2), `subscribe` (bool) | The end screen over the brand's background: a headline ("Thanks for watching" by default) and frames where YouTube Studio places its elements, inside the inner 90% of the frame: up to two 16:9 videos, 36% of the width, stacked at the right, and the round subscribe button under the headline. Two videos and the button by default |
 | `callout` | `x`, `y` (screen pixels), `width`, `height`, `text` | A ring on a point of the screen recording, or with `width` and `height` an outline around a box, with `text` on a label beside it towards the middle of the frame. Follows the layout and zoom. A rule copies `x` and `y` from a click or `x`, `y`, `width`, `height` and `text` from an OCR box; drawn by hand it snaps to the OCR box under the point or the nearest click within 160 screen pixels and 1.5 s |
-| `pop` | `text`, `sticker`, `x`, `y`, `size` (4K output pixels) | An emoji or a word popping in, by default right of the middle in the upper third and 360 pixels tall. An emoji plays its animation from the bundled Noto set (👍 👏 😍 🥳 ✅ ✨ ❤️ 🔥 😂 👀 🎉, other emoji are refused), a word sits on an accent pill. `sticker` names a brand Lottie template drawn instead, its `text` slot set to `text`. One of `text` and `sticker` is required |
+| `pop` | `text`, `sticker`, `image`, `x`, `y`, `size` (4K output pixels) | An emoji, a word or a picture popping in, by default right of the middle in the upper third and 360 pixels tall. An emoji plays its animation from the bundled Noto set (👍 👏 😍 🥳 ✅ ✨ ❤️ 🔥 😂 👀 🎉, other emoji are refused), a word sits on an accent pill. `sticker` names a brand Lottie template drawn instead, its `text` slot set to `text`. `image` is a still (`.png`, `.jpg`) relative to the video folder, drawn `size` tall on rounded corners, a meme from the Library. One of `text`, `sticker` and `image` is required |
 | `blur` | `x`, `y`, `width`, `height` (screen pixels), `strength` | The screen recording averaged over blocks of `strength` screen pixels (32 by default) inside the rectangle, following the layout and zoom |
 | `bleep` | none | The voice over the range replaced by a 1 kHz tone |
 
@@ -634,6 +635,32 @@ Each preset's own values, and what it does besides its springs:
 | `calm` | 30 | 0 | 10 | 20 | word by word, fading | fade with a short slide |
 
 `beat-sync` snaps entrances to the music, on by default in `reactive` and `editorial`: while a music cue plays, every overlay but `blur`, `bleep` and `b-roll` starts on the nearest beat of the cue within 150 ms, rounded to a frame, and keeps its end. Beats are detected once per music file. Cuts, transitions and bookends never move, and derived cuts keep the take times.
+
+## Credits
+
+A sound or image downloaded from the Library ([0026](../decisions/0026-library-search-on-openverse.md)) has a credit file beside it with the same stem, `<name>.credit.kdl`: `brand/sounds/deep-whoosh.mp3` has `brand/sounds/deep-whoosh.credit.kdl`, `library/facepalm.jpg` has `library/facepalm.credit.kdl`. A sound downloaded into a video outside a channel goes to the video's `sounds/`, an image to its `sources/`. `shot-core` reads and writes it like the other files; the sound lookup and the b-roll file lists skip it by its extension. Nodes, each once, in this order:
+
+| Node | Meaning |
+| --- | --- |
+| `title "<text>"` | required. The asset's title at its source |
+| `creator "<name>" url="<url>"` | optional, `url` optional |
+| `license <cc0,pdm,by> version="<text>" url="<url>"` | required, `version` and `url` optional. Only licenses that allow commercial use and changes without binding the video to a license: CC0, the Public Domain Mark and CC BY |
+| `source "<url>" provider="<text>"` | required. The page the asset was found on, and who hosts it |
+| `file "<url>"` | optional. The URL the file was downloaded from |
+| `openverse "<id>"` | optional. The asset's Openverse id |
+| `tags "<tag>" ...` | optional, one or more |
+| `attribution "<text>"` | required. The credit line as the provider words it. The description's credits are this line and the source |
+
+```kdl
+title "Deep Whoosh #1"
+creator "Kinoton" url="https://freesound.org/people/Kinoton"
+license cc0 version="1.0" url="https://creativecommons.org/publicdomain/zero/1.0/"
+source "https://freesound.org/people/Kinoton/sounds/351256" provider="freesound"
+file "https://cdn.freesound.org/previews/351/351256_2247456-hq.mp3"
+openverse "eab8a6e2-0ac8-4615-9e0d-ebde30523783"
+tags "sfx" "swoosh" "whoosh"
+attribution "\"Deep Whoosh #1\" by Kinoton is marked with CC0 1.0. To view the terms, visit https://creativecommons.org/publicdomain/zero/1.0/."
+```
 
 ## `cut.lock`
 
