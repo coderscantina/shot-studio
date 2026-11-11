@@ -51,7 +51,7 @@ block2 = "0.6.2"
 objc2-audio-toolbox = { version = "0.3.2", default-features = false, features = ["std", "AudioConverter", "objc2-core-audio-types"] }
 # Same wgpu as vello 0.11, so only one wgpu is compiled.
 wgpu = "30.0.1"
-pollster = "0.4.0"
+pollster = "1.0.1"
 libc = "0.2.191"
 # The NSView behind a gpui window, for the prompter's borderless placement and mirror. Same as gpui.
 raw-window-handle = "0.6.2"
@@ -59,14 +59,14 @@ tempfile = "3.27.0"
 # B-roll stills from sources/. Same version gpui pulls in, only the decoders b-roll needs.
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 # The version gpui-pre already builds; brand SVG logos, which carry no text of their own.
-resvg = { version = "0.46", default-features = false }
+resvg = { version = "0.49", default-features = false }
 # Official MCP Rust SDK. The client feature is only enabled for tests.
 rmcp = { version = "3.9.0", default-features = false, features = ["server", "macros", "transport-io"] }
 tokio = { version = "1.53.1", features = ["rt", "macros", "io-std"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 # Images of the thumbnail frame task over MCP, the version already in the lockfile.
-base64 = "0.22.1"
+base64 = "0.23.1"
 clap = { version = "4", features = ["derive"] }
 # whisper.cpp bindings, Metal backend for large-v3-turbo.
 whisper-rs = { version = "0.16.0", features = ["metal"] }
@@ -84,7 +84,7 @@ png = "0.18.1"
 ebur128 = "0.1.11"
 # YouTube upload: PKCE randomness, form and query encoding, and the refresh token in the macOS
 # Keychain. All three are the versions already in the lockfile.
-getrandom = "0.3.4"
+getrandom = "0.4.3"
 form_urlencoded = "1.2.2"
 security-framework = "3.7.0"
 # FSEvents for `shot build --watch`, the version already in the lockfile.
