@@ -7,6 +7,7 @@ This contract owns the files a video consists of and what each one means. `shot-
 ```
 <channel repo>/
   .gitignore            ignores media/ and .shot/
+  .shot/worktrees/<slug>/  the worktree of `video/<slug>` (ignored), see video worktrees below
   brand/
     brand.kdl           the channel's style: fonts, colors, logo, sounds, bookends, rules
     themes/<id>.kdl     the channel's other saved themes, see themes below
@@ -32,6 +33,8 @@ This contract owns the files a video consists of and what each one means. `shot-
       .shot/export/     rendered cuts, caption sidecar, thumbnail `main.png` (ignored), see ship artifacts
       .shot/ship/       the upload record (ignored), see ship artifacts
 ```
+
+A video is edited in its worktree ([0037](../decisions/0037-a-worktree-per-video-branch.md)): opening a card checks out `video/<slug>` at `.shot/worktrees/<slug>/`, once, and reuses it after. Edits stay uncommitted there until someone commits them, and the board reads the card from the worktree. The video's ignored folders, `media/` and `.shot/`, stay in the main checkout's video folder and the worktree's are symlinks to them, so removing a worktree loses no take, export or upload record. The board adds `/.shot/worktrees/`, `/videos/*/media` and `/videos/*/.shot` to the repo's `.git/info/exclude`, because `media/` in `.gitignore` matches folders only and not the links. A write to `video/<slug>` that changes a file with uncommitted edits in its worktree is refused with the files named. When the board opens it removes the worktree of a branch that is merged into the default branch or deleted, unless the worktree has uncommitted changes. `brand/` is edited in the main checkout.
 
 Content is what the video says: chapters, takes, a person's cuts. Style is how it looks and sounds, pacing included ([0019](../decisions/0019-semantic-video-elements-and-style.md)). Style cascades through layers that map to files, lowest first: the brand's imports, `brand/brand.kdl`, the channel's `formats/<format>.kdl`, the video's `format.kdl`, then an `override` in `cut.kdl` for one element. The edit scopes in the app are these files: only here, this video, this format, the channel.
 

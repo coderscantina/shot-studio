@@ -219,7 +219,8 @@ impl Board {
     /// Merges the proposal into the video branch, or into the default branch for a proposal of
     /// channel files, fast-forward when that branch has not moved, else with a merge commit,
     /// then deletes the proposal branch. On a conflict nothing changes and [`Error::Conflict`]
-    /// lists the paths.
+    /// lists the paths. When the video's worktree has uncommitted edits to a file the merge
+    /// changes, nothing changes and [`Error::Uncommitted`] lists them.
     pub fn accept_proposal(&self, slug: &str, name: &str) -> Result<Accepted> {
         let head = self.proposal_head(slug, name)?;
         let (branch, tip) = self.target(slug, &head)?;
@@ -242,7 +243,11 @@ impl Board {
                 false,
             )
         };
-        self.set_branch(&branch, new_tip)?;
+        if branch == branch_name(slug) {
+            self.advance_video(slug, new_tip)?;
+        } else {
+            self.set_branch(&branch, new_tip)?;
+        }
         self.delete_proposal(slug, name)?;
         Ok(Accepted {
             head: new_tip.to_string(),

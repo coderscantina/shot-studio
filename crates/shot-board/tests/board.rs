@@ -551,3 +551,187 @@ fn adds_a_video_as_a_branch_and_refuses_a_taken_slug() {
     }
     assert!(board.add_video("gamma", &files(&[("../x", "")])).is_err());
 }
+
+fn write(path: &Path, text: &str) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, text).unwrap();
+}
+
+/// Paths `git status` would list in the repo at `path`, untracked files included.
+fn status(path: &Path) -> Vec<String> {
+    let repo = Repository::discover(path).unwrap();
+    let mut options = git2::StatusOptions::new();
+    options.include_untracked(true).recurse_untracked_dirs(true);
+    repo.statuses(Some(&mut options))
+        .unwrap()
+        .iter()
+        .map(|e| e.path().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn opening_a_video_creates_its_worktree_once_and_reuses_it() {
+    let channel = Channel::new(&[("alpha", VIDEO)]);
+    let board = channel.board();
+
+    let folder = board.open_video("alpha").unwrap();
+    let worktree = channel.dir.path().join(".shot/worktrees/alpha");
+    assert_eq!(
+        folder.canonicalize().unwrap(),
+        worktree.join("videos/alpha").canonicalize().unwrap()
+    );
+    assert!(folder.join("video.kdl").is_file());
+    let repo = Repository::open(&worktree).unwrap();
+    assert_eq!(
+        repo.head().unwrap().name().unwrap(),
+        "refs/heads/video/alpha"
+    );
+
+    std::fs::write(folder.join("cut.kdl"), "chapter \"Intro\"\n").unwrap();
+    assert_eq!(board.open_video("alpha").unwrap(), folder);
+    assert!(folder.join("cut.kdl").is_file());
+    assert!(status(channel.dir.path()).is_empty());
+}
+
+#[test]
+fn media_stays_in_the_main_checkout_and_is_linked_from_the_worktree() {
+    let channel = Channel::new(&[("alpha", VIDEO)]);
+    let folder = channel.board().open_video("alpha").unwrap();
+
+    write(&folder.join("media/t01/screen.mov"), "frames");
+    write(&folder.join(".shot/cache/index.db"), "rows");
+    let main = channel.dir.path().join("videos/alpha");
+    assert_eq!(
+        std::fs::read_to_string(main.join("media/t01/screen.mov")).unwrap(),
+        "frames"
+    );
+    assert!(main.join(".shot/cache/index.db").is_file());
+    assert!(status(&folder).is_empty());
+}
+
+#[test]
+fn a_card_shows_uncommitted_edits_from_its_worktree() {
+    let channel = Channel::new(&[("alpha", VIDEO)]);
+    let board = channel.board();
+    let folder = board.open_video("alpha").unwrap();
+
+    std::fs::write(
+        folder.join("video.kdl"),
+        VIDEO.replace("status ideas", "status editing"),
+    )
+    .unwrap();
+    let cards = channel.board().cards().unwrap();
+    assert_eq!(cards[0].video.as_ref().unwrap().status, Status::Editing);
+    assert!(
+        channel
+            .file_at("video/alpha", "videos/alpha/video.kdl")
+            .contains("ideas")
+    );
+}
+
+#[test]
+fn commits_only_the_named_files_of_a_worktree() {
+    let channel = Channel::new(&[("alpha", VIDEO)]);
+    let board = channel.board();
+    let folder = board.open_video("alpha").unwrap();
+    std::fs::write(folder.join("cut.kdl"), "chapter \"Intro\"\n").unwrap();
+    std::fs::write(folder.join("script.md"), "# Changed\n").unwrap();
+
+    let sha = board
+        .commit_video_files("alpha", &["cut.kdl"], "♻️ migrate alpha to style rules")
+        .unwrap()
+        .unwrap();
+    assert_eq!(channel.sha("video/alpha"), sha);
+    assert_eq!(
+        channel.file_at("video/alpha", "videos/alpha/cut.kdl"),
+        "chapter \"Intro\"\n"
+    );
+    assert_eq!(
+        channel.file_at("video/alpha", "videos/alpha/script.md"),
+        "# Title\n"
+    );
+    assert_eq!(status(&folder), vec!["videos/alpha/script.md"]);
+    assert_eq!(
+        board
+            .commit_video_files("alpha", &["cut.kdl"], "♻️ again")
+            .unwrap(),
+        None
+    );
+}
+
+#[test]
+fn accepting_into_a_video_with_uncommitted_changes_to_its_files_is_refused() {
+    let channel = Channel::new(&[("alpha", VIDEO)]);
+    let board = channel.board();
+    let folder = board.open_video("alpha").unwrap();
+    std::fs::write(folder.join("cut.kdl"), "chapter \"Mine\"\n").unwrap();
+    for (name, file) in [("cut", "cut.kdl"), ("script", "script.md")] {
+        board
+            .create_proposal("alpha", name, "✏️ edit", &files(&[(file, "# Agent\n")]))
+            .unwrap();
+    }
+    let tip = channel.sha("video/alpha");
+
+    let Err(Error::Uncommitted { paths, .. }) = board.accept_proposal("alpha", "cut") else {
+        panic!("expected a refusal");
+    };
+    assert_eq!(paths, vec!["videos/alpha/cut.kdl"]);
+    assert_eq!(channel.sha("video/alpha"), tip);
+    assert!(channel.has_branch("proposal/alpha/cut"));
+
+    board.accept_proposal("alpha", "script").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(folder.join("script.md")).unwrap(),
+        "# Agent\n"
+    );
+    assert_eq!(status(&folder), vec!["videos/alpha/cut.kdl"]);
+}
+
+#[test]
+fn opening_the_board_removes_worktrees_of_merged_or_deleted_branches_without_changes() {
+    let channel = Channel::new(&[("alpha", VIDEO), ("beta", VIDEO), ("gamma", VIDEO)]);
+    let board = channel.board();
+    let alpha = board.open_video("alpha").unwrap();
+    board.open_video("beta").unwrap();
+    let gamma = board.open_video("gamma").unwrap();
+    write(&alpha.join("media/t01/screen.mov"), "frames");
+    write(&gamma.join("sources/note.md"), "keep me\n");
+
+    let repo = channel.repo();
+    let merged = board.move_card("alpha", Status::Shipped).unwrap().unwrap();
+    let merged = repo.find_commit(merged.parse().unwrap()).unwrap();
+    let sig = repo.signature().unwrap();
+    let main = repo
+        .commit(
+            None,
+            &sig,
+            &sig,
+            "🔀 merge alpha",
+            &merged.tree().unwrap(),
+            &[&merged],
+        )
+        .unwrap();
+    repo.reference("refs/heads/main", main, true, "merge")
+        .unwrap();
+    for slug in ["beta", "gamma"] {
+        repo.find_reference(&format!("refs/heads/video/{slug}"))
+            .unwrap()
+            .delete()
+            .unwrap();
+    }
+    drop(board);
+
+    channel.board();
+    let worktrees = channel.dir.path().join(".shot/worktrees");
+    assert!(!worktrees.join("alpha").exists());
+    assert!(!worktrees.join("beta").exists());
+    assert!(gamma.join("sources/note.md").is_file());
+    assert!(
+        channel
+            .dir
+            .path()
+            .join("videos/alpha/media/t01/screen.mov")
+            .is_file()
+    );
+    assert_eq!(repo.worktrees().unwrap().len(), 1);
+}

@@ -25,11 +25,18 @@
 //! until the user runs `git reset --hard` or similar. The app keeps the working tree on the
 //! default branch.
 //!
+//! A video is edited in its own worktree at `.shot/worktrees/<slug>` ([0037],
+//! [`Board::open_video`]). A card reads `video.kdl` from there, uncommitted edits included. A
+//! write to the video's branch checks out the files it changes in the worktree, and is refused
+//! when one of them has uncommitted edits.
+//!
 //! [0004]: ../../docs/decisions/0004-proposals-as-branches.md
+//! [0037]: ../../docs/decisions/0037-a-worktree-per-video-branch.md
 
 mod error;
 mod proposals;
 mod releases;
+mod worktrees;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -74,11 +81,14 @@ pub struct Board {
 }
 
 impl Board {
-    /// Opens the repo at `path`. It must be the repo root, parents are not searched.
+    /// Opens the repo at `path`. It must be the repo root of the main checkout, parents are not
+    /// searched. Removes stale video worktrees, see [`Board::remove_stale_worktrees`].
     pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self> {
-        Ok(Self {
+        let board = Self {
             repo: Repository::open(path)?,
-        })
+        };
+        board.remove_stale_worktrees()?;
+        Ok(board)
     }
 
     /// Starts a channel repo at `path`, which must be missing or empty: `git init` on `main`,
@@ -155,7 +165,8 @@ impl Board {
     }
 
     /// All videos, sorted by slug: every folder under `videos/` on the default branch plus every
-    /// `video/<slug>` branch. Each card is read from its branch tip, else from the default branch.
+    /// `video/<slug>` branch. Each card is read from its worktree when it has one, else from its
+    /// branch tip, else from the default branch.
     pub fn cards(&self) -> Result<Vec<Card>> {
         let default = self.default_tip()?;
         let mut slugs = BTreeSet::new();
@@ -184,7 +195,10 @@ impl Board {
                     Ok(branch) => branch.get().peel_to_commit()?,
                     Err(_) => default.clone(),
                 };
-                let video = self.read_video(&tip, &slug);
+                let video = match self.worktree_folder(&slug) {
+                    Some(folder) => read_video_file(&folder.join("video.kdl"), &slug),
+                    None => self.read_video(&tip, &slug),
+                };
                 Ok(Card {
                     slug,
                     has_branch,
@@ -196,7 +210,8 @@ impl Board {
 
     /// Moves a card by rewriting `status` through shot-core and committing on the video's
     /// branch, creating the branch for an idea that has none. Returns the new commit sha, or
-    /// `None` when the card already has that status (no empty commits).
+    /// `None` when the card already has that status (no empty commits). Refused with
+    /// [`Error::Uncommitted`] when the video's worktree has uncommitted edits to `video.kdl`.
     pub fn move_card(&self, slug: &str, status: Status) -> Result<Option<String>> {
         let tip = self.tip(slug)?;
         let mut video = self.read_video(&tip, slug)?;
@@ -206,7 +221,7 @@ impl Board {
         video.status = status;
         let tree = self.write_files(&tip, [(video_path(slug, "video.kdl"), video.to_kdl())])?;
         let sha = self.commit(&tip, tree, &format!("🚚 move {slug} to {status}"))?;
-        self.set_branch(&branch_name(slug), sha)?;
+        self.advance_video(slug, sha)?;
         Ok(Some(sha.to_string()))
     }
 
@@ -341,10 +356,7 @@ impl Board {
             .get_path(Path::new(&video_path(slug, "video.kdl")))
             .map_err(|_| missing())?;
         let blob = self.repo.find_blob(entry.id()).map_err(|_| missing())?;
-        Video::parse(&String::from_utf8_lossy(blob.content())).map_err(|error| CardError::Parse {
-            slug: slug.to_owned(),
-            error,
-        })
+        parse_video(&String::from_utf8_lossy(blob.content()), slug)
     }
 
     /// Builds the tree of `base` with the given repo-relative files replaced or added.
@@ -383,6 +395,20 @@ impl Board {
             .reference(&format!("refs/heads/{name}"), commit, true, "shot-board")?;
         Ok(())
     }
+}
+
+fn read_video_file(path: &Path, slug: &str) -> Result<Video, CardError> {
+    let text = std::fs::read_to_string(path).map_err(|_| CardError::Missing {
+        slug: slug.to_owned(),
+    })?;
+    parse_video(&text, slug)
+}
+
+fn parse_video(text: &str, slug: &str) -> Result<Video, CardError> {
+    Video::parse(text).map_err(|error| CardError::Parse {
+        slug: slug.to_owned(),
+        error,
+    })
 }
 
 fn branch_name(slug: &str) -> String {
