@@ -6,21 +6,19 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use shot_core::{Cut, Format, Id, Micros, Project, Script, Timeline, Video};
+use shot_core::{Cut, FormatKind, Id, Lock, Micros, Project, Script, Timeline, Video};
 use shot_render::derived::{self, DerivedInputs, DerivedPlan, FaceTrack};
 use shot_render::export::{ExportOptions, ExportReport, export};
 
 fn project(dir: &Path, media: &Path, cut: &str) -> Project {
     if !dir.join("media").exists() {
         std::os::unix::fs::symlink(media, dir.join("media")).unwrap();
+        std::fs::write(dir.join("cut.lock"), Lock::default().to_kdl()).unwrap();
     }
     Project {
         video: Video::parse("title \"t\"\nstatus editing\nformat opinion\n").unwrap(),
         script: Script::parse("# t\n").unwrap(),
-        format: Format::parse(
-            &std::fs::read_to_string(fixtures().join("target-project/format.kdl")).unwrap(),
-        )
-        .unwrap(),
+        format: FormatKind::Opinion.preset(),
         cut: Cut::parse(cut).unwrap(),
     }
 }
@@ -153,7 +151,7 @@ fn reframing_keeps_the_face_inside_the_short() {
         format: shot_core::FormatKind::Opinion.preset(),
         cut: Cut::parse(cut).unwrap(),
     };
-    let timeline = Timeline::evaluate(&project);
+    let timeline = Timeline::evaluate(&project, &shot_core::Lock::default());
     let short = &timeline.outputs[1];
     let times = derived::face_times(short).remove(&take).unwrap();
     let track = shot_analyze::vision::face_track(dir.path(), &take, &times).unwrap();

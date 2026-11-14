@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 
 use shot_audio::{CEILING_DBTP, Meter, TARGET_LUFS};
-use shot_core::{Cut, Format, Project, Script, Video};
+use shot_core::{Cut, FormatKind, Lock, Project, Script, Video};
 use shot_media::audio::PcmReader;
 use shot_render::export::{ExportOptions, export};
 
@@ -14,11 +14,12 @@ fn project(cut: &str) -> (tempfile::TempDir, Project) {
         .join("target-project");
     let dir = tempfile::tempdir().unwrap();
     std::os::unix::fs::symlink(fixtures.join("media"), dir.path().join("media")).unwrap();
+    std::fs::write(dir.path().join("cut.lock"), Lock::default().to_kdl()).unwrap();
     let read = |name: &str| std::fs::read_to_string(fixtures.join(name)).unwrap();
     let project = Project {
         video: Video::parse(&read("video.kdl")).unwrap(),
         script: Script::parse(&read("script.md")).unwrap(),
-        format: Format::parse(&read("format.kdl")).unwrap(),
+        format: FormatKind::Opinion.preset(),
         cut: Cut::parse(cut).unwrap(),
     };
     (dir, project)

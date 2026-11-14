@@ -63,8 +63,8 @@ struct Seeks {
 /// Runs the bench on `dir` and returns whether it passed.
 pub fn run(dir: &std::path::Path, options: &BenchOptions) -> Result<bool, String> {
     let folder = VideoFolder::open(dir)?;
-    let project = &folder.shown;
-    let map = EditMap::preview(dir, &folder.project, project, View::Edited)?;
+    let project = &folder.project;
+    let map = EditMap::preview(dir, project, folder.lock(), View::Edited)?;
     if map.frames == 0 {
         return Err("the edit has no frames".into());
     }
@@ -144,22 +144,11 @@ pub fn run(dir: &std::path::Path, options: &BenchOptions) -> Result<bool, String
 }
 
 fn engine_spans(folder: &VideoFolder) -> String {
-    let overlays: usize = folder
-        .shown
-        .cut
-        .chapters
-        .iter()
-        .flat_map(|c| &c.takes)
-        .map(|t| t.overlays.len())
-        .sum();
-    let zooms: usize = folder
-        .shown
-        .cut
-        .chapters
-        .iter()
-        .flat_map(|c| &c.takes)
-        .map(|t| t.zooms.len())
-        .sum();
+    let (mut overlays, mut zooms) = (0, 0);
+    for (_, block) in crate::model::blocks(&folder.project.cut) {
+        overlays += crate::model::overlays(block, folder.lock()).len();
+        zooms += crate::model::zooms(block, folder.lock()).len();
+    }
     format!("{overlays} overlays, {zooms} zooms")
 }
 

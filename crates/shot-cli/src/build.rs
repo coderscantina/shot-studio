@@ -17,8 +17,7 @@ use shot_core::{Project, Script};
 use shot_mcp::style::{self, Disk, Patched, Repo};
 use shot_render::export::{self, ExportOptions, ExportReport};
 
-use crate::export::load;
-use crate::migrate::LOCK;
+use shot_ship::lock::LOCK_FILE as LOCK;
 
 #[derive(Args)]
 pub struct BuildArgs {
@@ -65,8 +64,7 @@ fn build(
     changed: &(dyn Fn() -> bool + Sync),
 ) -> Result<usize, String> {
     let started = Instant::now();
-    crate::restyle::refresh(video)?;
-    let project = load(video)?;
+    let project = crate::open(video)?.1.project;
     let cuts = cut_names(&project);
     let mut reports = Vec::with_capacity(cuts.len());
     for cut in &cuts {
@@ -295,12 +293,6 @@ fn proposal(video: &Path, name: &str, options: ExportOptions) -> Result<(), Stri
 /// The project and lock of the video in `video` as proposal `name` has it: the proposal's
 /// files on top of the video's, built like the video's own lock.
 fn proposal_version(video: &Path, name: &str) -> Result<(Project, shot_core::Lock), String> {
-    if !video.join(LOCK).exists() {
-        return Err(format!(
-            "{} is not migrated: proposal previews build a lock, run `shot migrate` first",
-            video.display()
-        ));
-    }
     let (disk, slug) = Disk::locate(video)?;
     let root = video
         .canonicalize()

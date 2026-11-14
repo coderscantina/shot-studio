@@ -1,27 +1,15 @@
-//! Runs the overlay rules over a video folder and writes their overlays into the main cut's take
-//! blocks, like the auto-zoom rule writes zooms:
-//!
-//! - **Link cards** for every URL said in a kept part of the transcript, read with the caption
-//!   fixes applied, so a fix for a misheard name also fixes its link.
-//! - **B-roll slots** over idle screen of at least 8 s and at every B marker of the event log.
-//! - **Highlights** where you read out text that is on screen, found with Vision.
-//!
-//! Each rule skips what an overlay of its template already covers, so running them again only
-//! adds what is new, and a person's changes to an overlay stay. [`redact`] places a bleep or a
-//! blur on words of the transcript, [`fill_b_roll`] picks the file of a slot.
+//! Overlays a person places from the transcript: [`redact`] places a bleep or a blur on words,
+//! [`highlight_said`] a highlight on text read out on screen, and [`fill_b_roll`] picks the file
+//! of a b-roll slot. Link cards, b-roll slots and highlights found by themselves are style rules.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use shot_analyze::elements::read_outs;
-use shot_analyze::vision::{self, Sampled, TextLine, VisionError};
-use shot_core::{
-    CaptionFix, Cut, Id, Micros, Overlay, ParamValue, TakeEdit, TimeRange, Transcript, Word,
-};
+use shot_analyze::vision::{self, VisionError};
+use shot_core::{Cut, Id, Micros, Overlay, ParamValue, TakeEdit, TimeRange};
 
 use crate::layout::Rect;
 use crate::overlay::highlight::{self, ScreenLine};
-use crate::overlay::{broll, link_card, overlay, redact as templates};
+use crate::overlay::{broll, overlay, redact as templates};
 
 #[derive(Debug, thiserror::Error)]
 pub enum OverlayRuleError {
@@ -46,143 +34,8 @@ pub enum OverlayRuleError {
     NoSlot { take: Id, at: Micros },
 }
 
-/// How many overlays each rule added.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Added {
-    pub link_cards: usize,
-    pub b_roll: usize,
-    pub highlights: usize,
-}
-
-/// What a take offers the rules, read once per take.
-struct TakeFacts {
-    words: Vec<Word>,
-    idle: Vec<TimeRange>,
-    markers: Vec<Micros>,
-    /// Text on screen at sample times, `None` without a screen track or words.
-    screen: Option<Sampled<Vec<TextLine>>>,
-}
-
-/// `cut` with link cards, b-roll slots and highlights added to every take block of the main cut.
-pub fn run(video_dir: &Path, cut: &Cut) -> Result<(Cut, Added), OverlayRuleError> {
-    let mut facts: HashMap<Id, TakeFacts> = HashMap::new();
-    let mut added = Added::default();
-    let mut cut = cut.clone();
-    for chapter in &mut cut.chapters {
-        for edit in &mut chapter.takes {
-            if !facts.contains_key(&edit.take) {
-                let read = take_facts(video_dir, &edit.take, &cut.caption_fixes)?;
-                facts.insert(edit.take.clone(), read);
-            }
-            let take = &facts[&edit.take];
-            let kept = |t: Micros| edit_keeps(edit, t);
-            let words: Vec<Word> = take
-                .words
-                .iter()
-                .filter(|w| kept(w.range.from()))
-                .cloned()
-                .collect();
-            let cards = link_card::cards(&words, &edit.overlays);
-            let slots: Vec<Overlay> = broll::slots(&take.idle, &take.markers, &edit.overlays)
-                .into_iter()
-                .filter(|o| kept(o.range.from()))
-                .collect();
-            let marks = match &take.screen {
-                Some(screen) => highlight::highlights(
-                    &read_outs(&words, &screen.samples),
-                    screen.size,
-                    &edit.overlays,
-                ),
-                None => Vec::new(),
-            };
-            added.link_cards += cards.len();
-            added.b_roll += slots.len();
-            added.highlights += marks.len();
-            edit.overlays
-                .extend(cards.into_iter().chain(slots).chain(marks));
-        }
-    }
-    Ok((cut, added))
-}
-
 fn edit_keeps(edit: &TakeEdit, t: Micros) -> bool {
     TimeRange::new(t, Micros(t.0 + 1)).is_some_and(|r| edit.keeps(r))
-}
-
-fn take_facts(
-    video_dir: &Path,
-    take: &Id,
-    fixes: &[CaptionFix],
-) -> Result<TakeFacts, OverlayRuleError> {
-    let media = video_dir.join("media").join(take.as_str());
-    let words: Vec<Word> = shot_analyze::cache::read_cached(video_dir, take)
-        .map_err(OverlayRuleError::Transcript)?
-        .map(|t: Transcript| {
-            crate::captions::apply_fixes(&t, fixes)
-                .into_iter()
-                .filter_map(|w| {
-                    Some(Word {
-                        range: TimeRange::new(w.from, w.to)?,
-                        text: w.text,
-                        confidence: 100,
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    let screen_path = media.join("screen.mp4");
-    let has_screen = screen_path.exists();
-    let idle = if has_screen {
-        let (frames, pixels) =
-            shot_analyze::idle::encoded_frames(&screen_path).map_err(|source| {
-                OverlayRuleError::Io {
-                    path: screen_path.clone(),
-                    source,
-                }
-            })?;
-        shot_analyze::idle::still_ranges(&frames, pixels, broll::IDLE_MIN)
-    } else {
-        Vec::new()
-    };
-    let events = media.join(crate::assets::EVENTS_FILE);
-    let markers = shot_capture::events::read_markers(&events)
-        .map_err(|source| OverlayRuleError::Io {
-            path: events.clone(),
-            source,
-        })?
-        .into_iter()
-        .filter(|m| m.mark == shot_capture::events::Mark::BRoll)
-        .map(|m| m.t)
-        .collect();
-    let screen = if has_screen && !words.is_empty() {
-        Some(vision::screen_text(
-            video_dir,
-            take,
-            &sentence_starts(&words),
-        )?)
-    } else {
-        None
-    };
-    Ok(TakeFacts {
-        words,
-        idle,
-        markers,
-        screen,
-    })
-}
-
-/// Where each sentence starts, snapped down to the keyframe grid so each sample decodes one
-/// keyframe.
-fn sentence_starts(words: &[Word]) -> Vec<Micros> {
-    let step = crate::derived::FACE_STEP.0;
-    let mut times: Vec<Micros> = words
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| *i == 0 || words[i - 1].text.ends_with(['.', '?', '!', ':']))
-        .map(|(_, w)| Micros(w.range.from().0 / step * step))
-        .collect();
-    times.dedup();
-    times
 }
 
 /// The text Vision reads on the screen track at `times`, in screen pixels.

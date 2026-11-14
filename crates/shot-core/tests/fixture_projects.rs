@@ -5,8 +5,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use shot_core::{
-    Cut, Format, Id, Layout, Micros, Project, RangeEdit, Script, TakeAt, TimeRange, Timeline,
-    Transcript, Video, Word,
+    Brand, Cut, FormatKind, FormatLayer, Id, Layout, Lock, Micros, MigrateInput, Project,
+    RangeEdit, Script, TakeAt, TimeRange, Timeline, Transcript, Video, Word, migrate,
+    written_before_lock,
 };
 
 const CHAPTERS_TSV: &str = include_str!("../../../fixtures/spec/chapters.tsv");
@@ -48,18 +49,43 @@ fn files_named(dir: &Path, name: &str, found: &mut Vec<PathBuf>) {
     }
 }
 
+/// The target project is written before the lock: it opens migrated, here without elements as
+/// the generator leaves it.
+fn target() -> (Project, Lock) {
+    let (format, cut) = (target_file("format.kdl"), target_file("cut.kdl"));
+    assert!(written_before_lock(&format, &cut));
+    let (video, script) = (
+        Video::parse(&target_file("video.kdl")).unwrap(),
+        Script::parse(&target_file("script.md")).unwrap(),
+    );
+    let migration = migrate(&MigrateInput {
+        video: &video,
+        script: &script,
+        format: &format,
+        cut: &cut,
+        imported: &[],
+        brand: &Brand::default(),
+        channel: FormatKind::Opinion.preset_source(),
+        elements: &[],
+        assets: &Default::default(),
+    })
+    .unwrap();
+    let project = Project {
+        video,
+        script,
+        format: migration.format,
+        cut: migration.cut,
+    };
+    (project, migration.lock)
+}
+
 #[test]
 fn target_project_is_a_timeline_of_the_spec_chapters() {
-    let project = Project {
-        video: Video::parse(&target_file("video.kdl")).unwrap(),
-        script: Script::parse(&target_file("script.md")).unwrap(),
-        format: Format::parse(&target_file("format.kdl")).unwrap(),
-        cut: Cut::parse(&target_file("cut.kdl")).unwrap(),
-    };
+    let (project, lock) = target();
     let spec = spec_chapters();
     assert_eq!(spec.len(), 8);
 
-    let timeline = Timeline::evaluate(&project);
+    let timeline = Timeline::evaluate(&project, &lock);
     let main = timeline.main();
     assert_eq!(main.chapters.len(), spec.len());
     assert_eq!(project.script.chapters.len(), spec.len());
@@ -88,30 +114,35 @@ fn target_project_is_a_timeline_of_the_spec_chapters() {
             .chapters
             .iter()
             .flat_map(|c| &c.takes[0].ranges)
-            .any(|r| matches!(r, RangeEdit::Remove { .. }))
+            .any(|r| matches!(r, RangeEdit::Remove(_)))
     );
 }
 
+/// Every committed file but the target's `format.kdl` and `cut.kdl`, which only migration reads.
 #[test]
 fn committed_kdl_is_canonical() {
     type Canonical = fn(&str) -> Result<String, shot_core::ParseError>;
     let kinds: [(&str, Canonical); 3] = [
         ("video.kdl", |t| Video::parse(t).map(|v| v.to_kdl())),
-        ("format.kdl", |t| Format::parse(t).map(|v| v.to_kdl())),
+        ("format.kdl", |t| FormatLayer::parse(t).map(|v| v.to_kdl())),
         ("cut.kdl", |t| Cut::parse(t).map(|v| v.to_kdl())),
     ];
+    let target = projects_dir().join("target");
     let mut checked = 0;
     for (name, canonical) in kinds {
         let mut paths = Vec::new();
         files_named(&projects_dir(), name, &mut paths);
         for path in paths {
+            if name != "video.kdl" && path.starts_with(&target) {
+                continue;
+            }
             let text = fs::read_to_string(&path).unwrap();
             let written = canonical(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
             assert_eq!(written, text, "{} is not canonical", path.display());
             checked += 1;
         }
     }
-    assert!(checked >= 4, "found only {checked} files");
+    assert!(checked >= 3, "found only {checked} files");
 }
 
 #[test]
@@ -156,7 +187,7 @@ fn take_block(kdl: &str, n: usize) -> std::ops::Range<usize> {
 
 #[test]
 fn an_edit_changes_only_the_lines_of_its_take_block() {
-    let cut = Cut::parse(&target_file("cut.kdl")).unwrap();
+    let (Project { cut, .. }, lock) = target();
     let before = cut.to_kdl();
     let at = TakeAt {
         chapter: 1,
@@ -169,7 +200,8 @@ fn an_edit_changes_only_the_lines_of_its_take_block() {
         cut.delete_words(at, &transcript, selection).unwrap(),
         cut.restore(
             at,
-            TimeRange::new(Micros(96_000_000), Micros(97_000_000)).unwrap(),
+            TimeRange::new(Micros(173_000_000), Micros(174_000_000)).unwrap(),
+            &lock,
         )
         .unwrap(),
         cut.set_layout(at, selection, Layout::Face).unwrap(),

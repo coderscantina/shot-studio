@@ -67,8 +67,7 @@ const DEFAULT_SPAN: u64 = 15 * FPS as u64;
 const SNAP: f32 = 8.;
 /// The shortest zoom or overlay a drag leaves, in frames.
 const MIN_LENGTH: u64 = 6;
-/// A zoom's scale when the format has no auto-zoom rule to take it from, and the scales the
-/// toolbar and menu offer.
+/// The scale of a zoom a person adds, and the scales the toolbar and menu offer.
 const DEFAULT_ZOOM: u16 = 130;
 pub(super) const ZOOM_SCALES: [u16; 4] = [115, 130, 150, 200];
 
@@ -236,8 +235,7 @@ impl Lanes {
     }
 }
 
-/// The shortest zoom Z makes when the format has no auto-zoom rule to take its hold from. A
-/// shorter one punches in and out before the eye catches up.
+/// The shortest zoom Z makes. A shorter one punches in and out before the eye catches up.
 const ZOOM_HOLD: shot_core::Micros = shot_core::Micros(1_500_000);
 
 /// `range` grown evenly on both sides to at least `hold`, inside `take`. Where one side runs
@@ -520,15 +518,13 @@ impl EditScreen {
         }
     }
 
-    /// Adds a zoom over the selected words, at the format's auto-zoom scale.
+    /// Adds a zoom over the selected words, at [`DEFAULT_ZOOM`].
     pub(super) fn add_zoom(&mut self, cx: &mut Context<Self>) {
         let Some((at, range, ..)) = self.selected() else {
             return;
         };
         let folder = self.folder.read(cx);
-        let rule = folder.project.format.auto_zoom.as_ref();
-        let scale = rule.map_or(DEFAULT_ZOOM, |z| z.scale);
-        let hold = rule.map_or(ZOOM_HOLD, |z| z.hold);
+        let (scale, hold) = (DEFAULT_ZOOM, ZOOM_HOLD);
         let take = folder
             .project
             .cut
@@ -865,8 +861,8 @@ fn split(top: f32, cx: &mut Context<EditScreen>) -> impl IntoElement {
 
 fn change_list(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement {
     let folder = this.folder.read(cx);
-    let changes = changes(&folder.shown.cut);
-    let raw: u64 = model::blocks(&folder.shown.cut)
+    let changes = changes(&folder.project.cut, folder.lock());
+    let raw: u64 = model::blocks(&folder.project.cut)
         .filter_map(|(_, edit)| {
             Some(edit.ranges.last()?.range().to().0 - edit.ranges.first()?.range().from().0)
         })
@@ -1799,9 +1795,7 @@ fn lock_moments<T: Clone>(
     cx: &Context<EditScreen>,
     pick: impl Fn(&shot_core::Instance) -> Option<T>,
 ) -> Vec<(u64, T)> {
-    let Some(lock) = this.folder.read(cx).lock() else {
-        return Vec::new();
-    };
+    let lock = this.folder.read(cx).lock();
     let mut out = Vec::new();
     for take in &lock.takes {
         for instance in &take.instances {
@@ -2125,20 +2119,12 @@ fn layout_lane(
 fn zoom_items(this: &EditScreen, cx: &Context<EditScreen>) -> Vec<Item> {
     let folder = this.folder.read(cx);
     let mut items = Vec::new();
-    for (at, block) in model::blocks(&folder.shown.cut) {
-        let own = folder
-            .project
-            .cut
-            .chapters
-            .get(at.chapter)
-            .and_then(|c| c.takes.get(at.take));
-        for zoom in &block.zooms {
+    for (at, block) in model::blocks(&folder.project.cut) {
+        for zoom in &model::zooms(block, folder.lock()) {
             let Some(frames) = this.map.output_range(at, zoom.range) else {
                 continue;
             };
-            let placed = own
-                .and_then(|b| b.zooms.iter().position(|z| z == zoom))
-                .map(Placed::Zoom);
+            let placed = block.zooms.iter().position(|z| z == zoom).map(Placed::Zoom);
             items.push(Item {
                 at,
                 placed,
@@ -2507,7 +2493,8 @@ fn voice_lane(
     window: &Range<u64>,
     cx: &mut Context<EditScreen>,
 ) -> impl IntoElement {
-    let cut = &this.folder.read(cx).shown.cut;
+    let folder = this.folder.read(cx);
+    let (cut, lock) = (&folder.project.cut, folder.lock());
     let removed_in = |at: shot_core::TakeAt| -> Vec<shot_core::TimeRange> {
         if this.view == model::View::Edited {
             return Vec::new();
@@ -2516,12 +2503,9 @@ fn voice_lane(
             .get(at.chapter)
             .and_then(|c| c.takes.get(at.take))
             .map(|edit| {
-                edit.ranges
-                    .iter()
-                    .filter_map(|r| match r {
-                        shot_core::RangeEdit::Remove { range, .. } => Some(*range),
-                        shot_core::RangeEdit::Keep(_) => None,
-                    })
+                model::removals(edit, lock)
+                    .into_iter()
+                    .map(|(r, _)| r)
                     .collect()
             })
             .unwrap_or_default()

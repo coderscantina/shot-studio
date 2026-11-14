@@ -202,9 +202,11 @@ mod tests {
             )
             .unwrap(),
         };
-        ExportPlan::new(Timeline::evaluate(&project).main(), 60, |_| {
-            shot_core::MediaId::default()
-        })
+        ExportPlan::new(
+            Timeline::evaluate(&project, &shot_core::Lock::default()).main(),
+            60,
+            |_| shot_core::MediaId::default(),
+        )
     }
 
     fn brand() -> Vec<(SoundKey, Id)> {
@@ -276,9 +278,11 @@ mod tests {
             )
             .unwrap(),
         };
-        let plan = ExportPlan::new(Timeline::evaluate(&project).main(), 60, |_| {
-            shot_core::MediaId::default()
-        });
+        let plan = ExportPlan::new(
+            Timeline::evaluate(&project, &shot_core::Lock::default()).main(),
+            60,
+            |_| shot_core::MediaId::default(),
+        );
         let id = |s: &str| Id::new(s).unwrap();
         let brand = vec![
             (

@@ -35,26 +35,25 @@ pub use captions::{
 pub use credit::{Creator, Credit, License};
 pub use cut::{
     CaptionBreak, CaptionFix, Chapter, Clip, Cut, DerivedCut, DerivedKind, Framing, LayoutChange,
-    Music, Overlay, Override, OverrideEffect, ParamValue, Point, RangeEdit, Rating, RemovedBy,
-    Review, TakeEdit, Zoom, ZoomBy, ZoomShape,
+    Music, Overlay, Override, OverrideEffect, ParamValue, Point, RangeEdit, Rating, TakeEdit, Zoom,
+    ZoomShape,
 };
-pub use edit::{Decision, EditError, Placed, TakeAt, WordState, WordView};
+pub use edit::{Decision, EditError, Placed, RemovedBy, Review, TakeAt, WordState, WordView};
 pub use element::{Attr, AttrValue, DuplicateElement, Element, ElementKind, Elements};
 pub use engine::{StyleError, StyleInput, build};
 pub use error::ParseError;
 pub use format::Inputs;
 pub use format::{
-    AutoCut, AutoZoom, CaptionStyle, Color, CursorStyle, DeviceFrame, Effects, Format, FormatKind,
-    FormatLayer, Keystrokes, Layout, LayoutName, LayoutSwitch, Pacing, PrompterMode, RuleKind,
-    Shadow, SwitchKind, SwitchSound, TimedRule, WindowStyle, ZoomMotion, ZoomTrigger,
+    CaptionStyle, Color, CursorStyle, DeviceFrame, Effects, Format, FormatKind, FormatLayer,
+    Keystrokes, Layout, LayoutName, LayoutSwitch, PrompterMode, Shadow, SwitchKind, SwitchSound,
+    WindowStyle, ZoomMotion,
 };
 pub use lock::{
     Applied, Asset, ElementRef, Instance, LOCK_VERSION, Lock, LockTake, Orphan, Provenance,
 };
 pub use migrate::{
-    B_ROLL_IDLE, B_ROLL_MARKER, EMPHASIS_HOLD, EMPHASIS_ZOOM, LINK_CARD_FOR, MigrateError,
-    MigrateInput, Migration, Report as MigrationReport, ZOOM_LEAD, has_rule_nodes, implied_rules,
-    migrate, preset_rules,
+    MigrateError, MigrateInput, Migration, Report as MigrationReport, migrate,
+    without_old_settings, written_before_lock,
 };
 pub use script::{Beat, Script, ScriptChapter};
 pub use style::{

@@ -292,7 +292,7 @@ fn the_disk_loader_builds_the_lock_the_contract_shows() {
 }
 
 #[tokio::test]
-async fn tools_read_a_migrated_video_whose_format_is_a_layer() {
+async fn tools_read_a_video_whose_format_is_a_layer() {
     let dir = channel();
     let client = connect(dir.path()).await;
 

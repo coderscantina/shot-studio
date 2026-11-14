@@ -1079,14 +1079,20 @@ fn stepped(grid: &[Vec<String>], selected: Option<&str>, step: Step) -> Option<S
 }
 
 /// Reads what a card shows besides its `video.kdl`: the edited length from `cut.kdl` (less the
-/// lock's cuts on a migrated video), else the spoken length of `script.md`, and the next step.
+/// lock's cuts), else the spoken length of `script.md`, and the next step.
 fn card_info(board: &Board, slug: &str, video: &Video, proposals: usize) -> CardInfo {
     let read = |file: &str| board.read_file(slug, file).ok().flatten();
     let script = read("script.md").and_then(|text| Script::parse(&text).ok());
     let cut = read("cut.kdl")
         .and_then(|text| Cut::parse(&text).ok())
         .filter(|cut| !cut.chapters.is_empty());
-    let review = cut.as_ref().map_or(0, |cut| cut.review_queue().count());
+    // A tip without a lock was never opened; its queue is empty until it is.
+    let lock = read(LOCK_FILE)
+        .and_then(|text| Lock::parse(&text).ok())
+        .unwrap_or_default();
+    let review = cut
+        .as_ref()
+        .map_or(0, |cut| cut.review_queue(&lock).count());
     let length = match cut {
         Some(cut) => {
             let project = Project {
@@ -1098,11 +1104,7 @@ fn card_info(board: &Board, slug: &str, video: &Video, proposals: usize) -> Card
                 format: video.format.preset(),
                 cut,
             };
-            let lock = read(LOCK_FILE).and_then(|text| Lock::parse(&text).ok());
-            let timeline = match &lock {
-                Some(lock) => Timeline::styled(&project, lock),
-                None => Timeline::evaluate(&project),
-            };
+            let timeline = Timeline::evaluate(&project, &lock);
             let edited = timeline
                 .main()
                 .chapters

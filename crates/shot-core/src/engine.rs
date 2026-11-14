@@ -258,11 +258,11 @@ fn structure_subjects(cut: &Cut, take: &Id, cuts: &[TimeRange]) -> Vec<Subject<'
             let last = chapter.takes.last()?;
             let start = first.ranges.iter().find_map(|r| match r {
                 RangeEdit::Keep(range) => Some(range.from()),
-                RangeEdit::Remove { .. } => None,
+                RangeEdit::Remove(_) => None,
             })?;
             let end = last.ranges.iter().rev().find_map(|r| match r {
                 RangeEdit::Keep(range) => Some(range.to()),
-                RangeEdit::Remove { .. } => None,
+                RangeEdit::Remove(_) => None,
             })?;
             Some((&first.take, start_of(start), &last.take, end_of(end)))
         })
@@ -294,7 +294,7 @@ fn kept_ranges(cut: &Cut, take: &Id) -> Vec<TimeRange> {
         .flat_map(|block| &block.ranges)
         .filter_map(|r| match r {
             RangeEdit::Keep(range) => Some(*range),
-            RangeEdit::Remove { .. } => None,
+            RangeEdit::Remove(_) => None,
         })
         .collect();
     kept.sort_by_key(|r| r.from());

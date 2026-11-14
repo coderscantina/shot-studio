@@ -34,7 +34,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
-use shot_core::{Brand, ContentHash, Effects, Id, Lock, MediaId, Micros, OutputKind, Project};
+use shot_core::{ContentHash, Effects, Id, Lock, MediaId, Micros, OutputKind, Project};
 use shot_media::audio::{AAC_PACKET_SAMPLES, AacEncoder, AacStream, AudioError, SAMPLE_RATE};
 use shot_media::encode::{EncodeError, EncodedFrame, EncoderSettings, HevcEncoder};
 use shot_media::mux::{self, AudioTrack, Chapter, FragmentedFile, Joiner, Movie, MuxError, Track};
@@ -201,7 +201,7 @@ pub fn export_until(
     render(
         video_dir,
         project,
-        lock.as_ref(),
+        &lock,
         &cache,
         cut,
         Some(out),
@@ -235,7 +235,7 @@ pub fn render_proposal(
     render(
         video_dir,
         project,
-        Some(lock),
+        lock,
         &cache,
         cut,
         None,
@@ -251,7 +251,7 @@ pub fn render_proposal(
 fn render(
     video_dir: &Path,
     project: &Project,
-    lock: Option<&Lock>,
+    lock: &Lock,
     cache: &dyn Fn(&ExportPlan) -> Result<Cache, ExportError>,
     cut: &str,
     out: Option<&Path>,
@@ -259,10 +259,7 @@ fn render(
     progress: &(dyn Fn(Progress) + Sync),
     cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<ExportReport, ExportError> {
-    let timeline = match lock {
-        Some(lock) => shot_core::Timeline::styled(project, lock),
-        None => shot_core::Timeline::evaluate(project),
-    };
+    let timeline = shot_core::Timeline::evaluate(project, lock);
     let output = timeline
         .outputs
         .iter()
@@ -303,25 +300,20 @@ fn render(
             (derived.plan.clone(), music)
         }
         None => {
-            let joins = match lock {
-                Some(lock) => Some(joins(&media, project, lock, &theme)?),
-                None => None,
-            };
+            let joins = joins(&media, project, lock, &theme)?;
             let plan_of = |output: &shot_core::Output| {
                 let mut plan = ExportPlan::new(output, FPS, |take| ids[take]);
                 crate::overlay::key_chunks(&mut plan, &assets, &theme);
-                if let Some(joins) = &joins {
-                    plan = plan.with_joins(joins);
-                    crate::join::key_joins(
-                        &mut plan,
-                        &KeyInputs {
-                            output,
-                            media: &|take| ids[take],
-                            identity: &assets,
-                            theme: &theme,
-                        },
-                    );
-                }
+                plan = plan.with_joins(&joins);
+                crate::join::key_joins(
+                    &mut plan,
+                    &KeyInputs {
+                        output,
+                        media: &|take| ids[take],
+                        identity: &assets,
+                        theme: &theme,
+                    },
+                );
                 plan
             };
             let plan = plan_of(output);
@@ -548,7 +540,7 @@ struct Media {
 /// lock, with its bookends and transitions and its entrances on the beat. Chunk keys are left
 /// out; the preview draws frames by [`Painter::paint`] and caches nothing.
 pub fn preview_plan(video_dir: &Path, project: &Project) -> Result<ExportPlan, ExportError> {
-    preview_plan_with(video_dir, project, crate::lock::read(video_dir)?.as_ref())
+    preview_plan_with(video_dir, project, &crate::lock::read(video_dir)?)
 }
 
 /// [`preview_plan`] styled by `lock` instead of the folder's `cut.lock`: a proposal's preview
@@ -556,25 +548,15 @@ pub fn preview_plan(video_dir: &Path, project: &Project) -> Result<ExportPlan, E
 pub fn preview_plan_with(
     video_dir: &Path,
     project: &Project,
-    lock: Option<&Lock>,
+    lock: &Lock,
 ) -> Result<ExportPlan, ExportError> {
-    let timeline = match lock {
-        Some(lock) => shot_core::Timeline::styled(project, lock),
-        None => shot_core::Timeline::evaluate(project),
-    };
+    let timeline = shot_core::Timeline::evaluate(project, lock);
     let main = timeline.main();
     let theme = theme(video_dir, lock, project)?;
     let media = Media::new(video_dir, project, lock);
-    let joins = match lock {
-        Some(lock) => Some(joins(&media, project, lock, &theme)?),
-        None => None,
-    };
+    let joins = joins(&media, project, lock, &theme)?;
     let plan_of = |output: &shot_core::Output| {
-        let plan = ExportPlan::new(output, FPS, |_| MediaId::default());
-        match &joins {
-            Some(joins) => plan.with_joins(joins),
-            None => plan,
-        }
+        ExportPlan::new(output, FPS, |_| MediaId::default()).with_joins(&joins)
     };
     let plan = plan_of(main);
     if !theme.beat_sync {
@@ -614,12 +596,7 @@ pub fn preview_score(
     project: &Project,
     plan: &ExportPlan,
 ) -> Result<voice::Score, ExportError> {
-    preview_score_with(
-        video_dir,
-        project,
-        plan,
-        crate::lock::read(video_dir)?.as_ref(),
-    )
+    preview_score_with(video_dir, project, plan, &crate::lock::read(video_dir)?)
 }
 
 /// [`preview_score`] styled by `lock` instead of the folder's `cut.lock`, for a proposal.
@@ -627,12 +604,9 @@ pub fn preview_score_with(
     video_dir: &Path,
     project: &Project,
     plan: &ExportPlan,
-    lock: Option<&Lock>,
+    lock: &Lock,
 ) -> Result<voice::Score, ExportError> {
-    let timeline = match lock {
-        Some(lock) => shot_core::Timeline::styled(project, lock),
-        None => shot_core::Timeline::evaluate(project),
-    };
+    let timeline = shot_core::Timeline::evaluate(project, lock);
     let theme = theme(video_dir, lock, project)?;
     let media = Media::new(video_dir, project, lock);
     let music = music(plan, None, &media)?;
@@ -749,11 +723,10 @@ impl Cues {
 /// the folder's own lock.
 pub fn theme(
     video_dir: &Path,
-    lock: Option<&Lock>,
+    lock: &Lock,
     project: &Project,
 ) -> Result<Theme, crate::theme::ThemeError> {
-    let none = Brand::default();
-    let brand = lock.map_or(&none, |lock| &lock.brand);
+    let brand = &lock.brand;
     let root = crate::theme::channel_root(video_dir).unwrap_or(video_dir);
     Theme::new(brand, project.video.format, Some(&project.cut), &|file| {
         let path = root.join(file);
@@ -1157,7 +1130,7 @@ fn score(
 }
 
 impl Media {
-    fn new(video_dir: &Path, project: &Project, lock: Option<&shot_core::Lock>) -> Self {
+    fn new(video_dir: &Path, project: &Project, lock: &shot_core::Lock) -> Self {
         Self {
             root: video_dir.join("media"),
             music: project.cut.music.as_ref().map(|m| {
@@ -1167,9 +1140,9 @@ impl Media {
                     f32::from(m.duck),
                 )
             }),
-            cues: lock.map(Cues::of).unwrap_or_default(),
+            cues: Cues::of(lock),
             sounds: shot_audio::sound::Library::new(video_dir, channel_brand(video_dir).as_deref()),
-            brand_sounds: lock.map(|l| l.brand.sounds.clone()).unwrap_or_default(),
+            brand_sounds: lock.brand.sounds.clone(),
             dir: video_dir.to_owned(),
             channel: crate::theme::channel_root(video_dir)
                 .unwrap_or(video_dir)
@@ -2050,8 +2023,7 @@ mod tests {
     use super::*;
     use crate::join::Joins;
     use shot_core::{
-        Brand, Cut, Format, FormatLayer, MigrateInput, Overlay, Script, Timeline, TransitionKind,
-        Video,
+        Brand, FormatLayer, MigrateInput, Overlay, Script, Timeline, TransitionKind, Video,
     };
 
     const BRAND: &str = r#"intro bumper="brand/media/intro.mp4" title=#true
@@ -2076,22 +2048,23 @@ on chapter-start {
         let read = |name: &str| fs::read_to_string(dir.join(name)).unwrap();
         let cut =
             read("cut.kdl") + "\nshort later {\n    clip t01 from=300_000_000 to=305_000_000\n}\n";
-        let old = Project {
-            video: Video::parse(&read("video.kdl")).unwrap(),
-            script: Script::parse(&read("script.md")).unwrap(),
-            format: Format::parse(&read("format.kdl")).unwrap(),
-            cut: Cut::parse(&cut).unwrap(),
-        };
-        let channel = FormatLayer::default();
+        let (video, script) = (
+            Video::parse(&read("video.kdl")).unwrap(),
+            Script::parse(&read("script.md")).unwrap(),
+        );
         let migration = shot_core::migrate(&MigrateInput {
-            project: &old,
+            video: &video,
+            script: &script,
+            format: &read("format.kdl"),
+            cut: &cut,
             imported: &[],
             brand: &Brand::default(),
-            channel: &channel,
+            channel: "",
             elements: &[],
             assets: &Default::default(),
         })
         .unwrap();
+        let channel = FormatLayer::default();
         // Then the brand arrives and `shot style build` runs.
         let brand = Brand::parse(BRAND).unwrap();
         let assets = brand
@@ -2110,9 +2083,10 @@ on chapter-start {
         })
         .unwrap();
         let project = Project {
+            video,
+            script,
             cut: migration.cut,
             format: migration.format,
-            ..old
         };
         (project, lock)
     }
@@ -2128,7 +2102,7 @@ on chapter-start {
     #[test]
     fn a_short_of_the_target_project_has_no_bookends_cards_or_stingers_and_keeps_its_sounds() {
         let (project, lock) = target();
-        let timeline = Timeline::styled(&project, &lock);
+        let timeline = Timeline::evaluate(&project, &lock);
         let bookend = |bumper: &str, title: Option<&str>| BookendInput {
             bumper: Some(bumper.to_owned()),
             title: title.map(str::to_owned),
@@ -2207,7 +2181,7 @@ on chapter-start {
     #[test]
     fn entrances_snap_to_the_beat_and_cuts_keep_their_times() {
         let (project, lock) = target();
-        let timeline = Timeline::styled(&project, &lock);
+        let timeline = Timeline::evaluate(&project, &lock);
         let mut output = timeline.main().clone();
         let range = |from, to| shot_core::TimeRange::new(Micros(from), Micros(to)).unwrap();
         let overlay = |template: &str, from| Overlay {
@@ -2317,7 +2291,7 @@ on chapter-start {
             }),
             ..Joins::default()
         };
-        let timeline = Timeline::styled(&project, &lock);
+        let timeline = Timeline::evaluate(&project, &lock);
         let plan = ExportPlan::new(timeline.main(), FPS, |_| MediaId::default()).with_joins(&joins);
         let cache = Cache::new(&video, &plan).unwrap();
         let bookend = plan.bookends[0].chunks[0].hash;

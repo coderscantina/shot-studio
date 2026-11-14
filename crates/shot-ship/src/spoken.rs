@@ -215,7 +215,7 @@ pub(crate) mod tests {
     #[test]
     fn places_kept_words_in_output_time_and_marks_chapters_at_their_first_word() {
         let project = project(CUT);
-        let main = &Timeline::evaluate(&project).outputs[0];
+        let main = &Timeline::evaluate(&project, &shot_core::Lock::default()).outputs[0];
         let transcripts = transcript(&[
             ("ship", 500_000, 900_000),
             ("cut", 3_000_000, 3_400_000),
@@ -237,7 +237,7 @@ pub(crate) mod tests {
     #[test]
     fn bookends_move_marks_on_and_an_intro_opens_its_chapter() {
         let project = project(CUT);
-        let main = &Timeline::evaluate(&project).outputs[0];
+        let main = &Timeline::evaluate(&project, &shot_core::Lock::default()).outputs[0];
         let words = spoken_words(main, &transcript(&[("then", 9_000_000, 9_400_000)]));
         let marks = chapter_marks(main, &words);
         let t01 = Id::new("t01").unwrap();

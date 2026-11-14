@@ -164,7 +164,6 @@ pub(crate) fn zooms(start: u64) -> Vec<Zoom> {
         scale: 150,
         range: range(start + 4_600_000, start + 9_400_000),
         center: Some(shot_core::Point { x: 1800, y: 700 }),
-        by: None,
         shape: Default::default(),
     }]
 }
@@ -422,6 +421,10 @@ mod tests {
             .unwrap()
             .save(dir.join(STILL_FILE))
             .unwrap();
+        std::fs::write(dir.join("cut.lock"), shot_core::Lock::default().to_kdl()).unwrap();
+        let layer =
+            shot_core::FormatLayer::parse("layouts content face split\nzoom-motion smooth\n")
+                .unwrap();
         shot_core::Project {
             video: shot_core::Video::parse(&format!(
                 "title \"t\"\nstatus editing\nformat {}\n",
@@ -429,13 +432,7 @@ mod tests {
             ))
             .unwrap(),
             script: shot_core::Script::parse("# t\n").unwrap(),
-            format: shot_core::Format::parse(&format!(
-                "{}zoom-motion smooth\n",
-                std::fs::read_to_string(fixtures.join("format.kdl"))
-                    .unwrap()
-                    .replace("layouts face split", "layouts content face split")
-            ))
-            .unwrap(),
+            format: FormatKind::Opinion.preset().resolve([&layer]),
             cut: shot_core::Cut::parse(cut).unwrap(),
         }
     }
@@ -448,7 +445,7 @@ mod tests {
                 .iter()
                 .filter_map(|r| match r {
                     shot_core::RangeEdit::Keep(range) => Some(*range),
-                    shot_core::RangeEdit::Remove { .. } => None,
+                    shot_core::RangeEdit::Remove(_) => None,
                 })
                 .collect();
             let (Some(first), Some(last)) = (kept.first(), kept.last()) else {
@@ -497,7 +494,11 @@ mod tests {
     #[ignore = "needs the generated target project and the hardware HEVC encoder, takes minutes"]
     fn the_full_fixture_with_templates_exports_faster_than_realtime() {
         let fixtures = std::path::PathBuf::from(std::env::var("SHOT_FIXTURES").unwrap());
-        let cut = std::fs::read_to_string(fixtures.join("target-project/cut.kdl")).unwrap();
+        // The target's cut as it plays: its rule removals as a person's.
+        let mut cut = std::fs::read_to_string(fixtures.join("target-project/cut.kdl")).unwrap();
+        for rule in ["silence", "pause", "filler", "retake", "misspoken"] {
+            cut = cut.replace(&format!(" by={rule}\n"), " by=manual\n");
+        }
         let dir = tempfile::tempdir().unwrap();
         // Launch is the costliest preset: glass, tilt and glyph by glyph type.
         let mut project = project(dir.path(), FormatKind::ProductTour, &cut);

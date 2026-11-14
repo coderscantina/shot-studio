@@ -2,16 +2,15 @@
 //! `format.kdl` on the right, the code-diff overlay at the playhead, and lanes for the screen,
 //! clicks, zooms and keys over the whole video.
 //!
-//! Every setting writes `format.kdl`. Auto zoom writes its zooms into `cut.kdl` and runs again
-//! whenever its triggers or scale change, replacing only its own zooms.
+//! Every setting writes `format.kdl`. Zooms on clicks and typing come from the style rules.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui::{Context, Div, FontWeight, Hsla, Window, div, prelude::*, px};
 use shot_core::{
-    AutoZoom, Color, CursorStyle, DeviceFrame, Format, Id, Keystrokes, Micros, Shadow, WindowStyle,
-    ZoomBy, ZoomMotion, ZoomTrigger,
+    Color, CursorStyle, DeviceFrame, Format, Id, Keystrokes, Micros, Shadow, WindowStyle,
+    ZoomMotion,
 };
 use shot_render::code_diff::{CodeDiff, CodeDiffOverlay, LineKind};
 use shot_render::events::EventLog;
@@ -22,7 +21,7 @@ use super::EditScreen;
 use super::parts;
 use crate::model::{FPS, fraction};
 use crate::theme::*;
-use crate::ui::{self, Segment, mono, segmented};
+use crate::ui::{self, mono};
 
 const NAME_WIDTH: f32 = 92.;
 /// Typed keys closer than this share one block in the Keys lane.
@@ -106,24 +105,12 @@ fn format_of(this: &EditScreen, cx: &Context<EditScreen>) -> Format {
 }
 
 impl EditScreen {
-    /// Writes `format.kdl` with `change` applied, then runs auto zoom again when it changed.
+    /// Writes `format.kdl` with `change` applied.
     fn change_format(&mut self, cx: &mut Context<Self>, change: impl FnOnce(&mut Format)) {
         let result = self.folder.update(cx, |folder, cx| {
             let mut format = folder.project.format.clone();
             change(&mut format);
-            // A migrated video's zooms come from the style rules, not the auto-zoom settings.
-            let rerun =
-                format.auto_zoom != folder.project.format.auto_zoom && !folder.is_migrated();
             folder.write_format(format)?;
-            if rerun {
-                let cut = shot_render::rules::auto_zoom(
-                    &folder.dir,
-                    &folder.project.cut,
-                    &folder.project.format,
-                )
-                .map_err(|e| e.to_string())?;
-                folder.write_cut(cut)?;
-            }
             cx.notify();
             Ok::<_, String>(())
         });
@@ -207,9 +194,6 @@ fn heading(text: &'static str) -> Div {
         .child(text)
 }
 
-/// Triggers in canonical order.
-const TRIGGERS: [ZoomTrigger; 3] = [ZoomTrigger::Click, ZoomTrigger::Typing, ZoomTrigger::Cursor];
-const SCALES: [u16; 4] = [140, 160, 200, 250];
 const CURSOR_SIZES: [u16; 5] = [0, 100, 140, 180, 220];
 const PADDINGS: [u16; 5] = [0, 32, 48, 64, 96];
 const CORNERS: [u16; 4] = [0, 12, 24, 36];
@@ -219,31 +203,6 @@ const BACKGROUNDS: [u32; 4] = [0x1C2340, 0x2A2D33, 0x4F6BFF, 0xE9EBEF];
 fn settings(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement {
     let format = format_of(this, cx);
     let effects = format.effects();
-    let rule = format.auto_zoom.clone();
-    let on = rule.as_ref().is_some_and(|r| !r.triggers.is_empty());
-    let triggers = rule
-        .as_ref()
-        .map(|r| r.triggers.clone())
-        .unwrap_or_default();
-    let scale = rule.as_ref().map_or(160, |r| r.scale);
-    let trigger = |label: &'static str, trigger: ZoomTrigger, cx: &mut Context<EditScreen>| {
-        Segment::new(
-            label,
-            triggers.contains(&trigger),
-            cx.listener(move |this, _, _, cx| {
-                this.change_format(cx, |f| {
-                    let rule = f.auto_zoom.get_or_insert_with(default_rule);
-                    if let Some(i) = rule.triggers.iter().position(|t| *t == trigger) {
-                        rule.triggers.remove(i);
-                    } else {
-                        rule.triggers.push(trigger);
-                        rule.triggers
-                            .sort_by_key(|t| TRIGGERS.iter().position(|o| o == t));
-                    }
-                })
-            }),
-        )
-    };
     let style = effects.window;
     ui::pane()
         .w(px(330.))
@@ -257,45 +216,10 @@ fn settings(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement
                 .flex()
                 .items_center()
                 .p(px(4.))
-                .child(heading("Auto zoom"))
-                .child(div().flex_1())
-                .child(
-                    switch("auto-zoom", on).on_click(cx.listener(move |this, _, _, cx| {
-                        this.change_format(cx, |f| {
-                            let rule = f.auto_zoom.get_or_insert_with(default_rule);
-                            rule.triggers = if on {
-                                Vec::new()
-                            } else {
-                                default_rule().triggers
-                            };
-                        })
-                    })),
-                ),
+                .child(heading("Zoom and cursor")),
         )
-        .child(segmented(
-            "triggers",
-            WELL,
-            vec![
-                trigger("Clicks", ZoomTrigger::Click, cx),
-                trigger("Typing", ZoomTrigger::Typing, cx),
-                trigger("Cursor", ZoomTrigger::Cursor, cx),
-            ],
-        ))
         .child(
             group()
-                .child(field(
-                    "scale",
-                    "Zoom",
-                    format!("{scale}%"),
-                    true,
-                    move |this, cx| {
-                        this.change_format(cx, |f| {
-                            let rule = f.auto_zoom.get_or_insert_with(default_rule);
-                            rule.scale = next(&SCALES, rule.scale);
-                        })
-                    },
-                    cx,
-                ))
                 .child(field(
                     "motion",
                     "Motion",
@@ -514,18 +438,6 @@ fn window_field(
     )
 }
 
-/// The rule auto zoom starts from: the product tour preset's.
-fn default_rule() -> AutoZoom {
-    shot_core::FormatKind::ProductTour
-        .preset()
-        .auto_zoom
-        .unwrap_or(AutoZoom {
-            triggers: vec![ZoomTrigger::Click, ZoomTrigger::Typing],
-            scale: 160,
-            hold: Micros(1_500_000),
-        })
-}
-
 // Code from git.
 
 fn code_pane(this: &mut EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement {
@@ -695,7 +607,7 @@ fn lanes(this: &mut EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElemen
             let to = snapped.end.min(span.source_frames.end);
             if from < to {
                 let at = |f: u64| span.output_frame + (f - span.source_frames.start);
-                zooms.push((at(from), at(to), zoom.scale, zoom.by));
+                zooms.push((at(from), at(to), zoom.scale));
             }
         }
     }
@@ -762,23 +674,8 @@ fn lanes(this: &mut EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElemen
                     "Zoom",
                     div()
                         .size_full()
-                        .children(zooms.into_iter().map(|(from, to, scale, by)| {
-                            let by = match by {
-                                Some(ZoomBy::Click) => " · click",
-                                Some(ZoomBy::Typing) => " · typing",
-                                Some(ZoomBy::Cursor) => " · cursor",
-                                Some(ZoomBy::Marker) => " · marker",
-                                Some(ZoomBy::JumpCut) => " · jump cut",
-                                Some(ZoomBy::Emphasis) => " · emphasis",
-                                None => "",
-                            };
-                            block(
-                                x(from),
-                                x(to),
-                                ZOOM_TINT,
-                                ZOOM_TEXT,
-                                format!("{scale}%{by}"),
-                            )
+                        .children(zooms.into_iter().map(|(from, to, scale)| {
+                            block(x(from), x(to), ZOOM_TINT, ZOOM_TEXT, format!("{scale}%"))
                         })),
                 ))
                 .child(lane(

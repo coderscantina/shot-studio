@@ -555,7 +555,7 @@ mod tests {
             let root = tempfile::tempdir().unwrap();
             let dir = channel(root.path(), &fixtures, kind);
             let folder = VideoFolder::open(&dir).unwrap();
-            let map = EditMap::preview(&dir, &folder.project, &folder.shown, View::Edited).unwrap();
+            let map = EditMap::preview(&dir, &folder.project, folder.lock(), View::Edited).unwrap();
             let plan = map.plan.clone();
             let out = dir.join("main.mp4");
             export(

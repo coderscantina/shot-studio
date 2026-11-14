@@ -372,7 +372,6 @@ impl RecordScreen {
         Setup {
             dir: folder.dir.clone(),
             project: folder.project.clone(),
-            migrated: folder.is_migrated(),
         }
     }
 
@@ -494,9 +493,7 @@ impl RecordScreen {
                     Phase::Finished { take, duration } => {
                         this.update(cx, |this, cx| {
                             let result = this.folder.update(cx, |folder, cx| {
-                                let result = folder
-                                    .append_take(take.clone(), duration)
-                                    .and_then(|()| crate::cut::run::rough_cut(folder, &take));
+                                let result = folder.append_take(take.clone(), duration);
                                 cx.notify();
                                 result
                             });
@@ -890,7 +887,7 @@ fn record(
 
 impl RecordScreen {
     /// Adds what Vision and Claude find to the take's elements in a `shot analyze` of its own,
-    /// so it never holds up the rough cut, then rebuilds a migrated video's lock with them.
+    /// so it never holds up the rough cut, then rebuilds the video's lock with them.
     /// Without the `shot` command or Claude Code that part is skipped.
     fn analyze_later(&self, take: &Id, cx: &mut Context<Self>) {
         let Ok(shot) = crate::agent::shot_executable() else {

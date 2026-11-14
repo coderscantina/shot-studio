@@ -6,9 +6,8 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 
 use shot_core::{
-    Applied, Attr, Brand, ContentHash, Cut, Element, ElementKind, Elements, Format, FormatKind,
-    FormatLayer, Framing, Id, Layer, Lock, Micros, Pacing, StyleInput, Target, TimeRange,
-    ZoomShape, build,
+    Applied, Attr, Brand, ContentHash, Cut, Element, ElementKind, Elements, FormatKind,
+    FormatLayer, Framing, Id, Layer, Lock, Micros, StyleInput, Target, TimeRange, ZoomShape, build,
 };
 
 const BRAND: &str = include_str!("../../../fixtures/examples/channel/brand/brand.kdl");
@@ -333,15 +332,16 @@ fn format_layers_resolve_over_the_preset() {
     let channel = FormatLayer::parse(CHANNEL_FORMAT).unwrap();
     let video = FormatLayer::parse(FORMAT).unwrap();
     let format = FormatKind::Opinion.preset().resolve([&channel, &video]);
-    assert_eq!(format.pacing, Pacing::Natural);
-    assert_eq!(format.auto_cut.confidence, 85);
     assert_eq!(format.captions, FormatKind::Opinion.preset().captions);
 
-    // A settings-only `Format` stays strict: rules and brand blocks belong to a layer.
-    let err = Format::parse(CHANNEL_FORMAT).unwrap_err();
-    assert_eq!((err.line, err.column), (13, 1), "{err}");
-    assert!(err.message.contains("unknown node `on`"));
-    // A full file is also a layer, and comes back the same.
+    // The settings from before style rules are refused, with what to do instead.
+    let err = FormatLayer::parse(&format!("prompter beats\npacing tight\n{FORMAT}")).unwrap_err();
+    assert_eq!((err.line, err.column), (2, 1), "{err}");
+    assert!(
+        err.message.contains("`pacing` is from before style rules"),
+        "{err}"
+    );
+    // A preset is also a layer, and comes back the same.
     let preset = FormatKind::Opinion.preset_source();
     assert_eq!(FormatLayer::parse(preset).unwrap().to_kdl(), preset);
 }
@@ -353,11 +353,11 @@ fn grammar_errors_name_the_line() {
         "    trim breath=250_000",
     );
     let err = FormatLayer::parse(&unknown_effect).unwrap_err();
-    assert_eq!((err.line, err.column), (6, 5), "{err}");
+    assert_eq!((err.line, err.column), (5, 5), "{err}");
 
     let wrong_attr = FORMAT.replace("on silence min=500_000", "on silence host=github");
     let err = FormatLayer::parse(&wrong_attr).unwrap_err();
-    assert_eq!(err.line, 5, "{err}");
+    assert_eq!(err.line, 4, "{err}");
     assert!(err.message.contains("no attribute `host`"), "{err}");
 
     let min_on_a_moment = CHANNEL_FORMAT.replace("on click {", "on click min=100 {");

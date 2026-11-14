@@ -8,8 +8,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use shot_core::{
-    Cut, EditError, Format, Id, Layout, MediaId, Micros, Overlay, Project, RangeEdit, RemovedBy,
-    SceneSwitch, TakeAt, TimeRange, Timeline, Transcript, WordState, Zoom,
+    Applied, Cut, EditError, Format, Id, Instance, Layout, Lock, MediaId, Micros, Overlay, Project,
+    RangeEdit, RemovedBy, SceneSwitch, TakeAt, TakeEdit, TimeRange, Timeline, Transcript,
+    WordState, Zoom,
 };
 use shot_render::plan::{self, ExportPlan, frame_time};
 
@@ -32,22 +33,165 @@ pub enum View {
     Untrimmed,
 }
 
-/// The cut a view plays: the edit itself, or the edit with every removal restored.
-pub fn cut_for(cut: &Cut, view: View) -> Cut {
+/// What a view plays: the edit and its lock, or every block's material whole with the lock's
+/// zooms and overlays but none of its cuts.
+pub fn view_of(cut: &Cut, lock: &Lock, view: View) -> (Cut, Lock) {
     match view {
-        View::Edited => cut.clone(),
-        View::Untrimmed => blocks(cut).fold(cut.clone(), |restored, (at, edit)| {
-            let whole = edit
-                .ranges
-                .first()
-                .zip(edit.ranges.last())
-                .and_then(|(first, last)| TimeRange::new(first.range().from(), last.range().to()));
-            match whole {
-                Some(range) => restored.restore(at, range).unwrap_or(restored),
-                None => restored,
+        View::Edited => (cut.clone(), lock.clone()),
+        View::Untrimmed => {
+            let mut whole = cut.clone();
+            for block in whole.chapters.iter_mut().flat_map(|c| &mut c.takes) {
+                let mut ranges: Vec<RangeEdit> = Vec::with_capacity(block.ranges.len());
+                for range in block.ranges.drain(..).map(|r| r.range()) {
+                    match ranges.last_mut() {
+                        Some(RangeEdit::Keep(last)) if last.to() == range.from() => {
+                            *last = TimeRange::new(last.from(), range.to()).expect("joined");
+                        }
+                        _ => ranges.push(RangeEdit::Keep(range)),
+                    }
+                }
+                block.ranges = ranges;
             }
-        }),
+            let mut uncut = lock.clone();
+            for take in &mut uncut.takes {
+                take.instances
+                    .retain(|i| !matches!(i.applied, Applied::Cut(_)));
+            }
+            (whole, uncut)
+        }
     }
+}
+
+/// What the block loses, in order: a person's removals and the lock's cuts in its kept
+/// material, each with who removed it. Where the lock's cuts overlap, the earlier one names
+/// what they remove.
+pub fn removals(edit: &TakeEdit, lock: &Lock) -> Vec<(TimeRange, RemovedBy)> {
+    let mut all: Vec<(TimeRange, RemovedBy)> = edit
+        .ranges
+        .iter()
+        .filter_map(|r| match *r {
+            RangeEdit::Remove(range) => Some((range, RemovedBy::Manual)),
+            RangeEdit::Keep(_) => None,
+        })
+        .collect();
+    for instance in lock.take(&edit.take).iter().flat_map(|t| &t.instances) {
+        let Applied::Cut(cut) = instance.applied else {
+            continue;
+        };
+        for range in &edit.ranges {
+            if let RangeEdit::Keep(kept) = range
+                && let Some(inside) = kept.intersect(cut)
+            {
+                all.push((inside, RemovedBy::Rule(instance.element.target)));
+            }
+        }
+    }
+    all.sort_by_key(|(range, _)| range.from());
+    let mut out: Vec<(TimeRange, RemovedBy)> = Vec::with_capacity(all.len());
+    for (range, by) in all {
+        let from = out
+            .last()
+            .map_or(range.from(), |(last, _)| range.from().max(last.to()));
+        if let Some(range) = TimeRange::new(from, range.to()) {
+            out.push((range, by));
+        }
+    }
+    out
+}
+
+/// What of the block plays: its kept material less the lock's cuts, in order.
+pub fn played(edit: &TakeEdit, lock: &Lock) -> Vec<TimeRange> {
+    let removed = removals(edit, lock);
+    let mut out = Vec::new();
+    for range in &edit.ranges {
+        let RangeEdit::Keep(kept) = *range else {
+            continue;
+        };
+        let mut from = kept.from();
+        for (cut, _) in removed.iter().filter(|(cut, _)| cut.overlaps(kept)) {
+            out.extend(TimeRange::new(from, cut.from()));
+            from = from.max(cut.to());
+        }
+        out.extend(TimeRange::new(from, kept.to()));
+    }
+    out
+}
+
+/// The cut as it plays: each block's kept material less the lock's cuts, which show as removed
+/// ranges, for views that ask how much of a take plays.
+pub fn as_played(cut: &Cut, lock: &Lock) -> Cut {
+    let mut out = cut.clone();
+    for block in out.chapters.iter_mut().flat_map(|c| &mut c.takes) {
+        let mut ranges: Vec<RangeEdit> = played(block, lock)
+            .into_iter()
+            .map(RangeEdit::Keep)
+            .chain(
+                removals(block, lock)
+                    .into_iter()
+                    .map(|(r, _)| RangeEdit::Remove(r)),
+            )
+            .collect();
+        ranges.sort_by_key(|r| r.range().from());
+        block.ranges = ranges;
+    }
+    out
+}
+
+/// The block's zooms as the edit plays them: a person's and the lock's that play in it, in
+/// order of their start.
+pub fn zooms(edit: &TakeEdit, lock: &Lock) -> Vec<Zoom> {
+    let mut zooms = edit.zooms.clone();
+    zooms.extend(styled(edit, lock).filter_map(|i| match i.applied {
+        Applied::Zoom {
+            scale,
+            range,
+            center,
+            shape,
+        } => Some(Zoom {
+            scale,
+            range,
+            center,
+            shape,
+        }),
+        _ => None,
+    }));
+    zooms.sort_by_key(|z| z.range.from());
+    zooms
+}
+
+/// The block's overlays in drawing order: a person's, then the lock's that play in it.
+pub fn overlays(edit: &TakeEdit, lock: &Lock) -> Vec<Overlay> {
+    let mut overlays = edit.overlays.clone();
+    overlays.extend(styled(edit, lock).filter_map(|i| match &i.applied {
+        Applied::Overlay {
+            template,
+            range,
+            params,
+        } => Some(Overlay {
+            template: template.clone(),
+            range: *range,
+            params: params.clone(),
+        }),
+        _ => None,
+    }));
+    overlays
+}
+
+/// The lock's zooms and overlays of the block's take that play in its kept material, with the
+/// instance behind each.
+pub fn styled<'a>(edit: &'a TakeEdit, lock: &'a Lock) -> impl Iterator<Item = &'a Instance> {
+    let plays = |range: TimeRange| {
+        edit.ranges
+            .iter()
+            .any(|r| matches!(r, RangeEdit::Keep(kept) if kept.overlaps(range)))
+    };
+    lock.take(&edit.take)
+        .into_iter()
+        .flat_map(|t| &t.instances)
+        .filter(move |i| match &i.applied {
+            Applied::Zoom { range, .. } | Applied::Overlay { range, .. } => plays(*range),
+            _ => false,
+        })
 }
 
 /// Every take block of the main cut with its address, in output order.
@@ -134,34 +278,28 @@ impl Default for EditMap {
 }
 
 impl EditMap {
-    /// Plans `project` as `view` shows it, without bookends or transitions.
-    pub fn of(project: &Project, view: View) -> Self {
+    /// Plans `project` styled by `lock` as `view` shows it, without bookends or transitions.
+    pub fn of(project: &Project, lock: &Lock, view: View) -> Self {
+        let (cut, lock) = view_of(&project.cut, lock, view);
         let project = Project {
-            cut: cut_for(&project.cut, view),
+            cut,
             ..project.clone()
         };
-        let timeline = Timeline::evaluate(&project);
+        let timeline = Timeline::evaluate(&project, &lock);
         // The preview caches nothing, so cache identity doesn't matter.
         let plan = ExportPlan::new(timeline.main(), FPS, |_| MediaId::default());
         Self::new(&project.cut, plan)
     }
 
     /// The map the Edit screen shows of the video in `dir`: in the edited view the timeline
-    /// export renders from `files` (styled by the lock, with the brand's intro, outro and
-    /// transitions), tied to the blocks of `shown`, the cut as the screens show it; the whole
-    /// recordings of `shown` in the untrimmed view.
-    pub fn preview(
-        dir: &Path,
-        files: &Project,
-        shown: &Project,
-        view: View,
-    ) -> Result<Self, String> {
+    /// export renders (styled by the lock, with the brand's intro, outro and transitions),
+    /// tied to the blocks of the cut; the whole recordings in the untrimmed view.
+    pub fn preview(dir: &Path, project: &Project, lock: &Lock, view: View) -> Result<Self, String> {
         match view {
             View::Edited => {
                 let plan =
-                    shot_render::export::preview_plan(dir, files).map_err(|e| e.to_string())?;
-                let map = Self::new(&shown.cut, plan);
-                // `shown` folds the lock into the blocks so that this holds; see `crate::style`.
+                    shot_render::export::preview_plan(dir, project).map_err(|e| e.to_string())?;
+                let map = Self::new(&project.cut, plan);
                 if map.spans.len() != map.plan.segments.len() {
                     return Err(format!(
                         "the preview could place {} of the {} segments export renders",
@@ -171,7 +309,7 @@ impl EditMap {
                 }
                 Ok(map)
             }
-            View::Untrimmed => Ok(Self::of(shown, view)),
+            View::Untrimmed => Ok(Self::of(project, lock, view)),
         }
     }
 
@@ -434,9 +572,10 @@ pub struct BlockDoc {
     pub paragraphs: Vec<Paragraph>,
 }
 
-/// The transcript of every block of `cut` as `view` shows it.
+/// The transcript of every block of `cut` styled by `lock` as `view` shows it.
 pub fn document(
     cut: &Cut,
+    lock: &Lock,
     transcripts: &HashMap<Id, Transcript>,
     map: &EditMap,
     view: View,
@@ -454,7 +593,7 @@ pub fn document(
                 };
             };
             let words: Vec<DocWord> = cut
-                .transcript_view(at, transcript)
+                .transcript_view(at, transcript, lock)
                 .unwrap_or_default()
                 .into_iter()
                 .map(|w| DocWord {
@@ -471,7 +610,7 @@ pub fn document(
                     .map_or(default_layout, |c| c.layout)
             };
             let items = match view {
-                View::Edited => edited_items(&edit.ranges, &words),
+                View::Edited => edited_items(&removals(edit, lock), &words),
                 View::Untrimmed => (0..words.len()).map(Item::Word).collect(),
             };
             BlockDoc {
@@ -489,30 +628,23 @@ fn midpoint(range: TimeRange) -> Micros {
     Micros((range.from().0 + range.to().0) / 2)
 }
 
-/// Kept words, with each run of removals where it sits between them.
-fn edited_items(ranges: &[RangeEdit], words: &[DocWord]) -> Vec<Item> {
+/// Kept words, with each run of `removals`, the block's in order, where it sits between them.
+/// Removals that meet make one run.
+fn edited_items(removals: &[(TimeRange, RemovedBy)], words: &[DocWord]) -> Vec<Item> {
     let mut runs: Vec<CutRun> = Vec::new();
-    let mut previous_removed = false;
-    for edit in ranges {
-        match *edit {
-            RangeEdit::Remove { range, by } => {
-                match runs.last_mut().filter(|_| previous_removed) {
-                    Some(run) => {
-                        run.range = TimeRange::new(run.range.from(), range.to())
-                            .expect("ranges are ordered");
-                        run.removed = Micros(run.removed.0 + range.duration().0);
-                        run.manual |= by == RemovedBy::Manual;
-                    }
-                    None => runs.push(CutRun {
-                        range,
-                        removed: range.duration(),
-                        manual: by == RemovedBy::Manual,
-                        words: 0..0,
-                    }),
-                }
-                previous_removed = true;
+    for &(range, by) in removals {
+        match runs.last_mut().filter(|run| run.range.to() == range.from()) {
+            Some(run) => {
+                run.range = TimeRange::new(run.range.from(), range.to()).expect("in order");
+                run.removed = Micros(run.removed.0 + range.duration().0);
+                run.manual |= by == RemovedBy::Manual;
             }
-            RangeEdit::Keep(_) => previous_removed = false,
+            None => runs.push(CutRun {
+                range,
+                removed: range.duration(),
+                manual: by == RemovedBy::Manual,
+                words: 0..0,
+            }),
         }
     }
     for run in &mut runs {
@@ -769,27 +901,29 @@ pub struct Changes {
     pub overlays: usize,
 }
 
-pub fn changes(cut: &Cut) -> Changes {
+pub fn changes(cut: &Cut, lock: &Lock) -> Changes {
     let mut out = Changes::default();
     for (_, edit) in blocks(cut) {
-        for range in &edit.ranges {
-            if let RangeEdit::Remove { range, by } = *range {
-                match out.removed.iter_mut().find(|(who, ..)| *who == by) {
-                    Some((_, count, length)) => {
-                        *count += 1;
-                        length.0 += range.duration().0;
-                    }
-                    None => out.removed.push((by, 1, range.duration())),
+        for (range, by) in removals(edit, lock) {
+            match out.removed.iter_mut().find(|(who, ..)| *who == by) {
+                Some((_, count, length)) => {
+                    *count += 1;
+                    length.0 += range.duration().0;
                 }
+                None => out.removed.push((by, 1, range.duration())),
             }
         }
-        out.zooms += edit.zooms.len();
+        let (zooms, overlays) = styled(edit, lock).fold((0, 0), |(z, o), i| match i.applied {
+            Applied::Zoom { .. } => (z + 1, o),
+            _ => (z, o + 1),
+        });
+        out.zooms += edit.zooms.len() + zooms;
         out.layouts += edit.layouts.len();
-        out.overlays += edit.overlays.len();
+        out.overlays += edit.overlays.len() + overlays;
     }
     out.removed.sort_by_key(|(by, ..)| match by {
         RemovedBy::Manual => None,
-        RemovedBy::Rule(rule) => Some(*rule),
+        RemovedBy::Rule(target) => Some(target.as_str()),
     });
     out
 }
@@ -797,7 +931,7 @@ pub fn changes(cut: &Cut) -> Changes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shot_core::{Chapter, LayoutChange, RuleKind, TakeEdit, Word};
+    use shot_core::{Chapter, LayoutChange, Word};
 
     fn range(from: u64, to: u64) -> TimeRange {
         TimeRange::new(Micros(from), Micros(to)).unwrap()
@@ -812,7 +946,6 @@ mod tests {
             take: id(take),
             ranges,
             layouts: Vec::new(),
-            reviews: Vec::new(),
             zooms: Vec::new(),
             overlays: Vec::new(),
         }
@@ -822,14 +955,20 @@ mod tests {
         RangeEdit::Keep(range(from, to))
     }
 
-    fn remove(from: u64, to: u64, by: RemovedBy) -> RangeEdit {
-        RangeEdit::Remove {
-            range: range(from, to),
-            by,
-        }
+    fn remove(from: u64, to: u64) -> RangeEdit {
+        RangeEdit::Remove(range(from, to))
     }
 
-    const SILENCE: RemovedBy = RemovedBy::Rule(RuleKind::Silence);
+    /// A lock of `t01` that cuts `ranges` on silences.
+    fn silences(ranges: &[(u64, u64)]) -> Lock {
+        let cuts: String = ranges
+            .iter()
+            .map(|(from, to)| {
+                format!("    cut from={from} to={to} on=silence t={from} layer=format rule=\"silence\"\n")
+            })
+            .collect();
+        Lock::parse(&format!("lock 1\n\ntake t01 {{\n{cuts}}}\n")).unwrap()
+    }
 
     fn project(cut: Cut) -> Project {
         Project {
@@ -851,7 +990,7 @@ mod tests {
                         "t01",
                         vec![
                             keep(0, 1_000_000),
-                            remove(1_000_000, 1_500_000, SILENCE),
+                            remove(1_000_000, 1_500_000),
                             keep(1_500_000, 2_000_000),
                         ],
                     )],
@@ -867,7 +1006,7 @@ mod tests {
 
     #[test]
     fn edit_map_ties_output_frames_to_blocks_and_media_time() {
-        let map = EditMap::of(&project(two_chapters()), View::Edited);
+        let map = EditMap::of(&project(two_chapters()), &Lock::default(), View::Edited);
         assert_eq!(map.frames, 150);
         assert_eq!(map.chapters[0].frames, 0..90);
         assert_eq!(map.chapters[1].frames, 90..150);
@@ -902,7 +1041,7 @@ mod tests {
 
     #[test]
     fn media_ranges_and_output_frames_map_both_ways_across_a_cut() {
-        let map = EditMap::of(&project(two_chapters()), View::Edited);
+        let map = EditMap::of(&project(two_chapters()), &Lock::default(), View::Edited);
         let a = TakeAt {
             chapter: 0,
             take: 0,
@@ -923,7 +1062,7 @@ mod tests {
     fn an_intro_after_the_hook_moves_what_follows_and_opens_its_chapter() {
         use shot_render::join::{BookendInput, Joins};
         let project = project(two_chapters());
-        let timeline = Timeline::evaluate(&project);
+        let timeline = Timeline::evaluate(&project, &shot_core::Lock::default());
         let bookend = |seconds: u64| BookendInput {
             bumper: None,
             title: Some("A".into()),
@@ -953,7 +1092,7 @@ mod tests {
 
     #[test]
     fn layout_runs_join_a_blocks_spans_across_its_cuts() {
-        let map = EditMap::of(&project(two_chapters()), View::Edited);
+        let map = EditMap::of(&project(two_chapters()), &Lock::default(), View::Edited);
         let runs = map.layout_runs();
         let shape: Vec<_> = runs
             .iter()
@@ -977,7 +1116,7 @@ mod tests {
 
     #[test]
     fn untrimmed_plays_every_removal() {
-        let map = EditMap::of(&project(two_chapters()), View::Untrimmed);
+        let map = EditMap::of(&project(two_chapters()), &Lock::default(), View::Untrimmed);
         assert_eq!(map.frames, 180);
         assert_eq!(map.cut_frames(), [120]);
     }
@@ -998,11 +1137,9 @@ mod tests {
                 takes: vec![block(
                     "t01",
                     vec![
-                        keep(0, 1_000_000),
-                        remove(1_000_000, 1_300_000, SILENCE),
-                        remove(1_300_000, 2_000_000, RemovedBy::Manual),
-                        keep(2_000_000, 3_000_000),
-                        remove(3_000_000, 3_400_000, SILENCE),
+                        keep(0, 1_300_000),
+                        remove(1_300_000, 2_000_000),
+                        keep(2_000_000, 3_400_000),
                     ],
                 )],
             }],
@@ -1018,8 +1155,16 @@ mod tests {
         }
         let transcripts = HashMap::from([(id("t01"), transcript)]);
         let p = project(cut);
-        let map = EditMap::of(&p, View::Edited);
-        let doc = document(&p.cut, &transcripts, &map, View::Edited, Layout::Face);
+        let lock = silences(&[(1_000_000, 1_300_000), (3_000_000, 3_400_000)]);
+        let map = EditMap::of(&p, &lock, View::Edited);
+        let doc = document(
+            &p.cut,
+            &lock,
+            &transcripts,
+            &map,
+            View::Edited,
+            Layout::Face,
+        );
         let items = &doc[0].paragraphs[0].items;
         assert_eq!(items.len(), 4);
         assert_eq!(items[0], Item::Word(0));
@@ -1038,9 +1183,10 @@ mod tests {
         // "it" at 2.1 s plays after 1 s of kept media.
         assert_eq!(doc[0].words[2].output, Some(66));
 
-        let untrimmed = EditMap::of(&p, View::Untrimmed);
+        let untrimmed = EditMap::of(&p, &lock, View::Untrimmed);
         let all = document(
             &p.cut,
+            &lock,
             &transcripts,
             &untrimmed,
             View::Untrimmed,
@@ -1077,8 +1223,16 @@ mod tests {
         }
         let transcripts = HashMap::from([(id("t01"), transcript)]);
         let p = project(cut);
-        let map = EditMap::of(&p, View::Edited);
-        let doc = document(&p.cut, &transcripts, &map, View::Edited, Layout::Face);
+        let lock = Lock::default();
+        let map = EditMap::of(&p, &lock, View::Edited);
+        let doc = document(
+            &p.cut,
+            &lock,
+            &transcripts,
+            &map,
+            View::Edited,
+            Layout::Face,
+        );
         let paragraphs = &doc[0].paragraphs;
         let shape: Vec<_> = paragraphs
             .iter()

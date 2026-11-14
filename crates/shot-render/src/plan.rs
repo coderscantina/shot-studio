@@ -8,7 +8,7 @@
 //! valid even though it moved. Audio follows the same grid: at 48 kHz and 60 fps a frame is
 //! exactly 800 samples, so audio and video can never drift apart.
 //!
-//! A migrated video's main output also has bookends and transitions, placed by
+//! A video's main output also has bookends and transitions, placed by
 //! [`ExportPlan::with_joins`] in [`crate::join`].
 
 use std::ops::Range;
@@ -191,9 +191,11 @@ mod tests {
             format: FormatKind::Opinion.preset(),
             cut: Cut::parse(cut).unwrap(),
         };
-        ExportPlan::new(Timeline::evaluate(&project).main(), 60, |_| {
-            MediaId::default()
-        })
+        ExportPlan::new(
+            Timeline::evaluate(&project, &shot_core::Lock::default()).main(),
+            60,
+            |_| MediaId::default(),
+        )
     }
 
     #[test]
@@ -203,7 +205,7 @@ mod tests {
 chapter "One" {
     take t01 {
         keep from=0 to=1_000_000
-        remove from=1_000_000 to=2_008_000 by=silence
+        remove from=1_000_000 to=2_008_000 by=manual
         keep from=2_008_000 to=2_510_000
         keep from=2_510_000 to=2_515_000
     }

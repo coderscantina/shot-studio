@@ -450,9 +450,9 @@ impl ShotServer {
         )
     )]
     fn read_transcript(&self, Parameters(args): Parameters<VideoArgs>) -> Result<String, String> {
-        let cut = self.cut(&args.slug)?;
-        let transcripts = self.transcripts(&args.slug, &cut)?;
-        Ok(transcript::render(&cut, &transcripts))
+        let built = self.built(&args.slug)?;
+        let transcripts = self.transcripts(&args.slug, &built.cut)?;
+        Ok(transcript::render(&built.cut, &built.lock, &transcripts))
     }
 
     #[tool(
@@ -465,9 +465,15 @@ impl ShotServer {
         )
     )]
     fn propose_cut(&self, Parameters(args): Parameters<ProposeCutArgs>) -> Result<String, String> {
-        let cut = self.cut(&args.slug)?;
-        let transcripts = self.transcripts(&args.slug, &cut)?;
-        let (cut, changes) = transcript::apply(&cut, &transcripts, &args.remove, &args.restore)?;
+        let built = self.built(&args.slug)?;
+        let transcripts = self.transcripts(&args.slug, &built.cut)?;
+        let (cut, changes) = transcript::apply(
+            &built.cut,
+            &built.lock,
+            &transcripts,
+            &args.remove,
+            &args.restore,
+        )?;
         let created = self.propose(
             &args.slug,
             &args.name,
@@ -482,7 +488,7 @@ impl ShotServer {
     }
 
     #[tool(
-        description = "The open review queue of a video: findings an auto-cut rule was not sure about, numbered, with their edited time, rule and words.",
+        description = "The open review queue of a video: elements a cut rule was not sure about, numbered, with their take, element kind, length and words.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -491,17 +497,18 @@ impl ShotServer {
         )
     )]
     fn review_queue(&self, Parameters(args): Parameters<VideoArgs>) -> Result<String, String> {
-        let cut = self.cut(&args.slug)?;
-        let transcripts = self.transcripts(&args.slug, &cut)?;
+        let built = self.built(&args.slug)?;
+        let cut = &built.cut;
+        let transcripts = self.transcripts(&args.slug, cut)?;
         let mut out = String::new();
-        for (index, (at, review)) in cut.review_queue().enumerate() {
+        for (index, (at, review)) in cut.review_queue(&built.lock).enumerate() {
             let take = &cut.chapters[at.chapter].takes[at.take].take;
             let _ = writeln!(
                 out,
                 "#{}  {}  {}  {:.1} s  \"{}\"",
                 index + 1,
                 take,
-                review.by.as_str(),
+                review.kind,
                 review.range.duration().0 as f64 / 1e6,
                 transcript::words_in(transcripts.get(take), review.range)
             );
@@ -513,7 +520,7 @@ impl ShotServer {
     }
 
     #[tool(
-        description = "Propose answers to review items as a branch: keep leaves the material in and tells the rule to leave it alone, cut removes it. Only answer items you are sure about.",
+        description = "Propose answers to review items as a branch: keep leaves the element in and tells the rule to leave it alone, cut removes it. Both are overrides in cut.kdl. Only answer items you are sure about.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -525,8 +532,9 @@ impl ShotServer {
         &self,
         Parameters(args): Parameters<ProposeReviewArgs>,
     ) -> Result<String, String> {
-        let mut cut = self.cut(&args.slug)?;
-        let queue: Vec<_> = cut.review_queue().collect();
+        let built = self.built(&args.slug)?;
+        let mut cut = built.cut.clone();
+        let queue: Vec<_> = built.cut.review_queue(&built.lock).collect();
         for decision in &args.decisions {
             let (at, review) = decision
                 .item
@@ -539,7 +547,7 @@ impl ShotServer {
                 other => return Err(format!("`{other}` is not keep or cut")),
             };
             cut = cut
-                .decide(*at, review.range, answer)
+                .decide(*at, review.range, answer, &built.lock)
                 .map_err(|e| e.to_string())?;
         }
         self.propose(
@@ -693,8 +701,7 @@ impl ShotServer {
                 .filter(|k| *k != ElementKind::Word)
                 .collect();
         }
-        let board = self.board()?;
-        let built = style::build_video(&style::Git(&board), &args.slug)?;
+        let built = self.built(&args.slug)?;
         let elements = built
             .elements
             .iter()
@@ -720,8 +727,7 @@ impl ShotServer {
     )]
     fn read_lock(&self, Parameters(args): Parameters<ReadLockArgs>) -> Result<String, String> {
         let take = args.take.as_deref().map(take_id).transpose()?;
-        let board = self.board()?;
-        let built = style::build_video(&style::Git(&board), &args.slug)?;
+        let built = self.built(&args.slug)?;
         let window = style::window(args.from_us, args.to_us)?;
         Ok(style::lock_text(
             &built.lock,
@@ -745,8 +751,7 @@ impl ShotServer {
         Parameters(args): Parameters<ExplainArgs>,
     ) -> Result<String, String> {
         let take = take_id(&args.take)?;
-        let board = self.board()?;
-        let built = style::build_video(&style::Git(&board), &args.slug)?;
+        let built = self.built(&args.slug)?;
         Ok(style::explain(&built, Some(&take), Micros(args.at_us)))
     }
 
@@ -871,8 +876,27 @@ impl ShotServer {
         confine::resolve(&self.repo, slug, "")
     }
 
+    /// Opens the video's folder as every front end does, so a video written before the lock is
+    /// migrated before a tool reads it. A video only in git has no folder to open.
+    fn open(&self, slug: &str) -> Result<(), String> {
+        let dir = self.video_dir(slug)?;
+        if dir.join("video.kdl").exists() {
+            let _lock =
+                shot_fs::WriteLock::acquire(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+            style::open(&dir)?;
+        }
+        Ok(())
+    }
+
+    /// The video at its tip with the lock its files build.
+    fn built(&self, slug: &str) -> Result<style::Built, String> {
+        self.open(slug)?;
+        style::build_video(&style::Git(&self.board()?), slug)
+    }
+
     /// The cut at the video's tip, empty when it has none yet.
     fn cut(&self, slug: &str) -> Result<Cut, String> {
+        self.open(slug)?;
         match self
             .board()?
             .read_file(slug, "cut.kdl")
@@ -1044,17 +1068,14 @@ impl ServerHandler for ShotServer {
     }
 }
 
-/// A video's format: a full `format.kdl` before migration, otherwise its layer of differences
-/// over the preset and the channel's `formats/<format>.kdl`, as the app and export resolve it.
+/// A video's format: its layer of differences over the preset and the channel's
+/// `formats/<format>.kdl`, as the app and export resolve it.
 fn resolved_format(
     board: &Board,
     slug: &str,
     video: &Video,
     text: Option<&str>,
 ) -> Result<Format, String> {
-    if let Some(format) = text.and_then(|t| Format::parse(t).ok()) {
-        return Ok(format);
-    }
     let layer = text
         .map(|t| FormatLayer::parse(t).map_err(|e| format!("format.kdl:{e}")))
         .transpose()?
@@ -1076,10 +1097,7 @@ fn validate(file: &str, text: &str) -> Result<(), String> {
     let parsed = match file {
         "video.kdl" => Video::parse(text).map(drop),
         "cut.kdl" => Cut::parse(text).map(drop),
-        // A full format before migration, a layer of differences after it.
-        "format.kdl" => Format::parse(text)
-            .map(drop)
-            .or_else(|_| FormatLayer::parse(text).map(drop)),
+        "format.kdl" => FormatLayer::parse(text).map(drop),
         "script.md" => Script::parse(text).map(drop),
         _ => Ok(()),
     };

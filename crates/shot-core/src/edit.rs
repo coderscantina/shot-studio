@@ -5,9 +5,9 @@ use std::fmt;
 
 use crate::takes::{holds, middle};
 use crate::{
-    Attempt, Chapter, Cut, Id, Layout, LayoutChange, LayoutSwitch, Lineup, Micros, Music,
-    RangeEdit, Rating, RemovedBy, Review, Row, RowAt, TakeEdit, TimeRange, Transcript, Word, Zoom,
-    ZoomShape,
+    Applied, Attempt, Chapter, Cut, ElementKind, Id, Layout, LayoutChange, LayoutSwitch, Lineup,
+    Lock, Micros, Music, Override, RangeEdit, Rating, Row, RowAt, TakeEdit, Target, TimeRange,
+    Transcript, Word, Zoom, ZoomShape,
 };
 
 /// One take block of the main cut: the chapter and the take's position in that chapter. A take
@@ -100,6 +100,13 @@ pub enum Decision {
     Cut,
 }
 
+/// Who removed a word: a person in `cut.kdl`, or a cut the style rules made on an element.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemovedBy {
+    Manual,
+    Rule(Target),
+}
+
 /// Whether the edit keeps a word.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WordState {
@@ -114,6 +121,15 @@ pub struct WordView<'a> {
     pub state: WordState,
 }
 
+/// An open item of the review queue: a lock's `review` instance that plays in a take block,
+/// on an element of `kind` starting at `t`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Review {
+    pub range: TimeRange,
+    pub kind: ElementKind,
+    pub t: Micros,
+}
+
 impl Cut {
     /// Appends a chapter named `title` with one block of `take` that keeps all of `range`, the
     /// way a finished recording enters the cut.
@@ -125,7 +141,6 @@ impl Cut {
                 take,
                 ranges: vec![RangeEdit::Keep(range)],
                 layouts: Vec::new(),
-                reviews: Vec::new(),
                 zooms: Vec::new(),
                 overlays: Vec::new(),
             }],
@@ -133,48 +148,57 @@ impl Cut {
         cut
     }
 
-    /// Answers the open review item at `range`. Keep writes it as `ignore`, so the rule leaves
-    /// the material alone when it runs again. Cut removes the material with the rule as `by`.
+    /// The open review items of the main cut in cut order: the lock's `review` instances of
+    /// each block's take that lie in its kept material.
+    pub fn review_queue<'a>(
+        &'a self,
+        lock: &'a Lock,
+    ) -> impl Iterator<Item = (TakeAt, Review)> + 'a {
+        self.chapters
+            .iter()
+            .enumerate()
+            .flat_map(move |(chapter, c)| {
+                c.takes.iter().enumerate().flat_map(move |(take, edit)| {
+                    let instances = lock.take(&edit.take).into_iter().flat_map(|t| &t.instances);
+                    instances.filter_map(move |i| match (&i.applied, i.element.target) {
+                        (&Applied::Review(range), Target::Kind(kind)) if edit.keeps(range) => {
+                            Some((
+                                TakeAt { chapter, take },
+                                Review {
+                                    range,
+                                    kind,
+                                    t: i.element.t,
+                                },
+                            ))
+                        }
+                        _ => None,
+                    })
+                })
+            })
+    }
+
+    /// K or C on the review item at `range` of the block at `at`: `override { keep }` or
+    /// `override { cut }` on its element.
     pub fn decide(
         &self,
         at: TakeAt,
         range: TimeRange,
         decision: Decision,
+        lock: &Lock,
     ) -> Result<Cut, EditError> {
-        let index = self
-            .take(at)?
-            .reviews
-            .iter()
-            .position(|r| !r.kept && r.range == range)
+        let (_, review) = self
+            .review_queue(lock)
+            .find(|(a, r)| *a == at && r.range == range)
             .ok_or(EditError::NotInReview(range))?;
-        Ok(self.with_take(at, |edit| match decision {
-            Decision::Keep => edit.reviews[index].kept = true,
-            Decision::Cut => {
-                let review = edit.reviews.remove(index);
-                replace_in_ranges(edit, review.range, |piece| RangeEdit::Remove {
-                    range: piece.range(),
-                    by: RemovedBy::Rule(review.by),
-                });
-            }
+        let take = self.take(at)?.take.clone();
+        Ok(self.with_override(&take, review.kind, review.t, |o| {
+            o.decision = Some(decision);
         }))
-    }
-
-    /// The open review items of the main cut, in cut order.
-    pub fn review_queue(&self) -> impl Iterator<Item = (TakeAt, Review)> + '_ {
-        self.chapters.iter().enumerate().flat_map(|(chapter, c)| {
-            c.takes.iter().enumerate().flat_map(move |(take, edit)| {
-                edit.reviews
-                    .iter()
-                    .filter(|r| !r.kept)
-                    .map(move |r| (TakeAt { chapter, take }, *r))
-            })
-        })
     }
 
     /// Removes the media of the words that overlap `selection` as `remove ... by=manual`. The
     /// cut runs from the start of the first word to the end of the last, so no word is half
-    /// cut. Material that is already removed keeps its original `by`. Review items the cut
-    /// touches are dropped, the person has decided about that material.
+    /// cut.
     pub fn delete_words(
         &self,
         at: TakeAt,
@@ -197,46 +221,68 @@ impl Cut {
         let span = TimeRange::new(first.range.from(), last.range.to())
             .expect("words are ordered, so the span is not empty");
         Ok(self.with_take(at, |edit| {
-            replace_in_ranges(edit, span, |piece| match piece {
-                RangeEdit::Keep(range) => RangeEdit::Remove {
-                    range,
-                    by: RemovedBy::Manual,
-                },
-                removed => removed,
-            });
-            edit.reviews.retain(|r| !r.range.overlaps(span));
+            replace_in_ranges(edit, span, |piece| RangeEdit::Remove(piece.range()));
         }))
     }
 
-    /// Turns every removed part of `range` back into kept media, whoever removed it. A part a
-    /// rule removed comes back under an `ignore` of that rule, so the rule does not remove it
-    /// again when it runs.
-    pub fn restore(&self, at: TakeAt, range: TimeRange) -> Result<Cut, EditError> {
-        self.take(at)?;
-        Ok(self.with_take(at, |edit| {
-            let ignores: Vec<Review> = edit
-                .ranges
-                .iter()
-                .filter_map(|piece| match *piece {
-                    RangeEdit::Remove {
-                        range: removed,
-                        by: RemovedBy::Rule(rule),
-                    } => Some(Review {
-                        range: removed.intersect(range)?,
-                        by: rule,
-                        kept: true,
-                    }),
-                    _ => None,
-                })
-                .collect();
-            replace_in_ranges(edit, range, |piece| RangeEdit::Keep(piece.range()));
-            for ignore in ignores {
-                let index = edit
-                    .reviews
-                    .partition_point(|r| r.range.from() < ignore.range.from());
-                edit.reviews.insert(index, ignore);
+    /// Turns every removed part of `range` of the block at `at` back into kept media: a
+    /// person's removals there become kept, and each of the lock's cuts there gets
+    /// `override { keep }` on its element, so the rules leave it.
+    pub fn restore(&self, at: TakeAt, range: TimeRange, lock: &Lock) -> Result<Cut, EditError> {
+        let take = self.take(at)?.take.clone();
+        let mut restored = self.with_take(at, |edit| {
+            replace_in_ranges(edit, range, |p| RangeEdit::Keep(p.range()))
+        });
+        for instance in lock.take(&take).iter().flat_map(|t| &t.instances) {
+            if let (&Applied::Cut(cut), Target::Kind(kind)) =
+                (&instance.applied, instance.element.target)
+                && cut.overlaps(range)
+            {
+                restored = restored.with_override(&take, kind, instance.element.t, |o| {
+                    o.decision = Some(Decision::Keep);
+                });
             }
-        }))
+        }
+        Ok(restored)
+    }
+
+    /// The cut with the override of (`take`, `kind`, `at`) changed by `change`, added when
+    /// there is none, in canonical order.
+    pub fn with_override(
+        &self,
+        take: &Id,
+        kind: ElementKind,
+        at: Micros,
+        change: impl FnOnce(&mut Override),
+    ) -> Cut {
+        let mut cut = self.clone();
+        let index = match cut
+            .overrides
+            .iter()
+            .position(|o| o.take == *take && o.kind == kind && o.at == at)
+        {
+            Some(index) => index,
+            None => {
+                cut.overrides.push(Override {
+                    take: take.clone(),
+                    kind,
+                    at,
+                    decision: None,
+                    effects: Vec::new(),
+                });
+                cut.overrides.len() - 1
+            }
+        };
+        change(&mut cut.overrides[index]);
+        let order: Vec<Id> = cut
+            .chapters
+            .iter()
+            .flat_map(|c| &c.takes)
+            .map(|b| b.take.clone())
+            .collect();
+        cut.overrides
+            .sort_by_key(|o| (order.iter().position(|t| *t == o.take), o.at, o.kind));
+        cut
     }
 
     /// Sets the layout over `range`, replacing and splitting the changes it overlaps and
@@ -309,15 +355,14 @@ impl Cut {
                     scale: scale.max(100),
                     range,
                     center: None,
-                    by: None,
                     shape: ZoomShape::default(),
                 },
             );
         }))
     }
 
-    /// Moves the zoom or overlay `placed` of the block at `at` to `range`. A zoom becomes a
-    /// person's, and zooms it now overlaps are dropped, so zooms never stack.
+    /// Moves the zoom or overlay `placed` of the block at `at` to `range`. Zooms it now
+    /// overlaps are dropped, so zooms never stack.
     pub fn set_range(
         &self,
         at: TakeAt,
@@ -329,7 +374,6 @@ impl Cut {
             Placed::Zoom(index) => {
                 let mut zoom = edit.zooms.remove(index);
                 zoom.range = range;
-                zoom.by = None;
                 edit.zooms.retain(|z| !z.range.overlaps(range));
                 let index = edit
                     .zooms
@@ -340,19 +384,17 @@ impl Cut {
         }))
     }
 
-    /// Sets the zoom `index` of the block at `at` to `scale` percent, at least 100. The zoom
-    /// becomes a person's.
+    /// Sets the zoom `index` of the block at `at` to `scale` percent, at least 100.
     pub fn set_zoom_scale(&self, at: TakeAt, index: usize, scale: u16) -> Result<Cut, EditError> {
         self.placed(at, Placed::Zoom(index))?;
         Ok(self.with_take(at, |edit| {
             let zoom = &mut edit.zooms[index];
             zoom.scale = scale.max(100);
-            zoom.by = None;
         }))
     }
 
     /// Sets how the zoom `index` of the block at `at` frames and ramps. A quarter framing
-    /// raises the scale to the 200 percent it needs. The zoom becomes a person's.
+    /// raises the scale to the 200 percent it needs.
     pub fn set_zoom_shape(
         &self,
         at: TakeAt,
@@ -364,7 +406,6 @@ impl Cut {
             let zoom = &mut edit.zooms[index];
             zoom.scale = zoom.scale.max(shape.framing.min_scale());
             zoom.shape = shape;
-            zoom.by = None;
         }))
     }
 
@@ -405,12 +446,14 @@ impl Cut {
     }
 
     /// The transcript's words that lie in the addressed take block, each with its state, for
-    /// rendering struck-through words. A word is judged by its midpoint, so a word cut by a
-    /// rule at its edge counts as removed or kept by where most of it is.
+    /// rendering struck-through words: removed by a person's cut, by one of the lock's cuts, or
+    /// kept. A word is judged by its midpoint, so a word cut at its edge counts as removed or
+    /// kept by where most of it is.
     pub fn transcript_view<'a>(
         &self,
         at: TakeAt,
         transcript: &'a Transcript,
+        lock: &Lock,
     ) -> Result<Vec<WordView<'a>>, EditError> {
         let edit = self.take(at)?;
         if transcript.take() != &edit.take {
@@ -419,18 +462,28 @@ impl Cut {
                 got: transcript.take().clone(),
             });
         }
+        let cuts: Vec<(TimeRange, Target)> = lock
+            .take(&edit.take)
+            .into_iter()
+            .flat_map(|t| &t.instances)
+            .filter_map(|i| match i.applied {
+                Applied::Cut(range) => Some((range, i.element.target)),
+                _ => None,
+            })
+            .collect();
+        let inside = |r: TimeRange, t: Micros| r.from() <= t && t < r.to();
         Ok(transcript
             .words()
             .iter()
             .filter_map(|word| {
                 let middle = Micros((word.range.from().0 + word.range.to().0) / 2);
-                let covering = edit.ranges.iter().find(|e| {
-                    let r = e.range();
-                    r.from() <= middle && middle < r.to()
-                })?;
+                let covering = edit.ranges.iter().find(|e| inside(e.range(), middle))?;
                 let state = match covering {
-                    RangeEdit::Keep(_) => WordState::Kept,
-                    RangeEdit::Remove { by, .. } => WordState::Removed(*by),
+                    RangeEdit::Remove(_) => WordState::Removed(RemovedBy::Manual),
+                    RangeEdit::Keep(_) => match cuts.iter().find(|(r, _)| inside(*r, middle)) {
+                        Some((_, target)) => WordState::Removed(RemovedBy::Rule(*target)),
+                        None => WordState::Kept,
+                    },
                 };
                 Some(WordView { word, state })
             })
@@ -538,7 +591,7 @@ impl Cut {
             .flat_map(|edit| &edit.ranges)
             .filter_map(|piece| match piece {
                 RangeEdit::Keep(kept) => kept.intersect(range),
-                RangeEdit::Remove { .. } => None,
+                RangeEdit::Remove(_) => None,
             })
             .map(|r| r.duration().0)
             .sum();
@@ -550,7 +603,7 @@ impl Cut {
     /// kept or removed, with pauses around it that belong to no row, and `with` goes where the
     /// first of it was. When the cut has nothing of
     /// the row, `with` goes after the material of the nearest row before it, else before the
-    /// nearest row after it, else into a chapter of its own at the end. The removes, reviews,
+    /// nearest row after it, else into a chapter of its own at the end. The removes,
     /// layouts, zooms and overlays inside `with` come along from the take's blocks; where the
     /// cut has none of the take, `with` is kept whole.
     pub fn use_attempt(
@@ -708,14 +761,13 @@ impl Cut {
     }
 
     /// A block of `take` over `range` with what the cut's blocks of that take have there: their
-    /// keeps and removes, reviews, layouts, zooms and overlays. Where no block covers the take's
+    /// keeps and removes, layouts, zooms and overlays. Where no block covers the take's
     /// media, the block keeps it.
     pub fn material(&self, take: &Id, range: TimeRange) -> TakeEdit {
         let mut out = TakeEdit {
             take: take.clone(),
             ranges: Vec::new(),
             layouts: Vec::new(),
-            reviews: Vec::new(),
             zooms: Vec::new(),
             overlays: Vec::new(),
         };
@@ -742,11 +794,6 @@ impl Cut {
                     out.zooms.push(z);
                 }
             }
-            for r in piece.reviews {
-                if free(r.range, out.reviews.iter().map(|o| o.range)) {
-                    out.reviews.push(r);
-                }
-            }
             for o in piece.overlays {
                 if !out.overlays.contains(&o) {
                     out.overlays.push(o);
@@ -762,12 +809,9 @@ impl Cut {
             filled.push(piece);
         }
         filled.extend(window(cursor, range.to()).map(RangeEdit::Keep));
-        out.ranges = merge_adjacent(filled, same_kind);
+        out.ranges = merge_adjacent(filled);
         out.layouts.sort_by_key(|l| l.range.from());
         out.zooms.sort_by_key(|z| z.range.from());
-        out.reviews.sort_by_key(|r| r.range.from());
-        let reviews = std::mem::take(&mut out.reviews);
-        out.reviews = reviews.into_iter().filter(|r| out.keeps(r.range)).collect();
         out
     }
 
@@ -805,7 +849,7 @@ fn window(from: Micros, to: Micros) -> Option<TimeRange> {
     TimeRange::new(from, to)
 }
 
-/// What of `edit` lies inside `window`: ranges, layouts, reviews and zooms cut to it, and the
+/// What of `edit` lies inside `window`: ranges, layouts and zooms cut to it, and the
 /// overlays that start in it. `None` when no kept or removed media is left.
 fn restrict(edit: &TakeEdit, window: TimeRange) -> Option<TakeEdit> {
     let ranges: Vec<RangeEdit> = edit
@@ -813,10 +857,7 @@ fn restrict(edit: &TakeEdit, window: TimeRange) -> Option<TakeEdit> {
         .iter()
         .filter_map(|piece| {
             let inside = piece.range().intersect(window)?;
-            Some(match *piece {
-                RangeEdit::Keep(_) => RangeEdit::Keep(inside),
-                RangeEdit::Remove { by, .. } => RangeEdit::Remove { range: inside, by },
-            })
+            Some(piece.with_range(inside))
         })
         .collect();
     if ranges.is_empty() {
@@ -836,16 +877,6 @@ fn restrict(edit: &TakeEdit, window: TimeRange) -> Option<TakeEdit> {
                     range,
                     enter: l.enter.clone().filter(|_| range.from() == l.range.from()),
                     exit: l.exit.clone().filter(|_| range.to() == l.range.to()),
-                })
-            })
-            .collect(),
-        reviews: edit
-            .reviews
-            .iter()
-            .filter_map(|r| {
-                Some(Review {
-                    range: r.range.intersect(window)?,
-                    ..*r
                 })
             })
             .collect(),
@@ -976,22 +1007,9 @@ fn meets(a: &TakeEdit, b: &TakeEdit) -> bool {
 /// Appends `next`, which starts where `edit` ends, to `edit`, and joins what the seam split.
 fn join(edit: &mut TakeEdit, next: TakeEdit) {
     let ranges = std::mem::take(&mut edit.ranges);
-    edit.ranges = merge_adjacent(ranges.into_iter().chain(next.ranges).collect(), same_kind);
+    edit.ranges = merge_adjacent(ranges.into_iter().chain(next.ranges).collect());
     edit.layouts.extend(next.layouts);
     merge_layouts(&mut edit.layouts);
-    for review in next.reviews {
-        match edit.reviews.last_mut() {
-            Some(last)
-                if last.range.to() == review.range.from()
-                    && last.by == review.by
-                    && last.kept == review.kept =>
-            {
-                last.range = TimeRange::new(last.range.from(), review.range.to())
-                    .expect("adjacent ranges join into a non-empty range");
-            }
-            _ => edit.reviews.push(review),
-        }
-    }
     for zoom in next.zooms {
         match edit.zooms.last_mut() {
             Some(last)
@@ -1011,11 +1029,7 @@ fn join(edit: &mut TakeEdit, next: TakeEdit) {
 }
 
 fn same_kind(a: RangeEdit, b: RangeEdit) -> bool {
-    match (a, b) {
-        (RangeEdit::Keep(_), RangeEdit::Keep(_)) => true,
-        (RangeEdit::Remove { by: a, .. }, RangeEdit::Remove { by: b, .. }) => a == b,
-        _ => false,
-    }
+    std::mem::discriminant(&a) == std::mem::discriminant(&b)
 }
 
 /// Splits the take's ranges at `span`, passes each piece inside it to `change`, and merges
@@ -1032,37 +1046,25 @@ fn replace_in_ranges(
             out.push(old);
             continue;
         };
-        let with_range = |range| match old {
-            RangeEdit::Keep(_) => RangeEdit::Keep(range),
-            RangeEdit::Remove { by, .. } => RangeEdit::Remove { range, by },
-        };
+        let with_range = |range| old.with_range(range);
         let before = TimeRange::new(range.from(), inside.from());
         let after = TimeRange::new(inside.to(), range.to());
         out.extend(before.map(with_range));
         out.push(change(with_range(inside)));
         out.extend(after.map(with_range));
     }
-    edit.ranges = merge_adjacent(out, |a, b| match (a, b) {
-        (RangeEdit::Keep(_), RangeEdit::Keep(_)) => true,
-        (RangeEdit::Remove { by: a, .. }, RangeEdit::Remove { by: b, .. }) => a == b,
-        _ => false,
-    });
+    edit.ranges = merge_adjacent(out);
 }
 
-fn merge_adjacent(
-    items: Vec<RangeEdit>,
-    same: impl Fn(RangeEdit, RangeEdit) -> bool,
-) -> Vec<RangeEdit> {
+/// Joins neighbours that meet and are both kept or both removed.
+fn merge_adjacent(items: Vec<RangeEdit>) -> Vec<RangeEdit> {
     let mut out: Vec<RangeEdit> = Vec::with_capacity(items.len());
     for item in items {
         match out.last_mut() {
-            Some(last) if last.range().to() == item.range().from() && same(*last, item) => {
+            Some(last) if last.range().to() == item.range().from() && same_kind(*last, item) => {
                 let range = TimeRange::new(last.range().from(), item.range().to())
                     .expect("adjacent ranges join into a non-empty range");
-                *last = match *last {
-                    RangeEdit::Keep(_) => RangeEdit::Keep(range),
-                    RangeEdit::Remove { by, .. } => RangeEdit::Remove { range, by },
-                };
+                *last = last.with_range(range);
             }
             _ => out.push(item),
         }
@@ -1116,7 +1118,6 @@ fn merge_layouts(layouts: &mut Vec<LayoutChange>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::RuleKind;
 
     fn range(from: u64, to: u64) -> TimeRange {
         TimeRange::new(Micros(from), Micros(to)).unwrap()
@@ -1126,11 +1127,8 @@ mod tests {
         RangeEdit::Keep(range(from, to))
     }
 
-    fn removed(from: u64, to: u64, by: RemovedBy) -> RangeEdit {
-        RangeEdit::Remove {
-            range: range(from, to),
-            by,
-        }
+    fn removed(from: u64, to: u64) -> RangeEdit {
+        RangeEdit::Remove(range(from, to))
     }
 
     const AT: TakeAt = TakeAt {
@@ -1164,7 +1162,6 @@ mod tests {
                     take: id(),
                     ranges,
                     layouts: Vec::new(),
-                    reviews: Vec::new(),
                     zooms: Vec::new(),
                     overlays: Vec::new(),
                 }],
@@ -1173,71 +1170,50 @@ mod tests {
         }
     }
 
-    #[test]
-    fn queue_decisions_write_remove_or_ignore() {
-        let mut cut = cut(vec![keep(0, 10_000_000)]);
-        let item = Review {
-            range: range(2_000_000, 3_000_000),
-            by: RuleKind::Pause,
-            kept: false,
-        };
-        cut.chapters[0].takes[0].reviews.push(item);
-        assert_eq!(cut.review_queue().collect::<Vec<_>>(), [(AT, item)]);
-
-        let kept = cut.decide(AT, item.range, Decision::Keep).unwrap();
-        let take = &kept.chapters[0].takes[0];
-        assert_eq!(take.reviews, [Review { kept: true, ..item }]);
-        assert_eq!(take.ranges, [keep(0, 10_000_000)]);
-        assert_eq!(kept.review_queue().count(), 0);
-        assert_eq!(
-            kept.decide(AT, item.range, Decision::Cut),
-            Err(EditError::NotInReview(item.range))
-        );
-
-        let cut_it = cut.decide(AT, item.range, Decision::Cut).unwrap();
-        let take = &cut_it.chapters[0].takes[0];
-        assert!(take.reviews.is_empty());
-        assert_eq!(
-            take.ranges,
-            [
-                keep(0, 2_000_000),
-                removed(2_000_000, 3_000_000, RemovedBy::Rule(RuleKind::Pause)),
-                keep(3_000_000, 10_000_000),
-            ]
-        );
+    /// A lock of `t01` with a sure silence cut, an unsure pause and a filler cut.
+    fn lock() -> Lock {
+        Lock::parse(
+            "lock 1\n\ntake t01 {\n    cut from=1_000_000 to=2_000_000 on=silence t=1_000_000 layer=format rule=\"silence\"\n    review from=6_000_000 to=7_000_000 on=pause t=6_000_000 layer=format rule=\"pause\"\n    cut from=8_000_000 to=9_000_000 on=filler t=8_000_000 layer=format rule=\"filler\"\n}\n",
+        )
+        .unwrap()
     }
 
     #[test]
-    fn restoring_a_rule_cut_ignores_the_rule_there() {
-        let cut = cut(vec![
-            keep(0, 1_000_000),
-            removed(1_000_000, 2_000_000, RemovedBy::Rule(RuleKind::Silence)),
-            keep(2_000_000, 3_000_000),
-        ]);
-        let restored = cut.restore(AT, range(500_000, 2_500_000)).unwrap();
-        let take = &restored.chapters[0].takes[0];
-        assert_eq!(take.ranges, [keep(0, 3_000_000)]);
+    fn answers_and_restores_write_overrides_on_the_element() {
+        let (cut, lock) = (cut(vec![keep(0, 10_000_000)]), lock());
+        let review = range(6_000_000, 7_000_000);
+        let queue: Vec<_> = cut.review_queue(&lock).collect();
+        assert_eq!(queue.len(), 1);
         assert_eq!(
-            take.reviews,
-            [Review {
-                range: range(1_000_000, 2_000_000),
-                by: RuleKind::Silence,
-                kept: true,
-            }]
+            (queue[0].1.range, queue[0].1.kind),
+            (review, ElementKind::Pause)
         );
 
-        // Cutting the restored material by hand ends the person's say over it.
-        let deleted = restored
-            .delete_words(AT, &transcript(), range(1_000_000, 1_200_000))
+        let cut_it = cut.decide(AT, review, Decision::Cut, &lock).unwrap();
+        let kept = cut_it.decide(AT, review, Decision::Keep, &lock).unwrap();
+        assert_eq!(kept.overrides.len(), 1, "one override per element");
+        assert!(
+            kept.to_kdl()
+                .ends_with("override t01 pause at=6_000_000 {\n    keep\n}\n")
+        );
+        assert_eq!(
+            cut.decide(AT, range(1, 2), Decision::Keep, &lock),
+            Err(EditError::NotInReview(range(1, 2)))
+        );
+
+        let manual = cut
+            .delete_words(AT, &transcript(), range(3_300_000, 3_400_000))
             .unwrap();
-        assert!(deleted.chapters[0].takes[0].reviews.is_empty());
+        let restored = manual.restore(AT, range(0, 5_000_000), &lock).unwrap();
+        assert_eq!(ranges(&restored), [keep(0, 10_000_000)]);
+        let kinds: Vec<_> = restored.overrides.iter().map(|o| (o.kind, o.at)).collect();
+        assert_eq!(kinds, [(ElementKind::Silence, Micros(1_000_000))]);
+        assert_eq!(Cut::parse(&restored.to_kdl()).unwrap(), restored);
     }
 
     fn ranges(cut: &Cut) -> &[RangeEdit] {
         &cut.chapters[0].takes[0].ranges
     }
-
-    const MANUAL: RemovedBy = RemovedBy::Manual;
 
     #[test]
     fn append_take_adds_a_canonical_chapter_that_keeps_the_whole_take() {
@@ -1263,7 +1239,7 @@ mod tests {
             ranges(&after),
             [
                 keep(0, 2_200_000),
-                removed(2_200_000, 4_300_000, MANUAL),
+                removed(2_200_000, 4_300_000),
                 keep(4_300_000, 11_000_000)
             ]
         );
@@ -1275,7 +1251,7 @@ mod tests {
         let head = c.delete_words(AT, &transcript(), range(0, 100)).unwrap();
         assert_eq!(
             ranges(&head),
-            [removed(0, 1_000_000, MANUAL), keep(1_000_000, 11_000_000)]
+            [removed(0, 1_000_000), keep(1_000_000, 11_000_000)]
         );
         let tail = c
             .delete_words(AT, &transcript(), range(10_000_000, 10_500_000))
@@ -1284,7 +1260,7 @@ mod tests {
             ranges(&tail),
             [
                 keep(0, 9_900_000),
-                removed(9_900_000, 10_900_000, MANUAL),
+                removed(9_900_000, 10_900_000),
                 keep(10_900_000, 11_000_000)
             ]
         );
@@ -1301,63 +1277,43 @@ mod tests {
             ranges(&after),
             [
                 keep(0, 1_100_000),
-                removed(1_100_000, 3_200_000, MANUAL),
+                removed(1_100_000, 3_200_000),
                 keep(3_200_000, 11_000_000)
             ]
         );
     }
 
     #[test]
-    fn adjacent_manual_removals_merge_but_rule_removals_stay() {
-        let silence = RemovedBy::Rule(RuleKind::Silence);
-        let c = cut(vec![
-            removed(0, 1_100_000, MANUAL),
-            keep(1_100_000, 2_100_000),
-            removed(2_100_000, 2_200_000, silence),
-            keep(2_200_000, 11_000_000),
-        ]);
-        let t = transcript();
-        let merged = c.delete_words(AT, &t, range(1_100_000, 2_000_000)).unwrap();
+    fn adjacent_removals_merge() {
+        let c = cut(vec![removed(0, 1_100_000), keep(1_100_000, 11_000_000)]);
+        let merged = c
+            .delete_words(AT, &transcript(), range(1_100_000, 2_000_000))
+            .unwrap();
         assert_eq!(
             ranges(&merged),
-            [
-                removed(0, 2_100_000, MANUAL),
-                removed(2_100_000, 2_200_000, silence),
-                keep(2_200_000, 11_000_000)
-            ]
-        );
-        let kept_apart = c.delete_words(AT, &t, range(2_200_000, 2_300_000)).unwrap();
-        assert_eq!(
-            ranges(&kept_apart)[2],
-            removed(2_100_000, 2_200_000, silence)
-        );
-        assert_eq!(
-            ranges(&kept_apart)[3],
-            removed(2_200_000, 3_200_000, MANUAL)
+            [removed(0, 2_100_000), keep(2_100_000, 11_000_000)]
         );
     }
 
     #[test]
-    fn restore_returns_manual_and_rule_removals_to_kept_media() {
-        let filler = RemovedBy::Rule(RuleKind::Filler);
+    fn restore_returns_removals_to_kept_media() {
         let c = cut(vec![
             keep(0, 1_000_000),
-            removed(1_000_000, 2_000_000, MANUAL),
+            removed(1_000_000, 2_000_000),
             keep(2_000_000, 3_000_000),
-            removed(3_000_000, 4_000_000, filler),
         ]);
-        let after = c.restore(AT, range(1_500_000, 3_500_000)).unwrap();
+        let lock = Lock::default();
+        let after = c.restore(AT, range(1_500_000, 3_000_000), &lock).unwrap();
         assert_eq!(
             ranges(&after),
             [
                 keep(0, 1_000_000),
-                removed(1_000_000, 1_500_000, MANUAL),
-                keep(1_500_000, 3_500_000),
-                removed(3_500_000, 4_000_000, filler)
+                removed(1_000_000, 1_500_000),
+                keep(1_500_000, 3_000_000),
             ]
         );
-        let all = c.restore(AT, range(0, 4_000_000)).unwrap();
-        assert_eq!(ranges(&all), [keep(0, 4_000_000)]);
+        let all = c.restore(AT, range(0, 3_000_000), &lock).unwrap();
+        assert_eq!(ranges(&all), [keep(0, 3_000_000)]);
     }
 
     fn layouts(cut: &Cut) -> Vec<(Layout, u64, u64)> {
@@ -1446,11 +1402,11 @@ mod tests {
         );
     }
 
-    fn zooms(c: &Cut) -> Vec<(u16, u64, u64, bool)> {
+    fn zooms(c: &Cut) -> Vec<(u16, u64, u64)> {
         c.chapters[0].takes[0]
             .zooms
             .iter()
-            .map(|z| (z.scale, z.range.from().0, z.range.to().0, z.by.is_none()))
+            .map(|z| (z.scale, z.range.from().0, z.range.to().0))
             .collect()
     }
 
@@ -1461,11 +1417,11 @@ mod tests {
             .unwrap()
             .add_zoom(AT, range(10, 20), 130)
             .unwrap();
-        assert_eq!(zooms(&c), [(130, 10, 20, true), (120, 40, 60, true)]);
+        assert_eq!(zooms(&c), [(130, 10, 20), (120, 40, 60)]);
         let moved = c.set_range(AT, Placed::Zoom(0), range(15, 45)).unwrap();
-        assert_eq!(zooms(&moved), [(130, 15, 45, true)]);
+        assert_eq!(zooms(&moved), [(130, 15, 45)]);
         let removed = c.remove_placed(AT, Placed::Zoom(1)).unwrap();
-        assert_eq!(zooms(&removed), [(130, 10, 20, true)]);
+        assert_eq!(zooms(&removed), [(130, 10, 20)]);
         assert_eq!(
             c.remove_placed(AT, Placed::Overlay(0)),
             Err(EditError::UnknownPlaced(AT, Placed::Overlay(0)))
@@ -1473,13 +1429,12 @@ mod tests {
     }
 
     #[test]
-    fn a_zoom_takes_a_new_scale_and_becomes_a_persons() {
-        let mut c = cut(vec![keep(0, 100)])
+    fn a_zoom_takes_a_new_scale() {
+        let c = cut(vec![keep(0, 100)])
             .add_zoom(AT, range(10, 20), 130)
             .unwrap();
-        c.chapters[0].takes[0].zooms[0].by = Some(crate::ZoomBy::Emphasis);
         let scaled = c.set_zoom_scale(AT, 0, 200).unwrap();
-        assert_eq!(zooms(&scaled), [(200, 10, 20, true)]);
+        assert_eq!(zooms(&scaled), [(200, 10, 20)]);
         assert_eq!(zooms(&c.set_zoom_scale(AT, 0, 50).unwrap())[0].0, 100);
         assert_eq!(
             c.set_zoom_scale(AT, 1, 150),
@@ -1506,23 +1461,22 @@ mod tests {
 
     #[test]
     fn transcript_view_marks_removed_words_and_who_removed_them() {
-        let silence = RemovedBy::Rule(RuleKind::Silence);
+        let silence = RemovedBy::Rule(Target::Kind(ElementKind::Silence));
         let c = cut(vec![
-            removed(0, 1_100_000, silence),
-            keep(1_100_000, 3_300_000),
-            removed(3_300_000, 4_400_000, MANUAL),
+            keep(0, 3_300_000),
+            removed(3_300_000, 4_400_000),
             keep(4_400_000, 5_500_000),
         ]);
         let t = transcript();
-        let view = c.transcript_view(AT, &t).unwrap();
+        let view = c.transcript_view(AT, &t, &lock()).unwrap();
         let states: Vec<_> = view.iter().map(|v| v.state).collect();
         assert_eq!(
             states,
             [
+                WordState::Kept,
                 WordState::Removed(silence),
                 WordState::Kept,
-                WordState::Kept,
-                WordState::Removed(MANUAL),
+                WordState::Removed(RemovedBy::Manual),
                 WordState::Kept,
             ]
         );
@@ -1537,7 +1491,7 @@ mod tests {
             take: 3,
         };
         assert_eq!(
-            c.restore(missing, range(0, 1)),
+            c.restore(missing, range(0, 1), &Lock::default()),
             Err(EditError::UnknownTake(missing))
         );
         assert_eq!(
@@ -1594,7 +1548,7 @@ mod tests {
     /// The first take as a rough cut, and the second appended after it as recording leaves it.
     fn recorded() -> Cut {
         Cut::parse(
-            "chapter \"Intro\" {\n    take t01 {\n        keep from=0 to=12_000_000\n        remove from=12_000_000 to=13_000_000 by=silence\n        keep from=13_000_000 to=30_000_000\n        zoom 120 from=15_000_000 to=16_000_000\n    }\n}\n\nchapter \"Take t02\" {\n    take t02 {\n        keep from=0 to=14_000_000\n        remove from=14_000_000 to=15_000_000 by=filler\n        keep from=15_000_000 to=30_000_000\n    }\n}\n",
+            "chapter \"Intro\" {\n    take t01 {\n        keep from=0 to=12_000_000\n        remove from=12_000_000 to=13_000_000 by=manual\n        keep from=13_000_000 to=30_000_000\n        zoom 120 from=15_000_000 to=16_000_000\n    }\n}\n\nchapter \"Take t02\" {\n    take t02 {\n        keep from=0 to=14_000_000\n        remove from=14_000_000 to=15_000_000 by=manual\n        keep from=15_000_000 to=30_000_000\n    }\n}\n",
         )
         .unwrap()
     }
@@ -1606,7 +1560,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             used.to_kdl(),
-            "chapter \"Intro\" {\n    take t01 {\n        keep from=0 to=11_000_000\n    }\n    take t02 {\n        keep from=11_000_000 to=14_000_000\n        remove from=14_000_000 to=15_000_000 by=filler\n        keep from=15_000_000 to=19_000_000\n    }\n    take t01 {\n        keep from=19_000_000 to=30_000_000\n    }\n}\n\nchapter \"Take t02\" {\n    take t02 {\n        keep from=0 to=11_000_000\n    }\n    take t02 {\n        keep from=19_000_000 to=30_000_000\n    }\n}\n"
+            "chapter \"Intro\" {\n    take t01 {\n        keep from=0 to=11_000_000\n    }\n    take t02 {\n        keep from=11_000_000 to=14_000_000\n        remove from=14_000_000 to=15_000_000 by=manual\n        keep from=15_000_000 to=19_000_000\n    }\n    take t01 {\n        keep from=19_000_000 to=30_000_000\n    }\n}\n\nchapter \"Take t02\" {\n    take t02 {\n        keep from=0 to=11_000_000\n    }\n    take t02 {\n        keep from=19_000_000 to=30_000_000\n    }\n}\n"
         );
         // Every beat taken from t02 empties its chapter, which goes.
         let all = (0..3).fold(recorded(), |cut, i| {
@@ -1620,7 +1574,7 @@ mod tests {
     #[test]
     fn using_what_holds_a_beat_already_changes_nothing() {
         let cut = Cut::parse(
-            "chapter \"Intro\" {\n    take t01 {\n        keep from=0 to=12_000_000\n        remove from=12_000_000 to=13_000_000 by=silence\n        keep from=13_000_000 to=30_000_000\n        review from=18_500_000 to=19_500_000 by=filler\n        zoom 120 from=10_500_000 to=11_500_000\n        overlay lower-third from=3_000_000 to=8_000_000 {\n            text \"Hi\"\n        }\n    }\n}\n",
+            "chapter \"Intro\" {\n    take t01 {\n        keep from=0 to=12_000_000\n        remove from=12_000_000 to=13_000_000 by=manual\n        keep from=13_000_000 to=30_000_000\n        zoom 120 from=10_500_000 to=11_500_000\n        overlay lower-third from=3_000_000 to=8_000_000 {\n            text \"Hi\"\n        }\n    }\n}\n",
         )
         .unwrap();
         let used = cut
@@ -1688,7 +1642,7 @@ mod tests {
                     "t02".into(),
                     vec![
                         keep(12_000_000, 14_000_000),
-                        removed(14_000_000, 15_000_000, RemovedBy::Rule(RuleKind::Filler)),
+                        removed(14_000_000, 15_000_000),
                         keep(15_000_000, 17_000_000)
                     ]
                 ),
@@ -1716,7 +1670,7 @@ mod tests {
             assembled.chapters[0].takes[0].ranges,
             [
                 keep(1_000_000, 12_000_000),
-                removed(12_000_000, 13_000_000, RemovedBy::Rule(RuleKind::Silence)),
+                removed(12_000_000, 13_000_000),
                 keep(13_000_000, 19_000_000)
             ]
         );

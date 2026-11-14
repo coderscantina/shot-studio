@@ -1,9 +1,10 @@
 //! A video folder on disk: its project files and the cached transcripts of its takes.
 //!
 //! The app holds no edit state of its own. Every edit writes `cut.kdl` through `shot-core`'s
-//! canonical writer and reloads, so the screen always shows what the files say. A migrated
-//! video (one with a `cut.lock`) has its `format.kdl` as a layer over the channel's format, and
-//! every write rebuilds its lock from the files, unless it shipped and the lock is frozen.
+//! canonical writer and reloads, so the screen always shows what the files say. The folder
+//! opens through [`style::open`] like in `shot` and the MCP server, which migrates a video
+//! written before the lock; its `format.kdl` is a layer over the channel's format, and every
+//! write rebuilds its lock from the files, unless it shipped and the lock is frozen.
 
 use std::collections::HashMap;
 use std::fs;
@@ -12,9 +13,9 @@ use std::sync::Arc;
 
 use shot_core::{
     Brand, CustomLayout, Cut, Decision, Elements, Format, FormatLayer, Id, Layout, Lock, Micros,
-    MigrateInput, Project, Script, TakeAt, TimeRange, Transcript, Video, ZoomBy,
+    Project, TakeAt, TimeRange, Transcript,
 };
-use shot_mcp::style::{self, Disk, Repo};
+use shot_mcp::style::{self, Disk};
 use shot_render::theme::Theme;
 use shot_ship::lock::LOCK_FILE;
 
@@ -22,9 +23,9 @@ pub struct VideoFolder {
     pub dir: PathBuf,
     /// The files: `cut.kdl` as written, the settings resolved through the layers.
     pub project: Project,
-    /// The project as the screens show it: a migrated video's lock folded into its take
-    /// blocks (see [`crate::style::shown`]). Equal to `project` before migration.
-    pub shown: Project,
+    /// The cut as it plays, the lock's cuts as removed ranges (see [`crate::model::as_played`]),
+    /// for the Takes view, which asks how much of each attempt plays.
+    pub played: Cut,
     /// Cached transcripts by take. A take without one is missing here.
     pub transcripts: HashMap<Id, Transcript>,
     /// The committed elements of each take that has an elements file.
@@ -32,7 +33,14 @@ pub struct VideoFolder {
     /// What the brand gives the templates, read again on every write like export reads it:
     /// the preview draws with it and the screens check overlays against it.
     pub theme: Result<Arc<Theme>, String>,
-    style: Option<Styled>,
+    /// The video's `format.kdl`.
+    layer: FormatLayer,
+    /// The settings under the video's layer: the preset with the channel's layer.
+    base: Format,
+    lock: Lock,
+    /// The channel repo, or the folder as a channel of one, and the video's slug.
+    disk: Disk,
+    slug: String,
     /// The files before each change, newest last, for undo.
     history: Vec<Snapshot>,
     /// Files that undo stepped back from, newest last, for redo.
@@ -48,7 +56,7 @@ pub struct VideoFolder {
 struct Snapshot {
     cut: Cut,
     format: Format,
-    /// The brand block of a migrated video's `format.kdl`.
+    /// The brand block of the video's `format.kdl`.
     brand: Option<Brand>,
     /// The channel's `brand/brand.kdl` as written, for channel layouts; `None` without one.
     channel_brand: Option<String>,
@@ -57,38 +65,18 @@ struct Snapshot {
 /// How many writes undo can step back through.
 const HISTORY: usize = 200;
 
-/// What a migrated video adds to its files.
-struct Styled {
-    /// The video's `format.kdl`.
-    layer: FormatLayer,
-    /// The settings under the video's layer: the preset with the channel's layer.
-    base: Format,
-    lock: Lock,
-    /// The channel repo and the video's slug, which a build reads. A folder outside a channel
-    /// repo keeps the lock it has, as `shot export` does.
-    repo: Option<(Disk, String)>,
-}
-
 /// `cut` with `take` appended as a chapter of its own that keeps `range`, its layout and zoom
-/// markers written as nodes. On a migrated video a marker zoom is a person's zoom.
+/// markers written as nodes.
 pub fn appended(
     cut: &Cut,
     take: &Id,
     range: TimeRange,
     markers: &[shot_capture::events::Marker],
     format: &Format,
-    migrated: bool,
 ) -> Cut {
     let mut cut = cut.append_take(take.clone(), format!("Take {take}"), range);
     if let Some(edit) = cut.chapters.last_mut().and_then(|c| c.takes.last_mut()) {
         shot_prompter::apply_markers(edit, markers, format);
-        if migrated {
-            for zoom in &mut edit.zooms {
-                if zoom.by == Some(ZoomBy::Marker) {
-                    zoom.by = None;
-                }
-            }
-        }
     }
     cut
 }
@@ -107,68 +95,27 @@ fn write(path: &Path, text: &str) -> Result<(), String> {
 }
 
 impl VideoFolder {
+    /// Opens the video in `dir` as every front end does, see [`style::open`]: a video written
+    /// before the lock is migrated first, and one whose migration would change its frames
+    /// does not open.
     pub fn open(dir: &Path) -> Result<Self, String> {
-        let required = |name: &str| {
-            read(dir, name)?.ok_or_else(|| format!("{}: missing", dir.join(name).display()))
-        };
-        let parsed = |name: &str, error: shot_core::ParseError| format!("{name}:{error}");
-        let video = Video::parse(&required("video.kdl")?).map_err(|e| parsed("video.kdl", e))?;
-        let script = Script::parse(&required("script.md")?).map_err(|e| parsed("script.md", e))?;
-        let cut = match read(dir, "cut.kdl")? {
-            Some(text) => Cut::parse(&text).map_err(|e| parsed("cut.kdl", e))?,
-            None => Cut::default(),
-        };
-        let (format, style) = match read(dir, LOCK_FILE)? {
-            None => {
-                let format =
-                    Format::parse(&required("format.kdl")?).map_err(|e| parsed("format.kdl", e))?;
-                (format, None)
-            }
-            Some(lock) => {
-                let lock = Lock::parse(&lock).map_err(|e| parsed(LOCK_FILE, e))?;
-                let layer = read(dir, "format.kdl")?
-                    .map(|t| FormatLayer::parse(&t).map_err(|e| parsed("format.kdl", e)))
-                    .transpose()?
-                    .unwrap_or_default();
-                let repo = Disk::locate(dir).ok();
-                let channel = match &repo {
-                    Some((disk, slug)) => {
-                        let path = format!("formats/{}.kdl", video.format);
-                        disk.read(slug, &path)?
-                            .map(|bytes| {
-                                let text = String::from_utf8(bytes)
-                                    .map_err(|_| format!("{path} is not UTF-8"))?;
-                                FormatLayer::parse(&text).map_err(|e| format!("{path}:{e}"))
-                            })
-                            .transpose()?
-                    }
-                    None => None,
-                };
-                let base = video.format.preset().resolve(channel.iter());
-                let format = layer.apply(&base);
-                let styled = Styled {
-                    layer,
-                    base,
-                    lock,
-                    repo,
-                };
-                (format, Some(styled))
-            }
-        };
-        let project = Project {
-            video,
-            script,
-            format,
-            cut,
+        let opened = {
+            let _lock =
+                shot_fs::WriteLock::acquire(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+            style::open(dir)?
         };
         let mut folder = Self {
             dir: dir.to_owned(),
-            shown: project.clone(),
-            project,
+            played: opened.project.cut.clone(),
+            project: opened.project,
             transcripts: HashMap::new(),
             elements: HashMap::new(),
             theme: Ok(Arc::default()),
-            style,
+            layer: opened.layer,
+            base: opened.base,
+            lock: opened.lock,
+            disk: opened.disk,
+            slug: opened.slug,
             history: Vec::new(),
             undone: Vec::new(),
             batching: false,
@@ -179,14 +126,9 @@ impl VideoFolder {
         Ok(folder)
     }
 
-    /// Whether the video's style comes from its lock.
-    pub fn is_migrated(&self) -> bool {
-        self.style.is_some()
-    }
-
-    /// A migrated video's lock as last built.
-    pub fn lock(&self) -> Option<&Lock> {
-        self.style.as_ref().map(|s| &s.lock)
+    /// The video's lock as last built.
+    pub fn lock(&self) -> &Lock {
+        &self.lock
     }
 
     /// Reads the cached transcript of every take the cut uses that has none loaded, as after
@@ -232,30 +174,23 @@ impl VideoFolder {
         Ok(())
     }
 
-    /// Builds a migrated video's lock from the files and writes `cut.lock` when it changed,
-    /// unless the video shipped, then reads the elements and the theme again. Called after
-    /// every write, and when analysis added elements.
+    /// Builds the video's lock from the files and writes `cut.lock` when it changed, unless the
+    /// video shipped, then reads the elements and the theme again. Called after every write,
+    /// and when analysis added elements.
     pub fn rebuild_lock(&mut self) -> Result<(), String> {
         self.writing(Self::store_lock)
     }
 
     fn store_lock(&mut self) -> Result<(), String> {
-        if let Some(styled) = &mut self.style
-            && let Some((disk, slug)) = &styled.repo
-        {
-            let built = style::build_video(disk, slug)?;
-            if !built.shipped() && built.lock != styled.lock {
-                disk.write(&style::video_path(slug, LOCK_FILE), &built.lock.to_kdl())?;
-                styled.lock = built.lock;
-            }
+        let built = style::build_video(&self.disk, &self.slug)?;
+        if !built.shipped() && built.lock != self.lock {
+            self.disk.write(
+                &style::video_path(&self.slug, LOCK_FILE),
+                &built.lock.to_kdl(),
+            )?;
+            self.lock = built.lock;
         }
-        self.shown = Project {
-            cut: match &self.style {
-                Some(styled) => crate::style::shown(&self.project.cut, &styled.lock),
-                None => self.project.cut.clone(),
-            },
-            ..self.project.clone()
-        };
+        self.played = crate::model::as_played(&self.project.cut, &self.lock);
         self.theme = Theme::load(&self.dir, self.project.video.format, &self.project.cut)
             .map(Arc::new)
             .map_err(|e| e.to_string());
@@ -367,28 +302,22 @@ impl VideoFolder {
         self.rebuild_lock()
     }
 
-    /// Writes `format.kdl` so the settings resolve to `format`: the whole format before
-    /// migration, the settings that differ from the channel's after.
+    /// Writes `format.kdl` so the settings resolve to `format`: the settings that differ from
+    /// the channel's.
     pub fn write_format(&mut self, format: Format) -> Result<(), String> {
         self.as_one_change(|folder| folder.store_format(format))
     }
 
     fn store_format(&mut self, format: Format) -> Result<(), String> {
-        let text = match &mut self.style {
-            Some(styled) => {
-                styled.layer = crate::style::layer(&format, &styled.base, &styled.layer);
-                styled.layer.to_kdl()
-            }
-            None => format.to_kdl(),
-        };
-        write(&self.dir.join("format.kdl"), &text)?;
+        self.layer = crate::style::layer(&format, &self.base, &self.layer);
+        write(&self.dir.join("format.kdl"), &self.layer.to_kdl())?;
         self.project.format = format;
         self.rebuild_lock()
     }
 
-    /// The brand block of a migrated video's `format.kdl`, `None` without one.
+    /// The brand block of the video's `format.kdl`, `None` without one.
     fn layer_brand(&self) -> Option<Brand> {
-        self.style.as_ref().and_then(|s| s.layer.brand.clone())
+        self.layer.brand.clone()
     }
 
     /// The hand-held strength the video's own layer sets, `None` when it leaves it to the
@@ -398,14 +327,8 @@ impl VideoFolder {
     }
 
     /// Sets the camera's hand-held strength in the video's layer, or with `None` leaves it to
-    /// the channel's brand. Only a migrated video has a brand to set it in. A change can be
-    /// undone.
+    /// the channel's brand. A change can be undone.
     pub fn set_handheld(&mut self, strength: Option<u8>) -> Result<(), String> {
-        if self.style.is_none() {
-            return Err(
-                "The camera is styled by the channel's brand, migrate the video first".into(),
-            );
-        }
         let mut brand = self.layer_brand().unwrap_or_default();
         brand.handheld = strength.map(|s| s.min(100));
         let brand = (!brand.is_empty()).then_some(brand);
@@ -419,14 +342,8 @@ impl VideoFolder {
     }
 
     /// Turns the camera's cut-out on or off in the video's layer, or with `None` leaves it to
-    /// the channel's brand. Only a migrated video has a brand to set it in. A change can be
-    /// undone.
+    /// the channel's brand. A change can be undone.
     pub fn set_cutout(&mut self, on: Option<bool>) -> Result<(), String> {
-        if self.style.is_none() {
-            return Err(
-                "The camera is styled by the channel's brand, migrate the video first".into(),
-            );
-        }
         let mut brand = self.layer_brand().unwrap_or_default();
         brand.cutout = on;
         let brand = (!brand.is_empty()).then_some(brand);
@@ -434,45 +351,31 @@ impl VideoFolder {
     }
 
     fn store_brand(&mut self, brand: Option<Brand>) -> Result<(), String> {
-        let styled = self
-            .style
-            .as_mut()
-            .ok_or("only a migrated video has a brand layer")?;
-        styled.layer.brand = brand;
-        write(&self.dir.join("format.kdl"), &styled.layer.to_kdl())?;
+        self.layer.brand = brand;
+        write(&self.dir.join("format.kdl"), &self.layer.to_kdl())?;
         self.rebuild_lock()
     }
 
-    /// Answers the review item at `range` of the block at `at`: an override of its element
-    /// in a migrated video, the old `ignore` or rule removal before.
+    /// Answers the review item at `range` of the block at `at` with an override of its element.
     pub fn decide(
         &mut self,
         at: TakeAt,
         range: TimeRange,
         decision: Decision,
     ) -> Result<(), String> {
-        let cut = match &self.style {
-            Some(styled) => {
-                crate::style::decide(&self.project.cut, &styled.lock, at, range, decision)
-            }
-            None => self.project.cut.decide(at, range, decision),
-        };
+        let cut = self.project.cut.decide(at, range, decision, &self.lock);
         self.write_cut(cut.map_err(|e| e.to_string())?)
     }
 
-    /// Turns removed media in `range` of the block at `at` back into kept media. In a
-    /// migrated video the lock's cuts there get `keep` overrides.
+    /// Turns removed media in `range` of the block at `at` back into kept media: a person's
+    /// removals, and the lock's cuts there through `keep` overrides.
     pub fn restore(&mut self, at: TakeAt, range: TimeRange) -> Result<(), String> {
-        let cut = match &self.style {
-            Some(styled) => crate::style::restore(&self.project.cut, &styled.lock, at, range),
-            None => self.project.cut.restore(at, range),
-        };
+        let cut = self.project.cut.restore(at, range, &self.lock);
         self.write_cut(cut.map_err(|e| e.to_string())?)
     }
 
     /// Appends a chapter that keeps all of a new take, with its layout and zoom hotkey markers
-    /// as nodes, and writes `cut.kdl`. A video's first take in a channel repo starts it on the
-    /// lock; in a migrated video the zoom hotkeys are a person's zooms.
+    /// as nodes, and writes `cut.kdl`.
     pub fn append_take(&mut self, take: Id, duration: Micros) -> Result<(), String> {
         let Some(range) = TimeRange::new(Micros(0), duration) else {
             return Err(format!("take {take} is empty"));
@@ -481,9 +384,6 @@ impl VideoFolder {
     }
 
     fn store_take(&mut self, take: Id, range: TimeRange) -> Result<(), String> {
-        if self.style.is_none() && self.project.cut.chapters.is_empty() {
-            self.start_migrated()?;
-        }
         let markers = shot_capture::events::read_markers(&self.media(&take, "events.jsonl"))
             .map_err(|e| format!("{take}/events.jsonl: {e}"))?;
         let cut = appended(
@@ -492,51 +392,23 @@ impl VideoFolder {
             range,
             &markers,
             &self.project.format,
-            self.style.is_some(),
         );
         self.write_cut(cut)
     }
 
-    /// Migrates a video with nothing recorded yet, as `shot migrate` would: its `format.kdl`
-    /// becomes the settings that differ from the channel's, and it gets a lock. Outside a
-    /// channel repo nothing changes.
-    fn start_migrated(&mut self) -> Result<(), String> {
-        let Ok((disk, slug)) = Disk::locate(&self.dir) else {
-            return Ok(());
-        };
-        let inputs = style::inputs(&disk, &slug)?;
-        let migration = shot_core::migrate(&MigrateInput {
-            project: &self.project,
-            imported: &inputs.imported,
-            brand: &inputs.brand,
-            channel: &inputs.format,
-            elements: &inputs.elements,
-            assets: &inputs.assets,
-        })
-        .map_err(|e| e.to_string())?;
-        if let Some(channel) = &migration.channel {
-            disk.write(
-                &format!("formats/{}.kdl", self.project.video.format),
-                &channel.to_kdl(),
-            )?;
-        }
-        let path = |file: &str| style::video_path(&slug, file);
-        disk.write(&path("format.kdl"), &migration.video.to_kdl())?;
-        disk.write(&path("cut.kdl"), &migration.cut.to_kdl())?;
-        disk.write(&path(LOCK_FILE), &migration.lock.to_kdl())?;
-        *self = Self {
-            writing: self.writing,
-            ..Self::open(&self.dir)?
-        };
-        Ok(())
+    /// The channel repo the video is in, `None` for a channel of one.
+    fn channel_root(&self) -> Option<&Path> {
+        self.disk
+            .in_channel()
+            .then(|| shot_render::theme::channel_root(&self.dir))
+            .flatten()
     }
 
     /// Adds the Lottie at `source` to the channel's brand when the import check passes, see
     /// [`crate::place::add_lottie`], and rebuilds the lock so its stickers and hashes are in.
     pub fn add_lottie(&mut self, source: &Path) -> Result<crate::place::LottieImport, String> {
-        let repo = Disk::locate(&self.dir)
-            .ok()
-            .and(shot_render::theme::channel_root(&self.dir))
+        let repo = self
+            .channel_root()
             .ok_or("Lottie templates live in a channel's brand, and this video is not in one")?
             .to_owned();
         let imported = crate::place::add_lottie(&repo, source)?;
@@ -551,9 +423,8 @@ impl VideoFolder {
     }
 
     fn store_brand_captions(&mut self, look: shot_core::CaptionLook) -> Result<(), String> {
-        let repo = Disk::locate(&self.dir)
-            .ok()
-            .and(shot_render::theme::channel_root(&self.dir))
+        let repo = self
+            .channel_root()
             .ok_or(
                 "The caption look of a channel lives in its brand, and this video is not in one",
             )?
@@ -575,11 +446,10 @@ impl VideoFolder {
         self.rebuild_lock()
     }
 
-    /// The channel's `brand/brand.kdl`, where channel layouts live: `None` unless the video is
-    /// migrated in a channel repo, the only videos whose brand reaches the picture.
+    /// The channel's `brand/brand.kdl`, where channel layouts live: `None` for a video outside
+    /// a channel repo, whose brand is the default one.
     pub fn brand_path(&self) -> Option<PathBuf> {
-        self.style.as_ref()?.repo.as_ref()?;
-        Some(shot_render::theme::channel_root(&self.dir)?.join("brand/brand.kdl"))
+        Some(self.channel_root()?.join("brand/brand.kdl"))
     }
 
     /// The channel's brand as its file says, the empty brand before it has one.
@@ -599,8 +469,7 @@ impl VideoFolder {
     /// change with undo.
     pub fn save_layout(&mut self, layout: CustomLayout, on_keys: bool) -> Result<(), String> {
         let path = self.brand_path().ok_or(
-            "Channel layouts live in a channel's brand, and this video is not a migrated video \
-             of a channel",
+            "Channel layouts live in a channel's brand, and this video is not in a channel",
         )?;
         self.as_one_change(|folder| {
             let mut brand = folder.channel_brand()?;
@@ -653,7 +522,7 @@ mod tests {
         folder
             .as_one_change(|folder| {
                 let mut changed = folder.project.format.clone();
-                changed.pacing = shot_core::Pacing::Natural;
+                changed.prompter = shot_core::PrompterMode::FullScript;
                 folder.write_format(changed)?;
                 let shorter = folder
                     .project
@@ -664,6 +533,7 @@ mod tests {
                             take: 0,
                         },
                         TimeRange::new(Micros(0), Micros(1)).unwrap(),
+                        folder.lock(),
                     )
                     .map_err(|e| e.to_string())?;
                 folder.write_cut(shorter.append_take(
@@ -677,8 +547,10 @@ mod tests {
         assert_eq!(folder.project.cut, cut);
         assert_eq!(folder.project.format, format);
         assert!(!folder.undo().unwrap(), "one step for both writes");
-        let written = fs::read_to_string(dir.path().join("format.kdl")).unwrap();
-        assert_eq!(Format::parse(&written).unwrap(), format);
+        assert_eq!(
+            VideoFolder::open(dir.path()).unwrap().project.format,
+            format
+        );
     }
 
     #[test]
@@ -708,7 +580,7 @@ mod tests {
     }
 
     #[test]
-    fn a_migrated_video_answers_its_lock_review_with_an_override() {
+    fn a_video_answers_its_lock_review_with_an_override() {
         let repo = tempfile::tempdir().unwrap();
         let video = repo.path().join("videos/demo");
         fs::create_dir_all(video.join("elements")).unwrap();
@@ -736,13 +608,16 @@ mod tests {
         );
 
         let mut folder = VideoFolder::open(&video).unwrap();
-        assert!(folder.is_migrated());
-        assert_eq!(folder.project.format.pacing, shot_core::Pacing::Natural);
+        assert_eq!(
+            fs::read_to_string(video.join("format.kdl")).unwrap(),
+            "",
+            "opening drops the pacing, which never reached a video with a lock"
+        );
         assert_eq!(
             folder.project.format.captions,
             shot_core::CaptionStyle::WordPop
         );
-        let queue: Vec<_> = folder.shown.cut.review_queue().collect();
+        let queue: Vec<_> = folder.project.cut.review_queue(folder.lock()).collect();
         assert_eq!(queue.len(), 1, "the unsure filler waits");
         assert!(
             fs::read_to_string(video.join(LOCK_FILE))
@@ -756,7 +631,7 @@ mod tests {
         let decided = folder.project.cut.clone();
         assert!(folder.undo().unwrap());
         assert_eq!(
-            folder.shown.cut.review_queue().count(),
+            folder.project.cut.review_queue(folder.lock()).count(),
             1,
             "undo reopens the review"
         );
@@ -770,8 +645,7 @@ mod tests {
                 .unwrap()
                 .contains("review")
         );
-        assert_eq!(folder.shown.cut.review_queue().count(), 0);
-        assert!(!shot_core::has_rule_nodes(&folder.project.cut));
+        assert_eq!(folder.project.cut.review_queue(folder.lock()).count(), 0);
     }
 
     /// `scripts/fixtures.sh` writes the demo channel's videos as the app creates them: an empty

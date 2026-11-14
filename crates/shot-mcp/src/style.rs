@@ -13,8 +13,9 @@ use std::path::{Path, PathBuf};
 
 use shot_board::Board;
 use shot_core::{
-    Applied, Brand, ContentHash, Cut, ElementKind, Elements, FormatLayer, Id, Instance, Lock,
-    LockTake, Micros, Override, Provenance, Selector, Status, StyleInput, TimeRange, Video, build,
+    Applied, Brand, ContentHash, Cut, ElementKind, Elements, Format, FormatKind, FormatLayer, Id,
+    Instance, Lock, LockTake, Micros, MigrateInput, MigrationReport, Override, Project, Provenance,
+    Script, Selector, Status, StyleInput, TimeRange, Video, build,
 };
 
 /// A channel repo as the style loader reads it. Paths are relative to the repo root.
@@ -25,45 +26,88 @@ pub trait Repo {
     fn slugs(&self) -> Result<Vec<String>, String>;
 }
 
-/// The working tree of a channel repo.
+/// The working tree of a channel repo, or a video folder outside one: a channel of one, whose
+/// `formats/<format>.kdl` is the shipped preset and whose brand is the default one.
 pub struct Disk {
     root: PathBuf,
+    /// The slug of the video when `root` is that video's folder outside a channel repo.
+    alone: Option<String>,
 }
 
 impl Disk {
-    /// The channel repo that holds `video`, a folder `videos/<slug>`, and the video's slug.
+    /// The channel repo that holds `video`, a folder `videos/<slug>`, and the video's slug. Any
+    /// other folder is a channel of one, its slug the folder's name.
     pub fn locate(video: &Path) -> Result<(Self, String), String> {
         let video = video
             .canonicalize()
             .map_err(|e| format!("{}: {e}", video.display()))?;
-        let slug = video.file_name().and_then(|n| n.to_str());
+        let slug = video
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| format!("{} is not a video folder", video.display()))?
+            .to_owned();
         let videos = video.parent();
-        match (slug, videos) {
-            (Some(slug), Some(videos)) if videos.file_name().is_some_and(|n| n == "videos") => {
+        match videos {
+            Some(videos) if videos.file_name().is_some_and(|n| n == "videos") => {
                 let root = videos.parent().unwrap_or(videos).to_path_buf();
-                Ok((Self { root }, slug.to_owned()))
+                Ok((Self { root, alone: None }, slug))
             }
-            _ => Err(format!(
-                "{} is not a video folder of a channel repo (videos/<slug>)",
-                video.display()
+            _ => Ok((
+                Self {
+                    root: video,
+                    alone: Some(slug.clone()),
+                },
+                slug,
             )),
         }
     }
 
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            alone: None,
+        }
+    }
+
+    /// Whether the video is in a channel repo rather than a channel of one.
+    pub fn in_channel(&self) -> bool {
+        self.alone.is_none()
+    }
+
+    /// Where repo path `path` is on disk. A channel of one has its video's files in its
+    /// folder, and brand files relative to it as the renderer reads them.
+    fn path(&self, path: &str) -> PathBuf {
+        match &self.alone {
+            Some(slug) => {
+                let video = format!("videos/{slug}/");
+                self.root.join(path.strip_prefix(&video).unwrap_or(path))
+            }
+            None => self.root.join(path),
+        }
     }
 
     /// Replaces `path` with `text` through [`shot_fs::write`], so a reader never sees half a lock.
     pub fn write(&self, path: &str, text: &str) -> Result<(), String> {
-        let target = self.root.join(path);
+        let target = self.path(path);
         shot_fs::write(&target, text).map_err(|e| format!("{}: {e}", target.display()))
     }
 }
 
 impl Repo for Disk {
     fn read(&self, _slug: &str, path: &str) -> Result<Option<Vec<u8>>, String> {
-        let path = self.root.join(path);
+        if self.alone.is_some() {
+            if let Some(kind) = path
+                .strip_prefix("formats/")
+                .and_then(|f| f.strip_suffix(".kdl"))
+            {
+                let kind = FormatKind::ALL.iter().find(|k| k.as_str() == kind);
+                return Ok(kind.map(|k| k.preset_source().as_bytes().to_vec()));
+            }
+            if path.starts_with("brand/") || path.starts_with("styles/") {
+                return Ok(None);
+            }
+        }
+        let path = self.path(path);
         match std::fs::read(&path) {
             Ok(bytes) => Ok(Some(bytes)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -72,6 +116,9 @@ impl Repo for Disk {
     }
 
     fn slugs(&self) -> Result<Vec<String>, String> {
+        if let Some(slug) = &self.alone {
+            return Ok(vec![slug.clone()]);
+        }
         let dir = self.root.join("videos");
         let entries = std::fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let mut slugs: Vec<String> = entries
@@ -121,6 +168,10 @@ impl Repo for Patched<'_> {
 pub struct Built {
     pub video: Video,
     pub cut: Cut,
+    /// The video's `format.kdl`.
+    pub layer: FormatLayer,
+    /// The channel's `formats/<format>.kdl`.
+    pub channel: FormatLayer,
     pub elements: Vec<Elements>,
     pub lock: Lock,
 }
@@ -167,15 +218,9 @@ pub struct Inputs {
 }
 
 /// Reads the files of video `slug`, hashes the assets the brand names and builds the lock. A
-/// missing `brand/brand.kdl`, channel format or `format.kdl` is an empty layer. A video whose
-/// `cut.kdl` still holds what rules wrote is refused until `shot migrate` ran on it.
+/// missing `brand/brand.kdl`, channel format or `format.kdl` is an empty layer.
 pub fn build_video(repo: &dyn Repo, slug: &str) -> Result<Built, String> {
     let inputs = inputs(repo, slug)?;
-    if shot_core::has_rule_nodes(&inputs.cut) {
-        return Err(format!(
-            "videos/{slug}/cut.kdl still holds rule removals, review items or rule zooms: run `shot migrate --video videos/{slug}` first"
-        ));
-    }
     let lock = build(&StyleInput {
         imported: &inputs.imported,
         brand: &inputs.brand,
@@ -189,6 +234,8 @@ pub fn build_video(repo: &dyn Repo, slug: &str) -> Result<Built, String> {
     Ok(Built {
         video: inputs.video,
         cut: inputs.cut,
+        layer: inputs.video_layer,
+        channel: inputs.format,
         elements: inputs.elements,
         lock,
     })
@@ -207,42 +254,14 @@ pub fn inputs(repo: &dyn Repo, slug: &str) -> Result<Inputs, String> {
     let video_layer = parsed(&path, layer_text, FormatLayer::parse)?.unwrap_or_default();
     let (path, format_text) = read(format!("formats/{}.kdl", video.format))?;
     let format = parsed(&path, format_text, FormatLayer::parse)?.unwrap_or_default();
-    let (path, brand_text) = read("brand/brand.kdl".to_owned())?;
-    let brand = parsed(&path, brand_text, Brand::parse)?.unwrap_or_default();
-
-    let mut imported = Vec::new();
-    for import in &brand.imports {
-        let (path, import_text) = read(format!("styles/{}.kdl", import.style))?;
-        let import_text = import_text
-            .ok_or_else(|| format!("{path} is missing, the brand imports {}", import.style))?;
-        imported.push(parsed(&path, Some(import_text), Brand::parse)?.unwrap_or_default());
-    }
-
-    let mut elements = Vec::new();
-    let mut seen = BTreeSet::new();
+    let (brand, imported, assets) = brand_inputs(repo, slug, &[&video_layer, &format])?;
+    let mut takes: Vec<&Id> = Vec::new();
     for take in cut.chapters.iter().flat_map(|c| &c.takes).map(|t| &t.take) {
-        if !seen.insert(take) {
-            continue;
-        }
-        let (path, jsonl) = read(video_path(slug, &format!("elements/{take}.jsonl")))?;
-        if let Some(found) = parsed(&path, jsonl, |t| Elements::parse(take.clone(), t))? {
-            elements.push(found);
+        if !takes.contains(&take) {
+            takes.push(take);
         }
     }
-
-    let patches = [&video_layer.brand, &format.brand];
-    let named = imported
-        .iter()
-        .chain([&brand])
-        .chain(patches.into_iter().flatten())
-        .flat_map(Brand::assets);
-    let mut assets = BTreeMap::new();
-    for path in named.collect::<BTreeSet<_>>() {
-        if let Some(bytes) = repo.read(slug, path)? {
-            assets.insert(path.to_owned(), ContentHash::of(&bytes));
-        }
-    }
-
+    let elements = read_elements(repo, slug, takes)?;
     Ok(Inputs {
         video,
         cut,
@@ -253,6 +272,196 @@ pub fn inputs(repo: &dyn Repo, slug: &str) -> Result<Inputs, String> {
         elements,
         assets,
     })
+}
+
+/// The channel's brand, its imports read from `styles/<id>.kdl`, and the hashes of the files
+/// they and the brand blocks of `layers` name.
+type BrandInputs = (Brand, Vec<Brand>, BTreeMap<String, ContentHash>);
+
+fn brand_inputs(
+    repo: &dyn Repo,
+    slug: &str,
+    layers: &[&FormatLayer],
+) -> Result<BrandInputs, String> {
+    let read = |path: String| text(repo, slug, &path).map(|t| (path, t));
+    let (path, brand_text) = read("brand/brand.kdl".to_owned())?;
+    let brand = parsed(&path, brand_text, Brand::parse)?.unwrap_or_default();
+    let mut imported = Vec::new();
+    for import in &brand.imports {
+        let (path, import_text) = read(format!("styles/{}.kdl", import.style))?;
+        let import_text = import_text
+            .ok_or_else(|| format!("{path} is missing, the brand imports {}", import.style))?;
+        imported.push(parsed(&path, Some(import_text), Brand::parse)?.unwrap_or_default());
+    }
+    let patches = layers.iter().filter_map(|l| l.brand.as_ref());
+    let named = imported
+        .iter()
+        .chain([&brand])
+        .chain(patches)
+        .flat_map(Brand::assets);
+    let mut assets = BTreeMap::new();
+    for path in named.collect::<BTreeSet<_>>() {
+        if let Some(bytes) = repo.read(slug, path)? {
+            assets.insert(path.to_owned(), ContentHash::of(&bytes));
+        }
+    }
+    Ok((brand, imported, assets))
+}
+
+/// The elements files of `takes` that exist.
+fn read_elements<'a>(
+    repo: &dyn Repo,
+    slug: &str,
+    takes: impl IntoIterator<Item = &'a Id>,
+) -> Result<Vec<Elements>, String> {
+    let mut elements = Vec::new();
+    for take in takes {
+        let path = video_path(slug, &format!("elements/{take}.jsonl"));
+        let jsonl = text(repo, slug, &path)?;
+        if let Some(found) = parsed(&path, jsonl, |t| Elements::parse(take.clone(), t))? {
+            elements.push(found);
+        }
+    }
+    Ok(elements)
+}
+
+/// A video opened from its folder: on style rules, with its lock as the files build it.
+pub struct Opened {
+    pub disk: Disk,
+    pub slug: String,
+    pub project: Project,
+    /// The video's `format.kdl`.
+    pub layer: FormatLayer,
+    /// The settings under the video's layer: the preset with the channel's layer.
+    pub base: Format,
+    pub lock: Lock,
+    /// What opening did to a video written before the lock, `None` for one on style rules.
+    pub migrated: Option<MigrationReport>,
+}
+
+/// Opens the video in `dir` the way the app, `shot` and the MCP server all open one, holding
+/// its write lock is the caller's part:
+///
+/// - A video written before the lock (no `cut.lock`, and `pacing`, `auto-cut`, `auto-zoom` or
+///   the rules' nodes in its files) is migrated with the elements it has, and refused with the
+///   reason when that would change its frames. Its files are written, the channel's format too
+///   when migration gives it rules.
+/// - A video with a lock loses the old settings its format files still hold.
+/// - The lock is built from the files and written when it changed, unless the video shipped.
+///
+/// Anything that should follow a migration, such as a commit on the video's branch, goes here.
+pub fn open(dir: &Path) -> Result<Opened, String> {
+    let (disk, slug) = Disk::locate(dir)?;
+    let read = |path: &str| text(&disk, &slug, path);
+    let lock_path = video_path(&slug, "cut.lock");
+    let format_path = video_path(&slug, "format.kdl");
+    let format = read(&format_path)?.unwrap_or_default();
+    let cut = read(&video_path(&slug, "cut.kdl"))?.unwrap_or_default();
+    let mut migrated = None;
+    if read(&lock_path)?.is_none() && shot_core::written_before_lock(&format, &cut) {
+        migrated = Some(migrate(&disk, &slug, &format, &cut)?);
+    } else {
+        let video_file = video_path(&slug, "video.kdl");
+        let video = parsed(&video_file, read(&video_file)?, Video::parse)?
+            .ok_or_else(|| format!("{video_file} is missing"))?;
+        let channel_path = format!("formats/{}.kdl", video.format);
+        for path in [format_path, channel_path] {
+            if path.starts_with("formats/") && !disk.in_channel() {
+                continue;
+            }
+            let Some(text) = read(&path)? else { continue };
+            let (layer, dropped) =
+                shot_core::without_old_settings(&text).map_err(|e| format!("{path}: {e}"))?;
+            if dropped {
+                disk.write(&path, &layer.to_kdl())?;
+            }
+        }
+    }
+    let built = build_video(&disk, &slug)?;
+    let written = read(&lock_path)?;
+    // A shipped video keeps the lock it shipped with.
+    let lock = match written {
+        Some(text) if built.shipped() => {
+            Lock::parse(&text).map_err(|e| format!("{lock_path}: {e}"))?
+        }
+        written => {
+            if written.as_deref() != Some(&built.lock.to_kdl()) {
+                disk.write(&lock_path, &built.lock.to_kdl())?;
+            }
+            built.lock
+        }
+    };
+    let script_path = video_path(&slug, "script.md");
+    let script = parsed(&script_path, read(&script_path)?, Script::parse)?
+        .ok_or_else(|| format!("{script_path} is missing"))?;
+    let base = built.video.format.preset().resolve([&built.channel]);
+    let project = Project {
+        format: built.layer.apply(&base),
+        video: built.video,
+        script,
+        cut: built.cut,
+    };
+    Ok(Opened {
+        disk,
+        slug,
+        project,
+        layer: built.layer,
+        base,
+        lock,
+        migrated,
+    })
+}
+
+/// Migrates video `slug`, written before the lock, with the elements it has, and writes the
+/// migrated files and the lock.
+fn migrate(disk: &Disk, slug: &str, format: &str, cut: &str) -> Result<MigrationReport, String> {
+    let read = |path: &str| text(disk, slug, path);
+    let path = |file: &str| video_path(slug, file);
+    let video = parsed(&path("video.kdl"), read(&path("video.kdl"))?, Video::parse)?
+        .ok_or_else(|| format!("{} is missing", path("video.kdl")))?;
+    let script = parsed(&path("script.md"), read(&path("script.md"))?, Script::parse)?
+        .ok_or_else(|| format!("{} is missing", path("script.md")))?;
+    let channel_path = format!("formats/{}.kdl", video.format);
+    let channel = read(&channel_path)?.unwrap_or_default();
+    let (channel_layer, _) =
+        shot_core::without_old_settings(&channel).map_err(|e| format!("{channel_path}: {e}"))?;
+    let (brand, imported, assets) = brand_inputs(disk, slug, &[&channel_layer])?;
+    let elements_dir = disk.path(&path("elements"));
+    let takes: Vec<Id> = match std::fs::read_dir(&elements_dir) {
+        Ok(entries) => entries
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .filter_map(|name| Id::new(name.strip_suffix(".jsonl")?))
+            .collect(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(format!("{}: {e}", elements_dir.display())),
+    };
+    let elements = read_elements(disk, slug, &takes)?;
+    let migration = shot_core::migrate(&MigrateInput {
+        video: &video,
+        script: &script,
+        format,
+        cut,
+        imported: &imported,
+        brand: &brand,
+        channel: &channel,
+        elements: &elements,
+        assets: &assets,
+    })
+    .map_err(|e| format!("videos/{slug} does not open: {e}"))?;
+    if let Some(channel) = &migration.channel {
+        disk.write(&channel_path, &channel.to_kdl())?;
+    }
+    disk.write(&path("cut.kdl"), &migration.cut.to_kdl())?;
+    disk.write(&path("format.kdl"), &migration.video.to_kdl())?;
+    disk.write(&path("cut.lock"), &migration.lock.to_kdl())?;
+    let rebuilt = build_video(disk, slug)?;
+    if rebuilt.lock != migration.lock {
+        return Err(format!(
+            "{}: a build of the migrated files gives another lock",
+            path("cut.lock")
+        ));
+    }
+    Ok(migration.report)
 }
 
 /// Seconds with one decimal, as the other tools print times.

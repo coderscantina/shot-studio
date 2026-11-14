@@ -16,6 +16,7 @@
 //! [0019]: ../../../docs/decisions/0019-semantic-video-elements-and-style.md
 
 pub mod claude;
+pub mod findings;
 mod mentions;
 mod screen;
 mod stream;
@@ -26,18 +27,17 @@ use std::path::{Path, PathBuf};
 
 use shot_capture::events::{Mark, Marker, read_markers};
 use shot_core::{
-    Attr, AutoCut, Element, ElementKind, Elements, Id, Micros, RuleKind, Script, TimeRange,
-    TimedRule, Transcript, Word,
+    Attr, Element, ElementKind, Elements, Id, Micros, Script, TimeRange, Transcript, Word,
 };
 
+pub use findings::{HeardRetake, heard_retakes};
 pub use mentions::{SaidUrl, urls};
 pub use screen::{ReadOut, read_outs};
 pub use stream::Stream;
 
-use crate::autocut::rules::{self, Gaps, Voice};
-use crate::autocut::{TakeFacts, zoom};
 use crate::events::{self, Input};
 use crate::{Error, Speech, idle, normalize, vision};
+use findings::{Gaps, TakeFacts, Voice};
 
 /// The `by` of each source, with the version of its detector.
 pub const BY_WHISPER: &str = "whisper@large-v3-turbo";
@@ -54,9 +54,9 @@ pub const BY_CLAUDE: &str = "claude";
 pub const GAP_MIN: Micros = Micros(300_000);
 /// A pause's confidence grows as it runs past this, the pause rule of every preset.
 const PAUSE_REFERENCE: Micros = Micros(1_000_000);
-/// The shortest still screen that is idle, the lowest `idle-screen min` of the presets.
+/// The shortest still screen that is idle, the lowest `on idle min=` of the presets' rules.
 pub const IDLE_MIN: Micros = Micros(3_000_000);
-/// Findings at or above this are sure, as the presets' `auto-cut confidence`.
+/// Findings at or above this are sure, as the `confidence` of the presets' cut rules.
 const SURE: u8 = 85;
 /// Key presses closer than this are one stretch of typing, of at least [`TYPING_KEYS`].
 const TYPING_GAP: Micros = Micros(1_000_000);
@@ -212,32 +212,13 @@ fn local(facts: &Facts) -> Elements {
         again: &again,
         duration: facts.duration,
     };
-    // The rules with every finding on, the gaps left to the loop below, which keeps them whole.
-    let reference = AutoCut {
-        confidence: SURE,
-        silence: TimedRule {
-            on: false,
-            min: GAP_MIN,
-        },
-        retake: true,
-        misspoken: true,
-        pause: TimedRule {
-            on: false,
-            min: GAP_MIN,
-        },
-        filler: true,
-        idle_screen: TimedRule {
-            on: true,
-            min: IDLE_MIN,
-        },
-    };
-    for finding in rules::find(&reference, Micros(0), &take, &Voice::default(), |_| true) {
-        let (kind, by) = match finding.rule {
-            RuleKind::Filler => (ElementKind::Filler, BY_WHISPER),
-            RuleKind::Retake => (ElementKind::Retake, BY_WHISPER),
-            RuleKind::Misspoken => (ElementKind::Misspoken, BY_WHISPER),
-            RuleKind::IdleScreen => (ElementKind::Idle, BY_SCREEN),
-            RuleKind::Silence | RuleKind::Pause => unreachable!("gap rules are off"),
+    // Gaps are left to the loop below, which keeps them whole.
+    for finding in findings::find(&take, &Voice::default(), SURE, IDLE_MIN) {
+        let kind = finding.kind;
+        let by = if kind == ElementKind::Idle {
+            BY_SCREEN
+        } else {
+            BY_WHISPER
         };
         let element = Element::over(kind, finding.range, by).with_confidence(finding.confidence);
         let element = match kind {
@@ -269,12 +250,12 @@ fn local(facts: &Facts) -> Elements {
     }
 
     let mut emphasis_end = Micros(0);
-    for loud in zoom::loud_words(words, facts.speech) {
+    for loud in findings::loud_words(words, facts.speech) {
         if loud.range.from() < emphasis_end {
             continue;
         }
         emphasis_end = loud.range.to();
-        let confidence = (60.0 + 4.0 * (loud.over - zoom::EMPHASIS_DB)).clamp(60.0, 95.0) as u8;
+        let confidence = (60.0 + 4.0 * (loud.over - findings::EMPHASIS_DB)).clamp(60.0, 95.0) as u8;
         add(
             &mut out,
             [Element::over(ElementKind::Emphasis, loud.range, BY_PROSODY)

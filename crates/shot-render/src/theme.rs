@@ -294,9 +294,7 @@ pub fn channel_root(video_dir: &Path) -> Option<&Path> {
 impl Theme {
     /// The theme of the video in `video_dir` with `format` and `cut`, from its `cut.lock`.
     pub fn load(video_dir: &Path, format: FormatKind, cut: &Cut) -> Result<Self, ThemeError> {
-        let brand = crate::lock::read(video_dir)?
-            .map(|lock| lock.brand)
-            .unwrap_or_default();
+        let brand = crate::lock::read(video_dir)?.brand;
         let root = channel_root(video_dir).unwrap_or(video_dir).to_owned();
         Self::new(&brand, format, Some(cut), &|file| {
             let path = root.join(file);
@@ -815,7 +813,7 @@ fn chapter_starts(cut: &Cut) -> Vec<ChapterStart> {
             let first = chapter.takes.first()?;
             let at = first.ranges.iter().find_map(|r| match r {
                 RangeEdit::Keep(range) => Some(range.from()),
-                RangeEdit::Remove { .. } => None,
+                RangeEdit::Remove(_) => None,
             })?;
             Some(ChapterStart {
                 take: first.take.clone(),
@@ -1030,13 +1028,10 @@ pub(crate) mod tests {
         let project = Project {
             video: shot_core::Video::parse("title \"t\"\nstatus editing\nformat opinion\n").unwrap(),
             script: shot_core::Script::parse("# t\n").unwrap(),
-            format: shot_core::Format::parse(
-                "prompter beats\npacing tight\nlayouts content\ncaptions off\n\
-                 auto-cut confidence=85 {\n    silence on=#false min=600_000\n    retake on=#false\n    \
-                 misspoken on=#false\n    pause on=#false min=1_000_000\n    filler on=#false\n    \
-                 idle-screen on=#false min=8_000_000\n}\n",
+            format: FormatKind::Opinion.preset().resolve([&shot_core::FormatLayer::parse(
+                "layouts content\ncaptions off\n",
             )
-            .unwrap(),
+            .unwrap()]),
             cut: shot_core::Cut::parse(
                 "chapter \"Intro\" {\n    take t01 {\n        keep from=0 to=6_000_000\n        \
                  overlay chapter-band from=0 to=1_000_000\n        \
@@ -1045,7 +1040,7 @@ pub(crate) mod tests {
             )
             .unwrap(),
         };
-        let timeline = Timeline::evaluate(&project);
+        let timeline = Timeline::evaluate(&project, &shot_core::Lock::default());
         let keys = |accent: &str| {
             let brand = brand(&format!("colors accent=\"{accent}\"\n"));
             let theme = Theme::new(
@@ -1088,7 +1083,7 @@ pub(crate) mod tests {
             format: FormatKind::Opinion.preset(),
             cut,
         };
-        let timeline = Timeline::evaluate(&project);
+        let timeline = Timeline::evaluate(&project, &shot_core::Lock::default());
         let keys = |brand_text: &str| {
             let theme = theme(&brand(brand_text)).unwrap();
             let mut plan = ExportPlan::new(timeline.main(), 60, |_| MediaId::default());

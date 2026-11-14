@@ -4,12 +4,12 @@
 //!
 //! [0019]: ../../../docs/decisions/0019-semantic-video-elements-and-style.md
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use clap::Args;
 use shot_mcp::style::{self, Disk, Repo};
 
-use crate::migrate::LOCK;
+use shot_ship::lock::LOCK_FILE as LOCK;
 
 #[derive(Args)]
 pub struct RestyleArgs {
@@ -43,31 +43,5 @@ pub fn run(repo: PathBuf, args: RestyleArgs) -> Result<(), String> {
     println!(
         "{path}: rebuilt, {added} lines added, {removed} removed. Commit it and ship again for a new release"
     );
-    Ok(())
-}
-
-/// Rebuilds a migrated video's lock from its files before it is rendered or checked, unless it
-/// shipped. A folder outside a channel repo keeps the lock it has.
-pub(crate) fn refresh(dir: &Path) -> Result<(), String> {
-    if !dir.join(LOCK).exists() {
-        return Ok(());
-    }
-    let Ok((disk, slug)) = Disk::locate(dir) else {
-        return Ok(());
-    };
-    let _lock = crate::lock(dir)?;
-    let built = style::build_video(&disk, &slug)?;
-    if built.shipped() {
-        return Ok(());
-    }
-    let path = style::video_path(&slug, LOCK);
-    let text = built.lock.to_kdl();
-    if disk
-        .read(&slug, &path)?
-        .is_none_or(|old| old != text.as_bytes())
-    {
-        disk.write(&path, &text)?;
-        eprintln!("{path}: rebuilt from the files");
-    }
     Ok(())
 }

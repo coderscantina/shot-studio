@@ -75,8 +75,12 @@ pub(crate) fn analyze_take(video: &Path, take: &Id, claude: bool) -> Result<(), 
 }
 
 /// Computes the person masks of `take`'s camera when the video's brand cuts the camera out,
-/// unless they are cached for the track as it is.
+/// unless they are cached for the track as it is. A video written before the lock has no
+/// brand until it is opened, as `shot migrate` does after analysing it.
 fn person_masks(video: &Path, take: &Id) -> Result<(), String> {
+    if !video.join(shot_ship::lock::LOCK_FILE).exists() {
+        return Ok(());
+    }
     let theme = shot_render::theme::Theme::open(video).map_err(|e| e.to_string())?;
     let camera = video.join("media").join(take.as_str()).join("camera.mp4");
     if !theme.cutout || !camera.exists() {
@@ -93,7 +97,7 @@ fn person_masks(video: &Path, take: &Id) -> Result<(), String> {
 }
 
 /// The take folders in `media/`, in order.
-fn takes(video: &Path) -> Result<Vec<Id>, String> {
+pub(crate) fn takes(video: &Path) -> Result<Vec<Id>, String> {
     let media = video.join("media");
     let entries = std::fs::read_dir(&media).map_err(|e| format!("{}: {e}", media.display()))?;
     let mut takes: Vec<Id> = entries

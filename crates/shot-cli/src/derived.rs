@@ -58,9 +58,8 @@ fn style(text: &str) -> Result<CaptionStyle, String> {
 }
 
 pub fn run(args: DerivedArgs) -> Result<(), String> {
-    let _lock = crate::lock(&args.video)?;
-    let project = crate::export::load(&args.video)?;
-    let mut cut = project.cut;
+    let (_lock, opened) = crate::open(&args.video)?;
+    let mut cut = opened.project.cut;
     let id = |text: &str| Id::new(text).ok_or_else(|| format!("{text} is not an id"));
     match args.action {
         DerivedAction::Add {

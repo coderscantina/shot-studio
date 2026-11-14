@@ -1,17 +1,10 @@
-//! `shot autozoom` and `shot code-diff`: the product video effects that write `cut.kdl`.
+//! `shot code-diff`: the product video effect that writes `cut.kdl`.
 
 use std::path::{Path, PathBuf};
 
 use clap::Args;
 use shot_core::{Cut, Id, Micros, TimeRange};
 use shot_render::code_diff::{self, CodeDiffOverlay};
-
-#[derive(Args)]
-pub struct AutoZoomArgs {
-    /// The video folder, holding format.kdl, cut.kdl and media/.
-    #[arg(long)]
-    video: PathBuf,
-}
 
 #[derive(Args)]
 pub struct CodeDiffArgs {
@@ -43,27 +36,9 @@ pub struct CodeDiffArgs {
     phrase: Option<String>,
 }
 
-pub fn auto_zoom(args: AutoZoomArgs) -> Result<(), String> {
-    let _lock = crate::lock(&args.video)?;
-    crate::migrate::refuse_if_migrated(&args.video, "zooms")?;
-    let project = crate::export::load(&args.video)?;
-    let cut = shot_render::rules::auto_zoom(&args.video, &project.cut, &project.format)
-        .map_err(|e| e.to_string())?;
-    let count = |cut: &Cut| -> usize {
-        cut.chapters
-            .iter()
-            .flat_map(|c| &c.takes)
-            .flat_map(|t| &t.zooms)
-            .filter(|z| shot_render::autozoom::is_auto_zoom(z.by))
-            .count()
-    };
-    println!("{} auto zooms, {} before", count(&cut), count(&project.cut));
-    write_cut(&args.video, &cut)
-}
-
-pub fn code_diff(args: CodeDiffArgs) -> Result<(), String> {
-    let _lock = crate::lock(&args.video)?;
-    let project = crate::export::load(&args.video)?;
+pub fn run(args: CodeDiffArgs) -> Result<(), String> {
+    let (_lock, opened) = crate::open(&args.video)?;
+    let project = opened.project;
     let take =
         Id::new(args.take.as_str()).ok_or_else(|| format!("{} is not a take id", args.take))?;
     let micros = |seconds: f64| Micros((seconds * 1e6).round() as u64);

@@ -7,7 +7,7 @@
 //! - [`autozoom`]: the auto-zoom rule, which writes zooms from the event log; [`rules`] runs it
 //!   over a video folder.
 //! - [`graph`]: draws a frame's scene from decoded IOSurface planes into an IOSurface target.
-//! - [`lock`]: a migrated video's `cut.lock`, which styles its timeline.
+//! - [`lock`]: a video's `cut.lock`, which styles its timeline.
 //! - [`plan`]: an evaluated output snapped to the frame grid.
 //! - [`cursor`]: the frame of a video track on screen at a time, decoding forward.
 //! - [`audio`]: the mic audio of an output, cut and faded like its video.
@@ -22,13 +22,12 @@
 //! - [`theme`]: what the brand gives the templates (preset, feel, colors, fonts, Lottie
 //!   templates) and the frame (camera, stinger, logo), read from the lock; [`typeface`] holds the
 //!   font files text draws in.
-//! - [`join`]: the intro and outro around a migrated video's segments and the transitions at
+//! - [`join`]: the intro and outro around a video's segments and the transitions at
 //!   its chapter edges, placed in the plan; [`bookend`] draws a generated title, and [`paint`]
 //!   draws any output frame for export and preview alike. [`monitor`] draws the take being
 //!   recorded the same way, from capture's live frames.
 
 pub mod assets;
-pub mod autozoom;
 pub mod bookend;
 pub mod captions;
 pub mod code_diff;
@@ -72,8 +71,6 @@ pub mod overlay_rules;
 pub mod paint;
 #[cfg(all(test, target_os = "macos"))]
 mod reel;
-#[cfg(target_os = "macos")]
-pub mod rules;
 #[cfg(all(test, target_os = "macos"))]
 mod showreel;
 #[cfg(target_os = "macos")]

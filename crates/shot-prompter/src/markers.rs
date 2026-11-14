@@ -1,20 +1,19 @@
 //! Hotkey markers into `cut.kdl` nodes, once, when a take is appended (decision 0014).
 
 use shot_capture::events::{Mark, Marker};
-use shot_core::{Format, LayoutChange, Micros, Point, TakeEdit, TimeRange, Zoom, ZoomBy};
+use shot_core::{Format, LayoutChange, Micros, Point, TakeEdit, TimeRange, Zoom};
 
-/// Zoom of a Z marker when the format has no auto zoom to take scale and hold from.
+/// Zoom of a Z marker.
 const ZOOM_SCALE: u16 = 150;
 const ZOOM_HOLD: Micros = Micros(2_000_000);
 
-/// Writes a take's layout markers as `layout` nodes and its Z markers as `zoom ... by=marker`
+/// Writes a take's layout markers as `layout` nodes and its Z markers as a person's `zoom`
 /// nodes, centered on the cursor at the press.
 ///
 /// A layout lasts until the next layout marker or the end of the take, and the format's default
-/// layout needs no node. A zoom has the format's auto zoom scale and hold, and ends early where
-/// the next Z marker starts. Zooms already `by=marker` are replaced, every other zoom stays and
-/// wins where they overlap. A, N, M and B markers are left to the retake rule, chapters and
-/// b-roll.
+/// layout needs no node. A zoom has [`ZOOM_SCALE`] and [`ZOOM_HOLD`], and ends early where the
+/// next Z marker starts. Zooms already in the block win where they overlap. A, N, M and B
+/// markers are elements the style rules read.
 pub fn apply_markers(edit: &mut TakeEdit, markers: &[Marker], format: &Format) {
     let Some(end) = edit.ranges.iter().map(|r| r.range().to()).max() else {
         return;
@@ -46,18 +45,13 @@ pub fn apply_markers(edit: &mut TakeEdit, markers: &[Marker], format: &Format) {
             .collect();
     }
 
-    let (scale, hold) = format
-        .auto_zoom
-        .as_ref()
-        .map_or((ZOOM_SCALE, ZOOM_HOLD), |z| (z.scale, z.hold));
     let presses: Vec<&Marker> = markers
         .iter()
         .copied()
         .filter(|m| m.mark == Mark::Zoom)
         .collect();
-    edit.zooms.retain(|z| z.by != Some(ZoomBy::Marker));
     for (i, press) in presses.iter().enumerate() {
-        let mut to = Micros((press.t.0 + hold.0).min(end.0));
+        let mut to = Micros((press.t.0 + ZOOM_HOLD.0).min(end.0));
         if let Some(next) = presses.get(i + 1) {
             to = to.min(next.t);
         }
@@ -73,13 +67,12 @@ pub fn apply_markers(edit: &mut TakeEdit, markers: &[Marker], format: &Format) {
         }
         if let Some(range) = TimeRange::new(from, to) {
             edit.zooms.push(Zoom {
-                scale,
+                scale: ZOOM_SCALE,
                 range,
                 center: Some(Point {
                     x: press.x,
                     y: press.y,
                 }),
-                by: Some(ZoomBy::Marker),
                 shape: Default::default(),
             });
         }
@@ -143,14 +136,13 @@ mod tests {
     }
 
     #[test]
-    fn zoom_markers_become_centered_marker_zooms_that_yield_to_others() {
+    fn zoom_markers_become_centered_zooms_that_yield_to_others() {
         let format = FormatKind::Opinion.preset();
         let mut edit = take();
         let person = Zoom {
             scale: 112,
             range: TimeRange::new(Micros(10_500_000), Micros(12_000_000)).unwrap(),
             center: None,
-            by: None,
             shape: Default::default(),
         };
         edit.zooms.push(person);
@@ -161,21 +153,19 @@ mod tests {
             marker(19_500_000, Mark::Zoom),
         ];
         apply_markers(&mut edit, &markers, &format);
-        apply_markers(&mut edit, &markers, &format);
         let zooms: Vec<_> = edit
             .zooms
             .iter()
-            .map(|z| (z.scale, z.range.from().0, z.range.to().0, z.by))
+            .map(|z| (z.scale, z.range.from().0, z.range.to().0))
             .collect();
-        let by = Some(ZoomBy::Marker);
         assert_eq!(
             zooms,
             [
-                (150, 1_000_000, 2_000_000, by),
-                (150, 2_000_000, 4_000_000, by),
-                (150, 10_000_000, 10_500_000, by),
-                (112, 10_500_000, 12_000_000, None),
-                (150, 19_500_000, 20_000_000, by),
+                (150, 1_000_000, 2_000_000),
+                (150, 2_000_000, 4_000_000),
+                (150, 10_000_000, 10_500_000),
+                (112, 10_500_000, 12_000_000),
+                (150, 19_500_000, 20_000_000),
             ]
         );
         assert_eq!(edit.zooms[0].center, Some(Point { x: 1480, y: 910 }));

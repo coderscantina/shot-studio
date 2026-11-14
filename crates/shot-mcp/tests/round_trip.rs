@@ -193,7 +193,8 @@ async fn failures_are_tool_errors_with_the_reason() {
     assert!(error && text.contains("not a valid name"));
 }
 
-/// Adds a recorded video `beta` with a cut, a review item and a cached transcript.
+/// Adds a recorded video `beta` with a cut, an unsure filler the channel's rules queue for
+/// review, and a cached transcript.
 fn with_recording(dir: &Path) {
     let folder = dir.join("videos/beta");
     std::fs::create_dir_all(&folder).unwrap();
@@ -207,14 +208,16 @@ fn with_recording(dir: &Path) {
         "# Beta\n\n## Hook\n\n- We ship on fridays\n",
     )
     .unwrap();
-    std::fs::write(
-        folder.join("format.kdl"),
-        shot_core::FormatKind::Opinion.preset().to_kdl(),
-    )
-    .unwrap();
+    std::fs::write(folder.join("format.kdl"), "").unwrap();
     std::fs::write(
         folder.join("cut.kdl"),
-        "chapter \"Hook\" {\n    take t01 {\n        keep from=0 to=6_000_000\n        review from=1_000_000 to=2_000_000 by=filler\n    }\n}\n",
+        "chapter \"Hook\" {\n    take t01 {\n        keep from=0 to=6_000_000\n    }\n}\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(folder.join("elements")).unwrap();
+    std::fs::write(
+        folder.join("elements/t01.jsonl"),
+        "{\"kind\":\"filler\",\"t\":1000000,\"to\":1800000,\"confidence\":60,\"by\":\"test\"}\n",
     )
     .unwrap();
     let mut transcript = Transcript::new(Id::new("t01").unwrap());
@@ -232,10 +235,16 @@ fn with_recording(dir: &Path) {
             .unwrap();
     }
     shot_analyze::cache::write_cached(&folder, &transcript).unwrap();
+    std::fs::create_dir_all(dir.join("formats")).unwrap();
+    std::fs::write(
+        dir.join("formats/opinion.kdl"),
+        shot_core::FormatKind::Opinion.preset_source(),
+    )
+    .unwrap();
     let repo = Repository::open(dir).unwrap();
     let mut index = repo.index().unwrap();
     index
-        .add_all(["videos"], IndexAddOption::DEFAULT, None)
+        .add_all(["videos", "formats"], IndexAddOption::DEFAULT, None)
         .unwrap();
     index.write().unwrap();
     let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
@@ -281,7 +290,7 @@ async fn an_agent_reads_a_transcript_and_proposes_a_cut_of_recorded_words() {
     );
 
     let (_, queue) = call(&client, "review_queue", json!({ "slug": "beta" })).await;
-    assert_eq!(queue, "#1  t01  filler  1.0 s  \"um\"\n");
+    assert_eq!(queue, "#1  t01  filler  0.8 s  \"um\"\n");
     let (error, _) = call(
         &client,
         "propose_review",

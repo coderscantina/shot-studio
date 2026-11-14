@@ -162,7 +162,6 @@ mod tests {
             scale: 200,
             range: TimeRange::new(Micros(from), Micros(to)).unwrap(),
             center: Some(Point { x, y }),
-            by: None,
             shape: ZoomShape::default(),
         }
     }

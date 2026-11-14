@@ -293,18 +293,19 @@ impl EditScreen {
         self.previewing = None;
         let keep = self.map.source_at(self.playhead);
         let folder = self.folder.read(cx);
-        let project = &folder.shown;
-        self.map = match EditMap::preview(&folder.dir, &folder.project, project, self.view) {
+        let (project, lock) = (&folder.project, folder.lock());
+        self.map = match EditMap::preview(&folder.dir, project, lock, self.view) {
             Ok(map) => map,
             Err(error) => {
                 self.error = Some(format!(
                     "the preview leaves out the bookends and transitions: {error}"
                 ));
-                EditMap::of(project, self.view)
+                EditMap::of(project, lock, self.view)
             }
         };
         self.doc = document(
             &project.cut,
+            lock,
             &folder.transcripts,
             &self.map,
             self.view,
@@ -318,8 +319,13 @@ impl EditScreen {
             .unwrap_or(self.playhead)
             .min(self.map.frames.saturating_sub(1));
         self.playhead = frame;
-        self.sound
-            .set_plan(&self.map, folder.dir.clone(), project.clone(), frame);
+        self.sound.set_plan(
+            &self.map,
+            folder.dir.clone(),
+            project.clone(),
+            lock.clone(),
+            frame,
+        );
         let plan = Plan {
             map: self.map.clone(),
             dir: folder.dir.clone(),
