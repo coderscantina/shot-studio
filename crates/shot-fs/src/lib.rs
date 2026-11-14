@@ -2,8 +2,9 @@
 //!
 //! [`write`] replaces a file so that a crash or a full disk leaves the old file or the new one,
 //! never an empty or partial one. [`WriteLock`] makes the app, `shot` and the MCP server wait
-//! for each other while they read, change and write one video's files. `shot-core` does no IO,
-//! so this is the one place every writer shares.
+//! for each other while they read, change and write one video's files. [`channel_root`] finds
+//! the channel repo of a video folder. `shot-core` does no IO, so this is the one place every
+//! writer shares.
 
 use std::fs::{self, File};
 use std::io::{self, Write};
@@ -54,6 +55,30 @@ fn temp_path(path: &Path) -> io::Result<PathBuf> {
     )))
 }
 
+/// The channel repo of the video folder `video_dir`, which brand and format paths are relative
+/// to: `<repo>` for `<repo>/videos/<slug>`, and the main checkout `<repo>` for the folder of a
+/// video's worktree, `<repo>/.shot/worktrees/<slug>/videos/<slug>` ([0037]). A channel repo has
+/// `brand/` or `formats/`, or is a git repo. `None` for any other folder, a channel of one.
+///
+/// [0037]: ../../../docs/decisions/0037-a-worktree-per-video-branch.md
+pub fn channel_root(video_dir: &Path) -> Option<&Path> {
+    let videos = video_dir.parent()?;
+    if videos.file_name()? != "videos" {
+        return None;
+    }
+    let mut root = videos.parent()?;
+    if root
+        .parent()
+        .is_some_and(|p| p.ends_with(".shot/worktrees"))
+    {
+        root = root.ancestors().nth(3)?;
+    }
+    ["brand", "formats", ".git"]
+        .iter()
+        .any(|name| root.join(name).exists())
+        .then_some(root)
+}
+
 /// The advisory lock on a video folder's files, `<video>/.shot/write.lock`. Take it before
 /// reading the files a change starts from and hold it until the last write; dropping it lets
 /// the next writer in. It is not reentrant: taking it twice in one process waits forever.
@@ -91,6 +116,23 @@ mod tests {
             .collect();
         names.sort();
         names
+    }
+
+    #[test]
+    fn a_worktree_video_folder_belongs_to_the_main_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        fs::create_dir_all(repo.join("formats")).unwrap();
+        let worktree = repo.join(".shot/worktrees/alpha/videos/alpha");
+        fs::create_dir_all(&worktree).unwrap();
+        fs::create_dir_all(repo.join("videos/alpha")).unwrap();
+        assert_eq!(channel_root(&worktree), Some(repo));
+        assert_eq!(channel_root(&repo.join("videos/alpha")), Some(repo));
+        // A `videos/` folder that is no channel, and a folder outside one, are channels of one.
+        let lone = dir.path().join("elsewhere/videos/beta");
+        fs::create_dir_all(&lone).unwrap();
+        assert_eq!(channel_root(&lone), None);
+        assert_eq!(channel_root(repo), None);
     }
 
     #[test]

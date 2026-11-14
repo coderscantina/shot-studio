@@ -42,7 +42,7 @@ impl SoundOrigin {
 
 /// The channel's `brand/` folder of the video in `video_dir`, where export looks for it.
 fn brand_dir(video_dir: &Path) -> Option<PathBuf> {
-    let brand = video_dir.parent()?.parent()?.join("brand");
+    let brand = shot_fs::channel_root(video_dir)?.join("brand");
     brand.is_dir().then_some(brand)
 }
 

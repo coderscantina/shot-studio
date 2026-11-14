@@ -1,8 +1,9 @@
 //! Keeps every path a tool takes inside the channel repo or the video folder.
 //!
 //! Git reads go through `shot-board`, which only accepts boring slugs and relative paths. The
-//! working tree reads (cached transcripts, thumbnail stills) and every path an agent names go
-//! through here: no absolute paths, no `..`, and symlinks are resolved before the check.
+//! working tree reads (the video's files, cached transcripts, thumbnail stills) and every path
+//! an agent names go through here: no absolute paths, no `..`, and symlinks are resolved before
+//! the check.
 
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -37,13 +38,15 @@ pub fn relative(path: &str) -> Result<&Path, String> {
     }
 }
 
-/// The real location of `rel` (empty for the folder itself) in the video folder of `slug`.
-/// A path that does not exist yet comes back as spelled, so the caller's read reports it
-/// missing. A path that exists but resolves outside the video folder, or a video folder that
-/// resolves outside the repo, is an error.
-pub fn resolve(repo: &Path, slug_name: &str, rel: &str) -> Result<PathBuf, String> {
+/// The real location of `rel` (empty for the folder itself) in `folder`, the video folder of
+/// `slug`: the main checkout's `videos/<slug>` or the one in the video's worktree. A path that
+/// does not exist yet comes back as spelled, so the caller's read reports it missing. A path
+/// that exists but resolves outside the video folder, or a video folder that resolves outside
+/// the repo, is an error. A worktree's `media/` and `.shot/` link to the main checkout's video
+/// folder, so paths there count as inside.
+pub fn resolve(repo: &Path, slug_name: &str, folder: &Path, rel: &str) -> Result<PathBuf, String> {
     slug(slug_name)?;
-    let mut path = repo.join("videos").join(slug_name);
+    let mut path = folder.to_owned();
     if !rel.is_empty() {
         path.push(relative(rel)?);
     }
@@ -56,12 +59,12 @@ pub fn resolve(repo: &Path, slug_name: &str, rel: &str) -> Result<PathBuf, Strin
     let root = repo
         .canonicalize()
         .map_err(|e| format!("{}: {e}", repo.display()))?;
-    let folder = repo
-        .join("videos")
-        .join(slug_name)
+    let folder = folder
         .canonicalize()
         .map_err(|e| format!("{slug_name}: {e}"))?;
-    if !folder.starts_with(&root) || !real.starts_with(&folder) {
+    let main = repo.join("videos").join(slug_name).canonicalize().ok();
+    let inside = real.starts_with(&folder) || main.is_some_and(|main| real.starts_with(main));
+    if !folder.starts_with(&root) || !inside {
         return Err(outside());
     }
     Ok(real)
@@ -110,12 +113,20 @@ mod tests {
         symlink(outside.path().join("secret"), video.join("link")).unwrap();
         symlink(outside.path(), repo.path().join("videos/beta")).unwrap();
 
-        assert!(resolve(repo.path(), "alpha", "inside").is_ok());
-        assert!(resolve(repo.path(), "alpha", "missing").is_ok());
-        assert!(resolve(repo.path(), "alpha", "").is_ok());
-        assert!(resolve(repo.path(), "alpha", "link").is_err());
-        assert!(resolve(repo.path(), "alpha", ".shot/cache/secret").is_err());
-        assert!(resolve(repo.path(), "beta", "secret").is_err());
-        assert!(resolve(repo.path(), "alpha", "../beta/secret").is_err());
+        let resolve = |slug: &str, rel: &str| {
+            resolve(
+                repo.path(),
+                slug,
+                &repo.path().join("videos").join(slug),
+                rel,
+            )
+        };
+        assert!(resolve("alpha", "inside").is_ok());
+        assert!(resolve("alpha", "missing").is_ok());
+        assert!(resolve("alpha", "").is_ok());
+        assert!(resolve("alpha", "link").is_err());
+        assert!(resolve("alpha", ".shot/cache/secret").is_err());
+        assert!(resolve("beta", "secret").is_err());
+        assert!(resolve("alpha", "../beta/secret").is_err());
     }
 }

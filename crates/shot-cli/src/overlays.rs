@@ -13,7 +13,7 @@ use shot_render::overlay_rules::{self, Redaction};
 pub struct OverlaysArgs {
     /// The video folder.
     #[arg(long, global = true, default_value = ".")]
-    video: PathBuf,
+    pub(crate) video: PathBuf,
     #[command(subcommand)]
     action: OverlaysAction,
 }

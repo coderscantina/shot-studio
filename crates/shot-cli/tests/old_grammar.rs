@@ -1,12 +1,12 @@
 //! A video with a lock whose `cut.kdl` still holds a node from before style rules: `shot`
-//! refuses it and says how to move it onto them.
+//! refuses it and says it has to be fixed by hand.
 
 #![cfg(target_os = "macos")]
 
 use std::process::Command;
 
 #[test]
-fn export_refuses_a_rule_removal_and_says_to_migrate() {
+fn export_refuses_a_rule_removal_and_says_to_fix_it_by_hand() {
     let dir = tempfile::tempdir().unwrap();
     let video = dir.path();
     let write = |file: &str, text: &str| std::fs::write(video.join(file), text).unwrap();
@@ -26,7 +26,7 @@ fn export_refuses_a_rule_removal_and_says_to_migrate() {
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("cut.kdl:4:9: `remove by=silence` is from before style rules: open the video in Shot Studio or run `shot migrate`"),
+        stderr.contains("cut.kdl:4:9: `remove by=silence` is from before style rules, and a video with a cut.lock is not migrated again: remove the node by hand"),
         "{stderr}"
     );
 }

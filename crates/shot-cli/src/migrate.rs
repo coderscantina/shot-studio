@@ -13,7 +13,7 @@ use shot_ship::lock::LOCK_FILE;
 pub struct MigrateArgs {
     /// One video folder. Without it, every video of the channel (`--repo`).
     #[arg(long)]
-    video: Option<PathBuf>,
+    pub(crate) video: Option<PathBuf>,
 }
 
 pub fn run(repo: PathBuf, args: MigrateArgs) -> Result<(), String> {
@@ -21,8 +21,8 @@ pub fn run(repo: PathBuf, args: MigrateArgs) -> Result<(), String> {
         Some(video) => vec![video],
         None => style::Repo::slugs(&Disk::new(&repo))?
             .into_iter()
-            .map(|slug| repo.join("videos").join(slug))
-            .collect(),
+            .map(|slug| crate::video_folder(&repo, &repo.join("videos").join(slug)))
+            .collect::<Result<_, _>>()?,
     };
     let mut failed = 0;
     for video in &videos {

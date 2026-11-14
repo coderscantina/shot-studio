@@ -29,14 +29,21 @@ pub trait Repo {
 /// The working tree of a channel repo, or a video folder outside one: a channel of one, whose
 /// `formats/<format>.kdl` is the shipped preset and whose brand is the default one.
 pub struct Disk {
+    /// Where the video's own files are: the channel repo, the video's worktree ([0037]), or the
+    /// video's folder outside a channel repo.
+    ///
+    /// [0037]: ../../../docs/decisions/0037-a-worktree-per-video-branch.md
     root: PathBuf,
+    /// Where the channel's files are: the main checkout, also for a video in its worktree.
+    channel: PathBuf,
     /// The slug of the video when `root` is that video's folder outside a channel repo.
     alone: Option<String>,
 }
 
 impl Disk {
-    /// The channel repo that holds `video`, a folder `videos/<slug>`, and the video's slug. Any
-    /// other folder is a channel of one, its slug the folder's name.
+    /// The channel repo that holds `video`, a folder `videos/<slug>` of the main checkout or of
+    /// the video's worktree, and the video's slug. Any other folder is a channel of one, its
+    /// slug the folder's name.
     pub fn locate(video: &Path) -> Result<(Self, String), String> {
         let video = video
             .canonicalize()
@@ -46,25 +53,26 @@ impl Disk {
             .and_then(|n| n.to_str())
             .ok_or_else(|| format!("{} is not a video folder", video.display()))?
             .to_owned();
-        let videos = video.parent();
-        match videos {
-            Some(videos) if videos.file_name().is_some_and(|n| n == "videos") => {
-                let root = videos.parent().unwrap_or(videos).to_path_buf();
-                Ok((Self { root, alone: None }, slug))
-            }
-            _ => Ok((
-                Self {
-                    root: video,
-                    alone: Some(slug.clone()),
-                },
-                slug,
-            )),
-        }
+        let disk = match shot_fs::channel_root(&video) {
+            Some(channel) => Self {
+                root: video.ancestors().nth(2).unwrap_or(channel).to_path_buf(),
+                channel: channel.to_path_buf(),
+                alone: None,
+            },
+            None => Self {
+                root: video.clone(),
+                channel: video.clone(),
+                alone: Some(slug.clone()),
+            },
+        };
+        Ok((disk, slug))
     }
 
     pub fn new(root: impl Into<PathBuf>) -> Self {
+        let root = root.into();
         Self {
-            root: root.into(),
+            channel: root.clone(),
+            root,
             alone: None,
         }
     }
@@ -74,15 +82,22 @@ impl Disk {
         self.alone.is_none()
     }
 
+    /// The main checkout of the channel repo when the video is in its worktree.
+    pub fn worktree_of(&self) -> Option<&Path> {
+        (self.in_channel() && self.root != self.channel).then_some(self.channel.as_path())
+    }
+
     /// Where repo path `path` is on disk. A channel of one has its video's files in its
-    /// folder, and brand files relative to it as the renderer reads them.
+    /// folder, and brand files relative to it as the renderer reads them. In a channel the
+    /// videos' files are in `root`, everything else in the main checkout.
     fn path(&self, path: &str) -> PathBuf {
         match &self.alone {
             Some(slug) => {
                 let video = format!("videos/{slug}/");
                 self.root.join(path.strip_prefix(&video).unwrap_or(path))
             }
-            None => self.root.join(path),
+            None if path.starts_with("videos/") => self.root.join(path),
+            None => self.channel.join(path),
         }
     }
 
@@ -119,7 +134,7 @@ impl Repo for Disk {
         if let Some(slug) = &self.alone {
             return Ok(vec![slug.clone()]);
         }
-        let dir = self.root.join("videos");
+        let dir = self.channel.join("videos");
         let entries = std::fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let mut slugs: Vec<String> = entries
             .filter_map(|e| e.ok())
@@ -128,6 +143,20 @@ impl Repo for Disk {
             .collect();
         slugs.sort();
         Ok(slugs)
+    }
+}
+
+/// The folder video `slug` of the channel at `repo` (its main checkout) is worked on in: the
+/// video's worktree, checked out on first use ([`Board::open_video`]). A folder of the main
+/// checkout that nobody committed yet has no branch and is worked on where it is. Ask again
+/// on each use: the worktree of a merged branch goes when the board opens.
+pub fn video_folder(repo: &Path, slug: &str) -> Result<PathBuf, String> {
+    let board =
+        Board::open(repo).map_err(|e| format!("{} is not a channel repo: {e}", repo.display()))?;
+    let loose = repo.join("videos").join(slug);
+    match board.open_video(slug) {
+        Err(shot_board::Error::UnknownVideo(_)) if loose.join("video.kdl").exists() => Ok(loose),
+        opened => opened.map_err(|e| e.to_string()),
     }
 }
 
@@ -348,8 +377,11 @@ pub struct Opened {
 ///   when migration gives it rules.
 /// - A video with a lock loses the old settings its format files still hold.
 /// - The lock is built from the files and written when it changed, unless the video shipped.
+/// - A video migrated in its worktree gets the files the migration wrote committed on its
+///   branch, on their own ([0035]). A channel format the migration gave rules stays an
+///   uncommitted edit of the main checkout, like any channel file.
 ///
-/// Anything that should follow a migration, such as a commit on the video's branch, goes here.
+/// [0035]: ../../../docs/decisions/0035-every-video-on-style-rules.md
 pub fn open(dir: &Path) -> Result<Opened, String> {
     let (disk, slug) = Disk::locate(dir)?;
     let read = |path: &str| text(&disk, &slug, path);
@@ -360,6 +392,13 @@ pub fn open(dir: &Path) -> Result<Opened, String> {
     let mut migrated = None;
     if read(&lock_path)?.is_none() && shot_core::written_before_lock(&format, &cut) {
         migrated = Some(migrate(&disk, &slug, &format, &cut)?);
+        if let Some(main) = disk.worktree_of() {
+            Board::open(main)
+                .and_then(|board| {
+                    board.commit_video_files(&slug, &MIGRATED, "♻️ move the video onto style rules")
+                })
+                .map_err(|e| format!("videos/{slug}: the migration is not committed: {e}"))?;
+        }
     } else {
         let video_file = video_path(&slug, "video.kdl");
         let video = parsed(&video_file, read(&video_file)?, Video::parse)?
@@ -411,6 +450,9 @@ pub fn open(dir: &Path) -> Result<Opened, String> {
         migrated,
     })
 }
+
+/// The files of a video folder that [`migrate`] writes.
+const MIGRATED: [&str; 3] = ["cut.kdl", "format.kdl", "cut.lock"];
 
 /// Migrates video `slug`, written before the lock, with the elements it has, and writes the
 /// migrated files and the lock.

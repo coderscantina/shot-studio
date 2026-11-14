@@ -127,3 +127,59 @@ fn a_folder_outside_a_channel_gets_a_lock_from_the_preset_and_the_default_brand(
     let edited = style::open(video).unwrap();
     assert_eq!(edited.lock.takes[0].cuts().count(), 0);
 }
+
+#[test]
+fn a_video_migrated_in_its_worktree_gets_one_commit_of_the_migrated_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let board = shot_board::Board::init(dir.path()).unwrap();
+    let files = ["video.kdl", "script.md", "format.kdl", "cut.kdl"].map(|f| {
+        (
+            f.to_owned(),
+            std::fs::read_to_string(Path::new(TARGET).join(f)).unwrap(),
+        )
+    });
+    board.add_video("target", &files.into()).unwrap();
+    let video = board.open_video("target").unwrap();
+
+    assert!(style::open(&video).unwrap().migrated.is_some());
+    let repo = git2::Repository::open(dir.path()).unwrap();
+    let head = repo
+        .revparse_single("video/target")
+        .unwrap()
+        .peel_to_commit()
+        .unwrap();
+    assert_eq!(
+        head.summary().unwrap(),
+        Some("♻️ move the video onto style rules")
+    );
+    assert_eq!(
+        head.parent(0).unwrap().summary().unwrap(),
+        Some("💡 add target")
+    );
+    let diff = repo
+        .diff_tree_to_tree(
+            Some(&head.parent(0).unwrap().tree().unwrap()),
+            Some(&head.tree().unwrap()),
+            None,
+        )
+        .unwrap();
+    let mut changed: Vec<_> = diff
+        .deltas()
+        .map(|d| d.new_file().path().unwrap().to_str().unwrap().to_owned())
+        .collect();
+    changed.sort();
+    assert_eq!(
+        changed,
+        [
+            "videos/target/cut.kdl",
+            "videos/target/cut.lock",
+            "videos/target/format.kdl"
+        ]
+    );
+    let worktree = git2::Repository::open(dir.path().join(".shot/worktrees/target")).unwrap();
+    let dirty = worktree.statuses(None).unwrap();
+    assert!(
+        dirty.iter().all(|s| s.status() == git2::Status::IGNORED),
+        "the migrated files are committed"
+    );
+}

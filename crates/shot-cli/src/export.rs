@@ -11,7 +11,7 @@ use shot_render::export::{self, ExportOptions, Progress};
 pub struct ExportArgs {
     /// The video folder, holding cut.kdl and media/.
     #[arg(long)]
-    video: PathBuf,
+    pub(crate) video: PathBuf,
     /// The output file. Defaults to .shot/export/<cut>.mp4 in the video folder.
     #[arg(long)]
     out: Option<PathBuf>,

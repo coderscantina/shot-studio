@@ -154,11 +154,14 @@ pub fn open(dir: &Path, cx: &mut App) -> Result<(), String> {
     open_at(dir, None, cx)
 }
 
-/// Like [`open`], on `screen` instead of the screen of the video's next step. A folder that is open already comes to the front
-/// and shows `screen`. A video of a channel gets the files it lacks from its branch first (see
-/// [`channel::prepare`]).
+/// Like [`open`], on `screen` instead of the screen of the video's next step. A folder that is
+/// open already comes to the front and shows `screen`. A video of a channel opens in its
+/// worktree, given its folder there or in the main checkout (see [`channel::prepare`]).
 pub fn open_at(dir: &Path, screen: Option<Screen>, cx: &mut App) -> Result<(), String> {
-    let dir = key(dir);
+    let dir = match channel::locate(dir) {
+        Some((repo, slug)) => key(&channel::prepare(&repo, &slug)?),
+        None => key(dir),
+    };
     let open = cx.try_global::<Studios>().and_then(|studios| {
         studios
             .0
@@ -176,10 +179,6 @@ pub fn open_at(dir: &Path, screen: Option<Screen>, cx: &mut App) -> Result<(), S
         if shown.is_ok() {
             return Ok(());
         }
-    }
-    // A card of a channel may have its files on its branch only: get them on disk first.
-    if let Some((repo, slug)) = channel::locate(&dir) {
-        channel::prepare(&repo, &slug)?;
     }
     let folder = VideoFolder::open(&dir)?;
     let bounds = Bounds::centered(None, size(px(1600.), px(1000.)), cx);
@@ -786,12 +785,12 @@ impl Render for Studio {
 /// Rebuilds the lock of every open video of the channel at `repo` after its brand changed, so
 /// their screens draw the new look.
 pub fn brand_changed(repo: &Path, cx: &mut App) {
-    let videos = key(repo).join("videos");
+    let repo = key(repo);
     let folders: Vec<Entity<VideoFolder>> = cx
         .try_global::<Studios>()
         .into_iter()
         .flat_map(|studios| &studios.0)
-        .filter(|(dir, ..)| dir.starts_with(&videos))
+        .filter(|(dir, ..)| shot_fs::channel_root(dir) == Some(repo.as_path()))
         .filter_map(|(_, _, studio)| studio.upgrade())
         .map(|studio| studio.read(cx).folder.clone())
         .collect();
@@ -804,8 +803,7 @@ pub fn brand_changed(repo: &Path, cx: &mut App) {
     }
 }
 
-/// The channel repo and slug of a video folder at `<repo>/videos/<slug>`, if the repo opens as
-/// a board.
+/// The channel repo and slug of a video folder, see [`channel::locate`].
 pub(crate) fn channel(dir: &Path) -> Option<(PathBuf, String)> {
     channel::locate(dir)
 }

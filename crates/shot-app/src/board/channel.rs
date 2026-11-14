@@ -1,21 +1,20 @@
 //! Channel repos as the app uses them: find the channel of a video folder, start a channel, add
 //! a video to one, get a card's folder ready to open, and move a video folder into a channel.
 //!
-//! The board reads videos from git (see `shot-board`), the studio edits a folder on disk at
-//! `<repo>/videos/<slug>`. A new video gets both: its branch with the first commit and its
-//! folder. A card whose folder is missing files, such as an idea that only has `video.kdl` on
-//! the default branch, gets them from its branch tip before it opens.
+//! The board reads videos from git (see `shot-board`), the studio edits a video in its
+//! worktree's folder `<repo>/.shot/worktrees/<slug>/videos/<slug>` ([0037]), checked out when
+//! the card first opens. A new video gets its branch with the first commit. An idea that only
+//! has `video.kdl` gets a script, a format layer and a lock in its worktree before it opens.
+//!
+//! [0037]: ../../../docs/decisions/0037-a-worktree-per-video-branch.md
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use shot_board::Board;
-use shot_core::{Cut, FormatKind, Lock, Status, Video};
+use shot_core::{FormatKind, Lock, Status, Video};
 use shot_ship::lock::LOCK_FILE;
-
-/// The files of a video folder that live in git, apart from `elements/` and `sources/`.
-const TRACKED: [&str; 5] = ["video.kdl", "script.md", "format.kdl", "cut.kdl", LOCK_FILE];
 
 /// The status of video `slug` as its card on the board shows it, read from its branch.
 pub fn status(repo: &Path, slug: &str) -> Option<Status> {
@@ -24,16 +23,12 @@ pub fn status(repo: &Path, slug: &str) -> Option<Status> {
     card.video.ok().map(|video| video.status)
 }
 
-/// The channel repo and slug of a video folder at `<repo>/videos/<slug>`, if the repo opens as
-/// a board.
+/// The channel repo, its main checkout, and the slug of a video folder `videos/<slug>` of the
+/// main checkout or of the video's worktree, if the repo opens as a board.
 pub fn locate(dir: &Path) -> Option<(PathBuf, String)> {
     let dir = std::path::absolute(dir).ok()?;
     let slug = dir.file_name()?.to_str()?.to_owned();
-    let videos = dir.parent()?;
-    if videos.file_name()? != "videos" {
-        return None;
-    }
-    let repo = videos.parent()?.to_owned();
+    let repo = shot_fs::channel_root(&dir)?.to_owned();
     Board::open(&repo).ok()?;
     Some((repo, slug))
 }
@@ -111,13 +106,12 @@ pub fn new_video(repo: &Path, title: &str, format: FormatKind) -> Result<String,
     Ok(slug)
 }
 
-/// Gets the folder of video `slug` ready to open in the studio and returns it. Files the folder
-/// lacks come from the video's branch tip; an idea without a script gets one with its title,
-/// and one without a format gets an empty layer and lock, as a new video does. Files already on
-/// disk are never overwritten.
+/// Gets video `slug` ready to open in the studio and returns its folder, in the video's
+/// worktree once it is committed (see [`shot_mcp::style::video_folder`]). An idea without a
+/// script gets one with its title, and one without a format gets an empty layer and lock, as a
+/// new video does. Files already there are never overwritten.
 pub fn prepare(repo: &Path, slug: &str) -> Result<PathBuf, String> {
-    let board = Board::open(repo).map_err(|e| e.to_string())?;
-    let dir = folder(repo, slug);
+    let dir = shot_mcp::style::video_folder(repo, slug)?;
     let write = |file: &str, text: &str| {
         let path = dir.join(file);
         if let Some(parent) = path.parent() {
@@ -125,26 +119,7 @@ pub fn prepare(repo: &Path, slug: &str) -> Result<PathBuf, String> {
         }
         shot_fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))
     };
-    let from_branch = |file: &str| -> Result<(), String> {
-        if dir.join(file).exists() {
-            return Ok(());
-        }
-        // A folder nobody committed yet has no branch to fill it from.
-        match board.read_file(slug, file) {
-            Ok(Some(text)) => write(file, &text),
-            Ok(None) | Err(shot_board::Error::UnknownVideo(_)) => Ok(()),
-            Err(e) => Err(e.to_string()),
-        }
-    };
-    for file in TRACKED {
-        from_branch(file)?;
-    }
     let read = |file: &str| fs::read_to_string(dir.join(file)).ok();
-    if let Some(cut) = read("cut.kdl").and_then(|text| Cut::parse(&text).ok()) {
-        for take in cut.chapters.iter().flat_map(|c| &c.takes) {
-            from_branch(&format!("elements/{}.jsonl", take.take))?;
-        }
-    }
     let video = read("video.kdl")
         .ok_or_else(|| format!("videos/{slug}/video.kdl does not exist"))
         .and_then(|text| Video::parse(&text).map_err(|e| format!("videos/{slug}/video.kdl:{e}")))?;
@@ -243,6 +218,7 @@ fn text_files(dir: &Path) -> Result<BTreeMap<String, String>, String> {
 mod tests {
     use super::*;
     use crate::folder::VideoFolder;
+    use shot_core::Cut;
 
     #[test]
     fn slugs_are_lowercase_words_joined_by_dashes() {
@@ -253,7 +229,7 @@ mod tests {
     }
 
     #[test]
-    fn a_new_video_is_a_card_and_a_folder_that_opens() {
+    fn a_card_opens_in_its_worktree_and_its_edits_show_on_the_board() {
         let parent = tempfile::tempdir().unwrap();
         let repo = parent.path().join("cantina");
         create(&repo).unwrap();
@@ -261,16 +237,34 @@ mod tests {
         assert_eq!(slug, "friday-deploys");
         let again = new_video(&repo, "Friday deploys", FormatKind::Opinion).unwrap();
         assert_eq!(again, "friday-deploys-2");
-
         let cards = Board::open(&repo).unwrap().cards().unwrap();
         assert_eq!(cards.len(), 2);
         assert_eq!(cards[0].video.as_ref().unwrap().status, Status::Ideas);
-        let folder = VideoFolder::open(&repo.join("videos/friday-deploys")).unwrap();
+
+        let dir = prepare(&repo, &slug).unwrap();
+        let worktree = repo.join(".shot/worktrees/friday-deploys/videos/friday-deploys");
+        assert_eq!(
+            dir.canonicalize().unwrap(),
+            worktree.canonicalize().unwrap()
+        );
+        let (main, located) = locate(&dir).unwrap();
+        assert_eq!(main.canonicalize().unwrap(), repo.canonicalize().unwrap());
+        assert_eq!(located, slug);
+        let mut folder = VideoFolder::open(&dir).unwrap();
         assert_eq!(folder.project.video.title, "Friday deploys");
         assert_eq!(folder.project.video.format, FormatKind::Opinion);
+
+        let board = Board::open(&repo).unwrap();
+        let video = &cards[0].video.as_ref().unwrap().clone();
+        let length = |board: &Board| crate::board::card_info(board, &slug, video, 0).length;
+        assert_eq!(length(&board), None);
+        let cut = "chapter \"A\" {\n    take t01 {\n        keep from=0 to=10_000_000\n    }\n}\n";
+        folder.write_cut(Cut::parse(cut).unwrap()).unwrap();
+        assert!(length(&board).is_some(), "the card shows the edit");
         assert_eq!(
-            locate(&repo.join("videos/friday-deploys")),
-            Some((repo.clone(), slug))
+            board.read_file(&slug, "cut.kdl").unwrap(),
+            None,
+            "the edit stays uncommitted"
         );
     }
 

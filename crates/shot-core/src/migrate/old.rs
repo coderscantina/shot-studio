@@ -249,11 +249,13 @@ auto-cut confidence=85 {
 }
 ";
 
-/// An error for an old node outside migration, `what` as it was written.
+/// An error for an old node outside migration, `what` as it was written. Opening a video
+/// migrates it only while it has no `cut.lock`, so the node reached a video with a lock, where
+/// neither `shot migrate` nor `shot restyle` (which builds from the same files) can read it.
 pub(crate) fn refused(node: Node<'_>, what: &str) -> ParseError {
     node.error(format!(
-        "{what} is from before style rules: open the video in Shot Studio or run `shot migrate` \
-         to move it onto them"
+        "{what} is from before style rules, and a video with a cut.lock is not migrated again: \
+         remove the node by hand or write it as a person's cut, an override or a rule"
     ))
 }
 
