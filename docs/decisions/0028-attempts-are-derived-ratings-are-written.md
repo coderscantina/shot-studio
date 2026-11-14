@@ -1,6 +1,6 @@
 # 0028: Attempts are derived from the files, ratings and picks are written
 
-Status: Proposed in milestone 13 (stream A, takes view and compose). Waits on Mike.
+Status: Adopted by Mike on 2026-11-14.
 
 ## Problem
 

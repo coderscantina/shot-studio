@@ -1,6 +1,6 @@
 # 0033: Project files carry a version, written only once it is above 1
 
-Status: Proposed in milestone 14, stream A.
+Status: Adopted by Mike on 2026-11-14.
 
 ## Problem
 

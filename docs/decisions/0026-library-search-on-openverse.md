@@ -1,6 +1,6 @@
 # 0026: Library search on Openverse, downloads in the channel with a credit file
 
-Status: Proposed on 2026-11-08 for milestone 13 items 4 and 8.
+Status: Adopted by Mike on 2026-11-14.
 
 ## Problem
 

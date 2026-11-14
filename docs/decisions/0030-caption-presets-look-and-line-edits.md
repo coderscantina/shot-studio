@@ -1,6 +1,6 @@
 # 0030: Caption presets, a look in the brand, and line edits as fixes
 
-Status: Proposed, milestone 13 stream D, 2026-11-08.
+Status: Adopted by Mike on 2026-11-14.
 
 ## Problem
 

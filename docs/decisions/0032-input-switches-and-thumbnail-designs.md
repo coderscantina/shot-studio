@@ -1,6 +1,6 @@
 # 0032: Input switches live in the format, thumbnail designs in their own file
 
-Status: Proposed in milestone 13, stream G.
+Status: Adopted by Mike on 2026-11-14.
 
 ## Problem
 

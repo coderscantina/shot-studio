@@ -1,6 +1,6 @@
 # 0027: Scene switches on layout edges, channel layouts by name in the brand
 
-Status: Proposed. Milestone 13 items 3 and 10 (stream B).
+Status: Adopted by Mike on 2026-11-14. Amended by [0036](0036-one-transition-type.md): a switch is the shared transition type.
 
 ## Problem
 
