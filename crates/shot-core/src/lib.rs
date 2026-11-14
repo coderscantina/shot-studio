@@ -21,6 +21,7 @@ mod takes;
 pub mod thumbnail;
 mod timeline;
 mod transcript;
+mod transition;
 mod values;
 mod video;
 
@@ -45,8 +46,7 @@ pub use error::ParseError;
 pub use format::Inputs;
 pub use format::{
     CaptionStyle, Color, CursorStyle, DeviceFrame, Effects, Format, FormatKind, FormatLayer,
-    Keystrokes, Layout, LayoutName, LayoutSwitch, PrompterMode, Shadow, SwitchKind, SwitchSound,
-    WindowStyle, ZoomMotion,
+    Keystrokes, Layout, LayoutName, PrompterMode, Shadow, WindowStyle, ZoomMotion,
 };
 pub use lock::{
     Applied, Asset, ElementRef, Instance, LOCK_VERSION, Lock, LockTake, Orphan, Provenance,
@@ -57,8 +57,7 @@ pub use migrate::{
 };
 pub use script::{Beat, Script, ScriptChapter};
 pub use style::{
-    ActiveRule, Effect, EffectKey, Filter, Layer, Rule, RuleBody, Selector, StyleSheet,
-    TRANSITION_LENGTH, Target, TransitionKind,
+    ActiveRule, Effect, EffectKey, Filter, Layer, Rule, RuleBody, Selector, StyleSheet, Target,
 };
 pub use takes::{Attempt, Group, Lineup, Row, RowAt, TakeWords, word_diff, words_in};
 pub use timeline::{
@@ -66,6 +65,7 @@ pub use timeline::{
     Segment, Timeline,
 };
 pub use transcript::{Transcript, Word};
+pub use transition::{Transition, TransitionKind, TransitionSound};
 pub use values::{Id, Micros, TimeRange};
 pub use video::{Date, Status, Video};
 

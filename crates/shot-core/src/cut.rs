@@ -5,8 +5,8 @@ use kdl::KdlValue;
 use crate::kdl_io::{Bare, FromKdl, Node, Source, ToKdl, Writer, keyword_enum};
 use crate::migrate::old::{self, OldBlock, Review, refused};
 use crate::{
-    CaptionStyle, Decision, Effect, EffectKey, ElementKind, Id, Layout, LayoutSwitch, Micros,
-    ParseError, Target, TimeRange,
+    CaptionStyle, Decision, Effect, EffectKey, ElementKind, Id, Layout, Micros, ParseError, Target,
+    TimeRange, Transition,
 };
 
 /// `cut.kdl`: the edit. Everything is addressed by take id and the take's media time.
@@ -181,10 +181,10 @@ pub struct LayoutChange {
     pub layout: Layout,
     pub range: TimeRange,
     /// The switch into this layout at `from`, written as `in`.
-    pub enter: Option<LayoutSwitch>,
+    pub enter: Option<Transition>,
     /// The switch out of it at `to`, written as `out`. A change starting at `to` has its own
     /// `in`, which wins.
-    pub exit: Option<LayoutSwitch>,
+    pub exit: Option<Transition>,
 }
 
 impl LayoutChange {
@@ -580,7 +580,7 @@ impl TakeEdit {
                             "out" => &mut change.exit,
                             _ => return Err(edge.unknown()),
                         };
-                        edge.set_once(slot, LayoutSwitch::read(edge)?)?;
+                        edge.set_once(slot, Transition::read(edge, &["length", "sound"])?)?;
                     }
                     edit.layouts.push(change);
                 }

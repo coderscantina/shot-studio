@@ -409,8 +409,12 @@ impl LayoutSpec {
     /// spring overshoots. A source both show moves its frame, corners, crop focus, border and
     /// shadow; one only one side shows fades and scales by 8 % on its own frame. Slots stack
     /// by their place in each layout, so a slot rising to the top passes the other halfway.
-    /// The window style and background come from the side the morph is nearer.
+    /// The window style and background come from the side the morph is nearer. At 0 it is
+    /// `self` as it is, so a switch's first frame is the old layout's.
     pub fn morph(&self, to: &Self, t: f32) -> Self {
+        if t == 0.0 {
+            return self.clone();
+        }
         let mix = |a: f32, b: f32| a + (b - a) * t;
         let fade = t.clamp(0.0, 1.0);
         fn find(spec: &LayoutSpec, source: Source) -> Option<(usize, &Slot)> {

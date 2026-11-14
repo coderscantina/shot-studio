@@ -539,8 +539,7 @@ mod tests {
                 take: Id::new("t01").unwrap(),
                 at: Micros(2_000_000),
                 target: Target::ChapterStart,
-                kind: TransitionKind::Dissolve,
-                length: Micros(500_000),
+                transition: shot_core::Transition::new(TransitionKind::Dissolve),
             }],
             ..Joins::default()
         };

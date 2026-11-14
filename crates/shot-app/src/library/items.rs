@@ -168,6 +168,7 @@ impl Item {
                 TransitionKind::Stinger => "The brand's Lottie covers the cut".into(),
                 TransitionKind::MaskWipe => "Opens a shape from the middle".into(),
                 TransitionKind::ZoomThrough => "Punches both sides in towards the cut".into(),
+                TransitionKind::Morph => "Springs every slot into the next layout".into(),
             },
             Self::Effect(EffectItem::Captions(style)) => match style {
                 CaptionStyle::WordPop => "Words pop as they are spoken".into(),
@@ -318,14 +319,18 @@ pub fn overlays(presets: &[OverlayPreset], brand: Option<&Brand>) -> Vec<Item> {
     items
 }
 
-/// The zoom, the chapter transitions and the caption styles.
+/// Every kind but a morph, which only joins layouts.
+fn chapter_transitions() -> impl Iterator<Item = TransitionKind> {
+    TransitionKind::ALL
+        .iter()
+        .copied()
+        .filter(|k| k.joins_chapters())
+}
+
+/// The zoom, the transitions a chapter edge can draw and the caption styles.
 pub fn effects() -> Vec<Item> {
     let mut items = vec![Item::Effect(EffectItem::Zoom)];
-    items.extend(
-        TransitionKind::ALL
-            .iter()
-            .map(|k| Item::Effect(EffectItem::Transition(*k))),
-    );
+    items.extend(chapter_transitions().map(|k| Item::Effect(EffectItem::Transition(k))));
     items.extend(
         CaptionStyle::ALL
             .iter()
@@ -385,7 +390,7 @@ mod tests {
                 .iter()
                 .filter(|i| i.section() == Section::Effects)
                 .count(),
-            1 + TransitionKind::ALL.len() + CaptionStyle::ALL.len()
+            1 + chapter_transitions().count() + CaptionStyle::ALL.len()
         );
     }
 

@@ -2,7 +2,7 @@
 //! inside a take, named by how it moves, and the popover that sets its kind, length and sound.
 //!
 //! A click or right-click on a mark opens the popover, T opens the switch nearest the playhead.
-//! Inside it 1 to 4 pick the kind, `[` and `]` step the length, Space plays the switch again,
+//! Inside it 1 to 7 pick the kind, `[` and `]` step the length, Space plays the switch again,
 //! Backspace or Delete gives the edge back to the format's `layout-switch`, Esc closes. Every
 //! change writes `cut.kdl` with undo and plays the switch from just before its edge.
 
@@ -13,7 +13,7 @@ use gpui::{
     Stateful, Window, actions, div, prelude::*, px,
 };
 use gpui_component::tooltip::Tooltip;
-use shot_core::{Cut, Id, LayoutSwitch, Micros, SwitchKind, SwitchSound, TakeAt};
+use shot_core::{Cut, Id, Micros, TakeAt, Transition, TransitionKind, TransitionSound};
 
 use super::EditScreen;
 use super::parts::layout_name;
@@ -29,6 +29,9 @@ actions!(
         DissolveSwitch,
         ZoomThroughSwitch,
         CutSwitch,
+        DipSwitch,
+        StingerSwitch,
+        MaskWipeSwitch,
         ShorterSwitch,
         LongerSwitch,
         PlaySwitch,
@@ -40,11 +43,14 @@ actions!(
 pub(crate) const CONTEXT: &str = "SceneSwitch";
 
 /// The kinds in the order of their keys.
-const KINDS: [(SwitchKind, &str, &str); 4] = [
-    (SwitchKind::Morph, "Morph", "1"),
-    (SwitchKind::Dissolve, "Dissolve", "2"),
-    (SwitchKind::ZoomThrough, "Zoom through", "3"),
-    (SwitchKind::Cut, "Cut", "4"),
+const KINDS: [(TransitionKind, &str, &str); 7] = [
+    (TransitionKind::Morph, "Morph", "1"),
+    (TransitionKind::Dissolve, "Dissolve", "2"),
+    (TransitionKind::ZoomThrough, "Zoom through", "3"),
+    (TransitionKind::Cut, "Cut", "4"),
+    (TransitionKind::Dip, "Dip", "5"),
+    (TransitionKind::Stinger, "Stinger", "6"),
+    (TransitionKind::MaskWipe, "Mask wipe", "7"),
 ];
 
 /// The lengths `[` and `]` step through, in microseconds.
@@ -64,7 +70,7 @@ pub struct OpenSwitch {
 
 /// What `cut.kdl` writes on the edge at `edge` of the block at `at`, as
 /// [`Cut::set_switch`] reads it: the change starting there, else the one ending there.
-fn written(cut: &Cut, at: TakeAt, edge: Micros) -> Option<LayoutSwitch> {
+fn written(cut: &Cut, at: TakeAt, edge: Micros) -> Option<Transition> {
     let block = cut.chapters.get(at.chapter)?.takes.get(at.take)?;
     let starts = block.layouts.iter().find(|c| c.range.from() == edge);
     match starts {
@@ -77,18 +83,18 @@ fn written(cut: &Cut, at: TakeAt, edge: Micros) -> Option<LayoutSwitch> {
     }
 }
 
-fn kind_name(kind: SwitchKind) -> &'static str {
+fn kind_name(kind: TransitionKind) -> &'static str {
     KINDS
         .iter()
         .find(|(k, ..)| *k == kind)
         .map_or("Morph", |(_, name, _)| name)
 }
 
-fn sound_name(sound: &Option<SwitchSound>) -> String {
+fn sound_name(sound: &Option<TransitionSound>) -> String {
     match sound {
         None => "No sound".into(),
-        Some(SwitchSound::Brand) => "Brand sounds".into(),
-        Some(SwitchSound::Named(name)) => name.to_string(),
+        Some(TransitionSound::Brand) => "Brand sounds".into(),
+        Some(TransitionSound::Named(name)) => name.to_string(),
     }
 }
 
@@ -151,13 +157,13 @@ impl EditScreen {
     /// format's, then plays it.
     fn change_switch(
         &mut self,
-        change: impl FnOnce(LayoutSwitch) -> Option<LayoutSwitch>,
+        change: impl FnOnce(Transition) -> Option<Transition>,
         cx: &mut Context<Self>,
     ) {
         let Some(mark) = self.open_mark() else {
             return;
         };
-        let switch = change(mark.switch.switch.clone());
+        let switch = change(mark.switch.transition.clone());
         let (at, edge) = (mark.at, mark.switch.at);
         self.edit(cx, |cut| cut.set_switch(at, edge, switch));
         self.play_switch(&mark);
@@ -181,7 +187,7 @@ impl EditScreen {
                 } else {
                     LENGTHS.into_iter().rev().find(|&l| l < length)
                 };
-                Some(LayoutSwitch {
+                Some(Transition {
                     length: Micros(next.unwrap_or(length)),
                     ..s
                 })
@@ -190,8 +196,8 @@ impl EditScreen {
         );
     }
 
-    fn set_kind(&mut self, kind: SwitchKind, cx: &mut Context<Self>) {
-        self.change_switch(|s| Some(LayoutSwitch { kind, ..s }), cx);
+    fn set_kind(&mut self, kind: TransitionKind, cx: &mut Context<Self>) {
+        self.change_switch(|s| Some(Transition { kind, ..s }), cx);
     }
 }
 
@@ -214,7 +220,7 @@ pub fn marks(
         .map(|(index, mark)| {
             let own = written(cut, mark.at, mark.switch.at).is_some();
             let on = open == Some((mark.at, mark.switch.at));
-            let switch = &mark.switch.switch;
+            let switch = &mark.switch.transition;
             let tip: SharedString = format!(
                 "{} into {}, {}{}",
                 kind_name(switch.kind),
@@ -244,7 +250,7 @@ pub fn marks(
                 })
                 .hover(|p| p.border_color(TEXT))
                 .child(match switch.kind {
-                    SwitchKind::ZoomThrough => "Zoom",
+                    TransitionKind::ZoomThrough => "Zoom",
                     kind => kind_name(kind),
                 })
                 .when(switch.sound.is_some(), |p| {
@@ -272,7 +278,7 @@ pub fn marks(
                 .bottom_0()
                 .left_0()
                 .right_0()
-                .when(switch.kind != SwitchKind::Cut, |d| {
+                .when(switch.kind != TransitionKind::Cut, |d| {
                     d.child(
                         div()
                             .absolute()
@@ -326,7 +332,7 @@ pub fn popover(
     let cut = &this.folder.read(cx).project.cut;
     let own = written(cut, mark.at, mark.switch.at);
     let format = this.folder.read(cx).project.format.layout_switch();
-    let switch = mark.switch.switch.clone();
+    let switch = mark.switch.transition.clone();
     let at = x(mark.frame.clamp(window.start, window.end));
 
     let row = |name: &'static str| {
@@ -336,11 +342,22 @@ pub fn popover(
             .gap(px(4.))
             .child(label(name).w(px(64.)).flex_none())
     };
-    let kinds = row("Kind").children(KINDS.iter().map(|&(kind, name, key)| {
-        choice(("switch-kind", key.as_bytes()[0] as usize), name, Some(key))
-            .on(switch.kind == kind)
-            .on_click(cx.listener(move |this, _, _, cx| this.set_kind(kind, cx)))
-    }));
+    let kinds = div()
+        .flex()
+        .items_start()
+        .gap(px(4.))
+        .child(label("Kind").w(px(64.)).flex_none().pt(px(5.)))
+        .child(
+            div()
+                .flex()
+                .flex_wrap()
+                .gap(px(4.))
+                .children(KINDS.iter().map(|&(kind, name, key)| {
+                    choice(("switch-kind", key.as_bytes()[0] as usize), name, Some(key))
+                        .on(switch.kind == kind)
+                        .on_click(cx.listener(move |this, _, _, cx| this.set_kind(kind, cx)))
+                })),
+        );
     let lengths = row("Length")
         .children(LENGTHS.iter().map(|&length| {
             choice(
@@ -352,7 +369,7 @@ pub fn popover(
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.change_switch(
                     |s| {
-                        Some(LayoutSwitch {
+                        Some(Transition {
                             length: Micros(length),
                             ..s
                         })
@@ -369,12 +386,12 @@ pub fn popover(
                 .child(kbd("["))
                 .child(kbd("]")),
         );
-    let mut sounds: Vec<Option<SwitchSound>> = vec![None, Some(SwitchSound::Brand)];
+    let mut sounds: Vec<Option<TransitionSound>> = vec![None, Some(TransitionSound::Brand)];
     sounds.extend(
         open.sounds
             .iter()
             .cloned()
-            .map(|n| Some(SwitchSound::Named(n))),
+            .map(|n| Some(TransitionSound::Named(n))),
     );
     let sound_row = div()
         .flex()
@@ -395,7 +412,7 @@ pub fn popover(
                         .on(on)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let sound = sound.clone();
-                            this.change_switch(|s| Some(LayoutSwitch { sound, ..s }), cx)
+                            this.change_switch(|s| Some(Transition { sound, ..s }), cx)
                         }))
                 })),
         );
@@ -451,14 +468,25 @@ pub fn popover(
         .shadow_lg()
         .text_size(TEXT_SM)
         .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
-        .on_action(cx.listener(|this, _: &MorphSwitch, _, cx| this.set_kind(SwitchKind::Morph, cx)))
         .on_action(
-            cx.listener(|this, _: &DissolveSwitch, _, cx| this.set_kind(SwitchKind::Dissolve, cx)),
+            cx.listener(|this, _: &MorphSwitch, _, cx| this.set_kind(TransitionKind::Morph, cx)),
         )
-        .on_action(cx.listener(|this, _: &ZoomThroughSwitch, _, cx| {
-            this.set_kind(SwitchKind::ZoomThrough, cx)
+        .on_action(cx.listener(|this, _: &DissolveSwitch, _, cx| {
+            this.set_kind(TransitionKind::Dissolve, cx)
         }))
-        .on_action(cx.listener(|this, _: &CutSwitch, _, cx| this.set_kind(SwitchKind::Cut, cx)))
+        .on_action(cx.listener(|this, _: &ZoomThroughSwitch, _, cx| {
+            this.set_kind(TransitionKind::ZoomThrough, cx)
+        }))
+        .on_action(cx.listener(|this, _: &CutSwitch, _, cx| this.set_kind(TransitionKind::Cut, cx)))
+        .on_action(cx.listener(|this, _: &DipSwitch, _, cx| this.set_kind(TransitionKind::Dip, cx)))
+        .on_action(
+            cx.listener(|this, _: &StingerSwitch, _, cx| {
+                this.set_kind(TransitionKind::Stinger, cx)
+            }),
+        )
+        .on_action(cx.listener(|this, _: &MaskWipeSwitch, _, cx| {
+            this.set_kind(TransitionKind::MaskWipe, cx)
+        }))
         .on_action(cx.listener(|this, _: &ShorterSwitch, _, cx| this.step_length(false, cx)))
         .on_action(cx.listener(|this, _: &LongerSwitch, _, cx| this.step_length(true, cx)))
         .on_action(cx.listener(|this, _: &PlaySwitch, _, cx| {

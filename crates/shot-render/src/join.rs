@@ -10,7 +10,8 @@
 //!   of it where the next chapter has none of its own, and into the outro. A dissolve, dip, mask
 //!   wipe or zoom-through is centered on its edge, half its length on each side, shortened to the
 //!   pieces it joins. A stinger plays from its peak before the edge, so it covers the cut at its
-//!   peak, for as long as its Lottie lasts. A cut draws nothing.
+//!   peak, for as long as its Lottie lasts. A cut draws nothing, and neither does a morph, which
+//!   export refuses on a chapter edge.
 //! - **Handles**: a dissolve and a mask wipe show both sides at once. The outgoing piece runs on
 //!   past its edge and the incoming one starts early, into their takes' material outside the
 //!   kept range, holding the media's first or last frame where it has none.
@@ -29,7 +30,7 @@ use std::ops::Range;
 
 use shot_core::{
     Applied, ContentHash, Id, Lock, MediaId, Micros, Output, RENDERER_VERSION, Target, TimeRange,
-    TransitionKind,
+    Transition, TransitionKind, TransitionSound,
 };
 
 use crate::plan::{ExportPlan, PlannedChunk, chunk_grid, frame_time};
@@ -70,8 +71,7 @@ pub struct Join {
     pub at: Micros,
     /// `chapter-start` or `video-start`.
     pub target: Target,
-    pub kind: TransitionKind,
-    pub length: Micros,
+    pub transition: Transition,
 }
 
 /// How long the brand stinger plays and when it covers the whole picture, where the cut is.
@@ -90,13 +90,12 @@ impl Joins {
             .flat_map(|take| {
                 take.instances
                     .iter()
-                    .filter_map(|instance| match instance.applied {
-                        Applied::Transition { kind, at, length } => Some(Join {
+                    .filter_map(|instance| match &instance.applied {
+                        Applied::Transition { transition, at } => Some(Join {
                             take: take.take.clone(),
-                            at,
+                            at: *at,
                             target: instance.element.target,
-                            kind,
-                            length,
+                            transition: transition.clone(),
                         }),
                         _ => None,
                     })
@@ -136,6 +135,8 @@ pub enum Piece {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannedTransition {
     pub kind: TransitionKind,
+    /// Without one, the brand's `transition` keys play.
+    pub sound: Option<TransitionSound>,
     /// Where `before` ends and `after` starts.
     pub edge: u64,
     /// The output frames it draws over.
@@ -306,8 +307,9 @@ impl ExportPlan {
             let (before, after) = (self.pieces[previous], self.pieces[index]);
             let edge = self.range_of(after).start;
             let floor = transitions.last().map_or(0, |t| t.window.end);
-            let window = match join.kind {
-                TransitionKind::Cut => continue,
+            let transition = &join.transition;
+            let window = match transition.kind {
+                TransitionKind::Cut | TransitionKind::Morph => continue,
                 TransitionKind::Stinger => {
                     let Some(stinger) = joins.stinger else {
                         continue;
@@ -316,7 +318,7 @@ impl ExportPlan {
                     start..(start + frames_of(stinger.duration)).min(self.frames)
                 }
                 _ => {
-                    let half = (frames_of(join.length) / 2)
+                    let half = (frames_of(transition.length) / 2)
                         .min(self.range_of(before).end - self.range_of(before).start)
                         .min(self.range_of(after).end - edge)
                         .min(edge - floor);
@@ -325,7 +327,8 @@ impl ExportPlan {
             };
             if window.start < edge && edge < window.end {
                 transitions.push(PlannedTransition {
-                    kind: join.kind,
+                    kind: transition.kind,
+                    sound: transition.sound.clone(),
                     edge,
                     window,
                     before,
@@ -456,22 +459,7 @@ pub fn key_joins(plan: &mut ExportPlan, inputs: &KeyInputs) {
     let theme = inputs.theme;
     let mut extensions: Vec<(Piece, usize, Vec<u8>)> = Vec::new();
     for transition in &plan.transitions {
-        let mut brand = Vec::new();
-        match transition.kind {
-            TransitionKind::Stinger => {
-                if let Some(stinger) = &theme.stinger {
-                    brand.extend_from_slice(&stinger.hash);
-                }
-            }
-            TransitionKind::Dip | TransitionKind::ZoomThrough => {
-                push_color(&mut brand, theme.palette.background.0);
-            }
-            TransitionKind::MaskWipe => {
-                push_color(&mut brand, theme.palette.accent.0);
-                brand.extend_from_slice(format!("{:?}", theme.wipe_shape()).as_bytes());
-            }
-            TransitionKind::Dissolve | TransitionKind::Cut => {}
-        }
+        let brand = brand_input(transition.kind, theme);
         for side in [transition.before, transition.after] {
             let other = if side == transition.before {
                 transition.after
@@ -568,6 +556,44 @@ fn side_key(
     }
 }
 
+/// The brand fields a chapter edge's transition draws in: the stinger file, the background of a
+/// dip or zoom-through, the accent and shape of a mask wipe.
+fn brand_input(kind: TransitionKind, theme: &Theme) -> Vec<u8> {
+    let mut brand = Vec::new();
+    match kind {
+        TransitionKind::Stinger => {
+            if let Some(stinger) = &theme.stinger {
+                brand.extend_from_slice(&stinger.hash);
+            }
+        }
+        TransitionKind::Dip | TransitionKind::ZoomThrough => {
+            push_color(&mut brand, theme.palette.background.0);
+        }
+        TransitionKind::MaskWipe => {
+            push_color(&mut brand, theme.palette.accent.0);
+            brand.extend_from_slice(format!("{:?}", theme.wipe_shape()).as_bytes());
+        }
+        TransitionKind::Dissolve | TransitionKind::Cut | TransitionKind::Morph => {}
+    }
+    brand
+}
+
+/// What a layout switch of `kind` adds to the keys of the chunks it draws over, beyond what
+/// [`Output::chunk_hash`] covers: the brand fields of the kinds that are new on a layout edge,
+/// keyed like their chapter-edge counterpart. The kinds a layout switch always had add nothing,
+/// so their chunks keep their keys.
+pub(crate) fn switch_input(kind: TransitionKind, theme: &Theme) -> Vec<u8> {
+    match kind {
+        TransitionKind::Dip | TransitionKind::Stinger | TransitionKind::MaskWipe => {
+            framed(&[b"switch", &brand_input(kind, theme)])
+        }
+        TransitionKind::Cut
+        | TransitionKind::Dissolve
+        | TransitionKind::ZoomThrough
+        | TransitionKind::Morph => Vec::new(),
+    }
+}
+
 fn push_color(out: &mut Vec<u8>, rgba: [f32; 4]) {
     for channel in rgba {
         out.extend_from_slice(&channel.to_le_bytes());
@@ -626,8 +652,7 @@ chapter "Three" {
             take: Id::new("t01").unwrap(),
             at: Micros(at),
             target,
-            kind,
-            length: Micros(500_000),
+            transition: Transition::new(kind),
         }
     }
 
@@ -792,6 +817,32 @@ chapter "Three" {
             .map(|(at, _)| at)
             .collect();
         assert_eq!(changed, [210, 240]);
+    }
+
+    #[test]
+    fn a_dip_on_a_layout_edge_keys_the_brand_background_and_a_dissolve_does_not() {
+        let keys = |kind: &str, background: u32| {
+            let cut = format!(
+                "chapter \"A\" {{\n    take t01 {{\n        keep from=0 to=4_000_000\n        layout split from=1_000_000 to=4_000_000 {{\n            in {kind}\n        }}\n    }}\n}}\n"
+            );
+            let mut theme = Theme::default();
+            theme.palette.background = crate::drawing::Rgba::hex(background, 1.0);
+            let mut plan = ExportPlan::new(&output(&cut), 60, |_| MediaId::default());
+            crate::overlay::key_chunks(&mut plan, &|_| Vec::new(), &theme);
+            plan.output_chunks()
+                .map(|(at, c)| (at, c.hash))
+                .collect::<Vec<_>>()
+        };
+        let (dark, light) = (keys("dip", 0x101418), keys("dip", 0xf4f1ea));
+        let changed: Vec<u64> = dark
+            .iter()
+            .zip(&light)
+            .filter(|(a, b)| a.1 != b.1)
+            .map(|(a, _)| a.0)
+            .collect();
+        // The switch at 1 s draws from frame 60 for 30 frames, the first chunk of `split`.
+        assert_eq!(changed, [60]);
+        assert_eq!(keys("dissolve", 0x101418), keys("dissolve", 0xf4f1ea));
     }
 
     #[test]

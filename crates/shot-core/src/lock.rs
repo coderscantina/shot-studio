@@ -9,7 +9,7 @@ use crate::brand::BrandScope;
 use crate::kdl_io::{Node, Source, Writer, required};
 use crate::{
     Brand, CaptionStyle, ContentHash, ElementKind, Id, Import, Layer, Layout, Micros, ParamValue,
-    ParseError, Point, Selector, Target, TimeRange, TransitionKind, ZoomShape,
+    ParseError, Point, Selector, Target, TimeRange, Transition, ZoomShape,
 };
 
 /// Bumped when the lock's grammar or the engine's results change for the same inputs.
@@ -101,10 +101,10 @@ pub enum Applied {
         at: Micros,
         gain: i16,
     },
+    /// Written with its length, always.
     Transition {
-        kind: TransitionKind,
+        transition: Transition,
         at: Micros,
-        length: Micros,
     },
     Music {
         file: String,
@@ -392,11 +392,12 @@ impl Instance {
                 }
             }
             "transition" => {
-                node.expect(1, &props(&["at", "length"]))?;
+                let transition = Transition::read(node, &props(&["at", "length", "sound"]))?;
+                // Written in full, so a default length never hides.
+                node.prop::<Micros>("length")?;
                 Applied::Transition {
-                    kind: node.arg(0)?,
+                    transition,
                     at: node.prop("at")?,
-                    length: node.prop("length")?,
                 }
             }
             "music" => {
@@ -482,8 +483,13 @@ impl Instance {
                     w.prop("gain", gain);
                 }
             }
-            Applied::Transition { kind, at, length } => {
-                w.arg(kind).prop("at", at).prop("length", length);
+            Applied::Transition { transition, at } => {
+                w.arg(&transition.kind)
+                    .prop("at", at)
+                    .prop("length", &transition.length);
+                if let Some(sound) = &transition.sound {
+                    w.prop("sound", sound);
+                }
             }
             Applied::Music {
                 file,

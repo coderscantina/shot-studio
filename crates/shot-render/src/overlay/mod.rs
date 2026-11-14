@@ -417,6 +417,9 @@ pub(crate) fn span_input(
         input.extend_from_slice(b"from-camera");
         input.extend_from_slice(&camera);
     }
+    if let Some(s) = left {
+        input.extend(crate::join::switch_input(s.transition.kind, theme));
+    }
     if theme.cuts_out(segment.layout) || left.is_some_and(|s| theme.cuts_out(s.from)) {
         let masks = identity(&shot_analyze::masks::cache_file(&segment.take));
         input.extend_from_slice(b"masks");

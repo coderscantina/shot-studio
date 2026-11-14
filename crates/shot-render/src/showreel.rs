@@ -331,8 +331,8 @@ impl Reel {
             if instance.element.target != Target::ChapterStart {
                 continue;
             }
-            if let Applied::Transition { kind, at, .. } = &mut instance.applied {
-                *kind = TRANSITIONS
+            if let Applied::Transition { transition, at } = &mut instance.applied {
+                transition.kind = TRANSITIONS
                     .iter()
                     .find(|(start, _)| Micros(*start) == *at)
                     .map_or(TransitionKind::Cut, |(_, k)| *k);

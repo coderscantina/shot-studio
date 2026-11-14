@@ -188,8 +188,7 @@ fn joins(project: &Project, theme: &Theme) -> Joins {
         take: t01.clone(),
         at: Micros(at),
         target,
-        kind,
-        length: Micros(500_000),
+        transition: shot_core::Transition::new(kind),
     };
     let mut transitions = vec![join(0, Target::VideoStart, TransitionKind::Dip)];
     transitions.extend(KINDS.map(|(at, kind)| join(at, Target::ChapterStart, kind)));
@@ -335,15 +334,23 @@ fn a_dissolve_starts_on_the_outgoing_frame_and_ends_on_the_incoming_one() {
 }
 
 #[test]
-#[ignore = "needs the GPU and the generated target project; fails at progress 0: 165 pixels differ by up to 5 on enter, 7088 by up to 81 on leave"]
+#[ignore = "needs the GPU and the generated target project"]
 fn a_zoom_through_starts_on_the_outgoing_frame_and_ends_on_the_incoming_one() {
     assert_switch_edges("zoom-through");
 }
 
 #[test]
-#[ignore = "needs the GPU and the generated target project; fails at progress 0: 824892 pixels differ by up to 55 on enter, 98860 by up to 82 on leave"]
+#[ignore = "needs the GPU and the generated target project"]
 fn a_morph_starts_on_the_outgoing_frame_and_ends_on_the_incoming_one() {
     assert_switch_edges("morph");
+}
+
+#[test]
+#[ignore = "needs the GPU and the generated target project"]
+fn the_chapter_kinds_switch_layouts_from_the_outgoing_frame_to_the_incoming_one() {
+    for kind in ["dip", "stinger", "mask-wipe"] {
+        assert_switch_edges(kind);
+    }
 }
 
 /// Where the reel's frames go, git-ignored.

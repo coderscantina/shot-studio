@@ -5,9 +5,9 @@ use std::fmt;
 
 use crate::takes::{holds, middle};
 use crate::{
-    Applied, Attempt, Chapter, Cut, ElementKind, Id, Layout, LayoutChange, LayoutSwitch, Lineup,
-    Lock, Micros, Music, Override, RangeEdit, Rating, Row, RowAt, TakeEdit, Target, TimeRange,
-    Transcript, Word, Zoom, ZoomShape,
+    Applied, Attempt, Chapter, Cut, ElementKind, Id, Layout, LayoutChange, Lineup, Lock, Micros,
+    Music, Override, RangeEdit, Rating, Row, RowAt, TakeEdit, Target, TimeRange, Transcript, Word,
+    Zoom, ZoomShape,
 };
 
 /// One take block of the main cut: the chapter and the take's position in that chapter. A take
@@ -321,7 +321,7 @@ impl Cut {
         &self,
         at: TakeAt,
         edge: Micros,
-        switch: Option<LayoutSwitch>,
+        switch: Option<crate::Transition>,
     ) -> Result<Cut, EditError> {
         let layouts = &self.take(at)?.layouts;
         let starts = layouts.iter().position(|c| c.range.from() == edge);
@@ -1347,10 +1347,7 @@ mod tests {
 
     #[test]
     fn a_switch_stays_on_its_edge_through_layout_edits() {
-        let dissolve = Some(LayoutSwitch {
-            kind: crate::SwitchKind::Dissolve,
-            ..LayoutSwitch::DEFAULT
-        });
+        let dissolve = Some(crate::Transition::new(crate::TransitionKind::Dissolve));
         let switches = |c: &Cut| -> Vec<(bool, bool)> {
             c.chapters[0].takes[0]
                 .layouts

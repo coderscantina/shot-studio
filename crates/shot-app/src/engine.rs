@@ -4,40 +4,31 @@
 //! into `420f` BT.601 buffers, the encoding gpui's surface element decodes.
 //!
 //! The thread keeps a few frames ahead while playing and renders one frame while paused. A seek
-//! drops what is queued. Ahead of a dissolve or mask wipe it keeps more frames queued: the
-//! window's first frame opens the incoming side's decoder at its handle, which can take a few
-//! frames' time.
+//! drops what is queued. The painter prefetches the incoming side of a dissolve or mask wipe
+//! ahead of its window.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
 use objc2_core_foundation::CFRetained;
 use objc2_core_video::CVPixelBuffer;
-use shot_core::{Effects, Micros};
-use shot_media::videotoolbox::Decoder;
-use shot_render::assets::Assets;
+use shot_core::Effects;
 use shot_render::captions::{Cue, Design};
 use shot_render::drawing::Drawing;
-use shot_render::frame::{Frame, Shot, compose};
+use shot_render::frame::Frame;
 use shot_render::graph::Renderer;
-use shot_render::join::Piece;
-use shot_render::layout::{Canvas, Rect, Scene, Source, Sources};
-use shot_render::paint::Painter;
-use shot_render::plan::{ExportPlan, frame_time};
-use shot_render::surface::{BufferPool, Matrix, Range, size};
+use shot_render::layout::{Canvas, Scene, Sources};
+use shot_render::paint::{Decoration, Painter, ScreenLayer};
+use shot_render::plan::frame_time;
+use shot_render::surface::{BufferPool, Matrix, Range};
 use shot_render::theme::Theme;
 
 use crate::model::{EditMap, FPS};
 
 /// Frames rendered ahead while playing, about 100 ms.
 const AHEAD: usize = 6;
-/// Frames rendered ahead while a dissolve or mask wipe starts within [`JOIN_NEAR`], 300 ms:
-/// room for the incoming side's first frame.
-const AHEAD_OF_JOIN: usize = 18;
-/// How far ahead of a two-sided transition the deeper queue starts, a second.
-const JOIN_NEAR: u64 = FPS as u64;
 /// The preview's render size. The Picture workspace shows it at 1040 points, 2080 pixels.
 const CANVAS: Canvas = Canvas {
     width: 1920,
@@ -52,32 +43,29 @@ pub struct PreviewFrame {
     pub screen: Option<ScreenMap>,
 }
 
-/// The screen layer of a drawn frame: its place on the canvas and the part of the screen
-/// recording it shows, so a point on the preview maps back to screen pixels.
+/// The screen layer the painter drew, on [`CANVAS`], so a point on the preview maps back to
+/// screen pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ScreenMap {
-    /// Canvas pixels of [`CANVAS`].
-    frame: Rect,
-    /// Texture coordinates of the recording.
-    crop: Rect,
-    /// The recording's size in pixels.
-    size: (u32, u32),
-}
+pub struct ScreenMap(ScreenLayer);
 
 impl ScreenMap {
     /// The screen pixel under `at`, a fraction of the preview's width and height, if the
     /// screen shows there.
     pub fn screen_point(&self, at: (f32, f32)) -> Option<shot_core::Point> {
         let (x, y) = (at.0 * CANVAS.width as f32, at.1 * CANVAS.height as f32);
-        let f = self.frame;
+        let ScreenLayer {
+            frame: f,
+            crop,
+            size,
+        } = self.0;
         if x < f.left || x > f.right || y < f.top || y > f.bottom {
             return None;
         }
-        let u = self.crop.left + (x - f.left) / f.width() * self.crop.width();
-        let v = self.crop.top + (y - f.top) / f.height() * self.crop.height();
+        let u = crop.left + (x - f.left) / f.width() * crop.width();
+        let v = crop.top + (y - f.top) / f.height() * crop.height();
         Some(shot_core::Point {
-            x: (u * self.size.0 as f32).round() as i32,
-            y: (v * self.size.1 as f32).round() as i32,
+            x: (u * size.0 as f32).round() as i32,
+            y: (v * size.1 as f32).round() as i32,
         })
     }
 }
@@ -85,10 +73,6 @@ impl ScreenMap {
 // SAFETY: CoreVideo buffers are reference counted atomically and the render thread never touches
 // a buffer once it is queued, so handing it to the UI thread is sound.
 unsafe impl Send for PreviewFrame {}
-
-/// Adds drawing over a painted frame, given its output time and the canvas. Only the bench
-/// sets one; it draws in a pass of its own over what the painter drew.
-pub type Decoration = fn(Micros, Canvas, &mut Frame);
 
 /// What one preview plays: where each output frame comes from, the video folder, the format's
 /// effects and the brand's theme.
@@ -121,7 +105,7 @@ struct State {
     /// A paused preview still owes the frame at `position`.
     owed: bool,
     queue: VecDeque<PreviewFrame>,
-    /// Draws on top of every composed frame. Only the bench sets it.
+    /// The painter draws it on every segment frame. Only the bench sets it.
     decoration: Option<Decoration>,
     error: Option<String>,
     quit: bool,
@@ -169,7 +153,8 @@ impl Engine {
         self.shared.changed.notify_all();
     }
 
-    /// Draws `decoration` on every frame from the next render on.
+    /// Draws `decoration` on every segment frame from the next render on, see
+    /// [`Painter::set_decoration`].
     pub fn set_decoration(&self, decoration: Decoration) {
         let mut state = self.shared.lock();
         state.decoration = Some(decoration);
@@ -236,29 +221,16 @@ impl Drop for Engine {
     }
 }
 
-/// The frames to keep queued while playing from output frame `position` of `plan`.
-fn lead(plan: &ExportPlan, position: u64) -> usize {
-    let near = plan
-        .transitions
-        .iter()
-        .any(|t| t.two_sided() && (position..=position + JOIN_NEAR).contains(&t.window.start));
-    if near { AHEAD_OF_JOIN } else { AHEAD }
-}
-
-/// What the render thread keeps for one theme: the painter with its decoders, and the assets
-/// the screen layer of a paused frame is laid out with.
+/// What the render thread keeps for one theme: the painter with its decoders.
 struct Painting {
     theme: Arc<Theme>,
     painter: Painter,
-    assets: Assets,
 }
 
 fn render_loop(shared: &Shared) {
     let mut renderer = None;
     let mut pool = None;
     let mut painting: Option<Painting> = None;
-    // The size of each recording, by path, for the screen layer.
-    let mut sizes: HashMap<PathBuf, (u32, u32)> = HashMap::new();
     loop {
         let (plan, frame, generation, decoration, playing) = {
             let mut state = shared.lock();
@@ -269,9 +241,7 @@ fn render_loop(shared: &Shared) {
                 let wants = state.plan.as_ref().is_some_and(|p| {
                     state.position < p.map.frames
                         && state.error.is_none()
-                        && (state.owed
-                            || (state.playing
-                                && state.queue.len() < lead(&p.map.plan, state.position)))
+                        && (state.owed || (state.playing && state.queue.len() < AHEAD))
                 });
                 if wants {
                     break;
@@ -304,14 +274,20 @@ fn render_loop(shared: &Shared) {
             let theme = plan.theme.as_ref().map_err(Clone::clone)?;
             let painting = match &mut painting {
                 Some(current) if Arc::ptr_eq(&current.theme, theme) => current,
-                _ => painting.insert(Painting {
-                    theme: theme.clone(),
-                    painter: Painter::with_theme(&plan.dir, plan.effects, theme.clone()),
-                    assets: Assets::with_theme(&plan.dir, theme.clone()),
-                }),
+                _ => {
+                    let mut painter = Painter::with_theme(&plan.dir, plan.effects, theme.clone());
+                    painter.set_prefetch(true);
+                    painting.insert(Painting {
+                        theme: theme.clone(),
+                        painter,
+                    })
+                }
             };
+            if let Some(decoration) = decoration {
+                painting.painter.set_decoration(decoration);
+            }
             let target = pool.buffer().map_err(|e| e.to_string())?;
-            painting
+            let screen = painting
                 .painter
                 .paint(renderer, &plan.map.plan, frame, &target)
                 .map_err(|e| e.to_string())?;
@@ -340,33 +316,8 @@ fn render_loop(shared: &Shared) {
                     .draw_over(&over, none, &target)
                     .map_err(|e| e.to_string())?;
             }
-            if let Some(decorate) = decoration {
-                let mut over = Frame {
-                    scene: Scene {
-                        background: [0.0; 3],
-                        layers: Vec::new(),
-                    },
-                    drawing: Drawing::default(),
-                    cutaway: None,
-                    cutout: None,
-                };
-                decorate(frame_time(frame, FPS), CANVAS, &mut over);
-                renderer
-                    .draw_over(
-                        &over,
-                        Sources {
-                            screen: None,
-                            camera: None,
-                        },
-                        &target,
-                    )
-                    .map_err(|e| e.to_string())?;
-            }
             // Only a paused frame can be clicked on to place a callout.
-            let screen = match playing {
-                true => None,
-                false => screen_map(&plan, frame, &mut painting.assets, &mut sizes)?,
-            };
+            let screen = screen.filter(|_| !playing).map(ScreenMap);
             Ok::<_, String>((target, screen))
         })();
 
@@ -389,94 +340,13 @@ fn render_loop(shared: &Shared) {
     }
 }
 
-/// Where the take's screen recording sits in output frame `frame`, laid out as the painter lays
-/// it out. `None` in a bookend, a transition, a b-roll cutaway or a layout without the screen.
-fn screen_map(
-    plan: &Plan,
-    frame: u64,
-    assets: &mut Assets,
-    sizes: &mut HashMap<PathBuf, (u32, u32)>,
-) -> Result<Option<ScreenMap>, String> {
-    let export = &plan.map.plan;
-    if export.join_at(frame).is_some() || !matches!(export.piece_at(frame), Some(Piece::Segment(_)))
-    {
-        return Ok(None);
-    }
-    let Some(span) = plan.map.span_at(frame) else {
-        return Ok(None);
-    };
-    let theme = assets.theme().map_err(|e| e.to_string())?;
-    let take = plan.dir.join("media").join(span.take.as_str());
-    // A take recorded without the camera or the screen draws the layout it can.
-    let tracks = (
-        take.join("screen.mp4").exists(),
-        take.join("camera.mp4").exists(),
-    );
-    let layout = span.layout.for_tracks(tracks.0, tracks.1);
-    let mut specs = vec![theme.layout(layout, &plan.effects.window)];
-    specs.extend(
-        span.switch
-            .as_ref()
-            .map(|s| theme.layout(s.from.for_tracks(tracks.0, tracks.1), &plan.effects.window)),
-    );
-    let specs = specs
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
-    let mut size_of = |source, file| -> Result<Option<(u32, u32)>, String> {
-        let path = take.join(file);
-        if !specs.iter().any(|s| s.uses(source)) || !path.exists() {
-            return Ok(None);
-        }
-        if let Some(size) = sizes.get(&path) {
-            return Ok(Some(*size));
-        }
-        let error = |e: shot_media::videotoolbox::DecodeError| format!("{}: {e}", path.display());
-        let first = Decoder::open_native(&path)
-            .map_err(error)?
-            .next_frame()
-            .map_err(error)?;
-        let size = first.map_or((16, 9), |f| size(&f.buffer));
-        sizes.insert(path, size);
-        Ok(Some(size))
-    };
-    let Some(screen) = size_of(Source::Screen, "screen.mp4")? else {
-        return Ok(None);
-    };
-    let camera = size_of(Source::Camera, "camera.mp4")?.unwrap_or((16, 9));
-    let look = assets
-        .look(&span.take, &span.overlays, plan.effects)
-        .map_err(|e| e.to_string())?;
-    let shot = Shot {
-        layout,
-        zooms: &span.zooms,
-        overlays: &span.overlays,
-        time: frame_time(span.source_frame(frame), FPS),
-        switch: span.switch.as_ref(),
-    };
-    let drawn =
-        compose(&shot, &look, CANVAS, Sources { screen, camera }).map_err(|e| e.to_string())?;
-    if drawn.cutaway.is_some() {
-        return Ok(None);
-    }
-    Ok(drawn
-        .scene
-        .layers
-        .iter()
-        .find(|l| l.source == Source::Screen)
-        .map(|l| ScreenMap {
-            frame: l.frame,
-            crop: l.crop,
-            size: screen,
-        }))
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::Path;
     use std::time::{Duration, Instant};
 
     use shot_core::TransitionKind;
+    use shot_media::videotoolbox::Decoder;
     use shot_render::cursor::FrameCursor;
     use shot_render::export::{ExportOptions, export};
     use shot_render::surface::read_rgb;

@@ -13,7 +13,7 @@ use kdl::KdlValue;
 use crate::kdl_io::{Bare, FromKdl, Node, Source, ToKdl, Writer, keyword_enum};
 use crate::{
     Attr, AttrValue, CaptionStyle, ElementKind, Id, Layout, Micros, ParamValue, ParseError,
-    ZoomShape,
+    Transition, ZoomShape,
 };
 
 keyword_enum! {
@@ -250,25 +250,6 @@ impl fmt::Display for Selector {
     }
 }
 
-keyword_enum! {
-    /// How a chapter starts ([0021], [0023]).
-    ///
-    /// [0021]: ../../../docs/decisions/0021-sound-transitions-and-bookends.md
-    /// [0023]: ../../../docs/decisions/0023-motion-system-and-lottie-templates.md
-    pub enum TransitionKind {
-        Cut = "cut",
-        Dissolve = "dissolve",
-        Dip = "dip",
-        /// The brand's Lottie stinger, covering the cut at its peak.
-        Stinger = "stinger",
-        MaskWipe = "mask-wipe",
-        ZoomThrough = "zoom-through",
-    }
-}
-
-/// The default `length` of a transition.
-pub const TRANSITION_LENGTH: Micros = Micros(500_000);
-
 /// What a rule does to each element it selects. One effect per [`EffectKey`] in a rule.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Effect {
@@ -299,10 +280,7 @@ pub enum Effect {
     Sfx { sound: Id, gain: i16 },
     /// How the chapter starting here joins the one before. Only on `chapter-start` and
     /// `video-start`.
-    Transition {
-        kind: TransitionKind,
-        length: Micros,
-    },
+    Transition(Transition),
     /// A music cue starting at the element: a file relative to the video folder, its gain and
     /// the gain under speech, both dB at most 0.
     Music { file: String, gain: i16, duck: i16 },
@@ -353,7 +331,7 @@ impl Effect {
             Self::Zoom { .. } => EffectKey::Zoom,
             Self::Overlay { template, .. } => EffectKey::Overlay(template.clone()),
             Self::Sfx { .. } => EffectKey::Sfx,
-            Self::Transition { .. } => EffectKey::Transition,
+            Self::Transition(_) => EffectKey::Transition,
             Self::Music { .. } => EffectKey::Music,
             Self::Captions(_) => EffectKey::Captions,
         }
@@ -449,14 +427,10 @@ impl Effect {
                 }
             }
             "transition" => {
-                node.expect(1, &["length"])?;
                 if !matches!(target, Target::ChapterStart | Target::VideoStart) {
                     return Err(node.error("`transition` applies to chapter-start or video-start"));
                 }
-                Self::Transition {
-                    kind: node.arg(0)?,
-                    length: node.opt_prop("length")?.unwrap_or(TRANSITION_LENGTH),
-                }
+                Self::Transition(Transition::read(node, &["length", "sound"])?)
             }
             "music" => {
                 node.expect(1, &["gain", "duck"])?;
@@ -543,13 +517,7 @@ impl Effect {
                 }
                 w.end();
             }
-            Self::Transition { kind, length } => {
-                w.arg(kind);
-                if *length != TRANSITION_LENGTH {
-                    w.prop("length", length);
-                }
-                w.end();
-            }
+            Self::Transition(transition) => transition.write(w),
             Self::Music { file, gain, duck } => {
                 w.arg(file).prop("gain", gain).prop("duck", duck).end();
             }

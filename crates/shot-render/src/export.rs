@@ -34,7 +34,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
-use shot_core::{ContentHash, Effects, Id, Lock, MediaId, Micros, OutputKind, Project};
+use shot_core::{
+    ContentHash, Effects, Id, Lock, MediaId, Micros, OutputKind, Project, TransitionSound,
+};
 use shot_media::audio::{AAC_PACKET_SAMPLES, AacEncoder, AacStream, AudioError, SAMPLE_RATE};
 use shot_media::encode::{EncodeError, EncodedFrame, EncoderSettings, HevcEncoder};
 use shot_media::mux::{self, AudioTrack, Chapter, FragmentedFile, Joiner, Movie, MuxError, Track};
@@ -160,6 +162,12 @@ pub enum ExportError {
     UnknownSound(Id),
     #[error(transparent)]
     Paint(#[from] PaintError),
+    #[error(
+        "the chapter edge in take {take} at {:.2} s can't morph: a morph needs the same take on \
+         both sides, so it only joins layouts. Pick another transition for the chapter",
+        .at.0 as f64 / 1e6
+    )]
+    ChapterMorph { take: Id, at: Micros },
     #[error("the brand's bumper {0} is missing")]
     MissingBumper(PathBuf),
     #[error("another chunk failed")]
@@ -265,6 +273,15 @@ fn render(
         .iter()
         .find(|output| output.name == cut)
         .ok_or_else(|| ExportError::UnknownCut(cut.to_owned()))?;
+    if let Some(join) = Joins::transitions_of(lock)
+        .into_iter()
+        .find(|j| !j.transition.kind.joins_chapters())
+    {
+        return Err(ExportError::ChapterMorph {
+            take: join.take,
+            at: join.at,
+        });
+    }
     let theme = Arc::new(theme(video_dir, lock, project)?);
     let media = Media::new(video_dir, project, lock);
     let main = timeline.main();
@@ -1105,7 +1122,7 @@ fn score(
         let Some(switch) = &planned.segment.switch else {
             continue;
         };
-        let Some(shot_core::SwitchSound::Named(name)) = &switch.switch.sound else {
+        let Some(TransitionSound::Named(name)) = &switch.transition.sound else {
             continue;
         };
         if !switches.insert((take.clone(), switch.at)) {
@@ -1121,6 +1138,17 @@ fn score(
                 shot_audio::SfxCue::new(sound.clone(), shot_audio::Anchor::Start(at), 0.0)
             }),
         );
+    }
+    // A transition between pieces that names its sound plays it at its window's start.
+    for transition in &plan.transitions {
+        if let Some(TransitionSound::Named(name)) = &transition.sound {
+            let at = transition.window.start * per_frame;
+            sfx.push(shot_audio::SfxCue::new(
+                find(name)?,
+                shot_audio::Anchor::Start(at),
+                0.0,
+            ));
+        }
     }
     Ok(voice::Score {
         music: music.clone(),
@@ -2273,6 +2301,34 @@ on chapter-start {
             shot_audio::CROSSFADE,
         );
         assert_eq!(music.snap(104_000, 800), 100_000);
+    }
+
+    #[test]
+    fn a_morph_on_a_chapter_edge_is_refused() {
+        let (project, mut lock) = target();
+        let transition = lock
+            .takes
+            .iter_mut()
+            .flat_map(|t| &mut t.instances)
+            .find_map(|i| match &mut i.applied {
+                shot_core::Applied::Transition { transition, .. } => Some(transition),
+                _ => None,
+            })
+            .expect("the target project joins its chapters");
+        transition.kind = TransitionKind::Morph;
+        let root = tempfile::tempdir().unwrap();
+        let error = render_proposal(
+            root.path(),
+            &project,
+            &lock,
+            "morph",
+            "main",
+            ExportOptions::default(),
+            &|_| {},
+        )
+        .unwrap_err();
+        assert!(matches!(error, ExportError::ChapterMorph { .. }), "{error}");
+        assert!(error.to_string().contains("can't morph"), "{error}");
     }
 
     #[test]
