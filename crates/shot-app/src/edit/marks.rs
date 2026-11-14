@@ -132,16 +132,17 @@ fn shorten(text: &str, most: usize) -> String {
 /// Every effect of the block at `at`, in the order they start.
 pub fn marks(this: &EditScreen, at: TakeAt, cx: &App) -> Vec<Mark> {
     let folder = this.folder.read(cx);
-    let block = |cut: &shot_core::Cut| {
-        cut.chapters
-            .get(at.chapter)
-            .and_then(|c| c.takes.get(at.take))
-            .cloned()
-    };
-    let (Some(shown), own) = (block(&folder.shown.cut), block(&folder.project.cut)) else {
+    let Some(own) = folder
+        .project
+        .cut
+        .chapters
+        .get(at.chapter)
+        .and_then(|c| c.takes.get(at.take))
+    else {
         return Vec::new();
     };
-    let lock_take = folder.lock().and_then(|l| l.take(&shown.take));
+    let lock = folder.lock();
+    let lock_take = lock.take(&own.take);
     let made_by = |kind: KindTag, from: Micros| -> Option<String> {
         let instance = lock_take?
             .instances
@@ -154,10 +155,8 @@ pub fn marks(this: &EditScreen, at: TakeAt, cx: &App) -> Vec<Mark> {
         Some(crate::place::provenance(&instance.provenance))
     };
     let mut out = Vec::new();
-    for (index, zoom) in shown.zooms.iter().enumerate() {
-        let mine = own
-            .as_ref()
-            .and_then(|b| b.zooms.iter().position(|z| z == zoom));
+    for (index, zoom) in crate::model::zooms(own, lock).iter().enumerate() {
+        let mine = own.zooms.iter().position(|z| z == zoom);
         out.push(Mark {
             id: MarkId {
                 at,
@@ -176,10 +175,8 @@ pub fn marks(this: &EditScreen, at: TakeAt, cx: &App) -> Vec<Mark> {
                 .or_else(|| mine.is_none().then(|| "From the style rules".into())),
         });
     }
-    for (index, placed) in shown.overlays.iter().enumerate() {
-        let mine = own
-            .as_ref()
-            .and_then(|b| b.overlays.iter().position(|o| o == placed));
+    for (index, placed) in crate::model::overlays(own, lock).iter().enumerate() {
+        let mine = own.overlays.iter().position(|o| o == placed);
         out.push(Mark {
             id: MarkId {
                 at,
@@ -201,13 +198,8 @@ pub fn marks(this: &EditScreen, at: TakeAt, cx: &App) -> Vec<Mark> {
         });
     }
     // Sounds play from the lock only, a person's from an override on a word.
-    let kept = |t: Micros| {
-        shown.ranges.iter().any(|r| {
-            matches!(r, shot_core::RangeEdit::Keep(_))
-                && r.range().from() <= t
-                && t < r.range().to()
-        })
-    };
+    let played = crate::model::played(own, lock);
+    let kept = |t: Micros| played.iter().any(|r| r.from() <= t && t < r.to());
     if let Some(take) = lock_take {
         for (index, instance) in take.instances.iter().enumerate() {
             let Applied::Sfx { sound, at: t, .. } = &instance.applied else {
@@ -223,7 +215,7 @@ pub fn marks(this: &EditScreen, at: TakeAt, cx: &App) -> Vec<Mark> {
                 .filter(|_| mine)
                 .filter(|o| {
                     folder.project.cut.overrides.iter().any(|over| {
-                        over.take == shown.take
+                        over.take == own.take
                             && over.at == *o
                             && over.effects.iter().any(|e| {
                                 matches!(e, OverrideEffect::Set(shot_core::Effect::Sfx { .. }))

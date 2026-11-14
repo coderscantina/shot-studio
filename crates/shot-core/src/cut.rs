@@ -3,9 +3,10 @@ use std::collections::HashSet;
 use kdl::KdlValue;
 
 use crate::kdl_io::{Bare, FromKdl, Node, Source, ToKdl, Writer, keyword_enum};
+use crate::migrate::old::{self, OldBlock, Review, refused};
 use crate::{
     CaptionStyle, Decision, Effect, EffectKey, ElementKind, Id, Layout, LayoutSwitch, Micros,
-    ParseError, RuleKind, Target, TimeRange,
+    ParseError, Target, TimeRange,
 };
 
 /// `cut.kdl`: the edit. Everything is addressed by take id and the take's media time.
@@ -137,30 +138,10 @@ pub struct TakeEdit {
     pub ranges: Vec<RangeEdit>,
     /// Layout changes, in order and not overlapping. Elsewhere the format's default applies.
     pub layouts: Vec<LayoutChange>,
-    /// Auto-cut findings a person decides on, in order and not overlapping, each inside kept
-    /// material.
-    pub reviews: Vec<Review>,
     /// Punch-in zooms, in order and not overlapping.
     pub zooms: Vec<Zoom>,
     /// Overlays in drawing order: later ones draw on top.
     pub overlays: Vec<Overlay>,
-}
-
-/// A rule's finding that was not applied: `review` while it waits in the queue, `ignore` once
-/// a person kept the material. Either way the material plays, so it changes no pixels. A rule
-/// that runs again skips findings overlapping a `remove`, `review` or `ignore` of its kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Review {
-    pub range: TimeRange,
-    pub by: RuleKind,
-    /// `true` once decided as Keep, written as `ignore`.
-    pub kept: bool,
-}
-
-impl Review {
-    fn node_name(self) -> &'static str {
-        if self.kept { "ignore" } else { "review" }
-    }
 }
 
 /// A point of the screen track in pixels, origin top left, like the event log.
@@ -170,40 +151,27 @@ pub struct Point {
     pub y: i32,
 }
 
-keyword_enum! {
-    /// What wrote an automatic zoom. A zoom without it is a person's.
-    pub enum ZoomBy {
-        /// The pacing's punch-in on every other jump cut.
-        JumpCut = "jump-cut",
-        /// Emphasis heard in the transcript.
-        Emphasis = "emphasis",
-        Click = "click",
-        Typing = "typing",
-        Cursor = "cursor",
-        /// The Z hotkey while recording.
-        Marker = "marker",
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RangeEdit {
     Keep(TimeRange),
-    Remove { range: TimeRange, by: RemovedBy },
+    /// A person's cut, written `remove ... by=manual`.
+    Remove(TimeRange),
 }
 
 impl RangeEdit {
     pub fn range(self) -> TimeRange {
         match self {
-            Self::Keep(range) | Self::Remove { range, .. } => range,
+            Self::Keep(range) | Self::Remove(range) => range,
         }
     }
-}
 
-/// Who removed a range: an auto-cut rule or a person.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RemovedBy {
-    Rule(RuleKind),
-    Manual,
+    /// The same edit over `range`.
+    pub fn with_range(self, range: TimeRange) -> Self {
+        match self {
+            Self::Keep(_) => Self::Keep(range),
+            Self::Remove(_) => Self::Remove(range),
+        }
+    }
 }
 
 /// A layout over a range of a take, with how the switches on its edges move when they differ
@@ -238,8 +206,6 @@ pub struct Zoom {
     pub range: TimeRange,
     /// Where the zoom centers on the screen track. `None` centers as the layout does.
     pub center: Option<Point>,
-    /// The rule that wrote it, `None` for a person's zoom.
-    pub by: Option<ZoomBy>,
     /// How it frames the picture and ramps in and out.
     pub shape: ZoomShape,
 }
@@ -368,6 +334,18 @@ pub struct Clip {
 
 impl Cut {
     pub fn parse(text: &str) -> Result<Self, ParseError> {
+        Self::read(text, None)
+    }
+
+    /// Reads a `cut.kdl` written before style rules: the blocks play what the old file showed,
+    /// and what the rules wrote into each block is apart, one [`OldBlock`] per block in order.
+    pub(crate) fn parse_old(text: &str) -> Result<(Self, Vec<OldBlock>), ParseError> {
+        let mut old = Vec::new();
+        let cut = Self::read(text, Some(&mut old))?;
+        Ok((cut, old))
+    }
+
+    fn read(text: &str, mut old: Option<&mut Vec<OldBlock>>) -> Result<Self, ParseError> {
         let src = Source {
             file: "cut.kdl",
             text,
@@ -392,7 +370,7 @@ impl Cut {
                 }
                 "music" => node.set_once(&mut music, Music::read(node)?)?,
                 "takes" => node.set_once(&mut ratings, Rating::read_all(node)?)?,
-                "chapter" => cut.chapters.push(Chapter::read(node)?),
+                "chapter" => cut.chapters.push(Chapter::read(node, old.as_deref_mut())?),
                 "override" => overrides.push((Override::read(node)?, node)),
                 name @ ("short" | "x-clip") => {
                     let kind = if name == "short" {
@@ -526,12 +504,20 @@ impl Cut {
 }
 
 impl Chapter {
-    fn read(node: Node<'_>) -> Result<Self, ParseError> {
+    fn read(node: Node<'_>, mut old: Option<&mut Vec<OldBlock>>) -> Result<Self, ParseError> {
         node.expect_block(1, &[])?;
         let takes = node
             .children()
             .map(|child| match child.name() {
-                "take" => TakeEdit::read(child),
+                "take" => match old.as_deref_mut() {
+                    Some(blocks) => {
+                        let mut block = OldBlock::default();
+                        let edit = TakeEdit::read(child, Some(&mut block))?;
+                        blocks.push(block);
+                        Ok(edit)
+                    }
+                    None => TakeEdit::read(child, None),
+                },
                 _ => Err(child.unknown()),
             })
             .collect::<Result<_, _>>()?;
@@ -551,13 +537,14 @@ impl Chapter {
 }
 
 impl TakeEdit {
-    fn read(node: Node<'_>) -> Result<Self, ParseError> {
+    /// Reads a take block. What the rules wrote before the lock goes to `old`, and without it
+    /// is refused.
+    fn read(node: Node<'_>, mut old: Option<&mut OldBlock>) -> Result<Self, ParseError> {
         node.expect_block(1, &[])?;
         let mut edit = Self {
             take: node.arg(0)?,
             ranges: Vec::new(),
             layouts: Vec::new(),
-            reviews: Vec::new(),
             zooms: Vec::new(),
             overlays: Vec::new(),
         };
@@ -575,10 +562,12 @@ impl TakeEdit {
                     child.expect(0, &["from", "to", "by"])?;
                     let range = TimeRange::read(child)?;
                     ranges.push((range, child));
-                    edit.ranges.push(RangeEdit::Remove {
-                        range,
-                        by: child.prop("by")?,
-                    });
+                    if let old::RemovedBy::Rule(rule) = child.prop("by")? {
+                        old_block(&mut old, child, format!("`remove by={rule}`"))?
+                            .removals
+                            .push((edit.ranges.len(), rule));
+                    }
+                    edit.ranges.push(RangeEdit::Remove(range));
                 }
                 "layout" => {
                     child.expect_block(1, &["from", "to"])?;
@@ -598,12 +587,15 @@ impl TakeEdit {
                 name @ ("review" | "ignore") => {
                     child.expect(0, &["from", "to", "by"])?;
                     let range = TimeRange::read(child)?;
-                    reviews.push((range, child));
-                    edit.reviews.push(Review {
+                    let review = Review {
                         range,
                         by: child.prop("by")?,
                         kept: name == "ignore",
-                    });
+                    };
+                    old_block(&mut old, child, format!("`{name}`"))?
+                        .reviews
+                        .push(review);
+                    reviews.push((range, child));
                 }
                 "zoom" => {
                     let props = ["from", "to", "x", "y", "by"];
@@ -618,12 +610,16 @@ impl TakeEdit {
                         (None, None) => None,
                         _ => return Err(child.error("`x` and `y` come together")),
                     };
+                    if let Some(by) = child.opt_prop::<old::ZoomBy>("by")? {
+                        old_block(&mut old, child, format!("`zoom by={by}`"))?
+                            .zooms
+                            .push((edit.zooms.len(), by));
+                    }
                     zooms.push((range, child));
                     edit.zooms.push(Zoom {
                         scale,
                         range,
                         center,
-                        by: child.opt_prop("by")?,
                         shape: ZoomShape::read(child)?,
                     });
                 }
@@ -649,10 +645,10 @@ impl TakeEdit {
                 RangeEdit::Keep(kept) => {
                     covered += kept.intersect(range).map_or(0, |r| r.duration().0);
                 }
-                RangeEdit::Remove { range: removed, .. } if removed.overlaps(range) => {
+                RangeEdit::Remove(removed) if removed.overlaps(range) => {
                     return false;
                 }
-                RangeEdit::Remove { .. } => {}
+                RangeEdit::Remove(_) => {}
             }
         }
         covered == range.duration().0
@@ -663,15 +659,10 @@ impl TakeEdit {
         for edit in &self.ranges {
             match edit {
                 RangeEdit::Keep(range) => write_range(w.node("keep"), *range).end(),
-                RangeEdit::Remove { range, by } => {
-                    write_range(w.node("remove"), *range).prop("by", by).end()
-                }
+                RangeEdit::Remove(range) => write_range(w.node("remove"), *range)
+                    .prop("by", &Bare("manual"))
+                    .end(),
             }
-        }
-        for review in &self.reviews {
-            write_range(w.node(review.node_name()), review.range)
-                .prop("by", &review.by)
-                .end();
         }
         for change in &self.layouts {
             write_range(w.node("layout").arg(&change.layout), change.range);
@@ -693,9 +684,6 @@ impl TakeEdit {
                 w.prop("x", &x).prop("y", &y);
             }
             zoom.shape.write(w);
-            if let Some(by) = &zoom.by {
-                w.prop("by", by);
-            }
             w.end();
         }
         for overlay in &self.overlays {
@@ -975,28 +963,17 @@ impl DerivedCut {
     }
 }
 
+/// The block's [`OldBlock`] for a node the rules wrote, or the refusal outside migration.
+fn old_block<'b>(
+    old: &'b mut Option<&mut OldBlock>,
+    node: Node<'_>,
+    what: String,
+) -> Result<&'b mut OldBlock, ParseError> {
+    old.as_deref_mut().ok_or_else(|| refused(node, &what))
+}
+
 fn write_range(w: &mut Writer, range: TimeRange) -> &mut Writer {
     w.prop("from", &range.from()).prop("to", &range.to())
-}
-
-impl FromKdl for RemovedBy {
-    fn from_kdl(value: &KdlValue) -> Result<Self, String> {
-        match value.as_string() {
-            Some("manual") => Ok(Self::Manual),
-            _ => RuleKind::from_kdl(value)
-                .map(Self::Rule)
-                .map_err(|e| format!("{e}, or manual")),
-        }
-    }
-}
-
-impl ToKdl for RemovedBy {
-    fn write_kdl(&self, out: &mut String) {
-        out.push_str(match self {
-            Self::Rule(rule) => rule.as_str(),
-            Self::Manual => "manual",
-        });
-    }
 }
 
 impl FromKdl for ParamValue {

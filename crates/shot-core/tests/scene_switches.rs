@@ -2,14 +2,20 @@
 //! switches a timeline finds in a take and the chunks they key.
 
 use shot_core::{
-    Brand, ContentHash, Cut, FormatKind, FormatLayer, Layout, LayoutName, LayoutSwitch, MediaId,
-    Micros, Project, Script, Segment, SwitchKind, SwitchSound, TimeRange, Timeline, Track, Video,
+    Brand, ContentHash, Cut, FormatKind, FormatLayer, Layout, LayoutName, LayoutSwitch, Lock,
+    MediaId, Micros, Project, Script, Segment, SwitchKind, SwitchSound, TimeRange, Timeline, Track,
+    Video,
 };
 
 const BRAND: &str = include_str!("../../../fixtures/examples/scenes/brand.kdl");
 const FORMAT: &str = include_str!("../../../fixtures/examples/scenes/format.kdl");
 const CUT: &str = include_str!("../../../fixtures/examples/scenes/cut.kdl");
 const CONTRACT: &str = include_str!("../../../docs/contracts/project-files.md");
+
+/// The timeline of a video whose lock applies nothing.
+fn evaluate(project: &Project) -> Timeline {
+    Timeline::evaluate(project, &Lock::default())
+}
 
 fn custom(name: &str) -> Layout {
     Layout::Custom(LayoutName::new(name).unwrap())
@@ -67,7 +73,7 @@ fn the_examples_round_trip_and_are_in_the_contract() {
 
 #[test]
 fn a_take_switches_on_every_edge_with_the_written_or_the_format_switch() {
-    let timeline = Timeline::evaluate(&project(CUT));
+    let timeline = evaluate(&project(CUT));
     let switches: Vec<(u64, Layout, Layout, SwitchKind, u64)> = segments(&timeline)
         .into_iter()
         .filter_map(|s| s.switch.as_ref())
@@ -95,7 +101,7 @@ fn a_take_switches_on_every_edge_with_the_written_or_the_format_switch() {
 #[test]
 fn a_layout_from_the_first_kept_moment_starts_the_block_without_a_switch() {
     let cut = "chapter \"A\" {\n    take t01 {\n        remove from=0 to=1_000_000 by=manual\n        keep from=1_000_000 to=9_000_000\n        layout split from=0 to=4_000_000\n    }\n}\n";
-    let timeline = Timeline::evaluate(&project(cut));
+    let timeline = evaluate(&project(cut));
     let at: Vec<u64> = segments(&timeline)
         .into_iter()
         .filter_map(|s| s.switch.as_ref().map(|s| s.at.0))
@@ -105,9 +111,9 @@ fn a_layout_from_the_first_kept_moment_starts_the_block_without_a_switch() {
 
 #[test]
 fn a_switch_keys_only_the_chunks_of_its_window() {
-    let before = keys(&Timeline::evaluate(&project(CUT)));
+    let before = keys(&evaluate(&project(CUT)));
     let changed = CUT.replace("in dissolve", "in morph");
-    let after = keys(&Timeline::evaluate(&project(&changed)));
+    let after = keys(&evaluate(&project(&changed)));
     assert_eq!(before.len(), after.len());
     let differ: Vec<usize> = (0..before.len())
         .filter(|&i| before[i] != after[i])
@@ -126,7 +132,7 @@ fn a_switch_keys_only_the_chunks_of_its_window() {
         None,
     );
     assert!(hard.is_ok());
-    let none = keys(&Timeline::evaluate(&project(&cut)));
+    let none = keys(&evaluate(&project(&cut)));
     let mut plain = project(CUT);
     plain.format.layout_switch = Some(LayoutSwitch {
         kind: SwitchKind::Cut,
@@ -139,8 +145,8 @@ fn a_switch_keys_only_the_chunks_of_its_window() {
             c.enter = None;
             c.exit = None;
         });
-    assert_eq!(none.len(), keys(&Timeline::evaluate(&plain)).len());
-    let first = segments(&Timeline::evaluate(&project(&cut)))[1].clone();
+    assert_eq!(none.len(), keys(&evaluate(&plain)).len());
+    let first = segments(&evaluate(&project(&cut)))[1].clone();
     assert_eq!(first.switch.as_ref().unwrap().switch.kind, SwitchKind::Cut);
     assert!(
         !first

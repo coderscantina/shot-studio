@@ -26,7 +26,6 @@ use shot_core::{
 
 use crate::cut::GoTo;
 use crate::cut::player::Player;
-use crate::cut::run;
 use crate::folder::VideoFolder;
 use crate::peaks::Peaks;
 use crate::studio::Screen;
@@ -136,7 +135,7 @@ fn played(cut: &Cut, attempt: &Attempt) -> Micros {
         .iter()
         .filter_map(|r| match r {
             RangeEdit::Keep(kept) => Some(kept.duration().0),
-            RangeEdit::Remove { .. } => None,
+            RangeEdit::Remove(_) => None,
         })
         .sum();
     Micros(kept)
@@ -245,7 +244,7 @@ impl TakesView {
 
     /// The first row with attempts, on the attempt the cut keeps most of.
     fn first_focus(&self, cx: &App) -> (usize, usize) {
-        let cut = &self.folder.read(cx).shown.cut;
+        let cut = &self.folder.read(cx).played;
         self.rows
             .iter()
             .enumerate()
@@ -259,7 +258,7 @@ impl TakesView {
     /// Whether the cut plays more than one take's attempt at some beat, which nobody has
     /// composed yet: then the Cut screen opens on this view.
     pub fn needs_composing(&self, cx: &App) -> bool {
-        needs_composing(&self.lineup, &self.folder.read(cx).shown.cut)
+        needs_composing(&self.lineup, &self.folder.read(cx).played)
     }
 
     /// After a new recording: says which beats the newest take repeats and focuses the first
@@ -327,7 +326,7 @@ impl TakesView {
         if row.attempts.len() < 2 {
             return None;
         }
-        let cut = &self.folder.read(cx).shown.cut;
+        let cut = &self.folder.read(cx).played;
         match held(cut, row) {
             Some(held) if held != self.at.1 => Some(held),
             _ => Some((self.at.1 + 1) % row.attempts.len()),
@@ -442,7 +441,7 @@ impl TakesView {
             return;
         }
         let folder = self.folder.read(cx);
-        let clip = clip(&folder.shown.cut, &attempts);
+        let clip = clip(&folder.played, &attempts);
         let key = (attempts[0].take.clone(), attempts[0].range);
         // A key of the first attempt alone would not tell one attempt from a pair.
         self.player.unload();
@@ -469,7 +468,7 @@ impl TakesView {
             return;
         }
         let folder = self.folder.read(cx);
-        let clip = clip(&folder.shown.cut, std::slice::from_ref(&chosen));
+        let clip = clip(&folder.played, std::slice::from_ref(&chosen));
         let key = (chosen.take.clone(), chosen.range);
         match self.player.load_clip(folder, key, clip) {
             Ok(()) => self.playing = vec![chosen],
@@ -546,8 +545,6 @@ impl TakesView {
             return;
         };
         let folder = self.folder.read(cx);
-        let uncut = !covers(&folder.project.cut, &chosen.take, chosen.range);
-        let migrated = folder.is_migrated();
         let cut = folder.project.cut.use_attempt(&self.lineup, at, &chosen);
         let what = if self.mark.is_some() {
             "The marked words of"
@@ -559,12 +556,7 @@ impl TakesView {
             take_name(&chosen.take)
         );
         self.write(Some(note), cx, |folder| {
-            folder.write_cut(cut.map_err(|e| e.to_string())?)?;
-            // Media the cut had none of gets its rough cut, as after recording.
-            if uncut && !migrated {
-                run::rough_cut(folder, &chosen.take)?;
-            }
-            Ok(())
+            folder.write_cut(cut.map_err(|e| e.to_string())?)
         });
         self.mark = None;
     }
@@ -572,14 +564,9 @@ impl TakesView {
     fn assemble(&mut self, cx: &mut Context<Self>) {
         let folder = self.folder.read(cx);
         let cut = &folder.project.cut;
-        let migrated = folder.is_migrated();
         let mut counts: Vec<(Id, usize)> = Vec::new();
-        let mut uncut: Vec<Id> = Vec::new();
         for (_, row) in self.lineup.rows() {
             if let Some(choice) = cut.choice(row) {
-                if !covers(cut, &choice.take, choice.range) && !uncut.contains(&choice.take) {
-                    uncut.push(choice.take.clone());
-                }
                 match counts.iter_mut().find(|(take, _)| *take == choice.take) {
                     Some((_, n)) => *n += 1,
                     None => counts.push((choice.take, 1)),
@@ -601,13 +588,7 @@ impl TakesView {
             .join(", ");
         let note = format!("Assembled {beats} beats from your picks: {from}. ⌘Z undoes it.");
         self.write(Some(note), cx, |folder| {
-            folder.write_cut(assembled.map_err(|e| e.to_string())?)?;
-            if !migrated {
-                for take in &uncut {
-                    run::rough_cut(folder, take)?;
-                }
-            }
-            Ok(())
+            folder.write_cut(assembled.map_err(|e| e.to_string())?)
         });
         self.mark = None;
     }
@@ -686,12 +667,7 @@ fn clip(cut: &Cut, attempts: &[Attempt]) -> Cut {
             title: String::new(),
             takes: attempts
                 .iter()
-                .map(|a| {
-                    let mut block = cut.material(&a.take, a.range);
-                    // Review items change no pixels.
-                    block.reviews.clear();
-                    block
-                })
+                .map(|a| cut.material(&a.take, a.range))
                 .collect(),
         }],
         ..cut.clone()
@@ -717,21 +693,6 @@ fn held(cut: &Cut, row: &Row) -> Option<usize> {
         .filter(|(kept, _)| kept.0 > 0)
         .max_by_key(|(kept, i)| (*kept, std::cmp::Reverse(*i)))
         .map(|(_, i)| i)
-}
-
-/// Whether the blocks of `take` in `cut` say what to keep or remove of all of `range`, so its
-/// rough cut is there.
-fn covers(cut: &Cut, take: &Id, range: TimeRange) -> bool {
-    let covered: u64 = cut
-        .chapters
-        .iter()
-        .flat_map(|c| &c.takes)
-        .filter(|edit| edit.take == *take)
-        .flat_map(|edit| &edit.ranges)
-        .filter_map(|r| r.range().intersect(range))
-        .map(|r| r.duration().0)
-        .sum();
-    covered >= range.duration().0
 }
 
 /// The words of an attempt as one text, the words that differ from the compared attempt
@@ -816,7 +777,7 @@ impl TakesView {
         let row_data = self.row_at(row).expect("rendered rows exist");
         let attempt = &row_data.attempts[index];
         let folder = self.folder.read(cx);
-        let cut = &folder.shown.cut;
+        let cut = &folder.played;
         let focused = self.at == (row, index);
         let rating = cut.rating(attempt);
         let picked = rating.is_some_and(|r| r.pick);
@@ -836,7 +797,7 @@ impl TakesView {
                 let height = peaks.as_ref().map_or(0.0, |p| p.over(from, to).clamp(0.0, 1.0));
                 let middle = Micros((from.0 + to.0) / 2);
                 let removed = block.ranges.iter().any(|r| {
-                    matches!(r, RangeEdit::Remove { range, .. } if range.from() <= middle && middle < range.to())
+                    matches!(r, RangeEdit::Remove(range) if range.from() <= middle && middle < range.to())
                 });
                 (height, removed)
             })
@@ -974,7 +935,7 @@ impl TakesView {
     fn row_view(&self, row: usize, cx: &mut Context<Self>) -> Div {
         let data = self.row_at(row).expect("rendered rows exist").clone();
         let number = row + 1;
-        let cut = &self.folder.read(cx).shown.cut;
+        let cut = &self.folder.read(cx).played;
         let held = in_cut(cut, &data);
         let focused_row = self.at.0 == row;
         // In the focused row the words that differ from the compared attempt are lit.
@@ -1092,7 +1053,7 @@ impl TakesView {
     }
 
     fn header(&self, cx: &mut Context<Self>) -> Div {
-        let cut = &self.folder.read(cx).shown.cut;
+        let cut = &self.folder.read(cx).played;
         let takes = match self.lineup.takes().len() {
             1 => "1 take".to_owned(),
             n => format!("{n} takes"),
@@ -1189,7 +1150,7 @@ impl TakesView {
                     .justify_between()
                     .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
                     .children(focused.as_ref().map(|(_, _, a)| {
-                        mono(seconds(played(&self.folder.read(cx).shown.cut, a)))
+                        mono(seconds(played(&self.folder.read(cx).played, a)))
                             .text_size(TEXT_SM)
                             .text_color(MUTED)
                     })),

@@ -13,7 +13,6 @@ use crate::ui::{self, label};
 
 pub(super) fn section(this: &EditScreen, cx: &mut Context<EditScreen>) -> Div {
     let folder = this.folder.read(cx);
-    let migrated = folder.is_migrated();
     let own = folder.own_handheld();
     let own_cutout = folder.own_cutout();
     let cutout = folder.theme.as_ref().is_ok_and(|theme| theme.cutout);
@@ -28,11 +27,11 @@ pub(super) fn section(this: &EditScreen, cx: &mut Context<EditScreen>) -> Div {
         0 => "Off".to_owned(),
         n => n.to_string(),
     };
-    let reset = own.filter(|_| migrated).map(|_| {
+    let reset = own.map(|_| {
         reset_button("camera-handheld-reset")
             .on_click(cx.listener(|this, _, _, cx| this.set_handheld(None, cx)))
     });
-    let cutout_reset = own_cutout.filter(|_| migrated).map(|_| {
+    let cutout_reset = own_cutout.map(|_| {
         reset_button("camera-cutout-reset")
             .on_click(cx.listener(|this, _, _, cx| this.set_cutout(None, cx)))
     });
@@ -43,50 +42,38 @@ pub(super) fn section(this: &EditScreen, cx: &mut Context<EditScreen>) -> Div {
         .gap(px(10.))
         .px(px(10.))
         .child(label("Camera"))
-        .map(|section| {
-            if migrated {
-                section
-                    .child(knob_row(
-                        "Hand-held",
-                        slider(this, Knob::Handheld, "camera-handheld", strength, cx),
-                        value,
-                        reset,
-                    ))
+        .child(knob_row(
+                "Hand-held",
+                slider(this, Knob::Handheld, "camera-handheld", strength, cx),
+                value,
+                reset,
+            ))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .text_size(px(14.))
+                    .child(div().text_color(MUTED).child("Cut out"))
+                    .child(div().flex_1())
+                    .children(cutout_reset)
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.))
-                            .text_size(px(14.))
-                            .child(div().text_color(MUTED).child("Cut out"))
-                            .child(div().flex_1())
-                            .children(cutout_reset)
-                            .child(
-                                Switch::new("camera-cutout")
-                                    .checked(cutout)
-                                    .accessibility_label("Cut the person out of the camera")
-                                    .on_click(cx.listener(|this, on: &bool, _, cx| {
-                                        this.set_cutout(Some(*on), cx)
-                                    })),
-                            ),
-                    )
-                    .when(cutout, |section| {
-                        section.child(
-                            div()
-                                .text_size(TEXT_XS)
-                                .text_color(FAINT)
-                                .child("A take shows the person once analysis found them. For takes recorded before, run shot analyze"),
-                        )
-                    })
-            } else {
+                        Switch::new("camera-cutout")
+                            .checked(cutout)
+                            .accessibility_label("Cut the person out of the camera")
+                            .on_click(cx.listener(|this, on: &bool, _, cx| {
+                                this.set_cutout(Some(*on), cx)
+                            })),
+                    ),
+            )
+            .when(cutout, |section| {
                 section.child(
                     div()
-                        .text_size(TEXT_SM)
+                        .text_size(TEXT_XS)
                         .text_color(FAINT)
-                        .child("The camera is styled by the channel's brand. Migrate the video to give it a hand-held drift or cut the person out"),
+                        .child("A take shows the person once analysis found them. For takes recorded before, run shot analyze"),
                 )
-            }
-        })
+            })
 }
 
 fn reset_button(id: &'static str) -> Stateful<Div> {

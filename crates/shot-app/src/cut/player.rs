@@ -9,12 +9,12 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use shot_core::{Cut, Decision, Id, Micros, Project, RangeEdit, TakeAt, TimeRange};
+use shot_core::{Applied, Cut, Id, Instance, Lock, Micros, Project, TakeAt, TimeRange};
 use shot_media::timing::ClockFollower;
 
 use crate::engine::{Engine, Plan, PreviewFrame};
 use crate::folder::VideoFolder;
-use crate::model::{EditMap, FPS, View};
+use crate::model::{self, EditMap, FPS, View};
 use crate::sound::Sound;
 
 /// Kept media played on each side of an item.
@@ -34,41 +34,47 @@ pub enum Hear {
 /// An item by its take and media range, which stay put while answers change the cut.
 pub type ItemKey = (Id, TimeRange);
 
-/// The cut that plays `range` of the block at `at` with up to [`LEAD`] of the block's kept media
-/// on each side: one chapter with one block, the item kept or cut as C would cut it. The item
-/// is an open review item, or a cut the rules applied, which plays restored as recorded. `None`
-/// when the block or the item is not in `cut`.
-pub fn clip(cut: &Cut, at: TakeAt, range: TimeRange, hear: Hear) -> Option<Cut> {
-    let applied = cut
-        .chapters
-        .get(at.chapter)?
-        .takes
-        .get(at.take)?
-        .ranges
-        .iter()
-        .any(
-            |piece| matches!(piece, RangeEdit::Remove { range: removed, .. } if *removed == range),
-        );
-    let recorded = if applied {
-        cut.restore(at, range).ok()?
-    } else {
-        cut.clone()
-    };
-    let source = match (hear, applied) {
-        (Hear::Around, _) => recorded.clone(),
-        (Hear::Cut, true) => cut.clone(),
-        (Hear::Cut, false) => cut.decide(at, range, Decision::Cut).ok()?,
-    };
-    let chapter = source.chapters.get(at.chapter)?;
+/// The cut and lock that play `range` of the block at `at` with up to [`LEAD`] of what the
+/// block plays on each side: one chapter with one block, the item kept or cut as C would cut it.
+/// The item is an open review item of `lock`, or a cut it applied, which plays restored as
+/// recorded. `None` when the block or the item is not in `cut`.
+pub fn clip(
+    cut: &Cut,
+    lock: &Lock,
+    at: TakeAt,
+    range: TimeRange,
+    hear: Hear,
+) -> Option<(Cut, Lock)> {
+    let chapter = cut.chapters.get(at.chapter)?;
     let mut block = chapter.takes.get(at.take)?.clone();
-    let kept: Vec<TimeRange> = recorded.chapters[at.chapter].takes[at.take]
-        .ranges
+    let review = lock.take(&block.take).and_then(|t| {
+        t.instances
+            .iter()
+            .find(|i| i.applied == Applied::Review(range))
+    });
+    let applied = !model::played(&block, lock)
         .iter()
-        .filter_map(|piece| match piece {
-            RangeEdit::Keep(kept) => Some(*kept),
-            RangeEdit::Remove { .. } => None,
-        })
-        .collect();
+        .any(|p| p.overlaps(range));
+    if review.is_none() && !applied {
+        return None;
+    }
+    // As recorded the item plays; cut it plays as C leaves it.
+    let restored = without_cuts_over(lock, &block.take, range);
+    let played = match (hear, review) {
+        (Hear::Around, _) => restored.clone(),
+        (Hear::Cut, Some(review)) => {
+            let mut cut = lock.clone();
+            if let Some(take) = cut.takes.iter_mut().find(|t| t.take == block.take) {
+                take.instances.push(Instance {
+                    applied: Applied::Cut(range),
+                    ..review.clone()
+                });
+            }
+            cut
+        }
+        (Hear::Cut, None) => lock.clone(),
+    };
+    let kept = model::played(&block, &restored);
     let window = TimeRange::new(
         lead_before(&kept, range.from()),
         lead_after(&kept, range.to()),
@@ -76,17 +82,9 @@ pub fn clip(cut: &Cut, at: TakeAt, range: TimeRange, hear: Hear) -> Option<Cut> 
     block.ranges = block
         .ranges
         .iter()
-        .filter_map(|piece| {
-            let inside = piece.range().intersect(window)?;
-            Some(match *piece {
-                RangeEdit::Keep(_) => RangeEdit::Keep(inside),
-                RangeEdit::Remove { by, .. } => RangeEdit::Remove { range: inside, by },
-            })
-        })
+        .filter_map(|piece| Some(piece.with_range(piece.range().intersect(window)?)))
         .collect();
-    // Review items change no pixels, and the clip's are not answered here.
-    block.reviews.clear();
-    Some(Cut {
+    let clip = Cut {
         // The bed would play from its start under every item.
         music: None,
         chapters: vec![shot_core::Chapter {
@@ -95,7 +93,18 @@ pub fn clip(cut: &Cut, at: TakeAt, range: TimeRange, hear: Hear) -> Option<Cut> 
         }],
         derived: Vec::new(),
         ..cut.clone()
-    })
+    };
+    Some((clip, played))
+}
+
+/// `lock` without the cuts of `take` that overlap `range`.
+fn without_cuts_over(lock: &Lock, take: &Id, range: TimeRange) -> Lock {
+    let mut lock = lock.clone();
+    if let Some(t) = lock.takes.iter_mut().find(|t| t.take == *take) {
+        t.instances
+            .retain(|i| !matches!(i.applied, Applied::Cut(cut) if cut.overlaps(range)));
+    }
+    lock
 }
 
 /// Where [`LEAD`] of the kept media before `t` begins.
@@ -149,6 +158,7 @@ struct Loaded {
     map: EditMap,
     dir: PathBuf,
     project: Project,
+    lock: Lock,
 }
 
 #[derive(Default)]
@@ -178,29 +188,29 @@ impl Player {
         range: TimeRange,
         hear: Hear,
     ) -> Result<(), String> {
-        let shown = &folder.shown;
-        let take = shown.cut.chapters[at.chapter].takes[at.take].take.clone();
+        let files = &folder.project;
+        let take = files.cut.chapters[at.chapter].takes[at.take].take.clone();
         let key = (take, range);
         if self.loaded().is_some_and(|loaded| loaded == (&key, hear)) {
             return Ok(());
         }
         let plan = |hear| {
-            let cut = clip(&shown.cut, at, range, hear)
+            let (cut, lock) = clip(&files.cut, folder.lock(), at, range, hear)
                 .ok_or_else(|| "this item is no longer in the cut".to_owned())?;
             let project = Project {
                 cut,
-                ..shown.clone()
+                ..files.clone()
             };
-            Ok::<_, String>((EditMap::of(&project, View::Edited), project))
+            Ok::<_, String>((EditMap::of(&project, &lock, View::Edited), project, lock))
         };
-        let (around, around_project) = plan(Hear::Around)?;
+        let (around, around_project, around_lock) = plan(Hear::Around)?;
         let block = TakeAt {
             chapter: 0,
             take: 0,
         };
         let item = around.output_range(block, range).unwrap_or(0..0);
-        let (map, project) = match hear {
-            Hear::Around => (around.clone(), around_project),
+        let (map, project, lock) = match hear {
+            Hear::Around => (around.clone(), around_project, around_lock),
             Hear::Cut => plan(Hear::Cut)?,
         };
         // As recorded, the poster is the item's first frame; cut, the frame after the cut.
@@ -215,7 +225,7 @@ impl Player {
             Plan {
                 map: map.clone(),
                 dir: folder.dir.clone(),
-                effects: shown.format.effects(),
+                effects: files.format.effects(),
                 theme: folder.theme.clone(),
                 captions: None,
             },
@@ -223,7 +233,13 @@ impl Player {
         );
         if let Some(sound) = &self.sound {
             sound.set_playing(false);
-            sound.set_plan(&map, folder.dir.clone(), project.clone(), poster);
+            sound.set_plan(
+                &map,
+                folder.dir.clone(),
+                project.clone(),
+                lock.clone(),
+                poster,
+            );
         }
         self.loaded = Some(Loaded {
             key,
@@ -233,6 +249,7 @@ impl Player {
             map,
             dir: folder.dir.clone(),
             project,
+            lock,
         });
         self.playhead = poster;
         self.playing = false;
@@ -259,9 +276,10 @@ impl Player {
         }
         let project = Project {
             cut,
-            ..folder.shown.clone()
+            ..folder.project.clone()
         };
-        let map = EditMap::of(&project, View::Edited);
+        let lock = folder.lock().clone();
+        let map = EditMap::of(&project, &lock, View::Edited);
         if map.frames == 0 {
             return Err("there is nothing to play here".to_owned());
         }
@@ -270,7 +288,7 @@ impl Player {
             Plan {
                 map: map.clone(),
                 dir: folder.dir.clone(),
-                effects: folder.shown.format.effects(),
+                effects: folder.project.format.effects(),
                 theme: folder.theme.clone(),
                 captions: None,
             },
@@ -278,7 +296,7 @@ impl Player {
         );
         if let Some(sound) = &self.sound {
             sound.set_playing(false);
-            sound.set_plan(&map, folder.dir.clone(), project.clone(), 0);
+            sound.set_plan(&map, folder.dir.clone(), project.clone(), lock.clone(), 0);
         }
         self.loaded = Some(Loaded {
             key,
@@ -288,6 +306,7 @@ impl Player {
             map,
             dir: folder.dir.clone(),
             project,
+            lock,
         });
         self.playhead = 0;
         self.playing = false;
@@ -339,6 +358,7 @@ impl Player {
                 &loaded.map,
                 loaded.dir.clone(),
                 loaded.project.clone(),
+                loaded.lock.clone(),
                 self.playhead,
             );
             self.sound = Some(sound);
@@ -488,31 +508,27 @@ impl Player {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shot_core::{RemovedBy, Review, RuleKind};
+    use shot_core::RangeEdit;
 
     fn range(from: u64, to: u64) -> TimeRange {
         TimeRange::new(Micros(from), Micros(to)).unwrap()
     }
 
-    /// A block over 0 to 20 s with 4 to 5 s removed and a pause at 10 to 11 s waiting.
+    /// A block over 0 to 20 s with 4 to 5 s removed by hand.
     fn cut() -> Cut {
         let mut cut =
             Cut::default().append_take(Id::new("t01").unwrap(), "A", range(0, 20_000_000));
-        let block = &mut cut.chapters[0].takes[0];
-        block.ranges = vec![
+        cut.chapters[0].takes[0].ranges = vec![
             RangeEdit::Keep(range(0, 4_000_000)),
-            RangeEdit::Remove {
-                range: range(4_000_000, 5_000_000),
-                by: RemovedBy::Manual,
-            },
+            RangeEdit::Remove(range(4_000_000, 5_000_000)),
             RangeEdit::Keep(range(5_000_000, 20_000_000)),
         ];
-        block.reviews.push(Review {
-            range: range(10_000_000, 11_000_000),
-            by: RuleKind::Pause,
-            kept: false,
-        });
         cut
+    }
+
+    /// A pause at 10 to 11 s waiting in the queue, and a silence cut at 15 to 16 s.
+    fn lock() -> Lock {
+        Lock::parse("lock 1\n\ntake t01 {\n    review from=10_000_000 to=11_000_000 on=pause t=10_000_000 layer=format rule=\"pause\"\n    cut from=15_000_000 to=16_000_000 on=silence t=15_000_000 layer=format rule=\"silence\"\n}\n").unwrap()
     }
 
     const AT: TakeAt = TakeAt {
@@ -522,42 +538,59 @@ mod tests {
 
     #[test]
     fn a_clip_plays_two_seconds_of_kept_media_on_each_side() {
-        let around = clip(&cut(), AT, range(10_000_000, 11_000_000), Hear::Around).unwrap();
+        let (around, _) = clip(
+            &cut(),
+            &lock(),
+            AT,
+            range(10_000_000, 11_000_000),
+            Hear::Around,
+        )
+        .unwrap();
         assert_eq!(
             around.chapters[0].takes[0].ranges,
             vec![RangeEdit::Keep(range(8_000_000, 13_000_000))]
         );
-        assert!(around.chapters[0].takes[0].reviews.is_empty());
 
         // Before 6 s the lead-in skips what the edit removed.
-        let early = clip(&cut(), AT, range(6_000_000, 7_000_000), Hear::Around);
+        let (early, _) = clip(
+            &cut(),
+            &lock(),
+            AT,
+            range(15_000_000, 16_000_000),
+            Hear::Around,
+        )
+        .expect("an applied cut plays restored");
         assert_eq!(
-            early.unwrap().chapters[0].takes[0].ranges,
-            vec![
-                RangeEdit::Keep(range(3_000_000, 4_000_000)),
-                RangeEdit::Remove {
-                    range: range(4_000_000, 5_000_000),
-                    by: RemovedBy::Manual
-                },
-                RangeEdit::Keep(range(5_000_000, 9_000_000)),
-            ]
+            early.chapters[0].takes[0].ranges,
+            vec![RangeEdit::Keep(range(13_000_000, 18_000_000))]
+        );
+        assert!(
+            clip(
+                &cut(),
+                &lock(),
+                AT,
+                range(6_000_000, 7_000_000),
+                Hear::Around
+            )
+            .is_none()
         );
     }
 
     #[test]
     fn played_cut_the_clip_removes_the_item_as_c_would() {
-        let played = clip(&cut(), AT, range(10_000_000, 11_000_000), Hear::Cut).unwrap();
+        let (_, played) = clip(
+            &cut(),
+            &lock(),
+            AT,
+            range(10_000_000, 11_000_000),
+            Hear::Cut,
+        )
+        .unwrap();
+        let cuts: Vec<TimeRange> = played.takes[0].cuts().collect();
         assert_eq!(
-            played.chapters[0].takes[0].ranges,
-            vec![
-                RangeEdit::Keep(range(8_000_000, 10_000_000)),
-                RangeEdit::Remove {
-                    range: range(10_000_000, 11_000_000),
-                    by: RemovedBy::Rule(RuleKind::Pause)
-                },
-                RangeEdit::Keep(range(11_000_000, 13_000_000)),
-            ]
+            cuts,
+            [range(15_000_000, 16_000_000), range(10_000_000, 11_000_000)]
         );
-        assert!(clip(&cut(), AT, range(1, 2), Hear::Cut).is_none());
+        assert!(clip(&cut(), &lock(), AT, range(1, 2), Hear::Cut).is_none());
     }
 }

@@ -185,9 +185,11 @@ pub fn word_changes(
         let Some(transcript) = transcripts.get(&edit.take).filter(|_| same_block) else {
             continue;
         };
+        // The proposal changes `cut.kdl`; what the lock cuts is the same on both sides.
+        let none = Lock::default();
         let (Ok(before), Ok(after)) = (
-            base.transcript_view(at, transcript),
-            head.transcript_view(at, transcript),
+            base.transcript_view(at, transcript, &none),
+            head.transcript_view(at, transcript, &none),
         ) else {
             continue;
         };
@@ -252,7 +254,7 @@ pub fn apply(
                 .ok_or_else(|| format!("take {take} has no transcript"))?;
             cut.delete_words(change.at, transcript, change.range)
         } else {
-            cut.restore(change.at, change.range)
+            cut.restore(change.at, change.range, &Lock::default())
         }
         .map_err(|e| e.to_string())?;
     }
@@ -852,27 +854,16 @@ pub fn card_element(
 }
 
 /// The cut and lock of the video in `dir` as proposal `name` has them: its files on top of the
-/// video's. A migrated video's lock is built from them like its own; one without a lock plays
-/// the proposal's `cut.kdl` alone.
+/// video's, its lock built from them like the video's own.
 fn proposal_version(
     repo: &Path,
     slug: &str,
     name: &str,
     dir: &Path,
-    current: &Cut,
-    migrated: bool,
-) -> Result<(Cut, Option<Lock>), String> {
+) -> Result<(Cut, Lock), String> {
     let files = Board::open(repo)
         .and_then(|board| board.proposal_files(slug, name))
         .map_err(|e| e.to_string())?;
-    if !migrated {
-        let path = style::video_path(slug, "cut.kdl");
-        let cut = match files.get(&path) {
-            Some(text) => Cut::parse(text).map_err(|e| format!("{path}:{e}"))?,
-            None => current.clone(),
-        };
-        return Ok((cut, None));
-    }
     let (disk, slug) = Disk::locate(dir)?;
     let built = style::build_video(
         &Patched {
@@ -881,7 +872,7 @@ fn proposal_version(
         },
         &slug,
     )?;
-    Ok((built.cut, Some(built.lock)))
+    Ok((built.cut, built.lock))
 }
 
 /// How far before its first change a proposal's preview starts.
@@ -895,29 +886,17 @@ impl EditScreen {
         };
         let folder = self.folder.read(cx);
         let dir = folder.dir.clone();
-        let built = proposal_version(
-            &repo,
-            &slug,
-            name,
-            &dir,
-            &folder.project.cut,
-            folder.lock().is_some(),
-        )
-        .and_then(|(cut, lock)| {
+        let built = proposal_version(&repo, &slug, name, &dir).and_then(|(cut, lock)| {
             let project = Project {
                 cut,
                 ..folder.project.clone()
             };
-            let shown = match &lock {
-                Some(lock) => crate::style::shown(&project.cut, lock),
-                None => project.cut.clone(),
-            };
             let fail = |e: shot_render::export::ExportError| e.to_string();
-            let plan = shot_render::export::preview_plan_with(&dir, &project, lock.as_ref())
-                .map_err(fail)?;
-            let theme = shot_render::export::theme(&dir, lock.as_ref(), &project)
-                .map_err(|e| e.to_string())?;
-            let map = EditMap::new(&shown, plan);
+            let plan =
+                shot_render::export::preview_plan_with(&dir, &project, &lock).map_err(fail)?;
+            let theme =
+                shot_render::export::theme(&dir, &lock, &project).map_err(|e| e.to_string())?;
+            let map = EditMap::new(&project.cut, plan);
             if map.spans.len() != map.plan.segments.len() {
                 return Err("the proposal's preview could not place its segments".to_owned());
             }
@@ -941,15 +920,15 @@ impl EditScreen {
             .unwrap_or_default();
         let folder = self.folder.read(cx);
         self.doc = model::document(
-            &folder.shown.cut,
+            &folder.project.cut,
+            folder.lock(),
             &folder.transcripts,
             &map,
             self.view,
-            folder.shown.format.default_layout,
+            folder.project.format.default_layout,
         );
         let effects = project.format.effects();
-        self.sound
-            .set_plan_with(&map, dir.clone(), project, lock, from);
+        self.sound.set_plan(&map, dir.clone(), project, lock, from);
         self.engine.set_plan(
             Plan {
                 map: map.clone(),
@@ -1060,7 +1039,7 @@ mod tests {
         HashMap::from([(id, t)])
     }
 
-    const BASE: &str = "chapter \"Hook\" {\n    take t01 {\n        keep from=0 to=2_000_000\n        remove from=2_000_000 to=4_000_000 by=filler\n        keep from=4_000_000 to=8_000_000\n    }\n}\n";
+    const BASE: &str = "chapter \"Hook\" {\n    take t01 {\n        keep from=0 to=2_000_000\n        remove from=2_000_000 to=4_000_000 by=manual\n        keep from=4_000_000 to=8_000_000\n    }\n}\n";
 
     fn at() -> TakeAt {
         TakeAt {
@@ -1078,7 +1057,7 @@ mod tests {
         let t01 = &t[&Id::new("t01").unwrap()];
         base.delete_words(at(), t01, span(4_000_000, 4_800_000))
             .unwrap()
-            .restore(at(), span(2_000_000, 3_800_000))
+            .restore(at(), span(2_000_000, 3_800_000), &Lock::default())
             .unwrap()
     }
 
@@ -1164,8 +1143,9 @@ mod tests {
             format: shot_core::FormatKind::Opinion.preset(),
             cut: base.clone(),
         };
-        let map = EditMap::of(&project, View::Edited);
-        let doc = document(&base, &t, &map, View::Edited, Layout::Face);
+        let lock = Lock::default();
+        let map = EditMap::of(&project, &lock, View::Edited);
+        let doc = document(&base, &lock, &t, &map, View::Edited, Layout::Face);
         let found = cards(&[proposal], &doc, &base, &t);
         assert_eq!(found.len(), 1);
         assert_eq!(

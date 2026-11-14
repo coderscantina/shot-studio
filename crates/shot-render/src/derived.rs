@@ -507,7 +507,7 @@ mod tests {
     }
 
     fn plan(project: &Project, faces: &HashMap<Id, FaceTrack>) -> DerivedPlan {
-        let timeline = Timeline::evaluate(project);
+        let timeline = Timeline::evaluate(project, &shot_core::Lock::default());
         DerivedPlan::new(
             timeline.main(),
             &timeline.outputs[1],
@@ -612,7 +612,7 @@ short s {
             .unwrap();
         transcripts.insert(id, transcript);
         let project = project(CUT);
-        let timeline = Timeline::evaluate(&project);
+        let timeline = Timeline::evaluate(&project, &shot_core::Lock::default());
         let keys = |transcripts: &HashMap<Id, Transcript>| -> Vec<ContentHash> {
             DerivedPlan::new(
                 timeline.main(),

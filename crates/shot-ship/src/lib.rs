@@ -5,7 +5,7 @@
 //! - [`script_check`]: hook length, spoken length, sources and visuals of `script.md`.
 //! - [`spoken`]: the transcript in an output's time and its chapter marks.
 //! - [`describe`]: title and description with word-accurate chapters.
-//! - [`lock`]: a migrated video's `cut.lock` and the timeline export renders from it.
+//! - [`lock`]: a video's `cut.lock` and the timeline export renders from it.
 //! - [`ship`]: what ships where, rendering and checking it, uploading and tagging.
 //! - [`youtube`] and [`oauth`]: the Data API upload and the desktop sign-in.
 //! - [`record`]: what already shipped, in `.shot/ship/record.json`.

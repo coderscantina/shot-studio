@@ -32,8 +32,6 @@ pub struct PlaceState {
     pub picker: Option<Picker>,
     /// Read when the sound picker opens.
     sounds: Vec<(Id, SoundOrigin)>,
-    /// Why sounds cannot be placed on this video, read when the sound picker opens.
-    blocked: Option<String>,
     /// Plays a sound on its own, made with the first one played.
     audition: Option<Audition>,
     /// The next click on the Picture preview places a callout.
@@ -52,22 +50,7 @@ impl EditScreen {
         place.findings.clear();
         place.stop_audition();
         if place.picker == Some(Picker::Sound) {
-            let folder = self.folder.read(cx);
-            place.sounds = place::sounds(&folder.dir);
-            // A placed sound plays from the lock, which only a channel repo rebuilds.
-            place.blocked = match (&self.channel, folder.is_migrated()) {
-                (Some(_), true) => None,
-                (Some(_), false) => Some(format!(
-                    "Sounds are part of the style: run shot migrate --video {} once to place \
-                     them. You can listen to them now",
-                    folder.dir.display()
-                )),
-                (None, _) => Some(
-                    "Sounds are placed on a migrated video in a channel repo. You can listen \
-                     to them here"
-                        .into(),
-                ),
-            };
+            place.sounds = place::sounds(&self.folder.read(cx).dir);
         }
         cx.notify();
     }
@@ -154,9 +137,6 @@ impl EditScreen {
     }
 
     pub(super) fn place_sound(&mut self, sound: Id, cx: &mut Context<Self>) {
-        if self.place.blocked.is_some() {
-            return;
-        }
         let Some((take, t)) = self
             .moment()
             .and_then(|(at, t)| Some((self.take_of(at, cx)?, t)))
@@ -330,13 +310,10 @@ pub fn note(this: &EditScreen) -> Option<Div> {
 pub fn sound_picker(this: &EditScreen, cx: &mut Context<EditScreen>) -> Div {
     let place = &this.place;
     let playing = place.audition.as_ref().and_then(Audition::playing);
-    let hint = match &place.blocked {
-        Some(blocked) => div().text_color(WARN).child(blocked.clone()),
-        None => div().text_color(MUTED).child(match this.selection {
-            Some(_) => "Click a sound to place it on the selected words",
-            None => "Click a sound to place it on the word at the playhead",
-        }),
-    };
+    let hint = div().text_color(MUTED).child(match this.selection {
+        Some(_) => "Click a sound to place it on the selected words",
+        None => "Click a sound to place it on the word at the playhead",
+    });
     let mut panel = panel()
         .child(
             div()
@@ -360,16 +337,13 @@ pub fn sound_picker(this: &EditScreen, cx: &mut Context<EditScreen>) -> Div {
         if names.is_empty() {
             continue;
         }
-        panel = panel
-            .child(label(origin.label()).text_size(TEXT_XS))
-            .child(chips().children(names.into_iter().map(|name| {
-                sound_chip(
-                    name,
-                    playing.as_ref() == Some(name),
-                    place.blocked.is_none(),
-                    cx,
-                )
-            })));
+        panel = panel.child(label(origin.label()).text_size(TEXT_XS)).child(
+            chips().children(
+                names
+                    .into_iter()
+                    .map(|name| sound_chip(name, playing.as_ref() == Some(name), cx)),
+            ),
+        );
     }
     let warnings = [
         this.sound.warning(),
@@ -385,7 +359,7 @@ pub fn sound_picker(this: &EditScreen, cx: &mut Context<EditScreen>) -> Div {
 
 /// A sound's chip: a play button that plays it alone, lit while it plays, and its name, which
 /// places it when `placeable`.
-fn sound_chip(name: &Id, playing: bool, placeable: bool, cx: &mut Context<EditScreen>) -> Div {
+fn sound_chip(name: &Id, playing: bool, cx: &mut Context<EditScreen>) -> Div {
     let (listen, place) = (name.clone(), name.clone());
     let play = div()
         .id(gpui::ElementId::Name(format!("play-{name}").into()))
@@ -411,13 +385,9 @@ fn sound_chip(name: &Id, playing: bool, placeable: bool, cx: &mut Context<EditSc
         .pr(px(10.))
         .rounded_r(RADIUS_SM)
         .child(name.to_string())
-        .when(placeable, |label| {
-            label
-                .cursor_pointer()
-                .hover(|s| s.bg(FLOAT_ON))
-                .on_click(cx.listener(move |this, _, _, cx| this.place_sound(place.clone(), cx)))
-        })
-        .when(!placeable, |label| label.text_color(MUTED));
+        .cursor_pointer()
+        .hover(|s| s.bg(FLOAT_ON))
+        .on_click(cx.listener(move |this, _, _, cx| this.place_sound(place.clone(), cx)));
     div()
         .flex()
         .items_center()
@@ -433,12 +403,9 @@ fn sound_chip(name: &Id, playing: bool, placeable: bool, cx: &mut Context<EditSc
 /// The bundled animated emoji and the brand's stickers, placed at the playhead, and the
 /// Lottie import.
 pub fn pop_picker(this: &EditScreen, cx: &mut Context<EditScreen>) -> Div {
-    let stickers: Vec<Id> = this
-        .folder
-        .read(cx)
-        .lock()
-        .map(|l| place::stickers(&l.brand).cloned().collect())
-        .unwrap_or_default();
+    let stickers: Vec<Id> = place::stickers(&this.folder.read(cx).lock().brand)
+        .cloned()
+        .collect();
     panel()
         .child(div().font_weight(FontWeight::MEDIUM).child("Pop"))
         .child(chips().children(EMOJI.iter().map(|(emoji, _)| {

@@ -5,7 +5,6 @@
 
 mod agent;
 mod analyze;
-mod autocut;
 mod caption_fix;
 mod migrate;
 mod models;
@@ -21,18 +20,19 @@ use clap::{Args, Parser, Subcommand};
 use serde_json::{Value, json};
 use shot_board::{Activity, Board, Card, Proposal};
 use shot_core::Status;
+use shot_mcp::style::Opened;
 use shot_mcp::text;
 
 #[cfg(target_os = "macos")]
 mod build;
+#[cfg(target_os = "macos")]
+mod code_diff;
 #[cfg(target_os = "macos")]
 mod derived;
 #[cfg(target_os = "macos")]
 mod export;
 #[cfg(target_os = "macos")]
 mod overlays;
-#[cfg(target_os = "macos")]
-mod product;
 #[cfg(target_os = "macos")]
 mod ship;
 
@@ -82,13 +82,10 @@ enum Command {
     /// Rebuild the lock and every cut, then check them; once, on every change, or a proposal's.
     #[cfg(target_os = "macos")]
     Build(build::BuildArgs),
-    /// Write zooms on clicks, typing or the resting cursor, per format.kdl's auto-zoom rule.
-    #[cfg(target_os = "macos")]
-    Autozoom(product::AutoZoomArgs),
     /// Snapshot a commit range into sources/ and type it out as a code-diff overlay.
     #[cfg(target_os = "macos")]
-    CodeDiff(product::CodeDiffArgs),
-    /// Find link cards, highlights and b-roll slots, or place a bleep, blur or b-roll.
+    CodeDiff(code_diff::CodeDiffArgs),
+    /// Place a bleep, blur or b-roll, or check every overlay against its template.
     #[cfg(target_os = "macos")]
     Overlays(overlays::OverlaysArgs),
     /// Add, list or remove Shorts and X clips; export one with `export --cut <name>`.
@@ -96,7 +93,7 @@ enum Command {
     Derived(derived::DerivedArgs),
     /// Build a video's cut.lock, explain an instance, or measure a rule's scope.
     Style(style::StyleArgs),
-    /// Turn a video written before the lock into content, overrides and style rules, once.
+    /// Move videos written before the lock onto style rules, after analyzing their takes.
     Migrate(migrate::MigrateArgs),
     /// Rebuild a shipped video's frozen lock on purpose, for a new release.
     Restyle(restyle::RestyleArgs),
@@ -123,8 +120,6 @@ enum Command {
     },
     /// Transcribe a take's mic track into the transcript cache.
     Transcribe(transcribe::TranscribeArgs),
-    /// Run the auto-cut rules on a take and write the rough cut into cut.kdl.
-    Autocut(autocut::AutocutArgs),
     /// Run a take's analysis again and rewrite its elements file, and compute the camera's
     /// person masks when the brand cuts the camera out.
     Analyze(analyze::AnalyzeArgs),
@@ -165,6 +160,17 @@ pub(crate) fn lock(video: &Path) -> Result<shot_fs::WriteLock, String> {
     shot_fs::WriteLock::acquire(video).map_err(|e| format!("{}: {e}", video.display()))
 }
 
+/// Opens the video in `video` with [`shot_mcp::style::open`], holding its writer lock, and says
+/// so when that migrated it. Drop the lock to let others write while this command reads.
+pub(crate) fn open(video: &Path) -> Result<(shot_fs::WriteLock, Opened), String> {
+    let lock = lock(video)?;
+    let opened = shot_mcp::style::open(video)?;
+    if let Some(report) = &opened.migrated {
+        eprintln!("migrated {} onto style rules: {report}", video.display());
+    }
+    Ok((lock, opened))
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match run(cli) {
@@ -180,11 +186,10 @@ fn run(cli: Cli) -> Result<(), String> {
     match cli.command {
         Command::Models { action } => return models::run(action),
         Command::Transcribe(args) => return transcribe::run(args),
-        Command::Autocut(args) => return autocut::run(args),
         Command::Analyze(args) => return analyze::run(args),
         Command::CaptionFix(args) => return caption_fix::run(args),
         Command::Style(args) => return style::run(cli.repo, args),
-        Command::Migrate(args) => return migrate::run(args),
+        Command::Migrate(args) => return migrate::run(cli.repo, args),
         Command::Restyle(args) => return restyle::run(cli.repo, args),
         _ => {}
     }
@@ -211,12 +216,8 @@ fn run(cli: Cli) -> Result<(), String> {
         return build::run(args);
     }
     #[cfg(target_os = "macos")]
-    if let Command::Autozoom(args) = cli.command {
-        return product::auto_zoom(args);
-    }
-    #[cfg(target_os = "macos")]
     if let Command::CodeDiff(args) = cli.command {
-        return product::code_diff(args);
+        return code_diff::run(args);
     }
     #[cfg(target_os = "macos")]
     if let Command::Overlays(args) = cli.command {
@@ -290,7 +291,6 @@ fn run(cli: Cli) -> Result<(), String> {
         | Command::Record(_)
         | Command::Models { .. }
         | Command::Transcribe(_)
-        | Command::Autocut(_)
         | Command::Style(_)
         | Command::Migrate(_)
         | Command::Restyle(_)
@@ -301,7 +301,6 @@ fn run(cli: Cli) -> Result<(), String> {
         #[cfg(target_os = "macos")]
         Command::Export(_)
         | Command::Build(_)
-        | Command::Autozoom(_)
         | Command::CodeDiff(_)
         | Command::Overlays(_)
         | Command::Derived(_)

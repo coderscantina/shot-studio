@@ -164,7 +164,7 @@ fn reel_of(preset: &str, camera: &str, cut: &str, joined: bool) -> Reel {
         format: FormatKind::Opinion.preset(),
         cut,
     };
-    let timeline = Timeline::evaluate(&project);
+    let timeline = Timeline::evaluate(&project, &shot_core::Lock::default());
     let plan = ExportPlan::new(timeline.main(), 60, |_| MediaId::default());
     let plan = if joined {
         plan.with_joins(&joins(&project, &theme))

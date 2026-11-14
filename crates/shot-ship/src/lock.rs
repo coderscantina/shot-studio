@@ -1,4 +1,4 @@
-//! A migrated video's `cut.lock` as the ship tools read it, so chapter times, thumbnails and the
+//! A video's `cut.lock` as the ship tools read it, so chapter times, thumbnails and the
 //! ship plan follow the frames export renders. The lock is read, never rebuilt here: `shot`
 //! rebuilds it before shipping, the app on every edit.
 
@@ -9,11 +9,13 @@ use shot_core::{Lock, ParseError, Project, Timeline};
 
 use crate::spoken::Bookends;
 
-/// The lock's file name in the video folder. A video with one is migrated.
+/// The lock's file name in the video folder.
 pub const LOCK_FILE: &str = "cut.lock";
 
 #[derive(Debug, thiserror::Error)]
 pub enum LockError {
+    #[error("{}: missing, open the video in Shot Studio or run `shot style build` to write it", .0.display())]
+    Missing(PathBuf),
     #[error("{}: {source}", path.display())]
     Io { path: PathBuf, source: io::Error },
     #[error("cut.lock: {0}")]
@@ -23,31 +25,28 @@ pub enum LockError {
     Bookends(String),
 }
 
-/// The video's lock, `None` when it is not migrated.
-pub fn read(video_dir: &Path) -> Result<Option<Lock>, LockError> {
+/// The video's lock.
+pub fn read(video_dir: &Path) -> Result<Lock, LockError> {
     let path = video_dir.join(LOCK_FILE);
     match std::fs::read_to_string(&path) {
-        Ok(text) => Ok(Some(Lock::parse(&text)?)),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Ok(text) => Ok(Lock::parse(&text)?),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Err(LockError::Missing(path)),
         Err(source) => Err(LockError::Io { path, source }),
     }
 }
 
-/// The timeline export renders: styled by the lock when the video has one.
+/// The timeline export renders, styled by the video's lock.
 pub fn timeline(video_dir: &Path, project: &Project) -> Result<Timeline, LockError> {
-    Ok(match read(video_dir)? {
-        Some(lock) => Timeline::styled(project, &lock),
-        None => Timeline::evaluate(project),
-    })
+    Ok(Timeline::evaluate(project, &read(video_dir)?))
 }
 
-/// The main cut's intro and outro where export places them, for chapter times: none before
-/// the video is migrated or when its brand has neither.
+/// The main cut's intro and outro where export places them, for chapter times: none when its
+/// brand has neither.
 #[cfg(target_os = "macos")]
 pub fn bookends(video_dir: &Path, project: &Project) -> Result<Bookends, LockError> {
     use shot_render::join::Piece;
-    let has_bookends =
-        read(video_dir)?.is_some_and(|l| l.brand.intro.is_some() || l.brand.outro.is_some());
+    let brand = read(video_dir)?.brand;
+    let has_bookends = brand.intro.is_some() || brand.outro.is_some();
     if !has_bookends {
         return Ok(Bookends::default());
     }
@@ -89,16 +88,16 @@ mod tests {
     use crate::spoken::tests::project;
 
     #[test]
-    fn the_lock_cuts_the_timeline_of_a_migrated_video() {
+    fn the_lock_cuts_the_timeline() {
         let dir = tempfile::tempdir().unwrap();
         let project = project(
             "chapter \"Hook\" {\n    take t01 {\n        keep from=0 to=10_000_000\n    }\n}\n",
         );
         let length = |t: &Timeline| crate::spoken::duration(t.main());
-        assert_eq!(
-            length(&timeline(dir.path(), &project).unwrap()).0,
-            10_000_000
-        );
+        assert!(matches!(
+            timeline(dir.path(), &project),
+            Err(LockError::Missing(_))
+        ));
         std::fs::write(
             dir.path().join(LOCK_FILE),
             "lock 1\n\ntake t01 {\n    cut from=2_000_000 to=3_000_000 on=silence t=2_000_000 layer=format rule=\"silence\"\n}\n",

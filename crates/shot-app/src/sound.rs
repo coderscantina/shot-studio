@@ -42,9 +42,8 @@ const FEED_INTERVAL: Duration = Duration::from_millis(10);
 struct State {
     /// The edit, where its takes live and what plays with the voice; `None` before the first
     /// plan.
-    /// The map, the video folder, the project and, for a proposal, the lock it plays instead of
-    /// the folder's.
-    plan: Option<(EditMap, PathBuf, Project, Option<shot_core::Lock>)>,
+    /// The map, the video folder, the project and the lock that styles it.
+    plan: Option<(EditMap, PathBuf, Project, shot_core::Lock)>,
     /// The loudness gain of the last measured plan, in dB.
     gain: Option<f64>,
     /// Counts plan changes, so the feeder rebuilds its reader.
@@ -97,19 +96,14 @@ impl Sound {
         }
     }
 
-    /// Plays the audio of `map`'s plan of `project`, the video in `dir`, from output frame
-    /// `frame`.
-    pub fn set_plan(&self, map: &EditMap, dir: PathBuf, project: Project, frame: u64) {
-        self.set_plan_with(map, dir, project, None, frame);
-    }
-
-    /// [`Sound::set_plan`] styled by `lock` instead of the folder's `cut.lock`, for a proposal.
-    pub fn set_plan_with(
+    /// Plays the audio of `map`'s plan of `project` styled by `lock`, the video in `dir`, from
+    /// output frame `frame`.
+    pub fn set_plan(
         &self,
         map: &EditMap,
         dir: PathBuf,
         project: Project,
-        lock: Option<shot_core::Lock>,
+        lock: shot_core::Lock,
         frame: u64,
     ) {
         let mut state = self.shared.lock();
@@ -206,19 +200,12 @@ fn feed(shared: Arc<Shared>) {
                 drop(state);
                 let mut warning = None;
                 audio = plan.map(|(map, dir, project, lock)| {
-                    let score = match &lock {
-                        Some(lock) => shot_render::export::preview_score_with(
-                            &dir,
-                            &project,
-                            &map.plan,
-                            Some(lock),
-                        ),
-                        None => shot_render::export::preview_score(&dir, &project, &map.plan),
-                    }
-                    .unwrap_or_else(|e| {
-                        warning = Some(format!("Playing the voice alone: {e}"));
-                        Score::default()
-                    });
+                    let score =
+                        shot_render::export::preview_score_with(&dir, &project, &map.plan, &lock)
+                            .unwrap_or_else(|e| {
+                                warning = Some(format!("Playing the voice alone: {e}"));
+                                Score::default()
+                            });
                     measure(&shared, &measuring, plan_generation, &map, &dir, &score);
                     (shot_render::export::plan_audio(&dir, &map.plan), score)
                 });

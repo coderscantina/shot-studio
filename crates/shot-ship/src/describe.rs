@@ -106,7 +106,7 @@ mod tests {
             transcript(&[("never", 300_000, 600_000), ("so", 65_200_000, 65_500_000)]);
         let description = describe(
             &project,
-            Timeline::evaluate(&project).main(),
+            Timeline::evaluate(&project, &shot_core::Lock::default()).main(),
             &Bookends::default(),
             &transcripts,
         );

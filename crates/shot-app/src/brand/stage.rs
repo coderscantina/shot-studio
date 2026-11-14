@@ -281,7 +281,8 @@ impl Stage {
             (Ok(theme), true) => Some(Arc::new(sample_captions(&scene.project, theme))),
             _ => None,
         };
-        self.map = EditMap::of(&scene.project, View::Edited);
+        // A sample scene has no rules to style it.
+        self.map = EditMap::of(&scene.project, &shot_core::Lock::default(), View::Edited);
         let frame = frame_of(at).min(self.map.frames.saturating_sub(1));
         self.rest = frame;
         self.engine.set_plan(

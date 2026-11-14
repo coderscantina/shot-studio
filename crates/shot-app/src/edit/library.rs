@@ -47,8 +47,6 @@ pub struct Target {
     /// Where a placement lands: the selected words or the playhead, as a timecode.
     pub at: String,
     pub selected: bool,
-    /// Why sounds cannot be placed in this video, when they cannot.
-    pub sounds_blocked: Option<String>,
 }
 
 impl EditScreen {
@@ -64,21 +62,12 @@ impl EditScreen {
             title: folder.project.video.title.clone(),
             at: model::timecode(frame),
             selected: selected.is_some(),
-            sounds_blocked: match (&self.channel, folder.is_migrated()) {
-                (Some(_), true) => None,
-                (Some(_), false) => Some(
-                    "Sounds play from the style rules, which this video doesn't use yet. Run \
-                     shot migrate on it once to place sounds"
-                        .into(),
-                ),
-                (None, _) => Some("Sounds are placed in videos of a channel".into()),
-            },
         }
     }
 
     /// The video's resolved brand, for its stickers.
-    pub(crate) fn library_brand(&self, cx: &App) -> Option<shot_core::Brand> {
-        self.folder.read(cx).lock().map(|lock| lock.brand.clone())
+    pub(crate) fn library_brand(&self, cx: &App) -> shot_core::Brand {
+        self.folder.read(cx).lock().brand.clone()
     }
 
     /// The credits of the downloads the cut uses, for the description. Reads the credit files.
@@ -109,9 +98,6 @@ impl EditScreen {
         let outside = || "The playhead is outside the takes. Move it onto the cut".to_owned();
         match placement {
             Placement::Sound(sound) => {
-                if let Some(blocked) = self.library_target(cx).sounds_blocked {
-                    return Err(blocked);
-                }
                 let (at, t) = moment.ok_or_else(outside)?;
                 let take = self.take_at(at, cx).ok_or_else(outside)?;
                 let folder = self.folder.read(cx);

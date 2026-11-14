@@ -679,7 +679,7 @@ fn preview_of(
     folder: &VideoFolder,
     (overlay, take, chapter, layout): (Overlay, Id, String, shot_core::Layout),
 ) -> Preview {
-    let brand = folder.lock().map(|l| l.brand.clone()).unwrap_or_default();
+    let brand = folder.lock().brand.clone();
     Preview {
         sample: Sample::of_video(
             &folder.dir,

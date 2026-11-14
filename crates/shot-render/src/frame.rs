@@ -506,7 +506,6 @@ mod tests {
             scale: 200,
             range: TimeRange::new(Micros(0), Micros(1_000_000)).unwrap(),
             center: Some(Point { x: 1000, y: 500 }),
-            by: None,
             shape: Default::default(),
         }];
         let shot = Shot {

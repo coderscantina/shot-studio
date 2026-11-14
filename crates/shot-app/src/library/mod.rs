@@ -303,7 +303,7 @@ impl LibraryWindow {
         let brand = self
             .target
             .upgrade()
-            .and_then(|edit| edit.read(cx).library_brand(cx));
+            .map(|edit| edit.read(cx).library_brand(cx));
         let assets = [
             self.folders.sounds(),
             self.folders.music(),

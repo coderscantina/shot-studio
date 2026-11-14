@@ -271,7 +271,7 @@ impl Folders {
     /// The credits of every downloaded asset the cut of the video uses, each once, in the order
     /// first used: placed and automatic sounds, the music bed and cues, and the files of
     /// `b-roll` and `pop` overlays. `lock` is the video's `cut.lock`, when it has one.
-    pub fn credits(&self, cut: &Cut, lock: Option<&Lock>) -> Vec<Credit> {
+    pub fn credits(&self, cut: &Cut, lock: &Lock) -> Vec<Credit> {
         let Some(video) = &self.video else {
             return Vec::new();
         };
@@ -283,10 +283,7 @@ impl Folders {
             .flat_map(|c| &c.takes)
             .flat_map(|t| &t.overlays)
             .map(|o| (&o.template, &o.params));
-        let instances = lock
-            .into_iter()
-            .flat_map(|l| &l.takes)
-            .flat_map(|t| &t.instances);
+        let instances = lock.takes.iter().flat_map(|t| &t.instances);
         let mut params = Vec::new();
         for (template, list) in overlays {
             params.push((template, list));
@@ -312,9 +309,7 @@ impl Folders {
                     _ => None,
                 }),
         );
-        if let Some(lock) = lock {
-            sounds.extend(lock.brand.sounds.iter().map(|(_, sound)| sound.clone()));
-        }
+        sounds.extend(lock.brand.sounds.iter().map(|(_, sound)| sound.clone()));
         for (template, list) in params {
             let name = match template.as_str() {
                 "b-roll" => "file",
@@ -611,7 +606,7 @@ mod tests {
              at=2_000_000 {\n    sfx whoosh\n}\n",
         )
         .unwrap();
-        let credits = folders.credits(&cut, None);
+        let credits = folders.credits(&cut, &Lock::default());
         let titles: Vec<&str> = credits.iter().map(|c| c.title.as_str()).collect();
         assert_eq!(titles, ["Boing", "Facepalm"]);
         let text = description(&credits);

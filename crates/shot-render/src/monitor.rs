@@ -269,13 +269,18 @@ chapter "One" {
         let video = "title \"Live\"\nstatus editing\nformat opinion\n";
         std::fs::write(dir.path().join("video.kdl"), video).unwrap();
         std::fs::write(dir.path().join("cut.kdl"), cut).unwrap();
+        std::fs::write(
+            dir.path().join("cut.lock"),
+            shot_core::Lock::default().to_kdl(),
+        )
+        .unwrap();
         let project = Project {
             video: Video::parse(video).unwrap(),
             script: Script::parse("# t\n").unwrap(),
             format: FormatKind::Opinion.preset(),
             cut: Cut::parse(cut).unwrap(),
         };
-        let timeline = Timeline::evaluate(&project);
+        let timeline = Timeline::evaluate(&project, &shot_core::Lock::default());
         let main = timeline.main();
         let plan = ExportPlan::new(main, 60, |_| MediaId::default());
         let theme = Arc::new(Theme::open(dir.path()).unwrap());

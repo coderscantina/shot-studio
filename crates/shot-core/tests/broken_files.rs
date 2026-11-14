@@ -6,7 +6,7 @@ mod common;
 use std::time::Duration;
 
 use common::within;
-use shot_core::{Cut, Format};
+use shot_core::{Cut, FormatLayer};
 
 const CUT: &str = include_str!("../../../fixtures/examples/cut.kdl");
 const FORMAT: &str = include_str!("../../../fixtures/examples/format.kdl");
@@ -37,7 +37,7 @@ fn broken_cut_and_format_files_are_parsed_or_refused_in_time() {
             CUT,
             (|t: &str| Cut::parse(t).is_ok()) as fn(&str) -> bool,
         ),
-        ("format.kdl", FORMAT, |t| Format::parse(t).is_ok()),
+        ("format.kdl", FORMAT, |t| FormatLayer::parse(t).is_ok()),
     ] {
         for (what, variant) in broken(text) {
             let input = format!("{name}, {what}");

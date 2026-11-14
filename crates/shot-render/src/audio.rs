@@ -544,9 +544,11 @@ mod tests {
             }],
             ..Joins::default()
         };
-        let plan = crate::plan::ExportPlan::new(Timeline::evaluate(&project).main(), 60, |_| {
-            shot_core::MediaId::default()
-        })
+        let plan = crate::plan::ExportPlan::new(
+            Timeline::evaluate(&project, &shot_core::Lock::default()).main(),
+            60,
+            |_| shot_core::MediaId::default(),
+        )
         .with_joins(&joins);
         let mut audio = TimelineAudio::of_plan(&plan, move |_| mic.clone());
         assert_eq!(audio.len(), 2_500 * 48);

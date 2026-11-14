@@ -12,7 +12,7 @@ use gpui::{
 };
 use gpui_component::Root;
 use gpui_component::tooltip::Tooltip;
-use shot_core::{Cut, Status};
+use shot_core::{Cut, Lock, Status};
 
 use crate::board::{self, BoardScreen, ShowCurrent, channel};
 use crate::cut::{CutScreen, GoTo};
@@ -54,10 +54,10 @@ impl Screen {
 
     /// The step of a video outside a channel, from its folder: Record until it has takes, then
     /// Cut while cuts wait for review, then Edit.
-    fn step_of_loose(cut: &Cut) -> Self {
+    fn step_of_loose(cut: &Cut, lock: &Lock) -> Self {
         if cut.chapters.iter().all(|chapter| chapter.takes.is_empty()) {
             Self::Record
-        } else if cut.review_queue().next().is_some() {
+        } else if cut.review_queue(lock).next().is_some() {
             Self::Cut
         } else {
             Self::Edit
@@ -318,8 +318,7 @@ impl Studio {
             return;
         }
         self.folder.update(cx, |folder, cx| {
-            folder.project.script = script.clone();
-            folder.shown.script = script;
+            folder.project.script = script;
             cx.notify();
         });
         self.record
@@ -340,7 +339,7 @@ impl Studio {
         let project = &folder.project;
         let step = match &self.planning {
             Some(_) => Screen::step_of(self.status.unwrap_or(project.video.status)),
-            None => Some(Screen::step_of_loose(&project.cut)),
+            None => Some(Screen::step_of_loose(&project.cut, folder.lock())),
         };
         match step {
             Some(Screen::Edit | Screen::Ship) if untranscribed(folder) => Some(Screen::Cut),
@@ -370,9 +369,6 @@ impl Studio {
             (Screen::Script, None) => Screen::Edit,
             _ => screen,
         };
-        if self.screen == Screen::Cut && screen != Screen::Cut {
-            self.cut.update(cx, |cut, cx| cut.forget_note(cx));
-        }
         self.screen = screen;
         self.refresh_status();
         match screen {
@@ -416,7 +412,6 @@ impl Studio {
         });
         self.edit
             .update(cx, |edit, cx| edit.stepped_history(result.err(), cx));
-        self.cut.update(cx, |cut, cx| cut.forget_note(cx));
     }
 
     /// Opens the channel's theme window on `section`. A video outside a channel has no brand.
@@ -835,6 +830,9 @@ mod tests {
 
     #[test]
     fn a_loose_video_is_on_record_until_it_has_takes() {
-        assert_eq!(Screen::step_of_loose(&Cut::default()), Screen::Record);
+        assert_eq!(
+            Screen::step_of_loose(&Cut::default(), &Lock::default()),
+            Screen::Record
+        );
     }
 }

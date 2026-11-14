@@ -172,19 +172,10 @@ impl fmt::Debug for ContentHash {
 }
 
 impl Timeline {
-    /// A video as `cut.kdl` writes it, before the lock.
-    pub fn evaluate(project: &Project) -> Self {
-        Self::build(project, None)
-    }
-
-    /// A migrated video: the kept ranges less the union of the lock's cuts, with the lock's
+    /// The video's outputs: the kept ranges less the union of the lock's cuts, with the lock's
     /// zooms and overlays next to a person's. The segments, and so the chunk hashes, carry the
     /// lock's resolved values; provenance stays out of them.
-    pub fn styled(project: &Project, lock: &Lock) -> Self {
-        Self::build(project, Some(lock))
-    }
-
-    fn build(project: &Project, lock: Option<&Lock>) -> Self {
+    pub fn evaluate(project: &Project, lock: &Lock) -> Self {
         let captions = project.cut.captions.unwrap_or(project.format.captions);
         let default_layout = project.format.default_layout;
         let default_switch = project.format.layout_switch();
@@ -206,7 +197,7 @@ impl Timeline {
                         .takes
                         .iter()
                         .flat_map(|take| {
-                            let styled = lock.and_then(|l| l.take(&take.take));
+                            let styled = lock.take(&take.take);
                             take_segments(take, default_layout, &default_switch, styled)
                         })
                         .collect(),
@@ -412,7 +403,6 @@ fn take_segments(
                 scale: *scale,
                 range: *range,
                 center: *center,
-                by: None,
                 shape: *shape,
             }),
             Applied::Overlay {
@@ -434,7 +424,7 @@ fn take_segments(
         .iter()
         .filter_map(|edit| match edit {
             RangeEdit::Keep(range) => Some(*range),
-            RangeEdit::Remove { .. } => None,
+            RangeEdit::Remove(_) => None,
         })
         .flat_map(|kept| subtract(kept, &cuts))
         .flat_map(|kept| {
@@ -497,7 +487,7 @@ fn scene_switches(
 ) -> Vec<SceneSwitch> {
     let first = take.ranges.iter().find_map(|r| match r {
         RangeEdit::Keep(range) => Some(range.from()),
-        RangeEdit::Remove { .. } => None,
+        RangeEdit::Remove(_) => None,
     });
     let Some(first) = first else {
         return Vec::new();

@@ -50,9 +50,11 @@ fn video(layout: &str) -> (tempfile::TempDir, Project, ExportPlan) {
         format: FormatKind::Opinion.preset(),
         cut: Cut::parse(&cut).unwrap(),
     };
-    let plan = ExportPlan::new(Timeline::evaluate(&project).main(), 60, |_| {
-        MediaId::default()
-    });
+    let plan = ExportPlan::new(
+        Timeline::evaluate(&project, &shot_core::Lock::default()).main(),
+        60,
+        |_| MediaId::default(),
+    );
     (dir, project, plan)
 }
 

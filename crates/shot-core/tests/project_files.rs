@@ -1,8 +1,8 @@
 use shot_core::{
     CaptionFix, CaptionStyle, Color, ContentHash, CursorStyle, Cut, DerivedKind, DeviceFrame,
-    Format, FormatKind, Framing, Id, Layout, MediaId, Micros, Output, OutputKind, Point, Project,
-    RangeEdit, Script, Segment, Shadow, TakeAt, TimeRange, Timeline, Transcript, Video,
-    WindowStyle, Word,
+    Format, FormatKind, FormatLayer, Framing, Id, Layout, Lock, MediaId, Micros, Output,
+    OutputKind, Point, Project, RangeEdit, Script, Segment, Shadow, TakeAt, TimeRange, Timeline,
+    Transcript, Video, WindowStyle, Word,
 };
 
 const VIDEO: &str = include_str!("../../../fixtures/examples/video.kdl");
@@ -13,11 +13,21 @@ const TOUR_FORMAT: &str = include_str!("../../../fixtures/examples/tour/format.k
 const TOUR_CUT: &str = include_str!("../../../fixtures/examples/tour/cut.kdl");
 const CONTRACT: &str = include_str!("../../../docs/contracts/project-files.md");
 
+/// The settings of `text` over the preset of `kind`.
+fn settings(kind: FormatKind, text: &str) -> Format {
+    kind.preset().resolve([&FormatLayer::parse(text).unwrap()])
+}
+
+/// The timeline of a video whose lock applies nothing.
+fn evaluate(project: &Project) -> Timeline {
+    Timeline::evaluate(project, &Lock::default())
+}
+
 fn project() -> Project {
     Project {
         video: Video::parse(VIDEO).unwrap(),
         script: Script::parse(SCRIPT).unwrap(),
-        format: Format::parse(FORMAT).unwrap(),
+        format: settings(FormatKind::Opinion, FORMAT),
         cut: Cut::parse(CUT).unwrap(),
     }
 }
@@ -28,7 +38,7 @@ fn tour() -> Project {
         video: Video::parse("title \"Search filters\"\nstatus editing\nformat product-tour\n")
             .unwrap(),
         script: Script::parse("# Search filters\n").unwrap(),
-        format: Format::parse(TOUR_FORMAT).unwrap(),
+        format: settings(FormatKind::ProductTour, TOUR_FORMAT),
         cut: Cut::parse(TOUR_CUT).unwrap(),
     }
 }
@@ -85,7 +95,7 @@ fn video_round_trips() {
 #[test]
 fn format_round_trips() {
     assert_in_contract(FORMAT);
-    assert_eq!(Format::parse(FORMAT).unwrap().to_kdl(), FORMAT);
+    assert_eq!(FormatLayer::parse(FORMAT).unwrap().to_kdl(), FORMAT);
 }
 
 #[test]
@@ -114,19 +124,19 @@ fn errors_carry_line_and_column() {
     let err = Cut::parse(&unknown).unwrap_err();
     assert_eq!(
         (err.file, err.line, err.column),
-        ("cut.kdl", 16, 9),
+        ("cut.kdl", 13, 9),
         "{err}"
     );
 
-    let bad_value = CUT.replace("by=retake", "by=sneeze");
+    let bad_value = CUT.replace("33_000_000 by=manual", "33_000_000 by=sneeze");
     let err = Cut::parse(&bad_value).unwrap_err();
-    assert_eq!((err.line, err.column), (23, 46), "{err}");
+    assert_eq!((err.line, err.column), (20, 46), "{err}");
 
     let syntax = VIDEO.replace("status editing", "status \"editing");
     assert_eq!(Video::parse(&syntax).unwrap_err().line, 2);
 
     let unknown_take = CUT.replace("clip t02", "clip t09");
-    assert_eq!(Cut::parse(&unknown_take).unwrap_err().line, 49);
+    assert_eq!(Cut::parse(&unknown_take).unwrap_err().line, 43);
 }
 
 #[test]
@@ -145,7 +155,7 @@ fn a_file_from_a_newer_version_is_refused_with_both_versions() {
         assert!(parse(&format!("version 0\n{text}")).is_err());
     }
     check(VIDEO, Video::parse);
-    check(FORMAT, Format::parse);
+    check(FORMAT, FormatLayer::parse);
     check(CUT, Cut::parse);
     check("colors accent=\"#ff7a59\"\n", shot_core::Brand::parse);
     // Version 1 is the default, so the canonical form leaves it out.
@@ -159,19 +169,35 @@ fn a_file_from_a_newer_version_is_refused_with_both_versions() {
 fn tour_examples_round_trip() {
     assert_in_contract(TOUR_FORMAT);
     assert_in_contract(TOUR_CUT);
-    assert_eq!(Format::parse(TOUR_FORMAT).unwrap().to_kdl(), TOUR_FORMAT);
+    assert_eq!(
+        FormatLayer::parse(TOUR_FORMAT).unwrap().to_kdl(),
+        TOUR_FORMAT
+    );
     assert_eq!(Cut::parse(TOUR_CUT).unwrap().to_kdl(), TOUR_CUT);
 }
 
 #[test]
-fn review_fix_zoom_and_effect_nodes_report_their_line() {
-    let outside = CUT.replace(
-        "ignore from=45_000_000 to=46_100_000",
-        "ignore from=30_000_000 to=32_000_000",
+fn old_fix_zoom_and_effect_nodes_report_their_line() {
+    let rule_cut = CUT.replace("33_000_000 by=manual", "33_000_000 by=retake");
+    let err = Cut::parse(&rule_cut).unwrap_err();
+    assert_eq!((err.line, err.column), (20, 9), "{err}");
+    assert!(
+        err.message
+            .contains("`remove by=retake` is from before style rules"),
+        "{err}"
     );
-    let err = Cut::parse(&outside).unwrap_err();
-    assert_eq!((err.line, err.column), (25, 9), "{err}");
-    assert!(err.message.contains("kept material"), "{err}");
+    let review = CUT.replace(
+        "        zoom 112 from=8_000_000",
+        "        review from=9_800_000 to=10_400_000 by=filler\n        zoom 112 from=8_000_000",
+    );
+    assert_eq!(Cut::parse(&review).unwrap_err().line, 13);
+    let rule_zoom = TOUR_CUT.replace("y=640", "y=640 by=click");
+    assert!(
+        Cut::parse(&rule_zoom)
+            .unwrap_err()
+            .message
+            .contains("`zoom by=click`")
+    );
 
     let fix_twice = CUT.replace("fix \"jeep UI\" \"gpui\"", "fix \"LARA VEL\" \"gpui\"");
     assert_eq!(Cut::parse(&fix_twice).unwrap_err().line, 5);
@@ -179,23 +205,20 @@ fn review_fix_zoom_and_effect_nodes_report_their_line() {
     let half_center = TOUR_CUT.replace(" y=640", "");
     assert_eq!(Cut::parse(&half_center).unwrap_err().line, 4);
 
-    let trigger_twice = TOUR_FORMAT.replace("auto-zoom click typing", "auto-zoom click click");
-    assert_eq!(Format::parse(&trigger_twice).unwrap_err().line, 13);
-
     let bad_color = TOUR_FORMAT.replace("\"#141821\"", "\"#14182\"");
-    let err = Format::parse(&bad_color).unwrap_err();
-    assert_eq!((err.line, err.column), (17, 42), "{err}");
+    let err = FormatLayer::parse(&bad_color).unwrap_err();
+    assert_eq!((err.line, err.column), (7, 42), "{err}");
 }
 
 #[test]
 fn caption_fixes_change_only_burned_in_chunks() {
     let mut project = project();
-    let before = Timeline::evaluate(&project);
+    let before = evaluate(&project);
     project.cut.caption_fixes.push(CaptionFix {
         heard: "jee pee you eye".to_owned(),
         said: "gpui".to_owned(),
     });
-    let after = Timeline::evaluate(&project);
+    let after = evaluate(&project);
 
     assert_eq!(main_keys(&before), main_keys(&after));
     assert_ne!(derived_keys(&before, 1), derived_keys(&after, 1));
@@ -204,24 +227,24 @@ fn caption_fixes_change_only_burned_in_chunks() {
     // With captions off nothing is burned in, so the fixes do not count.
     let mut off = project.clone();
     off.cut.derived[1].captions = Some(CaptionStyle::Off);
-    let off_before = Timeline::evaluate(&off);
+    let off_before = evaluate(&off);
     off.cut.caption_fixes.clear();
     assert_eq!(
         derived_keys(&off_before, 2),
-        derived_keys(&Timeline::evaluate(&off), 2)
+        derived_keys(&evaluate(&off), 2)
     );
 }
 
 #[test]
 fn cursor_settings_reach_only_chunks_that_show_the_screen() {
     let mut project = project();
-    let before = main_keys(&Timeline::evaluate(&project));
+    let before = main_keys(&evaluate(&project));
     project.format.cursor = Some(CursorStyle {
         size: 140,
         smoothing: Micros(120_000),
         ripple: true,
     });
-    let after = main_keys(&Timeline::evaluate(&project));
+    let after = main_keys(&evaluate(&project));
 
     let layouts: Vec<Layout> = before.iter().map(|(l, _)| *l).collect();
     assert!(layouts.contains(&Layout::Face) && layouts.contains(&Layout::Split));
@@ -240,56 +263,47 @@ fn window_style_reaches_only_the_window_layout() {
         frame: DeviceFrame::Macbook,
     };
     let mut opinion = project();
-    let before = main_keys(&Timeline::evaluate(&opinion));
+    let before = main_keys(&evaluate(&opinion));
     opinion.format.window = Some(style);
-    assert_eq!(before, main_keys(&Timeline::evaluate(&opinion)));
+    assert_eq!(before, main_keys(&evaluate(&opinion)));
 
     let mut tour = tour();
-    let before = main_keys(&Timeline::evaluate(&tour));
+    let before = main_keys(&evaluate(&tour));
     assert_eq!(before[0].0, Layout::Window);
     tour.format.window = Some(style);
-    assert_ne!(before, main_keys(&Timeline::evaluate(&tour)));
+    assert_ne!(before, main_keys(&evaluate(&tour)));
 }
 
 #[test]
-fn zoom_center_and_motion_are_hashed_but_provenance_is_not() {
+fn zoom_center_shape_and_motion_are_hashed() {
     let tour = tour();
-    let before = main_keys(&Timeline::evaluate(&tour));
-
-    let mut unsigned = tour.clone();
-    for zoom in &mut unsigned.cut.chapters[0].takes[0].zooms {
-        zoom.by = None;
-    }
-    assert_eq!(before, main_keys(&Timeline::evaluate(&unsigned)));
+    let before = main_keys(&evaluate(&tour));
 
     let mut moved = tour.clone();
     moved.cut.chapters[0].takes[0].zooms[0].center = Some(Point { x: 10, y: 10 });
-    assert_ne!(before, main_keys(&Timeline::evaluate(&moved)));
+    assert_ne!(before, main_keys(&evaluate(&moved)));
 
     let mut instant = tour;
     instant.format.zoom_motion = None;
-    let instant_keys = main_keys(&Timeline::evaluate(&instant));
+    let instant_keys = main_keys(&evaluate(&instant));
     assert_ne!(before, instant_keys);
 
     // Framing and ramps are hashed where set; a default shape leaves every key as it was.
     let mut framed = instant.clone();
     framed.cut.chapters[0].takes[0].zooms[0].shape.framing = Framing::TopLeft;
-    assert_ne!(instant_keys, main_keys(&Timeline::evaluate(&framed)));
+    assert_ne!(instant_keys, main_keys(&evaluate(&framed)));
     let mut ramped = instant;
     ramped.cut.chapters[0].takes[0].zooms[2].shape.ramp_in = Some(Micros(300_000));
-    let ramped_keys = main_keys(&Timeline::evaluate(&ramped));
+    let ramped_keys = main_keys(&evaluate(&ramped));
     assert_ne!(instant_keys, ramped_keys);
 }
 
 #[test]
-fn review_items_and_music_change_no_hashes() {
+fn the_music_bed_changes_no_hashes() {
     let mut project = project();
-    let before = Timeline::evaluate(&project);
+    let before = evaluate(&project);
     project.cut.music = None;
-    for take in project.cut.chapters.iter_mut().flat_map(|c| &mut c.takes) {
-        take.reviews.clear();
-    }
-    let after = Timeline::evaluate(&project);
+    let after = evaluate(&project);
     assert_eq!(main_keys(&before), main_keys(&after));
     assert_eq!(derived_keys(&before, 1), derived_keys(&after, 1));
 }
@@ -297,13 +311,13 @@ fn review_items_and_music_change_no_hashes() {
 #[test]
 fn changing_one_chapter_changes_only_its_hashes() {
     let mut project = project();
-    let before = Timeline::evaluate(&project);
+    let before = evaluate(&project);
 
-    let RangeEdit::Remove { range, .. } = project.cut.chapters[1].takes[0].ranges[1] else {
+    let RangeEdit::Remove(range) = project.cut.chapters[1].takes[0].ranges[1] else {
         panic!("the example removes a retake in chapter two");
     };
     project.cut.chapters[1].takes[0].ranges[1] = RangeEdit::Keep(range);
-    let after = Timeline::evaluate(&project);
+    let after = evaluate(&project);
 
     assert_eq!(chapter_keys(&before, 0), chapter_keys(&after, 0));
     assert_ne!(chapter_keys(&before, 1), chapter_keys(&after, 1));
@@ -312,7 +326,7 @@ fn changing_one_chapter_changes_only_its_hashes() {
 
 #[test]
 fn a_take_recorded_again_under_its_old_id_gets_new_keys() {
-    let timeline = Timeline::evaluate(&project());
+    let timeline = evaluate(&project());
     let main = timeline.main();
     let segment = &main.chapters[0].segments[0];
     let old = MediaId::of(b"screen.mp4 1000 bytes, modified at 1");
@@ -323,7 +337,7 @@ fn a_take_recorded_again_under_its_old_id_gets_new_keys() {
 
 #[test]
 fn derived_cut_selects_main_material() {
-    let timeline = Timeline::evaluate(&project());
+    let timeline = evaluate(&project());
     let short = &timeline.outputs[1];
     assert_eq!(short.kind, OutputKind::Derived(DerivedKind::Short));
     assert_eq!(short.kind.aspect(), (9, 16));
@@ -345,12 +359,16 @@ fn derived_cut_selects_main_material() {
     );
     assert_eq!(short.chapters[0].segments[0].zooms.len(), 1);
 
-    let main_hook = &timeline.main().chapters[0].segments[1];
-    assert_eq!(main_hook.source, short.chapters[0].segments[0].source);
+    // The same frames key apart in the main cut and the Short.
+    let clip = &short.chapters[0].segments[0];
+    let main_hook = Segment {
+        source: clip.source,
+        ..timeline.main().chapters[0].segments[0].clone()
+    };
     let media = MediaId::default();
     assert_ne!(
-        key(timeline.main(), main_hook, media),
-        key(short, &short.chapters[0].segments[0], media)
+        key(timeline.main(), &main_hook, media),
+        key(short, clip, media)
     );
 
     let x_clip = &timeline.outputs[2];
@@ -409,7 +427,7 @@ fn text_between_a_chapter_heading_and_its_first_beat_is_the_chapter_note() {
 #[test]
 fn deleting_words_changes_only_the_hashes_of_its_chapter() {
     let mut project = project();
-    let before = Timeline::evaluate(&project);
+    let before = evaluate(&project);
 
     let mut transcript = Transcript::new(Id::new("t01").unwrap());
     for start in (12_000_000..13_000_000).step_by(500_000) {
@@ -430,7 +448,7 @@ fn deleting_words_changes_only_the_hashes_of_its_chapter() {
         .cut
         .delete_words(at, &transcript, selection)
         .unwrap();
-    let after = Timeline::evaluate(&project);
+    let after = evaluate(&project);
 
     assert_eq!(chapter_keys(&before, 0), chapter_keys(&after, 0));
     assert_ne!(chapter_keys(&before, 1), chapter_keys(&after, 1));
@@ -452,9 +470,9 @@ fn caption_looks_and_line_breaks_round_trip() {
     assert_eq!(brand.to_kdl(), BRAND_CAPTIONS);
     assert_eq!(brand.captions.words, Some(4));
     let format = FORMAT.replace("captions word-pop\n", FORMAT_CAPTIONS);
-    let parsed = Format::parse(&format).unwrap();
+    assert_eq!(FormatLayer::parse(&format).unwrap().to_kdl(), format);
+    let parsed = settings(FormatKind::Opinion, &format);
     assert_eq!(parsed.captions, CaptionStyle::Karaoke);
-    assert_eq!(parsed.to_kdl(), format);
     let design = brand
         .captions
         .merge(&parsed.caption_look)
@@ -475,9 +493,9 @@ fn caption_looks_and_line_breaks_round_trip() {
 #[test]
 fn a_caption_look_or_line_break_changes_only_burned_in_chunks() {
     let mut project = project();
-    let before = Timeline::evaluate(&project);
+    let before = evaluate(&project);
     project.format.caption_look.size = Some(130);
-    let after = Timeline::evaluate(&project);
+    let after = evaluate(&project);
     assert_eq!(main_keys(&before), main_keys(&after));
     assert_ne!(derived_keys(&before, 1), derived_keys(&after, 1));
     project.cut.caption_breaks.push(shot_core::CaptionBreak {
@@ -485,7 +503,7 @@ fn a_caption_look_or_line_break_changes_only_burned_in_chunks() {
         at: Micros(1_000_000),
         split: true,
     });
-    let split = Timeline::evaluate(&project);
+    let split = evaluate(&project);
     assert_eq!(main_keys(&after), main_keys(&split));
     assert_ne!(derived_keys(&after, 1), derived_keys(&split, 1));
 }
@@ -498,7 +516,7 @@ fn the_record_node_round_trips_and_switches_tracks_per_video() {
     assert_in_contract(RECORD_LAYER);
     let layer = shot_core::FormatLayer::parse(RECORD_LAYER).unwrap();
     assert_eq!(layer.to_kdl(), RECORD_LAYER);
-    let channel = Format::parse(FORMAT).unwrap();
+    let channel = settings(FormatKind::Opinion, FORMAT);
     assert_eq!(channel.inputs(), shot_core::Inputs::default());
     let video = channel.resolve([&layer]);
     let inputs = video.inputs();
@@ -508,7 +526,7 @@ fn the_record_node_round_trips_and_switches_tracks_per_video() {
         full.ends_with(RECORD_LAYER),
         "written after the settings:\n{full}"
     );
-    assert_eq!(Format::parse(&full).unwrap(), video);
+    assert_eq!(settings(FormatKind::Opinion, &full), video);
     assert!(shot_core::FormatLayer::parse("record screen=#false\n").is_err());
 }
 

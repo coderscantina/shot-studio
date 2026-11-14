@@ -1,4 +1,4 @@
-//! How a migrated video's pieces join: the intro and outro placed around and between its
+//! How a video's pieces join: the intro and outro placed around and between its
 //! segments, and transitions at chapter edges and bookend joins ([0021], [0023]). Pure, no IO:
 //! the export measures bumpers and hands in [`Joins`].
 //!
@@ -616,7 +616,9 @@ chapter "Three" {
             format: FormatKind::Opinion.preset(),
             cut: Cut::parse(cut).unwrap(),
         };
-        Timeline::evaluate(&project).main().clone()
+        Timeline::evaluate(&project, &shot_core::Lock::default())
+            .main()
+            .clone()
     }
 
     fn join(at: u64, target: Target, kind: TransitionKind) -> Join {

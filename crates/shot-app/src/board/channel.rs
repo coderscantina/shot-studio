@@ -101,7 +101,7 @@ pub fn new_video(repo: &Path, title: &str, format: FormatKind) -> Result<String,
     let files = BTreeMap::from([
         ("video.kdl".to_owned(), video.to_kdl()),
         ("script.md".to_owned(), first_script(&video.title)),
-        // A new video starts migrated, like `shot migrate` leaves one: nothing differs from the
+        // A new video starts on style rules, like `shot migrate` leaves one: nothing differs from the
         // channel's format yet and the lock of an empty cut is empty.
         ("format.kdl".to_owned(), String::new()),
         (LOCK_FILE.to_owned(), Lock::default().to_kdl()),

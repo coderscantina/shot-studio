@@ -1,5 +1,6 @@
-//! `shot overlays`: run the overlay rules, place bleeps and blurs from the transcript, fill a
-//! b-roll slot, and check every overlay against its template.
+//! `shot overlays`: place bleeps and blurs from the transcript, fill a b-roll slot, and check
+//! every overlay against its template. Link cards, highlights and b-roll slots for what a take
+//! shows are style rules.
 
 use std::path::PathBuf;
 
@@ -19,9 +20,6 @@ pub struct OverlaysArgs {
 
 #[derive(Subcommand)]
 enum OverlaysAction {
-    /// Add link cards for URLs said, b-roll slots over idle screen and B markers, and highlights
-    /// where you read out text on screen.
-    Find,
     /// Replace the voice with a tone where the take says a phrase.
     Bleep(Phrase),
     /// Blur where a phrase shows on screen, from when the take says it.
@@ -57,24 +55,12 @@ struct Phrase {
 }
 
 pub fn run(args: OverlaysArgs) -> Result<(), String> {
-    let _lock = crate::lock(&args.video)?;
-    let project = crate::export::load(&args.video)?;
+    let (_lock, opened) = crate::open(&args.video)?;
+    let project = opened.project;
     let take = |id: &str| Id::new(id).ok_or_else(|| format!("{id} is not a take id"));
     let micros = |seconds: f64| Micros((seconds * 1e6).round() as u64);
     let fail = |e: overlay_rules::OverlayRuleError| e.to_string();
     let cut = match args.action {
-        OverlaysAction::Find => {
-            crate::migrate::refuse_if_migrated(
-                &args.video,
-                "link cards, highlights and b-roll slots",
-            )?;
-            let (cut, added) = overlay_rules::run(&args.video, &project.cut).map_err(fail)?;
-            println!(
-                "{} link cards, {} b-roll slots, {} highlights added",
-                added.link_cards, added.b_roll, added.highlights
-            );
-            cut
-        }
         OverlaysAction::Bleep(p) => overlay_rules::redact(
             &args.video,
             &project.cut,

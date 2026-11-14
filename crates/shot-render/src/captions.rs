@@ -548,8 +548,8 @@ fn escape(text: &str) -> String {
 mod tests {
     use super::*;
     use shot_core::{
-        Chapter, Cut, Format, FormatKind, MediaId, Project, RangeEdit, RemovedBy, RuleKind, Script,
-        TakeEdit, TimeRange, Timeline, Video, Word,
+        Chapter, Cut, Format, FormatKind, MediaId, Project, RangeEdit, Script, TakeEdit, TimeRange,
+        Timeline, Video, Word,
     };
 
     fn range(from: u64, to: u64) -> TimeRange {
@@ -583,7 +583,6 @@ mod tests {
                         take: Id::new("t01").unwrap(),
                         ranges,
                         layouts: Vec::new(),
-                        reviews: Vec::new(),
                         zooms: Vec::new(),
                         overlays: Vec::new(),
                     }],
@@ -591,7 +590,7 @@ mod tests {
                 ..Cut::default()
             },
         };
-        let timeline = Timeline::evaluate(&project);
+        let timeline = Timeline::evaluate(&project, &shot_core::Lock::default());
         ExportPlan::new(timeline.main(), 60, |_| MediaId::of(b"t01"))
     }
 
@@ -609,10 +608,7 @@ mod tests {
         )]);
         let plan = plan(vec![
             RangeEdit::Keep(range(0, 300_000)),
-            RangeEdit::Remove {
-                range: range(300_000, 1_000_000),
-                by: RemovedBy::Rule(RuleKind::Filler),
-            },
+            RangeEdit::Remove(range(300_000, 1_000_000)),
             RangeEdit::Keep(range(1_000_000, 2_000_000)),
         ]);
         let fixes = [CaptionFix {

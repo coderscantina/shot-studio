@@ -115,7 +115,7 @@ pub fn with_sound(
         .text(shot_core::Attr::Text)
         .unwrap_or_default()
         .to_owned();
-    let cut = crate::style::with_override(cut, take, ElementKind::Word, word.t, |o| {
+    let cut = cut.with_override(take, ElementKind::Word, word.t, |o| {
         o.effects
             .retain(|e| !matches!(e, OverrideEffect::Set(Effect::Sfx { .. })));
         o.effects

@@ -11,8 +11,6 @@ use shot_ship::oauth::{self, AuthError, Client, Endpoints, Keychain};
 use shot_ship::ship::{self, Channel, Destination, Options, PlannedCut, ShipError, Step};
 use shot_ship::youtube::{Privacy, YouTube, YouTubeError};
 
-use crate::export::load;
-
 #[derive(Args)]
 pub struct CheckArgs {
     /// The video folder.
@@ -29,8 +27,7 @@ pub struct CheckArgs {
 
 /// Prints only the problems; a cut that passes prints nothing and exits 0.
 pub fn check(args: CheckArgs) -> Result<(), String> {
-    crate::restyle::refresh(&args.video)?;
-    let project = load(&args.video)?;
+    let project = crate::open(&args.video)?.1.project;
     let export = args
         .out
         .unwrap_or_else(|| export_path(&args.video, &args.cut));
@@ -66,8 +63,7 @@ pub fn thumbnails(args: ThumbnailsArgs) -> Result<(), String> {
         println!("thumbnail is {}", to.display());
         return Ok(());
     }
-    crate::restyle::refresh(&args.video)?;
-    let project = load(&args.video)?;
+    let project = crate::open(&args.video)?.1.project;
     let found = shot_ship::thumbnails::find(&args.video, &project, args.count)
         .map_err(|e| e.to_string())?;
     if found.is_empty() {
@@ -99,8 +95,7 @@ pub struct DescribeArgs {
 }
 
 pub fn describe(args: DescribeArgs) -> Result<(), String> {
-    crate::restyle::refresh(&args.video)?;
-    let project = load(&args.video)?;
+    let project = crate::open(&args.video)?.1.project;
     let transcripts = transcripts(&args.video, &project)?;
     let timeline = shot_ship::lock::timeline(&args.video, &project).map_err(|e| e.to_string())?;
     let bookends = shot_ship::lock::bookends(&args.video, &project).map_err(|e| e.to_string())?;
@@ -146,8 +141,7 @@ fn parse_privacy(value: &str) -> Result<Privacy, String> {
 /// Renders and checks every cut, refuses on problems unless `--force`, then uploads the main cut
 /// and the Shorts, keeps X clips as files, moves the card to shipped and tags the release.
 pub fn run_ship(args: ShipArgs) -> Result<(), String> {
-    crate::restyle::refresh(&args.video)?;
-    let project = load(&args.video)?;
+    let project = crate::open(&args.video)?.1.project;
     let transcripts = transcripts(&args.video, &project)?;
     // Everything a real ship needs besides the renders is checked before the minutes of
     // rendering: the card to move and the OAuth client.

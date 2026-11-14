@@ -4,37 +4,40 @@
 //!
 //! [0024]: ../../../docs/decisions/0024-content-stays-in-cut-kdl-style-moves-to-the-lock.md
 
+// `keyword_enum!` writes helpers the old grammar has no use for.
+#[allow(dead_code)]
+pub(crate) mod old;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use crate::lock::{Applied, Instance, Lock};
 use crate::timeline::Timeline;
 use crate::{
-    Attr, AttrValue, AutoZoom, Brand, ContentHash, Cut, Decision, Effect, EffectKey, ElementKind,
-    Elements, Filter, Format, FormatKind, FormatLayer, Id, Micros, Overlay, Override,
-    OverrideEffect, Project, RangeEdit, RemovedBy, Rule, RuleBody, RuleKind, Selector, StyleError,
-    StyleInput, StyleSheet, TakeEdit, Target, TimeRange, Zoom, ZoomBy, ZoomShape, ZoomTrigger,
-    build,
+    Attr, AttrValue, Brand, ContentHash, Cut, Decision, Effect, EffectKey, ElementKind, Elements,
+    Filter, Format, FormatKind, FormatLayer, Id, Micros, Overlay, Override, OverrideEffect,
+    ParseError, Project, RangeEdit, Rule, RuleBody, Script, Selector, StyleError, StyleInput,
+    StyleSheet, TakeEdit, Target, TimeRange, Video, Zoom, ZoomShape, build,
 };
+use old::{OldBlock, RuleKind, Settings, ZoomBy, ZoomTrigger};
 
 /// The pacing's punch-in on emphasis, and the shortest it holds.
-pub const EMPHASIS_ZOOM: u16 = 112;
-pub const EMPHASIS_HOLD: Micros = Micros(1_000_000);
+const EMPHASIS_ZOOM: u16 = 112;
+const EMPHASIS_HOLD: Micros = Micros(1_000_000);
 /// How long before a click or typing an auto zoom starts.
-pub const ZOOM_LEAD: Micros = Micros(500_000);
+const ZOOM_LEAD: Micros = Micros(500_000);
 /// How long a link card shows from the word that says the URL.
-pub const LINK_CARD_FOR: Micros = Micros(6_000_000);
+const LINK_CARD_FOR: Micros = Micros(6_000_000);
 /// Idle screen at least this long gets a b-roll slot, a B marker one this long.
-pub const B_ROLL_IDLE: Micros = Micros(8_000_000);
-pub const B_ROLL_MARKER: Micros = Micros(4_000_000);
+const B_ROLL_IDLE: Micros = Micros(8_000_000);
+const B_ROLL_MARKER: Micros = Micros(4_000_000);
 
 /// The overlay templates the overlay rules wrote into `cut.kdl` before the lock.
 const RULE_TEMPLATES: [&str; 3] = ["link-card", "highlight", "b-roll"];
 
-/// The style rules a format's settings stand for: the auto-cut rules with the pacing's breath,
+/// The style rules the old settings stand for: the auto-cut rules with the pacing's breath,
 /// the punch-in on emphasis, the auto-zoom triggers, link cards, highlights and b-roll slots.
-/// The shipped presets carry exactly these.
-pub fn implied_rules(format: &Format) -> StyleSheet {
+fn implied_rules(format: &Settings) -> StyleSheet {
     let auto = &format.auto_cut;
     let breath = format.pacing.breath();
     let cut = |breath| Effect::Cut {
@@ -144,70 +147,35 @@ pub fn implied_rules(format: &Format) -> StyleSheet {
     sheet
 }
 
-/// The jump-cut punch-in of the talking formats: 112% on the kept stretch after every other
-/// silence cut. `hold` reaches past the silence into the speech that follows.
-pub const JUMP_CUT_EVERY: u32 = 2;
-pub const JUMP_CUT_HOLD: Micros = Micros(3_000_000);
-
-/// The rules a shipped preset carries: those its settings stand for, and for the talking
-/// formats (`reaction`, `opinion`) the punch-in on every other jump cut. [`implied_rules`] stays
-/// without it, so a migrated video keeps the frames it had.
-pub fn preset_rules(kind: FormatKind) -> StyleSheet {
-    let mut sheet = implied_rules(&kind.preset());
-    if matches!(kind, FormatKind::Reaction | FormatKind::Opinion) {
-        let selector = Selector {
-            target: Target::Kind(ElementKind::Silence),
-            filters: vec![
-                Filter::Min(kind.preset().auto_cut.silence.min),
-                Filter::Every(JUMP_CUT_EVERY),
-            ],
-        };
-        let rule = Rule {
-            selector,
-            body: RuleBody::Effects(vec![Effect::Zoom {
-                scale: EMPHASIS_ZOOM,
-                hold: JUMP_CUT_HOLD,
-                lead: Micros(0),
-                shape: ZoomShape::default(),
-            }]),
-        };
-        let at = sheet
-            .rules
-            .iter()
-            .position(|r| r.selector.target == Target::Kind(ElementKind::Emphasis))
-            .map_or(sheet.rules.len(), |i| i + 1);
-        sheet.rules.insert(at, rule);
-    }
-    sheet
+/// Whether a video's `format.kdl` and `cut.kdl` hold what was written before the lock. A file
+/// that does not parse either way is not old: its own parse reports why.
+pub fn written_before_lock(format: &str, cut: &str) -> bool {
+    let old_format = FormatLayer::parse_old(format).is_ok_and(|(_, old)| !old.is_empty());
+    let old_cut = Cut::parse_old(cut)
+        .is_ok_and(|(_, blocks)| blocks.iter().any(|b| *b != OldBlock::default()));
+    old_format || old_cut
 }
 
-/// Whether `cut.kdl` still holds what rules wrote: rule removals, the review queue or rule
-/// zooms. Such a video is migrated before a build may write its lock.
-pub fn has_rule_nodes(cut: &Cut) -> bool {
-    cut.chapters.iter().flat_map(|c| &c.takes).any(|block| {
-        !block.reviews.is_empty()
-            || block.zooms.iter().any(|z| z.by.is_some())
-            || block.ranges.iter().any(|r| {
-                matches!(
-                    r,
-                    RangeEdit::Remove {
-                        by: RemovedBy::Rule(_),
-                        ..
-                    }
-                )
-            })
-    })
+/// A format layer read without the old settings it may still hold, and whether it held any.
+/// Those settings never reached a video with a lock, so dropping them changes no frame.
+pub fn without_old_settings(text: &str) -> Result<(FormatLayer, bool), ParseError> {
+    let (layer, old) = FormatLayer::parse_old(text)?;
+    Ok((layer, !old.is_empty()))
 }
 
-/// What [`migrate`] reads. The project is the video as written before the lock; the rest is
-/// what a build reads, with the channel's format as it is on disk.
+/// What [`migrate`] reads: the video's files as written before the lock, and what a build
+/// reads besides.
 #[derive(Debug, Clone, Copy)]
 pub struct MigrateInput<'a> {
-    pub project: &'a Project,
+    pub video: &'a Video,
+    pub script: &'a Script,
+    /// `format.kdl`, a full format before the lock.
+    pub format: &'a str,
+    pub cut: &'a str,
     pub imported: &'a [Brand],
     pub brand: &'a Brand,
-    /// The channel's `formats/<format>.kdl`.
-    pub channel: &'a FormatLayer,
+    /// The channel's `formats/<format>.kdl` as written, empty when it has none.
+    pub channel: &'a str,
     pub elements: &'a [Elements],
     pub assets: &'a BTreeMap<String, ContentHash>,
 }
@@ -218,7 +186,8 @@ pub struct Migration {
     pub cut: Cut,
     /// The video's `format.kdl`: only what differs from the channel's.
     pub video: FormatLayer,
-    /// The channel's format with the default rules of its settings, when it had no rules yet.
+    /// The channel's format to write back: with the rules of its settings when it had no rules
+    /// yet, and without the old settings it held. `None` when it stays as it is.
     pub channel: Option<FormatLayer>,
     /// The video's settings after the cascade, for its [`Project`].
     pub format: Format,
@@ -251,6 +220,7 @@ impl fmt::Display for Report {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MigrateError {
+    Parse(ParseError),
     Style(StyleError),
     /// The migrated video would not show what the old one did.
     Differs(String),
@@ -259,6 +229,7 @@ pub enum MigrateError {
 impl fmt::Display for MigrateError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Parse(e) => e.fmt(f),
             Self::Style(e) => e.fmt(f),
             Self::Differs(what) => write!(f, "the migrated video would differ: {what}"),
         }
@@ -266,6 +237,12 @@ impl fmt::Display for MigrateError {
 }
 
 impl std::error::Error for MigrateError {}
+
+impl From<ParseError> for MigrateError {
+    fn from(e: ParseError) -> Self {
+        Self::Parse(e)
+    }
+}
 
 impl From<StyleError> for MigrateError {
     fn from(e: StyleError) -> Self {
@@ -285,25 +262,37 @@ impl From<StyleError> for MigrateError {
 ///
 /// [migration mapping]: ../../../docs/contracts/project-files.md#migration-of-todays-nodes
 pub fn migrate(input: &MigrateInput<'_>) -> Result<Migration, MigrateError> {
-    let old = input.project;
-    let kind = old.video.format;
-    let channel = input.channel.rules.rules.is_empty().then(|| {
-        let mut layer = input.channel.clone();
-        layer.rules = implied_rules(&kind.preset().resolve([input.channel]));
+    let kind = input.video.format;
+    let (old_cut, blocks) = Cut::parse_old(input.cut)?;
+    let old = OldCut {
+        cut: old_cut,
+        blocks,
+    };
+    let (video_file, video_old) = FormatLayer::parse_old(input.format)?;
+    let (channel_file, channel_old) = FormatLayer::parse_old(input.channel)?;
+    let channel = (channel_file.rules.rules.is_empty() || !channel_old.is_empty()).then(|| {
+        let mut layer = channel_file.clone();
+        if layer.rules.rules.is_empty() {
+            layer.rules = implied_rules(&Settings::preset(kind).layered(&channel_old));
+        }
         layer
     });
-    let channel_layer = channel.as_ref().unwrap_or(input.channel);
+    let channel_layer = channel.as_ref().unwrap_or(&channel_file);
     let channel_format = kind.preset().resolve([channel_layer]);
-    let mut video = settings_diff(&old.format, &channel_format);
-    video.rules = rules_diff(&implied_rules(&old.format), &channel_layer.rules);
+    let old_format = full_format(kind, &video_file);
+    let mut video = settings_diff(&old_format, &channel_format);
+    video.rules = rules_diff(
+        &implied_rules(&Settings::full(kind, &video_old)),
+        &channel_layer.rules,
+    );
     let format = channel_format.resolve([&video]);
 
     let mut m = Migrator {
         input,
         channel: channel_layer,
         video: &video,
-        old: &old.cut,
-        cut: content(&old.cut),
+        old: &old,
+        cut: content(&old),
         overrides: BTreeMap::new(),
         report: Report::default(),
     };
@@ -314,14 +303,15 @@ pub fn migrate(input: &MigrateInput<'_>) -> Result<Migration, MigrateError> {
     let (cut, report) = m.finish();
 
     let lock = build(&style_input(input, channel_layer, &video, &cut))?;
-    let migrated = Project {
-        cut: cut.clone(),
+    let project = |format: &Format, cut: &Cut| Project {
+        video: input.video.clone(),
+        script: input.script.clone(),
         format: format.clone(),
-        ..old.clone()
+        cut: cut.clone(),
     };
     same_frames(
-        &Timeline::evaluate(old),
-        &Timeline::styled(&migrated, &lock),
+        &Timeline::evaluate(&project(&old_format, &old.cut), &Lock::default()),
+        &Timeline::evaluate(&project(&format, &cut), &lock),
     )
     .map_err(MigrateError::Differs)?;
     Ok(Migration {
@@ -332,6 +322,21 @@ pub fn migrate(input: &MigrateInput<'_>) -> Result<Migration, MigrateError> {
         lock,
         report,
     })
+}
+
+/// The settings of a full `format.kdl` from before the lock: what it sets, the preset's where
+/// it leaves a required setting out, and no product setting it does not name.
+fn full_format(kind: FormatKind, file: &FormatLayer) -> Format {
+    let bare = Format {
+        zoom_motion: None,
+        cursor: None,
+        keystrokes: None,
+        window: None,
+        layout_switch: None,
+        inputs: None,
+        ..kind.preset()
+    };
+    file.apply(&bare)
 }
 
 fn style_input<'a>(
@@ -367,19 +372,11 @@ fn settings_diff(old: &Format, channel: &Format) -> FormatLayer {
     let caption_look = old.caption_look.diff(&channel.caption_look);
     FormatLayer {
         prompter: differs(old.prompter, channel.prompter),
-        pacing: differs(old.pacing, channel.pacing),
         layouts: differs(layouts(old), layouts(channel)),
         // A look needs its node, which names the style.
         captions: (old.captions != channel.captions || !caption_look.is_empty())
             .then_some(old.captions),
         caption_look,
-        auto_cut: differs(old.auto_cut.clone(), channel.auto_cut.clone()),
-        auto_zoom: (old.auto_zoom != channel.auto_zoom).then(|| {
-            old.auto_zoom.clone().unwrap_or_else(|| AutoZoom {
-                triggers: Vec::new(),
-                ..channel.auto_zoom.clone().expect("differs from none")
-            })
-        }),
         zoom_motion: (old.zoom_motion != channel.zoom_motion).then_some(effects.zoom_motion),
         cursor: (old.cursor != channel.cursor).then_some(effects.cursor),
         keystrokes: (old.keystrokes != channel.keystrokes).then_some(effects.keystrokes),
@@ -417,21 +414,45 @@ fn rules_diff(video: &StyleSheet, channel: &StyleSheet) -> StyleSheet {
     sheet
 }
 
-/// `cut` without what the rules wrote: rule removals become kept material, the queue goes,
+/// A `cut.kdl` from before the lock: blocks that play what it showed, and what the rules wrote
+/// into each block, one [`OldBlock`] per block in cut order.
+struct OldCut {
+    cut: Cut,
+    blocks: Vec<OldBlock>,
+}
+
+impl OldCut {
+    /// Each block of `take` with what the rules wrote into it.
+    fn blocks<'a>(&'a self, take: &'a Id) -> impl Iterator<Item = (&'a TakeEdit, &'a OldBlock)> {
+        self.cut
+            .chapters
+            .iter()
+            .flat_map(|c| &c.takes)
+            .zip(&self.blocks)
+            .filter(move |(b, _)| b.take == *take)
+    }
+}
+
+/// The old cut without what the rules wrote: rule removals become kept material, the queue goes,
 /// and so do rule zooms and the overlays of the overlay rules' templates.
-fn content(cut: &Cut) -> Cut {
-    let mut cut = cut.clone();
-    for block in cut.chapters.iter_mut().flat_map(|c| &mut c.takes) {
-        let ranges = block.ranges.drain(..).map(|r| match r {
-            RangeEdit::Remove {
-                range,
-                by: RemovedBy::Rule(_),
-            } => RangeEdit::Keep(range),
-            other => other,
+fn content(old: &OldCut) -> Cut {
+    let mut cut = old.cut.clone();
+    let blocks = cut.chapters.iter_mut().flat_map(|c| &mut c.takes);
+    for (block, written) in blocks.zip(&old.blocks) {
+        let ranges = block.ranges.drain(..).enumerate().map(|(i, r)| {
+            match written.removals.iter().any(|(at, _)| *at == i) {
+                true => RangeEdit::Keep(r.range()),
+                false => r,
+            }
         });
         block.ranges = merge_keeps(ranges);
-        block.reviews.clear();
-        block.zooms.retain(|z| z.by.is_none());
+        let zooms = std::mem::take(&mut block.zooms);
+        block.zooms = zooms
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| !written.zooms.iter().any(|(at, _)| at == i))
+            .map(|(_, z)| z)
+            .collect();
         block
             .overlays
             .retain(|o| !RULE_TEMPLATES.contains(&o.template.as_str()));
@@ -466,14 +487,14 @@ fn element_kind(rule: RuleKind) -> ElementKind {
 }
 
 /// The element kinds a rule zoom may hang on, by what wrote it.
-fn zoom_kinds(by: Option<ZoomBy>) -> &'static [ElementKind] {
+fn zoom_kinds(by: ZoomBy) -> &'static [ElementKind] {
     match by {
-        Some(ZoomBy::Click) => &[ElementKind::Click],
-        Some(ZoomBy::Typing) => &[ElementKind::Typing],
-        Some(ZoomBy::Emphasis) => &[ElementKind::Emphasis, ElementKind::Word],
-        Some(ZoomBy::Marker) => &[ElementKind::Marker],
-        Some(ZoomBy::JumpCut) => &[ElementKind::Word],
-        Some(ZoomBy::Cursor) | None => &[],
+        ZoomBy::Click => &[ElementKind::Click],
+        ZoomBy::Typing => &[ElementKind::Typing],
+        ZoomBy::Emphasis => &[ElementKind::Emphasis, ElementKind::Word],
+        ZoomBy::Marker => &[ElementKind::Marker],
+        ZoomBy::JumpCut => &[ElementKind::Word],
+        ZoomBy::Cursor => &[],
     }
 }
 
@@ -493,7 +514,7 @@ struct Migrator<'a> {
     input: &'a MigrateInput<'a>,
     channel: &'a FormatLayer,
     video: &'a FormatLayer,
-    old: &'a Cut,
+    old: &'a OldCut,
     cut: Cut,
     overrides: BTreeMap<Key, Override>,
     report: Report,
@@ -502,7 +523,7 @@ struct Migrator<'a> {
 impl<'a> Migrator<'a> {
     fn takes(&self) -> Vec<Id> {
         let mut order: Vec<Id> = Vec::new();
-        for block in self.old.chapters.iter().flat_map(|c| &c.takes) {
+        for block in self.old.cut.chapters.iter().flat_map(|c| &c.takes) {
             if !order.contains(&block.take) {
                 order.push(block.take.clone());
             }
@@ -552,8 +573,9 @@ impl<'a> Migrator<'a> {
     /// `ignore` items become `keep` on their element; the queue's open items are the lock's.
     fn decisions(&mut self) {
         let mut kept = Vec::new();
-        for block in self.old.chapters.iter().flat_map(|c| &c.takes) {
-            for review in &block.reviews {
+        let blocks = self.old.cut.chapters.iter().flat_map(|c| &c.takes);
+        for (block, written) in blocks.zip(&self.old.blocks) {
+            for review in &written.reviews {
                 if !review.kept {
                     self.report.reproduced += 1;
                     continue;
@@ -680,7 +702,7 @@ impl<'a> Migrator<'a> {
         let mut placed: Vec<(Key, Zoom)> = Vec::new();
         for take in self.takes() {
             let kept = old_kept(self.old, &take);
-            let mut wanted: Vec<Zoom> = rule_zooms(self.old, &take);
+            let mut wanted: Vec<(Zoom, ZoomBy)> = rule_zooms(self.old, &take);
             for instance in lock.take(&take).into_iter().flat_map(|t| &t.instances) {
                 let Some(zoom) = zoom_of(instance) else {
                     continue;
@@ -688,7 +710,7 @@ impl<'a> Migrator<'a> {
                 if !kept.iter().any(|k| k.overlaps(zoom.range)) {
                     continue;
                 }
-                match wanted.iter().position(|w| same_zoom(w, &zoom)) {
+                match wanted.iter().position(|(w, _)| same_zoom(w, &zoom)) {
                     Some(i) => {
                         wanted.remove(i);
                         self.report.reproduced += 1;
@@ -701,9 +723,9 @@ impl<'a> Migrator<'a> {
                     }
                 }
             }
-            for zoom in wanted {
+            for (zoom, by) in wanted {
                 let element = self.elements(&take).and_then(|elements| {
-                    zoom_kinds(zoom.by).iter().find_map(|kind| {
+                    zoom_kinds(by).iter().find_map(|kind| {
                         elements.of_kind(*kind).find(|e| {
                             zoom.range.from() <= e.t
                                 && e.range().to() <= zoom.range.to()
@@ -750,14 +772,13 @@ impl<'a> Migrator<'a> {
     /// Puts a rule zoom back into the block it came from, as a person's.
     fn keep_zoom(&mut self, take: &Id, zoom: Zoom) {
         let blocks = self.cut.chapters.iter_mut().flat_map(|c| &mut c.takes);
-        let olds = self.old.chapters.iter().flat_map(|c| &c.takes);
+        let olds = self.old.cut.chapters.iter().flat_map(|c| &c.takes);
         for (block, old) in blocks.zip(olds) {
             if &block.take == take && old.zooms.contains(&zoom) {
-                let mine = Zoom { by: None, ..zoom };
                 let at = block
                     .zooms
-                    .partition_point(|z| z.range.from() < mine.range.from());
-                block.zooms.insert(at, mine);
+                    .partition_point(|z| z.range.from() < zoom.range.from());
+                block.zooms.insert(at, zoom);
             }
         }
         self.report.kept += 1;
@@ -853,7 +874,7 @@ impl<'a> Migrator<'a> {
         self.report.kept += keep.len();
         // Overlays kept as a person's go back in their old drawing order.
         let blocks = self.cut.chapters.iter_mut().flat_map(|c| &mut c.takes);
-        let olds = self.old.chapters.iter().flat_map(|c| &c.takes);
+        let olds = self.old.cut.chapters.iter().flat_map(|c| &c.takes);
         let mut seen: BTreeMap<Id, usize> = BTreeMap::new();
         for (block, old) in blocks.zip(olds) {
             let start = *seen.entry(block.take.clone()).or_default();
@@ -889,56 +910,48 @@ impl<'a> Migrator<'a> {
 }
 
 /// The kept ranges of `take` in the old cut, in order.
-fn old_kept(cut: &Cut, take: &Id) -> Vec<TimeRange> {
-    let mut kept: Vec<TimeRange> = blocks(cut, take)
-        .flat_map(|b| &b.ranges)
+fn old_kept(old: &OldCut, take: &Id) -> Vec<TimeRange> {
+    let mut kept: Vec<TimeRange> = old
+        .blocks(take)
+        .flat_map(|(b, _)| &b.ranges)
         .filter_map(|r| match r {
             RangeEdit::Keep(range) => Some(*range),
-            RangeEdit::Remove { .. } => None,
+            RangeEdit::Remove(_) => None,
         })
         .collect();
     kept.sort_by_key(|r| r.from());
     kept
 }
 
-fn blocks<'a>(cut: &'a Cut, take: &'a Id) -> impl Iterator<Item = &'a TakeEdit> + 'a {
+fn rule_removals(old: &OldCut, take: &Id) -> Vec<(TimeRange, RuleKind)> {
+    old.blocks(take)
+        .flat_map(|(b, written)| {
+            written
+                .removals
+                .iter()
+                .map(|&(i, rule)| (b.ranges[i].range(), rule))
+        })
+        .collect()
+}
+
+/// A person's removals of `take` in the migrated cut.
+fn manual_removals(cut: &Cut, take: &Id) -> Vec<TimeRange> {
     cut.chapters
         .iter()
         .flat_map(|c| &c.takes)
-        .filter(move |b| b.take == *take)
-}
-
-fn rule_removals(cut: &Cut, take: &Id) -> Vec<(TimeRange, RuleKind)> {
-    blocks(cut, take)
+        .filter(|b| b.take == *take)
         .flat_map(|b| &b.ranges)
         .filter_map(|r| match *r {
-            RangeEdit::Remove {
-                range,
-                by: RemovedBy::Rule(rule),
-            } => Some((range, rule)),
-            _ => None,
+            RangeEdit::Remove(range) => Some(range),
+            RangeEdit::Keep(_) => None,
         })
         .collect()
 }
 
-fn manual_removals(cut: &Cut, take: &Id) -> Vec<TimeRange> {
-    blocks(cut, take)
-        .flat_map(|b| &b.ranges)
-        .filter_map(|r| match *r {
-            RangeEdit::Remove {
-                range,
-                by: RemovedBy::Manual,
-            } => Some(range),
-            _ => None,
-        })
-        .collect()
-}
-
-fn rule_zooms(cut: &Cut, take: &Id) -> Vec<Zoom> {
-    let mut zooms: Vec<Zoom> = blocks(cut, take)
-        .flat_map(|b| &b.zooms)
-        .filter(|z| z.by.is_some())
-        .copied()
+fn rule_zooms(old: &OldCut, take: &Id) -> Vec<(Zoom, ZoomBy)> {
+    let mut zooms: Vec<(Zoom, ZoomBy)> = old
+        .blocks(take)
+        .flat_map(|(b, written)| written.zooms.iter().map(|&(i, by)| (b.zooms[i], by)))
         .collect();
     zooms.dedup();
     zooms
@@ -946,9 +959,9 @@ fn rule_zooms(cut: &Cut, take: &Id) -> Vec<Zoom> {
 
 /// The overlay-rule overlays of `take` with their index among all of the take's overlays in
 /// block order.
-fn rule_overlays(cut: &Cut, take: &Id) -> Vec<(usize, Overlay)> {
-    blocks(cut, take)
-        .flat_map(|b| &b.overlays)
+fn rule_overlays(old: &OldCut, take: &Id) -> Vec<(usize, Overlay)> {
+    old.blocks(take)
+        .flat_map(|(b, _)| &b.overlays)
         .enumerate()
         .filter(|(_, o)| RULE_TEMPLATES.contains(&o.template.as_str()))
         .map(|(i, o)| (i, o.clone()))
@@ -966,7 +979,6 @@ fn zoom_of(instance: &Instance) -> Option<Zoom> {
             scale,
             range,
             center,
-            by: None,
             shape,
         }),
         _ => None,
@@ -1028,10 +1040,7 @@ fn remove_manually(cut: &mut Cut, take: &Id, range: TimeRange) {
                 continue;
             };
             out.extend(TimeRange::new(kept.from(), inside.from()).map(RangeEdit::Keep));
-            out.push(RangeEdit::Remove {
-                range: inside,
-                by: RemovedBy::Manual,
-            });
+            out.push(RangeEdit::Remove(inside));
             out.extend(TimeRange::new(inside.to(), kept.to()).map(RangeEdit::Keep));
         }
         block.ranges = out;
@@ -1049,10 +1058,7 @@ fn same_frames(old: &Timeline, new: &Timeline) -> Result<(), String> {
             o.chapters
                 .iter()
                 .flat_map(|c| &c.segments)
-                .map(|s| crate::Segment {
-                    zooms: s.zooms.iter().map(|z| Zoom { by: None, ..*z }).collect(),
-                    ..s.clone()
-                })
+                .cloned()
                 .collect()
         };
         let (sa, sb) = (segments(a), segments(b));
@@ -1085,8 +1091,45 @@ fn same_frames(old: &Timeline, new: &Timeline) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    /// The jump-cut punch-in of the talking formats: 112% on the kept stretch after every other
+    /// silence cut. `hold` reaches past the silence into the speech that follows.
+    const JUMP_CUT_EVERY: u32 = 2;
+    const JUMP_CUT_HOLD: Micros = Micros(3_000_000);
+
+    /// The rules a shipped preset carries: those its old settings stood for, and for the talking
+    /// formats (`reaction`, `opinion`) the punch-in on every other jump cut. Migration writes
+    /// [`implied_rules`] without it, so a migrated video keeps the frames it had.
+    fn preset_rules(kind: FormatKind) -> StyleSheet {
+        let mut sheet = implied_rules(&Settings::preset(kind));
+        if matches!(kind, FormatKind::Reaction | FormatKind::Opinion) {
+            let selector = Selector {
+                target: Target::Kind(ElementKind::Silence),
+                filters: vec![
+                    Filter::Min(Settings::preset(kind).auto_cut.silence.min),
+                    Filter::Every(JUMP_CUT_EVERY),
+                ],
+            };
+            let rule = Rule {
+                selector,
+                body: RuleBody::Effects(vec![Effect::Zoom {
+                    scale: EMPHASIS_ZOOM,
+                    hold: JUMP_CUT_HOLD,
+                    lead: Micros(0),
+                    shape: ZoomShape::default(),
+                }]),
+            };
+            let at = sheet
+                .rules
+                .iter()
+                .position(|r| r.selector.target == Target::Kind(ElementKind::Emphasis))
+                .map_or(sheet.rules.len(), |i| i + 1);
+            sheet.rules.insert(at, rule);
+        }
+        sheet
+    }
+
     #[test]
-    fn presets_carry_the_rules_their_settings_stand_for() {
+    fn presets_carry_the_rules_their_old_settings_stood_for() {
         for &kind in FormatKind::ALL {
             assert_eq!(kind.preset_layer().rules, preset_rules(kind), "{kind}");
         }

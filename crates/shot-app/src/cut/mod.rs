@@ -1,22 +1,18 @@
-//! The Cut screen, where the auto-cut rules' rough cut is reviewed right after recording. The
+//! The Cut screen, where the style rules' rough cut is reviewed right after recording. The
 //! middle shows one review item at a time: what the rule found and why it asks, the words around
 //! it, its picture and waveform. Space plays it with a little of what plays before and after,
-//! ⇧Space plays it as it would sound cut. K keeps it, C cuts it, and the next item plays. The
-//! rules with their switches and the pacing sit on the left, the queue on the right. Once
-//! nothing waits, the cuts the rules applied on their own can be stepped through the same way:
-//! K restores the words, C leaves them cut.
+//! ⇧Space plays it as it would sound cut. K keeps it, C cuts it, and the next item plays. What
+//! the rules cut sits on the left, the queue on the right. Once nothing waits, the cuts the
+//! rules applied on their own can be stepped through the same way: K restores the words, C
+//! leaves them cut.
 //!
-//! The queue is the `review` nodes of `cut.kdl`, or a migrated video's `review` instances of
-//! its lock, read through [`Cut::review_queue`] of the shown cut; every answer goes through
-//! [`VideoFolder::decide`], which writes `ignore` or a rule removal before migration and an
-//! `override { keep }` or `{ cut }` after. The screen keeps only which item is on show and the
-//! answers given since it opened, so the list can show them dimmed. An answer undone with ⌘Z
-//! brings its item back on show.
+//! The queue is the lock's `review` instances, read through [`Cut::review_queue`]; every answer
+//! goes through [`VideoFolder::decide`], which writes an `override { keep }` or `{ cut }`. The
+//! screen keeps only which item is on show and the answers given since it opened, so the list
+//! can show them dimmed. An answer undone with ⌘Z brings its item back on show.
 
 pub mod player;
-pub mod run;
 
-use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -25,11 +21,10 @@ use gpui::{
     Hsla, ObjectFit, ScrollHandle, SharedString, StrikethroughStyle, StyledText, Subscription,
     Window, actions, div, prelude::*, px, relative, surface,
 };
-use shot_analyze::autocut::{self, RuleCount};
 use shot_analyze::{Speech, cache};
 use shot_core::{
-    Cut, Decision, Id, Micros, Pacing, RangeEdit, RemovedBy, Review, RuleKind, TakeAt, TimeRange,
-    Word,
+    Applied, Cut, Decision, ElementKind, Id, Lock, Micros, RangeEdit, RemovedBy, Review, TakeAt,
+    Target, TimeRange, Word,
 };
 
 use crate::folder::VideoFolder;
@@ -38,7 +33,7 @@ use crate::peaks::Peaks;
 use crate::studio::Screen;
 use crate::takes::TakesView;
 use crate::theme::*;
-use crate::transcribe::{Transcribe, Transcribed};
+use crate::transcribe::Transcribe;
 use crate::ui::{Segment, icon, kbd, label, mono, pane, segmented};
 use player::{Hear, ItemKey, Player};
 
@@ -117,8 +112,6 @@ pub struct CutScreen {
     player: Player,
     /// Play the next item shown this way: set by answers and moves, not by opening the screen.
     autoplay: Option<Hear>,
-    /// What the last rule switch or pacing change did to the cut.
-    note: Option<String>,
     error: Option<String>,
     focus: FocusHandle,
     list: ScrollHandle,
@@ -127,7 +120,6 @@ pub struct CutScreen {
     transcribe: Entity<Transcribe>,
     /// Pauses playback when another screen takes the focus.
     _blur: Option<Subscription>,
-    _transcribed: Subscription,
     _takes: Subscription,
 }
 
@@ -152,15 +144,6 @@ impl CutScreen {
         })
         .detach();
         let transcribe = cx.new(|cx| Transcribe::new(folder.clone(), cx));
-        let transcribed = cx.subscribe(&transcribe, |this, _, Transcribed(takes), cx| {
-            // The rules skipped these takes for want of words; now they make their rough cut.
-            let takes = takes.clone();
-            this.change("Transcribed".to_owned(), cx, |folder| {
-                takes
-                    .iter()
-                    .try_for_each(|take| run::rough_cut(folder, take))
-            });
-        });
         let takes = cx.new(|cx| TakesView::new(folder.clone(), cx));
         let forward = cx.subscribe(&takes, |_, _, GoTo(screen), cx| cx.emit(GoTo(*screen)));
         // A video with several takes in the cut at the same beats opens on its takes.
@@ -181,14 +164,12 @@ impl CutScreen {
             peaks: HashMap::new(),
             player: Player::default(),
             autoplay: None,
-            note: None,
             error: None,
             focus: cx.focus_handle(),
             list: ScrollHandle::new(),
             scrolled: None,
             transcribe,
             _blur: None,
-            _transcribed: transcribed,
             _takes: forward,
         }
     }
@@ -244,10 +225,11 @@ impl CutScreen {
     /// The items the middle steps through: the open review items, or the applied cuts not
     /// answered here yet.
     fn queue(&self, cx: &App) -> Vec<(TakeAt, Review)> {
-        let cut = &self.folder.read(cx).shown.cut;
+        let folder = self.folder.read(cx);
+        let (cut, lock) = (&folder.project.cut, folder.lock());
         match self.mode {
-            Mode::Open => cut.review_queue().collect(),
-            Mode::Applied => applied(cut)
+            Mode::Open => cut.review_queue(lock).collect(),
+            Mode::Applied => applied(cut, lock)
                 .filter(|(at, review)| {
                     let take = &cut.chapters[at.chapter].takes[at.take].take;
                     !self
@@ -265,23 +247,23 @@ impl CutScreen {
         &'a self,
         mode: Mode,
         cut: &'a Cut,
+        lock: &'a Lock,
     ) -> impl Iterator<Item = (usize, &'a Answered)> + 'a {
         let applied_mode = mode == Mode::Applied;
         self.answered
             .iter()
             .enumerate()
-            .filter(move |(_, a)| a.applied == applied_mode && stands(a, cut))
+            .filter(move |(_, a)| a.applied == applied_mode && stands(a, cut, lock))
     }
 
     /// Back to the open items as soon as one waits, as after a rule switch.
     fn follow_open(&mut self, cx: &App) {
+        let folder = self.folder.read(cx);
         if self.mode == Mode::Applied
-            && self
-                .folder
-                .read(cx)
-                .shown
+            && folder
+                .project
                 .cut
-                .review_queue()
+                .review_queue(folder.lock())
                 .next()
                 .is_some()
         {
@@ -293,10 +275,11 @@ impl CutScreen {
 
     /// Steps through the cuts the rules applied, from the one at `index`.
     fn review_applied(&mut self, index: usize, cx: &mut Context<Self>) {
-        let cut = &self.folder.read(cx).shown.cut;
+        let folder = self.folder.read(cx);
+        let (cut, lock) = (&folder.project.cut, folder.lock());
         if self.mode == Mode::Applied
-            || cut.review_queue().next().is_some()
-            || applied(cut).next().is_none()
+            || cut.review_queue(lock).next().is_some()
+            || applied(cut, lock).next().is_none()
         {
             return;
         }
@@ -328,9 +311,10 @@ impl CutScreen {
     /// An applied cut left cut wrote nothing, so there is nothing to take back.
     fn bring_back_undone(&mut self, cx: &mut Context<Self>) {
         self.follow_open(cx);
-        let cut = &self.folder.read(cx).shown.cut;
-        let open: Vec<(TakeAt, Review)> = cut.review_queue().collect();
-        let removed: Vec<(TakeAt, Review)> = applied(cut).collect();
+        let folder = self.folder.read(cx);
+        let (cut, lock) = (&folder.project.cut, folder.lock());
+        let open: Vec<(TakeAt, Review)> = cut.review_queue(lock).collect();
+        let removed: Vec<(TakeAt, Review)> = applied(cut, lock).collect();
         let mut back = None;
         self.answered.retain(|answered| {
             if answered.applied && answered.decision == Decision::Cut {
@@ -339,7 +323,7 @@ impl CutScreen {
             let queue = if answered.applied { &removed } else { &open };
             let open = queue.iter().find(|(at, review)| {
                 review.range == answered.review.range
-                    && review.by == answered.review.by
+                    && review.kind == answered.review.kind
                     && cut.chapters[at.chapter].takes[at.take].take == answered.take
             });
             if let Some((at, review)) = open {
@@ -360,7 +344,7 @@ impl CutScreen {
         let (at, review) = queue[index];
         let applied = self.mode == Mode::Applied;
         let result = self.folder.update(cx, |folder, cx| {
-            let take = folder.shown.cut.chapters[at.chapter].takes[at.take]
+            let take = folder.project.cut.chapters[at.chapter].takes[at.take]
                 .take
                 .clone();
             match (applied, decision) {
@@ -438,43 +422,6 @@ impl CutScreen {
         cx.emit(GoTo(screen));
     }
 
-    /// Runs a rule switch or pacing change and notes what it did to the length of the cut.
-    fn change(
-        &mut self,
-        what: String,
-        cx: &mut Context<Self>,
-        edit: impl FnOnce(&mut VideoFolder) -> Result<(), String>,
-    ) {
-        let before = kept_length(&self.folder.read(cx).shown.cut);
-        let result = self.folder.update(cx, |folder, cx| {
-            let result = edit(folder);
-            cx.notify();
-            result
-        });
-        let after = kept_length(&self.folder.read(cx).shown.cut);
-        self.note = result.is_ok().then(|| match after.cmp(&before) {
-            Ordering::Less => format!(
-                "{what}: the cut is {} shorter.",
-                length(Micros(before.0 - after.0))
-            ),
-            Ordering::Greater => format!(
-                "{what}: the cut is {} longer.",
-                length(Micros(after.0 - before.0))
-            ),
-            Ordering::Equal => format!("{what}: the length did not change."),
-        });
-        self.error = result.err();
-        cx.notify();
-    }
-
-    /// Drops the note of the last rule switch or pacing change, once ⌘Z or ⇧⌘Z stepped past
-    /// it or the screen was left.
-    pub fn forget_note(&mut self, cx: &mut Context<Self>) {
-        if self.note.take().is_some() {
-            cx.notify();
-        }
-    }
-
     fn speech(&mut self, take: &Id, cx: &App) -> Option<&Speech> {
         let dir = &self.folder.read(cx).dir;
         self.speech
@@ -523,7 +470,7 @@ impl CutScreen {
             return;
         };
         let (at, review) = queue[index];
-        let take = self.folder.read(cx).shown.cut.chapters[at.chapter].takes[at.take]
+        let take = self.folder.read(cx).project.cut.chapters[at.chapter].takes[at.take]
             .take
             .clone();
         self.load_peaks(&take, cx);
@@ -545,39 +492,41 @@ impl CutScreen {
     }
 }
 
-/// The rule's name in the rule list.
-fn rule_name(rule: RuleKind) -> &'static str {
-    match rule {
-        RuleKind::Silence => "Silences",
-        RuleKind::Retake => "Inline retakes",
-        RuleKind::Misspoken => "Misspoken words",
-        RuleKind::Pause => "Pauses mid-sentence",
-        RuleKind::Filler => "Filler words",
-        RuleKind::IdleScreen => "Idle screen",
+/// The name of what the rules cut of an element kind, in the rule list.
+fn rule_name(kind: ElementKind) -> String {
+    match kind {
+        ElementKind::Silence => "Silences".to_owned(),
+        ElementKind::Retake => "Inline retakes".to_owned(),
+        ElementKind::Misspoken => "Misspoken words".to_owned(),
+        ElementKind::Pause => "Pauses mid-sentence".to_owned(),
+        ElementKind::Filler => "Filler words".to_owned(),
+        ElementKind::Idle => "Idle screen".to_owned(),
+        other => format!("Cuts on {other}"),
     }
 }
 
-/// What an item of the rule is called. `speaks` says the item strikes words although its rule
+/// What an item of the kind is called. `speaks` says the item strikes words although its rule
 /// cuts only gaps between them, so the name does not call speech a pause.
-fn kind_name(rule: RuleKind, speaks: bool) -> &'static str {
-    match rule {
-        RuleKind::Silence if speaks => "Speech marked as silence",
-        RuleKind::Pause if speaks => "Speech marked as a pause",
-        RuleKind::Silence => "Silence",
-        RuleKind::Retake => "Inline retake",
-        RuleKind::Misspoken => "Misspoken word",
-        RuleKind::Pause => "Long pause",
-        RuleKind::Filler => "Filler",
-        RuleKind::IdleScreen => "Idle screen",
+fn kind_name(kind: ElementKind, speaks: bool) -> &'static str {
+    match kind {
+        ElementKind::Silence if speaks => "Speech marked as silence",
+        ElementKind::Pause if speaks => "Speech marked as a pause",
+        ElementKind::Silence => "Silence",
+        ElementKind::Retake => "Inline retake",
+        ElementKind::Misspoken => "Misspoken word",
+        ElementKind::Pause => "Long pause",
+        ElementKind::Filler => "Filler",
+        ElementKind::Idle => "Idle screen",
+        _ => "Cut by a rule",
     }
 }
 
 /// Why the rule asks, in a sentence. `murmur` says whether the mic hears speech in a silence,
 /// `None` when the take has no speech analysis.
-fn reason(rule: RuleKind, length: Micros, murmur: Option<bool>) -> String {
+fn reason(kind: ElementKind, length: Micros, murmur: Option<bool>) -> String {
     let seconds = self::length(length);
-    match rule {
-        RuleKind::Silence => match murmur {
+    match kind {
+        ElementKind::Silence => match murmur {
             Some(true) => format!(
                 "{seconds} without words, but the mic hears something. It may be a breath, or a word the recognizer missed."
             ),
@@ -588,17 +537,18 @@ fn reason(rule: RuleKind, length: Micros, murmur: Option<bool>) -> String {
                 "{seconds} without words. It may hold a breath, or a word the recognizer missed."
             ),
         },
-        RuleKind::Retake => "You said this more than once. The later version is usually the clean one, so the earlier one would go.".to_owned(),
-        RuleKind::Misspoken => {
+        ElementKind::Retake => "You said this more than once. The later version is usually the clean one, so the earlier one would go.".to_owned(),
+        ElementKind::Misspoken => {
             "A correction follows these words. Cutting them keeps only what you meant to say.".to_owned()
         }
-        RuleKind::Pause => format!(
+        ElementKind::Pause => format!(
             "A {seconds} pause in the middle of a sentence. It may be a dramatic beat, so it was not cut on its own."
         ),
-        RuleKind::Filler => "Words like this often carry emphasis. Keep the same words three times and the rule stops asking.".to_owned(),
-        RuleKind::IdleScreen => format!(
+        ElementKind::Filler => "Words like this often carry emphasis, so the rules were not sure enough to cut it.".to_owned(),
+        ElementKind::Idle => format!(
             "The screen does not change for {seconds} while you talk. A jump cut or b-roll could cover it."
         ),
+        _ => format!("{seconds} a rule was not sure enough to cut on its own."),
     }
 }
 
@@ -641,14 +591,14 @@ fn context_text(pre: &str, cut: &str, post: &str) -> StyledText {
 /// Whether an item of `rule` strikes words of the transcript although its rule cuts only the gaps
 /// between words. The rules never place one like that, but a newer transcript or a cut written
 /// by hand can leave the label on speech.
-fn speaks(rule: RuleKind, words: &[&str]) -> bool {
-    matches!(rule, RuleKind::Silence | RuleKind::Pause) && !words.is_empty()
+fn speaks(kind: ElementKind, words: &[&str]) -> bool {
+    matches!(kind, ElementKind::Silence | ElementKind::Pause) && !words.is_empty()
 }
 
 /// Why an item that [`speaks`] is in the list, open or `applied`.
-fn speech_reason(rule: RuleKind, length: Micros, applied: bool) -> String {
+fn speech_reason(kind: ElementKind, length: Micros, applied: bool) -> String {
     let seconds = self::length(length);
-    let what = if rule == RuleKind::Pause {
+    let what = if kind == ElementKind::Pause {
         format!("a {seconds} pause")
     } else {
         format!("{seconds} of silence")
@@ -665,55 +615,113 @@ fn speech_reason(rule: RuleKind, length: Micros, applied: bool) -> String {
 }
 
 /// Why the rules cut an applied cut on their own, in a sentence.
-fn applied_reason(rule: RuleKind, length: Micros) -> String {
+fn applied_reason(kind: ElementKind, length: Micros) -> String {
     let seconds = self::length(length);
-    match rule {
-        RuleKind::Silence => format!("{seconds} without words or voice, so the rules cut it."),
-        RuleKind::Retake => {
+    match kind {
+        ElementKind::Silence => format!("{seconds} without words or voice, so the rules cut it."),
+        ElementKind::Retake => {
             "You said this again later, so the rules cut the earlier version.".to_owned()
         }
-        RuleKind::Misspoken => {
+        ElementKind::Misspoken => {
             "A correction follows these words, so the rules cut them.".to_owned()
         }
-        RuleKind::Pause => format!(
+        ElementKind::Pause => format!(
             "A {seconds} pause in the middle of a sentence, long enough for the rules to cut it."
         ),
-        RuleKind::Filler => "A filler sound. Keep it when it carries meaning.".to_owned(),
-        RuleKind::IdleScreen => format!(
+        ElementKind::Filler => "A filler sound. Keep it when it carries meaning.".to_owned(),
+        ElementKind::Idle => format!(
             "{seconds} without voice on a screen that does not change, so the rules cut it."
         ),
+        _ => format!("{seconds} a rule cut on its own."),
     }
 }
 
 /// Whether `answered` still belongs in the list. An applied cut left cut wrote nothing, so it
-/// stands only while `cut` holds that exact cut: a pacing change that moved it offers the moved
+/// stands only while the lock holds that exact cut: a rule change that moved it offers the moved
 /// one again instead of keeping a stale row next to it.
-fn stands(answered: &Answered, cut: &Cut) -> bool {
+fn stands(answered: &Answered, cut: &Cut, lock: &Lock) -> bool {
     !(answered.applied && answered.decision == Decision::Cut)
-        || applied(cut).any(|(at, review)| {
+        || applied(cut, lock).any(|(at, review)| {
             review.range == answered.review.range
                 && cut.chapters[at.chapter].takes[at.take].take == answered.take
         })
 }
 
-/// The cuts the rules applied, in cut order, as review items of their rule.
-fn applied(cut: &Cut) -> impl Iterator<Item = (TakeAt, Review)> + '_ {
-    model::blocks(cut).flat_map(|(at, block)| {
-        block.ranges.iter().filter_map(move |piece| match *piece {
-            RangeEdit::Remove {
-                range,
-                by: RemovedBy::Rule(by),
-            } => Some((
-                at,
-                Review {
-                    range,
-                    by,
-                    kept: false,
-                },
-            )),
-            _ => None,
+/// The cuts the rules applied in the blocks' kept material, in cut order, as review items of
+/// their element.
+fn applied<'a>(cut: &'a Cut, lock: &'a Lock) -> impl Iterator<Item = (TakeAt, Review)> + 'a {
+    model::blocks(cut).flat_map(move |(at, block)| {
+        let instances = lock
+            .take(&block.take)
+            .into_iter()
+            .flat_map(|t| &t.instances);
+        instances.flat_map(move |i| {
+            let pieces = match (&i.applied, i.element.target) {
+                (&Applied::Cut(range), Target::Kind(kind)) => block
+                    .ranges
+                    .iter()
+                    .filter_map(|r| match r {
+                        RangeEdit::Keep(kept) => kept.intersect(range),
+                        RangeEdit::Remove(_) => None,
+                    })
+                    .map(|range| Review {
+                        range,
+                        kind,
+                        t: i.element.t,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            pieces.into_iter().map(move |review| (at, review))
         })
     })
+}
+
+/// What the lock and a person removed of one element kind, for its row in the rule list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KindCount {
+    kind: ElementKind,
+    removed: usize,
+    removed_time: Micros,
+    queued: usize,
+}
+
+/// The rules' cuts and open review items by element kind, in the order kinds come first.
+fn counts(cut: &Cut, lock: &Lock) -> Vec<KindCount> {
+    let mut out: Vec<KindCount> = Vec::new();
+    let mut add = |kind: ElementKind, removed: Option<Micros>| {
+        let index = match out.iter().position(|c| c.kind == kind) {
+            Some(index) => index,
+            None => {
+                out.push(KindCount {
+                    kind,
+                    removed: 0,
+                    removed_time: Micros(0),
+                    queued: 0,
+                });
+                out.len() - 1
+            }
+        };
+        let count = &mut out[index];
+        match removed {
+            Some(length) => {
+                count.removed += 1;
+                count.removed_time.0 += length.0;
+            }
+            None => count.queued += 1,
+        }
+    };
+    for (_, edit) in model::blocks(cut) {
+        for (range, by) in model::removals(edit, lock) {
+            if let RemovedBy::Rule(Target::Kind(kind)) = by {
+                add(kind, Some(range.duration()));
+            }
+        }
+    }
+    for (_, review) in cut.review_queue(lock) {
+        add(review.kind, None);
+    }
+    out
 }
 
 /// `M:SS` of a length.
@@ -744,16 +752,14 @@ fn words_in(words: &[Word], range: TimeRange) -> (std::ops::Range<usize>, Vec<&s
 }
 
 /// The edited time where `t` of the block at `at` plays, or where the material after it starts.
-fn edited_time(cut: &Cut, at: TakeAt, t: Micros) -> Micros {
+fn edited_time(cut: &Cut, lock: &Lock, at: TakeAt, t: Micros) -> Micros {
     let mut before = 0;
     for (block_at, block) in model::blocks(cut) {
-        for piece in &block.ranges {
-            if let RangeEdit::Keep(kept) = piece {
-                if block_at == at && kept.to() > t {
-                    return Micros(before + t.0.saturating_sub(kept.from().0));
-                }
-                before += kept.duration().0;
+        for played in model::played(block, lock) {
+            if block_at == at && played.to() > t {
+                return Micros(before + t.0.saturating_sub(played.from().0));
             }
+            before += played.duration().0;
         }
         if block_at == at {
             break;
@@ -762,14 +768,11 @@ fn edited_time(cut: &Cut, at: TakeAt, t: Micros) -> Micros {
     Micros(before)
 }
 
-fn kept_length(cut: &Cut) -> Micros {
+fn kept_length(cut: &Cut, lock: &Lock) -> Micros {
     Micros(
         model::blocks(cut)
-            .flat_map(|(_, b)| &b.ranges)
-            .filter_map(|p| match p {
-                RangeEdit::Keep(r) => Some(r.duration().0),
-                RangeEdit::Remove { .. } => None,
-            })
+            .flat_map(|(_, b)| model::played(b, lock))
+            .map(|r| r.duration().0)
             .sum(),
     )
 }
@@ -807,9 +810,9 @@ fn timecode(t: Micros) -> String {
     model::timecode(t.0 * u64::from(FPS) / 1_000_000)
 }
 
-/// What a rule did, for its row: "12 cuts, 2:41 · 3 to review", or "Off", or "On" before
-/// anything is recorded. Each piece says whether it is a duration, which shows in Geist Mono.
-fn rule_detail(count: &RuleCount, on: bool, recorded: bool) -> Vec<(String, bool)> {
+/// What the rules did of a kind, for its row: "12 cuts, 2:41 · 3 to review". Each piece says
+/// whether it is a duration, which shows in Geist Mono.
+fn rule_detail(count: &KindCount) -> Vec<(String, bool)> {
     let mut parts = Vec::new();
     if count.removed > 0 {
         let cuts = if count.removed == 1 { "cut" } else { "cuts" };
@@ -827,31 +830,7 @@ fn rule_detail(count: &RuleCount, on: bool, recorded: bool) -> Vec<(String, bool
         }
         parts.push((format!("{} to review", count.queued), false));
     }
-    match (on, parts.is_empty()) {
-        (false, true) => vec![("Off".to_owned(), false)],
-        (true, true) if !recorded => vec![("On".to_owned(), false)],
-        (true, true) => vec![("Nothing found".to_owned(), false)],
-        _ => parts,
-    }
-}
-
-/// A small on/off switch, lime when on.
-fn switch(on: bool) -> Div {
-    div()
-        .flex_none()
-        .w(px(36.))
-        .h(px(20.))
-        .p(px(2.))
-        .rounded_full()
-        .bg(if on { ACCENT } else { FLOAT })
-        .flex()
-        .when(on, |this| this.justify_end())
-        .child(
-            div()
-                .size(px(16.))
-                .rounded_full()
-                .bg(if on { ON_ACCENT } else { MUTED }),
-        )
+    parts
 }
 
 /// A 42 px button with an optional icon and its key hint, lime when `accent`.
@@ -898,20 +877,13 @@ fn button(
 }
 
 impl CutScreen {
-    fn rules_pane(&self, counts: &[RuleCount], cx: &mut Context<Self>) -> gpui::Stateful<Div> {
+    fn rules_pane(&self, counts: &[KindCount], cx: &mut Context<Self>) -> gpui::Stateful<Div> {
         let folder = self.folder.read(cx);
-        // A migrated video's cuts come from the style rules of its channel's format, which the
-        // rule editor (milestone 10 item 7) will change; until then the rules only show here.
-        let editable = !folder.is_migrated();
-        let format = &folder.project.format;
-        let pacing = format.pacing;
-        let format_name = folder.project.video.format;
+        let format = crate::board::format_name(folder.project.video.format);
         let recorded = !folder.project.cut.chapters.is_empty();
         let rows = counts.iter().map(|count| {
-            let rule = count.rule;
-            let on = run::rule_on(format, rule);
             div()
-                .id(SharedString::from(format!("rule-{rule}")))
+                .id(SharedString::from(format!("rule-{}", count.kind)))
                 .flex()
                 .items_center()
                 .gap(px(12.))
@@ -926,55 +898,29 @@ impl CutScreen {
                         .flex()
                         .flex_col()
                         .gap(px(2.))
-                        .child(div().font_weight(FontWeight::MEDIUM).child(rule_name(rule)))
+                        .child(
+                            div()
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(rule_name(count.kind)),
+                        )
                         .child(
                             div()
                                 .flex()
                                 .gap(px(4.))
                                 .text_size(TEXT_SM)
-                                .text_color(if editable && !on { FAINT } else { MUTED })
-                                .children(
-                                    rule_detail(count, on || !editable, recorded)
-                                        .into_iter()
-                                        .map(|(text, duration)| {
-                                            if duration {
-                                                mono(text)
-                                            } else {
-                                                div().child(text)
-                                            }
-                                        }),
-                                ),
+                                .text_color(MUTED)
+                                .children(rule_detail(count).into_iter().map(
+                                    |(text, duration)| {
+                                        if duration {
+                                            mono(text)
+                                        } else {
+                                            div().child(text)
+                                        }
+                                    },
+                                )),
                         ),
                 )
-                .when(editable, |this| {
-                    this.cursor_pointer()
-                        .hover(|s| s.bg(RAISED))
-                        .child(switch(on))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let what =
-                                format!("{} {}", rule_name(rule), if on { "off" } else { "on" });
-                            this.change(what, cx, |folder| run::set_rule(folder, rule, !on));
-                        }))
-                })
         });
-        let pacing_note = match pacing {
-            Pacing::Loose => "Loose keeps 0.5 s of breath around each cut.",
-            Pacing::Natural => "Natural keeps 0.25 s of breath around each cut.",
-            Pacing::Tight => "Tight is the jump-cut style, 0.05 s around each cut.",
-        };
-        let segment = |name: &'static str, value: Pacing, cx: &mut Context<Self>| {
-            Segment::new(
-                name,
-                pacing == value,
-                cx.listener(move |this, _, _, cx| {
-                    if pacing != value {
-                        this.change(format!("{name} pacing"), cx, |folder| {
-                            run::set_pacing(folder, value)
-                        });
-                    }
-                }),
-            )
-        };
         let note = |text: String| {
             div()
                 .text_size(TEXT_SM)
@@ -1014,58 +960,34 @@ impl CutScreen {
                     ),
             )
             .children(rows)
-            .map(|this| {
-                if editable {
-                    this.child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(8.))
-                            .px(px(4.))
-                            .pt(px(14.))
-                            .child(label("Pacing"))
-                            .child(segmented(
-                                "pacing",
-                                WELL,
-                                vec![
-                                    segment("Loose", Pacing::Loose, cx),
-                                    segment("Natural", Pacing::Natural, cx),
-                                    segment("Tight", Pacing::Tight, cx),
-                                ],
-                            ))
-                            .child(note(pacing_note.to_owned())),
-                    )
-                } else {
-                    let format = crate::board::format_name(format_name);
-                    this.child(
-                        div()
-                            .mt(px(8.))
-                            .p(px(12.))
-                            .rounded(RADIUS_MD)
-                            .bg(WELL)
-                            .flex()
-                            .flex_col()
-                            .gap(px(4.))
-                            .child(
-                                div()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child("Set by the channel"),
-                            )
-                            .child(note(format!(
-                                "This video follows the style rules of its channel's format, so the rules and the pacing change in the {format} format, for every video at once. Your answers here are saved for this video."
-                            ))),
-                    )
-                }
+            .when(recorded && counts.is_empty(), |this| {
+                this.child(div().px(px(4.)).child(note("Nothing cut yet.".to_owned())))
             })
-            .when_some(self.note.clone(), |this, text| {
-                this.child(div().px(px(4.)).pt(px(6.)).child(note(text).text_color(BODY)))
-            })
+            .child(
+                div()
+                    .mt(px(8.))
+                    .p(px(12.))
+                    .rounded(RADIUS_MD)
+                    .bg(WELL)
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .child(
+                        div()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child("Set by the channel"),
+                    )
+                    .child(note(format!(
+                        "This video follows the style rules of its channel's format, so the rules and the pacing change in the {format} format, for every video at once. Your answers here are saved for this video."
+                    ))),
+            )
             .child(div().pt(px(6.)).child(self.transcribe.clone()))
     }
 
     fn progress(&self, queue: &[(TakeAt, Review)], cx: &App) -> Div {
-        let cut = &self.folder.read(cx).shown.cut;
-        let answered = self.answers(self.mode, cut).count();
+        let folder = self.folder.read(cx);
+        let (cut, lock) = (&folder.project.cut, folder.lock());
+        let answered = self.answers(self.mode, cut, lock).count();
         let total = answered + queue.len();
         let stat = |value: String, name: &'static str, color: Hsla| {
             div()
@@ -1090,7 +1012,7 @@ impl CutScreen {
                     .items_end()
                     .gap(px(28.))
                     .child(stat(minutes(raw_length(cut)), "Raw", TEXT.into()))
-                    .child(stat(minutes(kept_length(cut)), "Cut", ACCENT.into()))
+                    .child(stat(minutes(kept_length(cut, lock)), "Cut", ACCENT.into()))
                     .child(stat(
                         queue.len().to_string(),
                         match self.mode {
@@ -1125,11 +1047,12 @@ impl CutScreen {
     fn item(&mut self, queue: &[(TakeAt, Review)], index: usize, cx: &mut Context<Self>) -> Div {
         let (at, review) = queue[index];
         let folder = self.folder.read(cx);
-        let cut = &folder.shown.cut;
+        let (cut, lock) = (&folder.project.cut, folder.lock());
         let block = &cut.chapters[at.chapter].takes[at.take];
         let take = block.take.clone();
         let chapter = cut.chapters[at.chapter].title.clone();
-        let at_text = timecode(edited_time(cut, at, review.range.from()));
+        let at_text = timecode(edited_time(cut, lock, at, review.range.from()));
+        let played = model::played(block, lock);
         let words = folder
             .transcripts
             .get(&take)
@@ -1139,7 +1062,7 @@ impl CutScreen {
         // Context is what plays around the item, so removed words stay out of it.
         let plays = |w: &&Word| {
             let middle = Micros((w.range.from().0 + w.range.to().0) / 2);
-            TimeRange::new(middle, Micros(middle.0 + 1)).is_some_and(|t| block.keeps(t))
+            played.iter().any(|p| p.from() <= middle && middle < p.to())
         };
         let mut pre: Vec<&str> = words[..inside.start]
             .iter()
@@ -1156,27 +1079,27 @@ impl CutScreen {
             .map(|w| w.text.as_str())
             .collect();
         let duration = length(review.range.duration());
-        let cut_text = match (inside_text.is_empty(), review.by) {
+        let cut_text = match (inside_text.is_empty(), review.kind) {
             (false, _) => inside_text.join(" "),
-            (true, RuleKind::IdleScreen) => format!("[screen idle {duration}]"),
-            (true, RuleKind::Silence) => format!("[silence {duration}]"),
+            (true, ElementKind::Idle) => format!("[screen idle {duration}]"),
+            (true, ElementKind::Silence) => format!("[silence {duration}]"),
             (true, _) => format!("[pause {duration}]"),
         };
         let context = context_text(&pre.join(" "), &cut_text, &post.join(" "));
-        let murmur = (review.by == RuleKind::Silence)
+        let murmur = (review.kind == ElementKind::Silence)
             .then(|| {
                 self.speech(&take, cx)
                     .map(|s| s.ranges.iter().any(|r| r.overlaps(review.range)))
             })
             .flatten();
         let applied = self.mode == Mode::Applied;
-        let speaks = speaks(review.by, &inside_text);
+        let speaks = speaks(review.kind, &inside_text);
         let why = if speaks {
-            speech_reason(review.by, review.range.duration(), applied)
+            speech_reason(review.kind, review.range.duration(), applied)
         } else if applied {
-            applied_reason(review.by, review.range.duration())
+            applied_reason(review.kind, review.range.duration())
         } else {
-            reason(review.by, review.range.duration(), murmur)
+            reason(review.kind, review.range.duration(), murmur)
         };
 
         let peaks = self.peaks.get(&take).cloned().flatten();
@@ -1257,7 +1180,7 @@ impl CutScreen {
                                 div()
                                     .text_size(px(20.))
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child(kind_name(review.by, speaks)),
+                                    .child(kind_name(review.kind, speaks)),
                             )
                             .child(mono(at_text.clone()).text_color(MUTED))
                             .child(div().min_w_0().truncate().text_color(MUTED).child(chapter)),
@@ -1381,20 +1304,20 @@ impl CutScreen {
     /// The middle when nothing waits: what happened, and the way on.
     fn done(&self, cx: &mut Context<Self>) -> Div {
         let folder = self.folder.read(cx);
-        let cut = &folder.shown.cut;
+        let (cut, lock) = (&folder.project.cut, folder.lock());
         let applied = self.mode == Mode::Applied;
-        let answered: Vec<&Answered> = self.answers(self.mode, cut).map(|(_, a)| a).collect();
+        let answered: Vec<&Answered> = self.answers(self.mode, cut, lock).map(|(_, a)| a).collect();
         let kept = answered
             .iter()
             .filter(|a| a.decision == Decision::Keep)
             .count();
         let cuts = answered.len() - kept;
-        let counts = autocut::rule_counts(cut);
+        let counts = counts(cut, lock);
         let removed: usize = counts.iter().map(|c| c.removed).sum();
         let removed_time = Micros(counts.iter().map(|c| c.removed_time.0).sum());
         let untranscribed =
             model::blocks(cut).any(|(_, b)| !folder.transcripts.contains_key(&b.take));
-        let runs = minutes(kept_length(cut));
+        let runs = minutes(kept_length(cut, lock));
         // A lime check only when the rules or the answers made a cut.
         let (icon_name, done, title, text) = if cut.chapters.is_empty() {
             (
@@ -1526,12 +1449,12 @@ impl CutScreen {
     /// `None` when there is nothing to list.
     fn list_pane(&mut self, queue: &[(TakeAt, Review)], cx: &mut Context<Self>) -> Option<Div> {
         let folder = self.folder.read(cx);
-        let cut = &folder.shown.cut;
+        let (cut, lock) = (&folder.project.cut, folder.lock());
         let applied_mode = self.mode == Mode::Applied;
         // With nothing open the list offers the applied cuts, and a click starts their review.
         let entering = !applied_mode && queue.is_empty();
         let offered: Vec<(TakeAt, Review)> = if entering {
-            applied(cut).collect()
+            applied(cut, lock).collect()
         } else {
             Vec::new()
         };
@@ -1542,11 +1465,14 @@ impl CutScreen {
             .iter()
             .enumerate()
             .map(|(index, (at, review))| {
-                (Row::Open(index), edited_time(cut, *at, review.range.from()))
+                (
+                    Row::Open(index),
+                    edited_time(cut, lock, *at, review.range.from()),
+                )
             })
             .collect();
         let with_answered = !entering || offered.is_empty();
-        for (i, answered) in self.answers(self.mode, cut) {
+        for (i, answered) in self.answers(self.mode, cut, lock) {
             if !with_answered {
                 continue;
             }
@@ -1562,7 +1488,7 @@ impl CutScreen {
                 })
                 .map(|(at, _)| at);
             let time = at.map_or(Micros(0), |at| {
-                edited_time(cut, at, answered.review.range.from())
+                edited_time(cut, lock, at, answered.review.range.from())
             });
             rows.push((Row::Answered(i, at), time));
         }
@@ -1588,7 +1514,10 @@ impl CutScreen {
             });
             let text = match (text.is_empty(), before.is_empty(), opens) {
                 (false, ..) => {
-                    return (format!("\"{}\"", text.join(" ")), speaks(review.by, &text));
+                    return (
+                        format!("\"{}\"", text.join(" ")),
+                        speaks(review.kind, &text),
+                    );
                 }
                 (true, false, Some(chapter)) => format!("Start of {chapter}"),
                 (true, true, _) => "At the start of the take".to_owned(),
@@ -1654,7 +1583,7 @@ impl CutScreen {
                         .child(
                             div()
                                 .font_weight(FontWeight::MEDIUM)
-                                .child(kind_name(review.by, speaks)),
+                                .child(kind_name(review.kind, speaks)),
                         )
                         .child(
                             div()
@@ -1784,7 +1713,8 @@ impl Render for CutScreen {
         if let Some(error) = self.player.error() {
             self.error.get_or_insert(error);
         }
-        let counts = autocut::rule_counts(&self.folder.read(cx).shown.cut);
+        let folder = self.folder.read(cx);
+        let counts = counts(&folder.project.cut, folder.lock());
         let rules = self.rules_pane(&counts, cx);
         let progress = self.progress(&queue, cx);
         let body = match self.shown(&queue) {
@@ -1842,75 +1772,79 @@ impl Render for CutScreen {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shot_core::RemovedBy;
+
+    fn range(from: u64, to: u64) -> TimeRange {
+        TimeRange::new(Micros(from), Micros(to)).unwrap()
+    }
+
+    /// A lock of `t01` that cuts silences at `from`.
+    fn silences(cuts: &[(u64, u64)]) -> Lock {
+        let instances: String = cuts
+            .iter()
+            .map(|(from, to)| {
+                format!("    cut from={from} to={to} on=silence t={from} layer=format rule=\"silence\"\n")
+            })
+            .collect();
+        Lock::parse(&format!("lock 1\n\ntake t01 {{\n{instances}}}\n")).unwrap()
+    }
 
     #[test]
     fn an_item_shows_at_its_edited_time() {
-        let range = |from: u64, to: u64| TimeRange::new(Micros(from), Micros(to)).unwrap();
         let take = Id::new("t01").unwrap();
         let cut = Cut::default()
             .append_take(take.clone(), "A", range(0, 10_000_000))
             .append_take(take, "B", range(10_000_000, 20_000_000));
         let mut cut = cut;
         cut.chapters[1].takes[0].ranges = vec![
-            RangeEdit::Remove {
-                range: range(10_000_000, 12_000_000),
-                by: RemovedBy::Manual,
-            },
+            RangeEdit::Remove(range(10_000_000, 12_000_000)),
             RangeEdit::Keep(range(12_000_000, 20_000_000)),
         ];
         let at = TakeAt {
             chapter: 1,
             take: 0,
         };
+        let lock = silences(&[(1_000_000, 2_000_000)]);
         assert_eq!(
-            edited_time(&cut, at, Micros(15_000_000)),
-            Micros(13_000_000)
+            edited_time(&cut, &lock, at, Micros(15_000_000)),
+            Micros(12_000_000)
         );
-        assert_eq!(kept_length(&cut), Micros(18_000_000));
+        assert_eq!(kept_length(&cut, &lock), Micros(17_000_000));
         assert_eq!(raw_length(&cut), Micros(20_000_000));
     }
 
     #[test]
-    fn a_cut_left_cut_stands_only_while_the_cut_holds_it() {
-        let range = |from: u64, to: u64| TimeRange::new(Micros(from), Micros(to)).unwrap();
+    fn a_cut_left_cut_stands_only_while_the_lock_holds_it() {
         let take = Id::new("t01").unwrap();
-        let mut cut = Cut::default().append_take(take.clone(), "A", range(0, 10_000_000));
-        let silence = |from| RangeEdit::Remove {
-            range: range(from, 6_000_000),
-            by: RemovedBy::Rule(RuleKind::Silence),
-        };
+        let cut = Cut::default().append_take(take.clone(), "A", range(0, 10_000_000));
         let left_cut = Answered {
             review: Review {
                 range: range(4_000_000, 6_000_000),
-                by: RuleKind::Silence,
-                kept: false,
+                kind: ElementKind::Silence,
+                t: Micros(4_000_000),
             },
             take,
             decision: Decision::Cut,
             applied: true,
         };
-        cut.chapters[0].takes[0].ranges = vec![
-            RangeEdit::Keep(range(0, 4_000_000)),
-            silence(4_000_000),
-            RangeEdit::Keep(range(6_000_000, 10_000_000)),
-        ];
-        assert!(stands(&left_cut, &cut));
+        assert!(stands(
+            &left_cut,
+            &cut,
+            &silences(&[(4_000_000, 6_000_000)])
+        ));
         // A looser pacing moved the cut's edge: the old answer no longer has a row.
-        cut.chapters[0].takes[0].ranges = vec![
-            RangeEdit::Keep(range(0, 4_500_000)),
-            silence(4_500_000),
-            RangeEdit::Keep(range(6_000_000, 10_000_000)),
-        ];
-        assert!(!stands(&left_cut, &cut));
+        assert!(!stands(
+            &left_cut,
+            &cut,
+            &silences(&[(4_500_000, 6_000_000)])
+        ));
     }
 
     #[test]
     fn lengths_and_rule_rows_read_plainly() {
         assert_eq!(length(Micros(800_000)), "0.8 s");
         assert_eq!(length(Micros(108_400_000)), "1:48");
-        let count = |removed, queued| RuleCount {
-            rule: RuleKind::Silence,
+        let count = |removed, queued| KindCount {
+            kind: ElementKind::Silence,
             removed,
             removed_time: Micros(161_000_000),
             queued,
@@ -1925,25 +1859,33 @@ mod tests {
             (words.join(" "), durations)
         };
         assert_eq!(
-            text(rule_detail(&count(12, 3), true, true)),
+            text(rule_detail(&count(12, 3))),
             (
                 "12 cuts, 2:41 · 3 to review".to_owned(),
                 vec!["2:41".to_owned()]
             )
         );
-        let short = RuleCount {
+        let short = KindCount {
             removed_time: Micros(3_700_000),
             ..count(2, 0)
         };
         assert_eq!(
-            text(rule_detail(&short, true, true)),
+            text(rule_detail(&short)),
             ("2 cuts, 3.7 s".to_owned(), vec!["3.7".to_owned()])
         );
-        assert_eq!(
-            text(rule_detail(&count(0, 0), true, true)).0,
-            "Nothing found"
+        let cut = Cut::default().append_take(Id::new("t01").unwrap(), "A", range(0, 10_000_000));
+        let found = counts(
+            &cut,
+            &silences(&[(1_000_000, 2_000_000), (5_000_000, 5_500_000)]),
         );
-        assert_eq!(text(rule_detail(&count(0, 0), true, false)).0, "On");
-        assert_eq!(text(rule_detail(&count(0, 0), false, true)).0, "Off");
+        assert_eq!(
+            found,
+            [KindCount {
+                kind: ElementKind::Silence,
+                removed: 2,
+                removed_time: Micros(1_500_000),
+                queued: 0,
+            }]
+        );
     }
 }

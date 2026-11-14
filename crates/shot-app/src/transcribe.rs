@@ -8,7 +8,7 @@
 //! div().child(transcribe.clone())
 //! ```
 //!
-//! When it is done the folder holds the new transcripts and [`Transcribed`] names their takes.
+//! When it is done the folder holds the new transcripts.
 //! Stop ends it after the current decode and writes nothing for the take it was on.
 
 use std::path::{Path, PathBuf};
@@ -16,9 +16,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use gpui::{
-    Context, Entity, EventEmitter, FontWeight, Hsla, Window, div, prelude::*, px, relative,
-};
+use gpui::{Context, Entity, FontWeight, Hsla, Window, div, prelude::*, px, relative};
 use shot_analyze::{Transcriber, cache, decode_mono, models};
 use shot_core::{Id, Micros};
 
@@ -28,9 +26,6 @@ use crate::theme::*;
 use crate::ui::{ActionLook, alert, icon, proposal_action};
 
 const POLL: Duration = Duration::from_millis(200);
-
-/// The takes that have a transcript now.
-pub struct Transcribed(pub Vec<Id>);
 
 /// What the background job is doing, shared with the screen.
 #[derive(Default)]
@@ -60,8 +55,6 @@ pub struct Transcribe {
     folder: Entity<VideoFolder>,
     state: State,
 }
-
-impl EventEmitter<Transcribed> for Transcribe {}
 
 impl Transcribe {
     pub fn new(folder: Entity<VideoFolder>, cx: &mut Context<Self>) -> Self {
@@ -138,21 +131,16 @@ impl Transcribe {
 
     /// Loads the new transcripts into the folder, or shows why the job failed.
     fn finish(&mut self, result: Result<Vec<Id>, String>, cx: &mut Context<Self>) {
-        let loaded = result.and_then(|takes| {
+        let loaded = result.and_then(|_| {
             self.folder.update(cx, |folder, cx| {
                 cx.notify();
-                folder.load_transcripts().map(|()| takes)
+                folder.load_transcripts()
             })
         });
-        match loaded {
-            Ok(takes) => {
-                self.state = State::Idle;
-                if !takes.is_empty() {
-                    cx.emit(Transcribed(takes));
-                }
-            }
-            Err(error) => self.state = State::Failed(error),
-        }
+        self.state = match loaded {
+            Ok(()) => State::Idle,
+            Err(error) => State::Failed(error),
+        };
     }
 }
 

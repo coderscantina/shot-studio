@@ -9,7 +9,7 @@ use std::process::Command;
 
 use serde_json::json;
 use shot_core::{
-    Applied, Brand, ContentHash, Cut, Format, FormatLayer, Micros, Project, Script, Target,
+    Applied, Brand, ContentHash, Cut, FormatKind, FormatLayer, Micros, Project, Script, Target,
     TransitionKind, Video,
 };
 
@@ -245,7 +245,7 @@ fn fixtures() -> PathBuf {
     PathBuf::from(std::env::var("SHOT_FIXTURES").expect("SHOT_FIXTURES is set"))
 }
 
-/// A channel repo in a temp dir with the reel's brand, files and a migrated video over the
+/// A channel repo in a temp dir with the reel's brand, files and a video over the
 /// fixture take, its lock built like `shot style build` does with the transitions set per
 /// chapter.
 pub(crate) struct Reel {
@@ -340,18 +340,14 @@ impl Reel {
         }
         std::fs::write(video.join("cut.lock"), lock.to_kdl()).expect("cut.lock");
 
-        let format_text = std::fs::read_to_string(fixtures().join("target-project/format.kdl"))
-            .expect("format.kdl")
-            .replace(
-                "layouts face split",
-                "layouts face face-content split content",
-            )
-            + "zoom-motion smooth\n";
-        std::fs::write(video.join("format.kdl"), &format_text).expect("format.kdl");
+        let format_text = "layouts face face-content split content\nzoom-motion smooth\n";
+        std::fs::write(video.join("format.kdl"), format_text).expect("format.kdl");
         let project = Project {
             video: Video::parse(video_text).expect("video.kdl"),
             script: Script::parse("# Why we ship on Fridays\n").expect("script"),
-            format: Format::parse(&format_text).expect("format"),
+            format: FormatKind::Opinion
+                .preset()
+                .resolve([&FormatLayer::parse(format_text).expect("format")]),
             cut,
         };
         Self {
@@ -425,10 +421,8 @@ impl Reel {
     /// the nearest beat the bed's detection found. The bed starts with the output.
     pub(crate) fn snapped(&self) -> Vec<(u64, u64)> {
         let snapped = preview_plan(&self.video, &self.project).expect("the reel plans");
-        let lock = crate::lock::read(&self.video)
-            .expect("lock")
-            .expect("a lock");
-        let plain = shot_core::Timeline::styled(&self.project, &lock);
+        let lock = crate::lock::read(&self.video).expect("a lock");
+        let plain = shot_core::Timeline::evaluate(&self.project, &lock);
         let plain = crate::plan::ExportPlan::new(plain.main(), snapped.fps, |_| {
             shot_core::MediaId::default()
         });

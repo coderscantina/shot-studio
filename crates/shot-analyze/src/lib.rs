@@ -1,4 +1,4 @@
-//! Transcription, VAD, auto-cut rules, faces, scene and idle detection.
+//! Transcription, VAD, retake and filler detection, faces, scene and idle detection.
 //!
 //! - [`models`]: pinned model downloads.
 //! - [`Transcriber`]: streaming mic audio into a word-timed transcript.
@@ -7,13 +7,11 @@
 //! - [`SpeechDetector`]: streaming mic audio into speech ranges and loudness levels.
 //! - [`idle`]: stretches where the screen track does not change.
 //! - [`again_markers`]: the `again` hotkey presses of a take's event log.
-//! - [`autocut`]: the rough cut, rules and pacing written into `cut.kdl`.
 //! - [`vision`]: faces and on-screen text with Apple Vision, for reframing and highlights.
 //! - [`masks`]: person masks of the camera, for the cut-out camera.
 //! - [`elements`]: the facts of a take in `elements/<take>.jsonl`, from all of the above.
 
 mod audio;
-pub mod autocut;
 pub mod cache;
 pub mod elements;
 mod events;

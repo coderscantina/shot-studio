@@ -316,7 +316,7 @@ pub fn measure_until(
 }
 
 /// The checks over the files next to the export and the project: captions, links, chapters,
-/// the thumbnail and, on the main cut of a migrated video, overrides whose element is gone.
+/// the thumbnail and, on the main cut, overrides whose element is gone.
 pub fn check_files(
     video_dir: &Path,
     project: &Project,
@@ -360,23 +360,17 @@ pub fn check_files(
         .iter()
         .any(|ext| export.with_extension(ext).exists());
     problems.extend(check::thumbnail(output.kind, thumbnail));
-    if output.kind == OutputKind::Main
-        && let Some(lock) = &lock
-    {
-        problems.extend(check::orphans(lock));
+    if output.kind == OutputKind::Main {
+        problems.extend(check::orphans(&lock));
     }
     problems.sort_by_key(|p| p.check);
     Ok(problems)
 }
 
-/// The timeline export renders, from the video's lock when it has one, and that lock.
-fn timeline(video_dir: &Path, project: &Project) -> Result<(Timeline, Option<Lock>), MediaError> {
+/// The timeline export renders, from the video's lock, and that lock.
+fn timeline(video_dir: &Path, project: &Project) -> Result<(Timeline, Lock), MediaError> {
     let lock = shot_render::lock::read(video_dir).map_err(|e| MediaError::Video(e.to_string()))?;
-    let timeline = match &lock {
-        Some(lock) => Timeline::styled(project, lock),
-        None => Timeline::evaluate(project),
-    };
-    Ok((timeline, lock))
+    Ok((Timeline::evaluate(project, &lock), lock))
 }
 
 fn output<'a>(timeline: &'a Timeline, cut: &str) -> Result<&'a Output, MediaError> {

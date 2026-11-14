@@ -6,7 +6,9 @@ use std::collections::HashMap;
 use std::fmt::Write;
 
 use rmcp::schemars;
-use shot_core::{Cut, Id, Micros, RangeEdit, RemovedBy, TakeAt, TimeRange, Transcript, Word};
+use shot_core::{
+    Applied, Cut, Id, Lock, Micros, RangeEdit, RemovedBy, TakeAt, TimeRange, Transcript, Word,
+};
 
 /// Words per line of the transcript text, so word numbers stay easy to count.
 const LINE_WORDS: usize = 8;
@@ -50,13 +52,23 @@ fn middle(word: &Word) -> u64 {
     (word.range.from().0 + word.range.to().0) / 2
 }
 
-/// The transcript of every take block in cut order. Each line starts with the edited time of
-/// its first kept word and the number of its first word (`w12`). Removed words are in brackets
-/// with what removed them: `[um so](filler)`.
-pub fn render(cut: &Cut, transcripts: &HashMap<Id, Transcript>) -> String {
+/// The transcript of every take block in cut order, with the cuts of `lock`. Each line starts
+/// with the edited time of its first kept word and the number of its first word (`w12`).
+/// Removed words are in brackets with what removed them: `[um so](filler)`.
+pub fn render(cut: &Cut, lock: &Lock, transcripts: &HashMap<Id, Transcript>) -> String {
     let mut out = String::new();
     let mut offset = 0u64;
     for block in blocks(cut) {
+        let cuts: Vec<(TimeRange, RemovedBy)> = lock
+            .take(block.take)
+            .into_iter()
+            .flat_map(|t| &t.instances)
+            .filter_map(|i| match i.applied {
+                Applied::Cut(range) => Some((range, RemovedBy::Rule(i.element.target))),
+                _ => None,
+            })
+            .collect();
+        let played = played(block.ranges, &cuts);
         let _ = writeln!(
             out,
             "## chapter {} \"{}\", take {}",
@@ -64,27 +76,34 @@ pub fn render(cut: &Cut, transcripts: &HashMap<Id, Transcript>) -> String {
             block.chapter,
             block.take
         );
+        let length: u64 = played.iter().map(|r| r.duration().0).sum();
         let Some(transcript) = transcripts.get(block.take) else {
             out.push_str("(no transcript yet: run `shot transcribe`)\n\n");
-            offset += kept(block.ranges);
+            offset += length;
             continue;
         };
+        let inside = |r: TimeRange, m: u64| r.from().0 <= m && m < r.to().0;
         let mut lines: Vec<Line> = Vec::new();
-        let mut kept_before = offset;
         for range in block.ranges {
             let r = range.range();
             for (index, word) in transcript.words().iter().enumerate() {
                 let m = middle(word);
-                if m < r.from().0 || m >= r.to().0 {
+                if !inside(r, m) {
                     continue;
                 }
-                let (removed, at) = match range {
-                    RangeEdit::Keep(_) => (
-                        None,
-                        Some(kept_before + word.range.from().0.saturating_sub(r.from().0)),
-                    ),
-                    RangeEdit::Remove { by, .. } => (Some(*by), None),
+                let removed = match range {
+                    RangeEdit::Remove(_) => Some(RemovedBy::Manual),
+                    RangeEdit::Keep(_) => cuts.iter().find(|(c, _)| inside(*c, m)).map(|c| c.1),
                 };
+                let at = removed.is_none().then(|| {
+                    let from = word.range.from();
+                    let before: u64 = played
+                        .iter()
+                        .filter(|p| p.from() < from)
+                        .map(|p| p.to().min(from).0 - p.from().0)
+                        .sum();
+                    offset + before
+                });
                 match lines.last_mut() {
                     Some(line) if line.words.len() < LINE_WORDS => {
                         line.at = line.at.or(at);
@@ -96,9 +115,6 @@ pub fn render(cut: &Cut, transcripts: &HashMap<Id, Transcript>) -> String {
                         words: vec![(word, removed)],
                     }),
                 }
-            }
-            if let RangeEdit::Keep(_) = range {
-                kept_before += r.duration().0;
             }
         }
         for Line { at, first, words } in lines {
@@ -130,7 +146,7 @@ pub fn render(cut: &Cut, transcripts: &HashMap<Id, Transcript>) -> String {
             let _ = writeln!(out, "{}", pieces.join(" "));
         }
         out.push('\n');
-        offset = kept_before;
+        offset += length;
     }
     if out.is_empty() {
         out.push_str("the cut has no chapters yet\n");
@@ -154,18 +170,33 @@ fn close(pieces: &mut [String], by: RemovedBy) {
 fn removed_by(by: RemovedBy) -> &'static str {
     match by {
         RemovedBy::Manual => "manual",
-        RemovedBy::Rule(rule) => rule.as_str(),
+        RemovedBy::Rule(target) => target.as_str(),
     }
 }
 
-fn kept(ranges: &[RangeEdit]) -> u64 {
-    ranges
-        .iter()
-        .filter_map(|r| match r {
-            RangeEdit::Keep(range) => Some(range.duration().0),
-            RangeEdit::Remove { .. } => None,
-        })
-        .sum()
+/// The kept ranges of a block less the lock's cuts, in order.
+fn played(ranges: &[RangeEdit], cuts: &[(TimeRange, RemovedBy)]) -> Vec<TimeRange> {
+    let mut out = Vec::new();
+    for range in ranges {
+        let RangeEdit::Keep(kept) = range else {
+            continue;
+        };
+        let mut pieces = vec![*kept];
+        for (cut, _) in cuts {
+            pieces = pieces
+                .into_iter()
+                .flat_map(|p| {
+                    [
+                        TimeRange::new(p.from(), cut.from().min(p.to())),
+                        TimeRange::new(cut.to().max(p.from()), p.to()),
+                    ]
+                })
+                .flatten()
+                .collect();
+        }
+        out.extend(pieces);
+    }
+    out
 }
 
 /// `m:ss.d` of edited time.
@@ -200,9 +231,11 @@ impl std::fmt::Display for Change {
     }
 }
 
-/// Applies word removals, then restores, to `cut`. Each span must lie in one take block.
+/// Applies word removals, then restores, to `cut`. Each span must lie in one take block. A
+/// restore over a cut of `lock` overrides it with `keep`.
 pub fn apply(
     cut: &Cut,
+    lock: &Lock,
     transcripts: &HashMap<Id, Transcript>,
     remove: &[WordSpan],
     restore: &[WordSpan],
@@ -255,7 +288,7 @@ pub fn apply(
         cut = if removes {
             cut.delete_words(at, transcript, range)
         } else {
-            cut.restore(at, range)
+            cut.restore(at, range, lock)
         }
         .map_err(|e| e.to_string())?;
         changes.push(Change {
@@ -310,35 +343,56 @@ mod tests {
         HashMap::from([(id, t)])
     }
 
-    const CUT: &str = "chapter \"Hook\" {\n    take t01 {\n        keep from=0 to=1_000_000\n        remove from=1_000_000 to=2_000_000 by=filler\n        keep from=2_000_000 to=6_000_000\n    }\n}\n";
+    const CUT: &str =
+        "chapter \"Hook\" {\n    take t01 {\n        keep from=0 to=6_000_000\n    }\n}\n";
+    const LOCK: &str = "lock 1\n\ntake t01 {\n    cut from=1_000_000 to=2_000_000 on=filler t=1_000_000 layer=format rule=\"filler\"\n}\n";
 
     #[test]
     fn renders_numbered_words_in_edited_time_with_removed_runs_marked() {
-        let cut = Cut::parse(CUT).unwrap();
+        let (cut, lock) = (Cut::parse(CUT).unwrap(), Lock::parse(LOCK).unwrap());
+        let text = render(&cut, &lock, &transcripts());
         assert_eq!(
-            render(&cut, &transcripts()),
+            text,
             "## chapter 1 \"Hook\", take t01\n0:00.0 w0 so [um](filler) we ship on fridays\n\n"
+        );
+        let removed = cut
+            .delete_words(
+                TakeAt {
+                    chapter: 0,
+                    take: 0,
+                },
+                &transcripts()[&Id::new("t01").unwrap()],
+                TimeRange::new(Micros(0), Micros(500_000)).unwrap(),
+            )
+            .unwrap();
+        let text = render(&removed, &lock, &transcripts());
+        assert!(
+            text.contains("0:00.2 w0 [so](manual) [um](filler) we"),
+            "{text}"
         );
     }
 
     #[test]
     fn proposes_cuts_and_restores_of_whole_recorded_words() {
-        let cut = Cut::parse(CUT).unwrap();
+        let (cut, lock) = (Cut::parse(CUT).unwrap(), Lock::parse(LOCK).unwrap());
         let span = |from, to| WordSpan {
             take: "t01".to_owned(),
             from_word: from,
             to_word: to,
         };
-        let (cut, changes) = apply(&cut, &transcripts(), &[span(4, 5)], &[span(1, 1)]).unwrap();
+        let (cut, changes) =
+            apply(&cut, &lock, &transcripts(), &[span(4, 5)], &[span(1, 1)]).unwrap();
         assert_eq!(
             changes[0].to_string(),
             "removes t01 w4-w5 \"on fridays\" (1.8 s)"
         );
-        let text = render(&cut, &transcripts());
+        assert_eq!(cut.overrides.len(), 1, "the restored filler is kept");
+        let lock = Lock::default();
+        let text = render(&cut, &lock, &transcripts());
         assert!(
             text.contains("so um we ship [on fridays](manual)"),
             "{text}"
         );
-        assert!(apply(&cut, &transcripts(), &[span(5, 9)], &[]).is_err());
+        assert!(apply(&cut, &lock, &transcripts(), &[span(5, 9)], &[]).is_err());
     }
 }

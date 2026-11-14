@@ -75,12 +75,9 @@ fn style_of(folder: &VideoFolder) -> CaptionStyle {
         .unwrap_or(folder.project.format.captions)
 }
 
-/// The brand's caption look, from the lock of a migrated video.
+/// The brand's caption look, from the video's lock.
 fn brand_look(folder: &VideoFolder) -> CaptionLook {
-    folder
-        .lock()
-        .map(|lock| lock.brand.captions.clone())
-        .unwrap_or_default()
+    folder.lock().brand.captions.clone()
 }
 
 /// The design the edit's captions burn in with: the preset, the brand's look, the video's.
@@ -477,7 +474,7 @@ fn hex(color: Color) -> u32 {
 pub fn panel(this: &EditScreen, cx: &mut Context<EditScreen>) -> Stateful<Div> {
     let folder = this.folder.read(cx);
     let design = design_of(folder);
-    let channel = folder.is_migrated() && this.channel.is_some();
+    let channel = this.channel.is_some();
     let custom = !folder.project.format.caption_look.is_empty();
     let accent = folder.theme.as_ref().map_or(0xC8F25A, |t| {
         let [r, g, b, _] = t.palette.accent.0;

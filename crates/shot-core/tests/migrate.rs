@@ -3,9 +3,24 @@
 use std::collections::BTreeMap;
 
 use shot_core::{
-    Brand, Cut, Elements, Format, FormatKind, FormatLayer, Id, MediaId, Micros, MigrateInput,
-    Project, Script, StyleInput, Timeline, Video, build, has_rule_nodes, implied_rules, migrate,
+    Brand, Cut, Elements, FormatKind, FormatLayer, Id, Lock, MediaId, Micros, MigrateInput,
+    Project, Script, StyleInput, Timeline, Video, build, migrate,
 };
+
+/// The opinion preset as it shipped before style rules: settings only.
+const OLD_FORMAT: &str = r#"prompter beats
+pacing tight
+layouts face split
+captions word-pop
+auto-cut confidence=85 {
+    silence on=#true min=600_000
+    retake on=#true
+    misspoken on=#true
+    pause on=#true min=1_000_000
+    filler on=#true
+    idle-screen on=#false min=8_000_000
+}
+"#;
 
 const OLD_CUT: &str = r#"chapter "One" {
     take t01 {
@@ -65,26 +80,60 @@ fn take() -> Id {
     Id::new("t01").unwrap()
 }
 
-fn old_project() -> Project {
+fn video() -> Video {
+    Video::parse("title \"Migrate\"\nstatus editing\nformat opinion\n").unwrap()
+}
+
+fn script() -> Script {
+    Script::parse("# Migrate\n").unwrap()
+}
+
+/// `old` as it played: the rules' removals and zooms as a person's, the queue gone.
+fn played(old: &str) -> Project {
+    let text: String = old
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("review") && !l.trim_start().starts_with("ignore"))
+        .map(|l| {
+            let l = l.replace(" by=jump-cut", "");
+            match l.trim_start().starts_with("remove") {
+                true => format!("{} by=manual\n", &l[..l.rfind(" by=").unwrap()]),
+                false => format!("{l}\n"),
+            }
+        })
+        .collect();
     Project {
-        video: Video::parse("title \"Migrate\"\nstatus editing\nformat opinion\n").unwrap(),
-        script: Script::parse("# Migrate\n").unwrap(),
+        video: video(),
+        script: script(),
         format: FormatKind::Opinion.preset(),
-        cut: Cut::parse(OLD_CUT).unwrap(),
+        cut: Cut::parse(&text).unwrap(),
+    }
+}
+
+fn input<'a>(
+    cut: &'a str,
+    format: &'a str,
+    channel: &'a str,
+    elements: &'a [Elements],
+) -> MigrateInput<'a> {
+    static BRAND: std::sync::LazyLock<Brand> = std::sync::LazyLock::new(Brand::default);
+    static ASSETS: BTreeMap<String, shot_core::ContentHash> = BTreeMap::new();
+    static VIDEO: std::sync::LazyLock<Video> = std::sync::LazyLock::new(video);
+    static SCRIPT: std::sync::LazyLock<Script> = std::sync::LazyLock::new(script);
+    MigrateInput {
+        video: &VIDEO,
+        script: &SCRIPT,
+        format,
+        cut,
+        imported: &[],
+        brand: &BRAND,
+        channel,
+        elements,
+        assets: &ASSETS,
     }
 }
 
 fn elements(text: &str) -> Vec<Elements> {
     vec![Elements::parse(take(), text).unwrap()]
-}
-
-/// The channel's opinion format as copied before presets carried rules: settings only.
-fn settings_only() -> FormatLayer {
-    FormatLayer::from(&FormatKind::Opinion.preset())
-}
-
-fn styled(project: &Project, lock: &shot_core::Lock) -> Timeline {
-    Timeline::styled(project, lock)
 }
 
 /// Every chunk key of the main output, a whole segment per chunk.
@@ -104,30 +153,27 @@ fn chunk_keys(timeline: &Timeline) -> Vec<String> {
 
 #[test]
 fn a_migrated_video_keeps_every_chunk() {
-    let old = old_project();
-    let (brand, channel, elements, assets) = (
-        Brand::default(),
-        settings_only(),
-        elements(ELEMENTS),
-        BTreeMap::new(),
-    );
-    let migration = migrate(&MigrateInput {
-        project: &old,
-        imported: &[],
-        brand: &brand,
-        channel: &channel,
-        elements: &elements,
-        assets: &assets,
-    })
-    .unwrap();
+    let elements = elements(ELEMENTS);
+    let migration = migrate(&input(OLD_CUT, OLD_FORMAT, OLD_FORMAT, &elements)).unwrap();
 
     assert_eq!(migration.cut.to_kdl(), NEW_CUT);
-    assert!(!has_rule_nodes(&migration.cut) && has_rule_nodes(&old.cut));
+    assert!(
+        Cut::parse(OLD_CUT).is_err(),
+        "only migration reads the old nodes"
+    );
     let channel = migration
         .channel
         .as_ref()
         .expect("the default rules were added");
-    assert_eq!(channel.rules, implied_rules(&FormatKind::Opinion.preset()));
+    let mut preset = FormatKind::Opinion.preset_layer().rules;
+    preset
+        .rules
+        .retain(|r| r.selector.to_string() != "silence min=600_000 every=2");
+    assert_eq!(
+        channel.rules, preset,
+        "the preset's rules but the jump-cut punch-in"
+    );
+    assert!(!channel.to_kdl().contains("pacing"));
     assert_eq!(migration.video, FormatLayer::default());
     assert_eq!(
         (migration.report.manual, migration.report.overrides),
@@ -137,11 +183,14 @@ fn a_migrated_video_keeps_every_chunk() {
     let new = Project {
         cut: migration.cut.clone(),
         format: migration.format.clone(),
-        ..old.clone()
+        ..played(OLD_CUT)
     };
-    let before = chunk_keys(&Timeline::evaluate(&old));
+    let before = chunk_keys(&Timeline::evaluate(&played(OLD_CUT), &Lock::default()));
     assert_eq!(before.len(), 3);
-    assert_eq!(chunk_keys(&styled(&new, &migration.lock)), before);
+    assert_eq!(
+        chunk_keys(&Timeline::evaluate(&new, &migration.lock)),
+        before
+    );
 }
 
 /// The migrated files, built again with `change` applied to the video's layer and elements.
@@ -166,21 +215,8 @@ fn rebuilt(
 }
 
 fn migrated() -> shot_core::Migration {
-    let (brand, channel, elements, assets) = (
-        Brand::default(),
-        settings_only(),
-        elements(ELEMENTS),
-        BTreeMap::new(),
-    );
-    migrate(&MigrateInput {
-        project: &old_project(),
-        imported: &[],
-        brand: &brand,
-        channel: &channel,
-        elements: &elements,
-        assets: &assets,
-    })
-    .unwrap()
+    let elements = elements(ELEMENTS);
+    migrate(&input(OLD_CUT, OLD_FORMAT, OLD_FORMAT, &elements)).unwrap()
 }
 
 #[test]
@@ -189,7 +225,7 @@ fn changing_the_pacing_recuts_the_video() {
     let project = Project {
         cut: migration.cut.clone(),
         format: migration.format.clone(),
-        ..old_project()
+        ..played(OLD_CUT)
     };
     let natural =
         FormatLayer::parse("on silence min=600_000 {\n    cut breath=250_000 confidence=85\n}\n")
@@ -207,8 +243,10 @@ fn changing_the_pacing_recuts_the_video() {
         ]
     );
     assert_ne!(
-        styled(&project, &lock).main().chapters,
-        styled(&project, &migration.lock).main().chapters
+        Timeline::evaluate(&project, &lock).main().chapters,
+        Timeline::evaluate(&project, &migration.lock)
+            .main()
+            .chapters
     );
 }
 
@@ -253,46 +291,20 @@ fn an_override_survives_a_recut_and_an_orphan_is_listed() {
 
 #[test]
 fn a_video_that_differs_from_its_channel_keeps_its_rules() {
-    let mut old = old_project();
-    old.format = Format::parse(
-        &FormatKind::Opinion
-            .preset()
-            .to_kdl()
-            .replace("pacing tight", "pacing natural")
-            .replace(
-                "silence on=#true min=600_000",
-                "silence on=#true min=900_000",
-            ),
-    )
-    .unwrap();
-    old.cut = Cut::parse(
-        r#"chapter "One" {
-    take t01 {
-        keep from=0 to=30_000_000
-    }
-}
-"#,
-    )
-    .unwrap();
-    let (brand, channel, elements, assets) = (
-        Brand::default(),
-        FormatKind::Opinion.preset_layer(),
-        elements(ELEMENTS),
-        BTreeMap::new(),
-    );
-    let migration = migrate(&MigrateInput {
-        project: &old,
-        imported: &[],
-        brand: &brand,
-        channel: &channel,
-        elements: &elements,
-        assets: &assets,
-    })
-    .unwrap();
+    let format = OLD_FORMAT
+        .replace("pacing tight", "pacing natural")
+        .replace(
+            "silence on=#true min=600_000",
+            "silence on=#true min=900_000",
+        );
+    let cut = "chapter \"One\" {\n    take t01 {\n        keep from=0 to=30_000_000\n    }\n}\n";
+    let channel = FormatKind::Opinion.preset_source();
+    let elements = elements(ELEMENTS);
+    let migration = migrate(&input(cut, &format, channel, &elements)).unwrap();
     assert!(migration.channel.is_none());
     let video = migration.video.to_kdl();
     assert!(
-        video.starts_with("pacing natural\nauto-cut confidence=85 {"),
+        !video.contains("pacing") && !video.contains("auto-cut"),
         "{video}"
     );
     assert!(

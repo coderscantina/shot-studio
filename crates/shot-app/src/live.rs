@@ -8,8 +8,8 @@
 //! load and capture starts, so the first styled frame follows the first captured one.
 //!
 //! The style is what the stop path will write: the take appended to `cut.kdl` as a chapter of
-//! its own with its markers as nodes, and on a migrated video the lock built from the files
-//! with the take's live elements, its cuts left out. A build takes a few milliseconds and runs
+//! its own with its markers as nodes, and the lock built from the files with the take's live
+//! elements, its cuts left out. A build takes a few milliseconds and runs
 //! only when the elements change. The thread never touches the capture queues: it reads the
 //! preview's converted frames, so a slow frame skips a refresh and never holds up the recording.
 
@@ -23,8 +23,8 @@ use std::time::{Duration, Instant};
 
 use objc2_core_foundation::CFRetained;
 use objc2_core_video::CVPixelBuffer;
-use shot_analyze::autocut::heard_retakes;
 use shot_analyze::elements::Stream;
+use shot_analyze::elements::heard_retakes;
 use shot_capture::Preview;
 use shot_capture::events::Marker;
 use shot_core::{
@@ -52,6 +52,8 @@ const BLACK_LUMA: u8 = 6;
 const BLACK_FOR: Duration = Duration::from_secs(2);
 /// Settled words the retake rule reads: enough for a restarted sentence and its repeat.
 const RETAKE_WINDOW: usize = 80;
+/// How sure a heard retake must be to show on the prompter: the shipped presets' cut confidence.
+const RETAKE_SURE: u8 = 85;
 /// The live take's kept range: longer than any take.
 const OPEN_END: Micros = Micros(24 * 3600 * 1_000_000);
 
@@ -61,11 +63,10 @@ pub enum Heard {
     Tentative(Vec<Word>),
 }
 
-/// The video as the take starts: its files, and whether its style comes from a lock.
+/// The video as the take starts.
 pub struct Setup {
     pub dir: PathBuf,
     pub project: Project,
-    pub migrated: bool,
 }
 
 /// What the Record screen reads from the live take.
@@ -319,7 +320,6 @@ fn run(
     view: &View,
     quit: &AtomicBool,
 ) {
-    let confidence = setup.project.format.auto_cut.confidence;
     let mut stream = match Stream::create(&setup.dir, &feeds.take) {
         Ok(stream) => stream,
         Err(e) => return view.fail(format!("elements: {e}")),
@@ -359,7 +359,7 @@ fn run(
         }
         if spoke {
             let window = &settled[settled.len().saturating_sub(RETAKE_WINDOW)..];
-            for retake in heard_retakes(window, confidence) {
+            for retake in heard_retakes(window, RETAKE_SURE) {
                 if shown.insert(retake.range.from()) {
                     feeds.prompter.lock().caught(Retake {
                         heard: retake.heard,
@@ -462,43 +462,25 @@ fn prepare(setup: &Setup, take: &Id) -> Result<(LiveStyle, Monitor), String> {
 struct LiveStyle {
     take: Id,
     project: Project,
-    migrated: bool,
     theme: Arc<Theme>,
-    /// A migrated video in its channel repo: what a build reads, the live take's elements
-    /// last in `inputs.elements`.
-    inputs: Option<Inputs>,
+    /// What a build reads, the live take's elements last in `inputs.elements`.
+    inputs: Inputs,
 }
 
 impl LiveStyle {
     fn new(setup: &Setup, take: &Id) -> Result<Self, String> {
         let project = setup.project.clone();
-        // A video's first take in a channel repo migrates it at stop, so it is styled now.
-        let styles = setup.migrated || project.cut.chapters.is_empty();
-        let inputs = match Disk::locate(&setup.dir) {
-            Ok((disk, slug)) if styles => {
-                let mut inputs = style::inputs(&disk, &slug)?;
-                inputs.elements.retain(|e| e.take() != take);
-                inputs.elements.push(Elements::new(take.clone()));
-                Some(inputs)
-            }
-            _ => None,
-        };
-        let migrated = setup.migrated || inputs.is_some();
-        let cut = crate::folder::appended(
-            &project.cut,
-            take,
-            open_range(),
-            &[],
-            &project.format,
-            migrated,
-        );
+        let (disk, slug) = Disk::locate(&setup.dir)?;
+        let mut inputs = style::inputs(&disk, &slug)?;
+        inputs.elements.retain(|e| e.take() != take);
+        inputs.elements.push(Elements::new(take.clone()));
+        let cut = crate::folder::appended(&project.cut, take, open_range(), &[], &project.format);
         let theme = Theme::load(&setup.dir, project.video.format, &cut)
             .map(Arc::new)
             .map_err(|e| e.to_string())?;
         Ok(Self {
             take: take.clone(),
             project,
-            migrated,
             theme,
             inputs,
         })
@@ -512,33 +494,28 @@ impl LiveStyle {
             open_range(),
             markers,
             &self.project.format,
-            self.migrated,
         );
         let project = Project {
             cut,
             ..self.project.clone()
         };
-        let timeline = match &mut self.inputs {
-            Some(inputs) => {
-                *inputs.elements.last_mut().expect("the live take's slot") = elements.clone();
-                let mut lock = shot_core::build(&StyleInput {
-                    imported: &inputs.imported,
-                    brand: &inputs.brand,
-                    format: &inputs.format,
-                    video: &inputs.video_layer,
-                    cut: &project.cut,
-                    elements: &inputs.elements,
-                    assets: &inputs.assets,
-                })
-                .map_err(|e| e.to_string())?;
-                if let Some(live) = lock.takes.iter_mut().find(|t| t.take == self.take) {
-                    live.instances
-                        .retain(|i| !matches!(i.applied, Applied::Cut(_)));
-                }
-                Timeline::styled(&project, &lock)
-            }
-            None => Timeline::evaluate(&project),
-        };
+        let inputs = &mut self.inputs;
+        *inputs.elements.last_mut().expect("the live take's slot") = elements.clone();
+        let mut lock = shot_core::build(&StyleInput {
+            imported: &inputs.imported,
+            brand: &inputs.brand,
+            format: &inputs.format,
+            video: &inputs.video_layer,
+            cut: &project.cut,
+            elements: &inputs.elements,
+            assets: &inputs.assets,
+        })
+        .map_err(|e| e.to_string())?;
+        if let Some(live) = lock.takes.iter_mut().find(|t| t.take == self.take) {
+            live.instances
+                .retain(|i| !matches!(i.applied, Applied::Cut(_)));
+        }
+        let timeline = Timeline::evaluate(&project, &lock);
         let main = timeline.main();
         Ok(Styled {
             segments: main

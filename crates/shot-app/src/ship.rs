@@ -2151,7 +2151,7 @@ fn check_stamp(dir: &Path, cut: &PlannedCut, cut_kdl: &str) -> Option<u64> {
         .and_then(|p| modified(&p))
         .hash(&mut hasher);
     cut_kdl.hash(&mut hasher);
-    // A migrated video's frames follow its lock too, which a rule change rebuilds.
+    // A video's frames follow its lock too, which a rule change rebuilds.
     std::fs::read(dir.join(shot_ship::lock::LOCK_FILE))
         .ok()
         .hash(&mut hasher);

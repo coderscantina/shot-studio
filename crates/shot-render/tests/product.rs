@@ -8,32 +8,28 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use shot_core::{
-    CursorStyle, Cut, FormatKind, Keystrokes, Layout, Micros, Project, Script, Video, ZoomMotion,
+    CursorStyle, Cut, FormatKind, Keystrokes, Layout, Lock, Micros, Project, Script, Video,
 };
 use shot_media::videotoolbox::Decoder;
 use shot_render::assets::Assets;
-use shot_render::autozoom;
-use shot_render::events::EventLog;
 use shot_render::export::{ExportOptions, export};
 use shot_render::frame::{Shot, compose};
 use shot_render::graph::Renderer;
-use shot_render::layout::{Canvas, LayoutSpec, Source, Sources};
+use shot_render::layout::{Canvas, Source, Sources};
 use shot_render::surface::{BufferPool, Matrix, Range, read_rgb, size};
-use shot_render::zoom::punch_at;
-
-const SCREEN: (u32, u32) = (3840, 2160);
 
 fn fixtures() -> PathBuf {
     PathBuf::from(std::env::var("SHOT_FIXTURES").expect("SHOT_FIXTURES is set"))
 }
 
-fn screen_events() -> EventLog {
-    let text = std::fs::read_to_string(fixtures().join("screen-30s.events.jsonl")).unwrap();
-    EventLog::parse(&text).unwrap()
-}
+/// The zooms the auto-zoom rule wrote on the fixture's first click and typed run, centered so
+/// the cursor stays in view.
+const ZOOMS: &str = "        zoom 160 from=900_000 to=2_500_000 x=1200 y=675
+        zoom 160 from=2_500_000 to=6_000_000 x=1992 y=900
+";
 
-/// A product tour of the 30 s screen fixture, `length` long, with auto zoom written into the cut
-/// and every keystroke shown.
+/// A product tour of the 30 s screen fixture, `length` long, with [`ZOOMS`] and every
+/// keystroke shown.
 fn screen_project(length: u64) -> (tempfile::TempDir, Project) {
     let dir = tempfile::tempdir().unwrap();
     let take = dir.path().join("media/t01");
@@ -47,13 +43,10 @@ fn screen_project(length: u64) -> (tempfile::TempDir, Project) {
     );
     let mut format = FormatKind::ProductTour.preset();
     format.keystrokes = Some(Keystrokes::All);
-    let mut cut = Cut::parse(&format!(
-        "chapter \"Tour\" {{\n    take t01 {{\n        keep from=0 to={length}\n    }}\n}}\n"
+    let cut = Cut::parse(&format!(
+        "chapter \"Tour\" {{\n    take t01 {{\n        keep from=0 to={length}\n{ZOOMS}    }}\n}}\n"
     ))
     .unwrap();
-    let rule = format.auto_zoom.clone().unwrap();
-    let edit = &mut cut.chapters[0].takes[0];
-    *edit = autozoom::apply(edit, &rule, &screen_events(), SCREEN);
     let project = Project {
         video: Video::parse("title \"Tour\"\nstatus editing\nformat product-tour\n").unwrap(),
         script: Script::parse("# Tour\n").unwrap(),
@@ -61,55 +54,8 @@ fn screen_project(length: u64) -> (tempfile::TempDir, Project) {
         cut,
     };
     std::fs::write(dir.path().join("cut.kdl"), project.cut.to_kdl()).unwrap();
+    std::fs::write(dir.path().join("cut.lock"), Lock::default().to_kdl()).unwrap();
     (dir, project)
-}
-
-#[test]
-#[ignore = "needs the generated screen fixture"]
-fn auto_zoom_lands_on_every_click_and_never_cuts_off_the_cursor() {
-    let events = screen_events();
-    let format = FormatKind::ProductTour.preset();
-    let rule = format.auto_zoom.clone().unwrap();
-    let zooms = autozoom::zooms(&rule, &events, SCREEN);
-    let effects = format.effects();
-    assert_eq!(effects.zoom_motion, ZoomMotion::Smooth);
-    let spec = LayoutSpec::styled(Layout::Window, &effects.window).unwrap();
-    let sizes = Sources {
-        screen: SCREEN,
-        camera: (1920, 1080),
-    };
-    let crop_at = |t: Micros| {
-        let punch = punch_at(&zooms, t, effects.zoom_motion, SCREEN);
-        (
-            punch.scale,
-            spec.scene(Canvas::UHD, sizes, punch).layers[0].crop,
-        )
-    };
-    let inside = |crop: shot_render::layout::Rect, [x, y]: [f32; 2]| {
-        crop.contains([x / SCREEN.0 as f32, y / SCREEN.1 as f32])
-    };
-    for click in events.clicks() {
-        let (scale, crop) = crop_at(click.t);
-        assert_eq!(scale, 1.6, "no full zoom on the click at {:?}", click.t);
-        assert!(
-            inside(crop, click.at),
-            "the click at {:?} is off view",
-            click.t
-        );
-    }
-    let mut frames = 0;
-    for frame in 0..30 * 60 {
-        let t = Micros(frame * 1_000_000 / 60);
-        let (_, crop) = crop_at(t);
-        let cursor = events.cursor(t, effects.cursor.smoothing).unwrap();
-        assert!(inside(crop, cursor), "the cursor is cut off at {t:?}");
-        frames += 1;
-    }
-    println!(
-        "{} clicks, {} zooms, cursor in view on all {frames} frames",
-        events.clicks().len(),
-        zooms.len()
-    );
 }
 
 /// Mean and 99th percentile of the absolute channel difference, in 8-bit code values.
@@ -236,6 +182,7 @@ fn a_cursor_style_change_re_renders_only_chunks_that_show_the_screen() {
     let source = fixtures().join("target-project");
     let dir = tempfile::tempdir().unwrap();
     std::os::unix::fs::symlink(source.join("media"), dir.path().join("media")).unwrap();
+    std::fs::write(dir.path().join("cut.lock"), Lock::default().to_kdl()).unwrap();
     let read = |name: &str| std::fs::read_to_string(source.join(name)).unwrap();
     // 2 s of `face`, the format's default, then 2 s of `split`.
     let cut = Cut::parse(
@@ -245,7 +192,7 @@ fn a_cursor_style_change_re_renders_only_chunks_that_show_the_screen() {
     let mut project = Project {
         video: Video::parse(&read("video.kdl")).unwrap(),
         script: Script::parse(&read("script.md")).unwrap(),
-        format: shot_core::Format::parse(&read("format.kdl")).unwrap(),
+        format: FormatKind::Opinion.preset(),
         cut,
     };
     let out = dir.path().join("out.mp4");

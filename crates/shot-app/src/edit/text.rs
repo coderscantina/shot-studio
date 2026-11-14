@@ -91,15 +91,14 @@ impl EditScreen {
             return false;
         };
         self.edit(cx, |cut| {
-            let mut cut =
-                crate::style::with_override(cut, &take, shot_core::ElementKind::Word, at, |o| {
-                    o.effects.retain(|e| {
-                        !matches!(
-                            e,
-                            shot_core::OverrideEffect::Set(shot_core::Effect::Sfx { .. })
-                        )
-                    })
-                });
+            let mut cut = cut.with_override(&take, shot_core::ElementKind::Word, at, |o| {
+                o.effects.retain(|e| {
+                    !matches!(
+                        e,
+                        shot_core::OverrideEffect::Set(shot_core::Effect::Sfx { .. })
+                    )
+                })
+            });
             cut.overrides
                 .retain(|o| o.decision.is_some() || !o.effects.is_empty());
             Ok(cut)
@@ -386,7 +385,7 @@ fn document(this: &mut EditScreen, follow: &Entity<bool>, cx: &mut Context<EditS
         .iter()
         .filter(|b| b.at.chapter == this.chapter)
         .collect();
-    let default_layout = this.folder.read(cx).shown.format.default_layout;
+    let default_layout = this.folder.read(cx).project.format.default_layout;
     let columns = Columns::for_width(f32::from(this.document_bounds.get().size.width));
     let doc_row = |rail: Div, content: AnyElement| doc_row(columns, rail, content);
     let rail = |start, layout| rail(columns, start, layout);
@@ -958,7 +957,7 @@ fn layout_chip(
 ) -> impl IntoElement {
     let screen = cx.entity();
     let (layout, range, before) = (switch.run.layout, switch.run.range, switch.before);
-    let default = this.folder.read(cx).shown.format.default_layout;
+    let default = this.folder.read(cx).project.format.default_layout;
     let choices = layout_choices(this, cx);
     Button::new(("layout-switch", word_key(at, word)))
         .ghost()
@@ -1225,7 +1224,7 @@ fn layout_picker(this: &EditScreen, cx: &mut Context<EditScreen>) -> Div {
         .selection_frames()
         .and_then(|f| this.map.span_at(f.start))
         .map(|s| s.layout);
-    let default = this.folder.read(cx).shown.format.default_layout;
+    let default = this.folder.read(cx).project.format.default_layout;
     div()
         .flex()
         .flex_col()
