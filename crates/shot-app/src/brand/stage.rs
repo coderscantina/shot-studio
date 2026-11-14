@@ -43,14 +43,21 @@ fn read(path: &Path) -> Option<String> {
 
 impl Sample {
     /// The first video of the channel at `repo`, by folder name, with a recorded take: two
-    /// seconds into its longest kept range.
+    /// seconds into its longest kept range. A video with a worktree is read from there.
     pub fn find(repo: &Path) -> Option<Self> {
+        let board = shot_board::Board::open(repo).ok();
         let mut dirs: Vec<PathBuf> = std::fs::read_dir(repo.join("videos"))
             .ok()?
             .filter_map(|e| Some(e.ok()?.path()))
             .filter(|p| p.is_dir())
+            .map(|dir| {
+                let slug = dir.file_name().and_then(|n| n.to_str());
+                slug.zip(board.as_ref())
+                    .and_then(|(slug, board)| board.worktree_folder(slug))
+                    .unwrap_or(dir)
+            })
             .collect();
-        dirs.sort();
+        dirs.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
         dirs.into_iter().find_map(|dir| {
             let video = Video::parse(&read(&dir.join("video.kdl"))?).ok()?;
             let cut = Cut::parse(&read(&dir.join("cut.kdl"))?).ok()?;

@@ -78,8 +78,11 @@ pub async fn serve_stdio(
 }
 
 /// One MCP session over one channel repo. The repo is opened per call, so nothing is cached and
-/// changes made by the app or by git in between are always seen. Transcripts are read from the
-/// cache in the repo's working tree, `videos/<slug>/.shot/cache`.
+/// changes made by the app or by git in between are always seen. A video's files are read from
+/// its worktree ([0037]), uncommitted edits included, and transcripts from the cache its
+/// `.shot/` links to, the main checkout's `videos/<slug>/.shot/cache`.
+///
+/// [0037]: ../../docs/decisions/0037-a-worktree-per-video-branch.md
 #[derive(Clone)]
 pub struct ShotServer {
     repo: PathBuf,
@@ -326,7 +329,7 @@ impl ShotServer {
     }
 
     #[tool(
-        description = "Read the text of one video from its branch tip: video.kdl, script.md, cut.kdl and format.kdl. Files that do not exist yet are marked as missing.",
+        description = "Read the text of one video as it is being edited, uncommitted edits included: video.kdl, script.md, cut.kdl and format.kdl. Files that do not exist yet are marked as missing.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -840,8 +843,8 @@ impl ShotServer {
                     .to_owned(),
             );
         }
-        Board::open(&self.repo).map_err(|e| e.to_string())?;
-        let dir = confine::resolve(&self.repo, &args.slug, THUMBNAILS)?;
+        let folder = self.video_dir(&args.slug)?;
+        let dir = confine::resolve(&self.repo, &args.slug, &folder, THUMBNAILS)?;
         let mut stills: Vec<PathBuf> = std::fs::read_dir(&dir)
             .map_err(|_| {
                 format!(
@@ -856,7 +859,12 @@ impl ShotServer {
         let mut content = Vec::new();
         for still in stills {
             let name = still.file_name().unwrap_or_default().to_string_lossy();
-            let real = confine::resolve(&self.repo, &args.slug, &format!("{THUMBNAILS}/{name}"))?;
+            let real = confine::resolve(
+                &self.repo,
+                &args.slug,
+                &folder,
+                &format!("{THUMBNAILS}/{name}"),
+            )?;
             let bytes = std::fs::read(&real).map_err(|e| format!("{}: {e}", real.display()))?;
             content.push(ContentBlock::text(format!("candidate {name}")));
             content.push(ContentBlock::image(
@@ -872,36 +880,46 @@ impl ShotServer {
             .map_err(|e| format!("{} is not a channel repo: {e}", self.repo.display()))
     }
 
+    /// The video's folder, in its worktree once it is committed, see [`style::video_folder`].
     fn video_dir(&self, slug: &str) -> Result<PathBuf, String> {
-        confine::resolve(&self.repo, slug, "")
+        confine::slug(slug)?;
+        let folder = style::video_folder(&self.repo, slug)?;
+        confine::resolve(&self.repo, slug, &folder, "")
     }
 
     /// Opens the video's folder as every front end does, so a video written before the lock is
-    /// migrated before a tool reads it. A video only in git has no folder to open.
-    fn open(&self, slug: &str) -> Result<(), String> {
+    /// migrated before a tool reads it, and returns its files.
+    fn open(&self, slug: &str) -> Result<style::Disk, String> {
         let dir = self.video_dir(slug)?;
         if dir.join("video.kdl").exists() {
             let _lock =
                 shot_fs::WriteLock::acquire(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
             style::open(&dir)?;
         }
-        Ok(())
+        Ok(style::Disk::locate(&dir)?.0)
     }
 
-    /// The video at its tip with the lock its files build.
+    /// The files of the video's folder as they are, for reads after [`ShotServer::open`].
+    fn disk(&self, slug: &str) -> Result<style::Disk, String> {
+        Ok(style::Disk::locate(&self.video_dir(slug)?)?.0)
+    }
+
+    /// The text of `file` in the video's folder, `None` when it has none yet.
+    fn read(&self, disk: &style::Disk, slug: &str, file: &str) -> Result<Option<String>, String> {
+        let path = style::video_path(slug, file);
+        style::Repo::read(disk, slug, &path)?
+            .map(|bytes| String::from_utf8(bytes).map_err(|_| format!("{path} is not UTF-8")))
+            .transpose()
+    }
+
+    /// The video with the lock its files build.
     fn built(&self, slug: &str) -> Result<style::Built, String> {
-        self.open(slug)?;
-        style::build_video(&style::Git(&self.board()?), slug)
+        style::build_video(&self.open(slug)?, slug)
     }
 
-    /// The cut at the video's tip, empty when it has none yet.
+    /// The video's cut, empty when it has none yet.
     fn cut(&self, slug: &str) -> Result<Cut, String> {
-        self.open(slug)?;
-        match self
-            .board()?
-            .read_file(slug, "cut.kdl")
-            .map_err(|e| e.to_string())?
-        {
+        match self.read(&self.open(slug)?, slug, "cut.kdl")? {
             Some(text) => Cut::parse(&text).map_err(|e| e.to_string()),
             None => Ok(Cut::default()),
         }
@@ -909,28 +927,22 @@ impl ShotServer {
 
     fn script(&self, slug: &str) -> Result<Script, String> {
         let text = self
-            .board()?
-            .read_file(slug, "script.md")
-            .map_err(|e| e.to_string())?
+            .read(&self.disk(slug)?, slug, "script.md")?
             .ok_or_else(|| format!("{slug} has no script.md yet"))?;
         Script::parse(&text).map_err(|e| e.to_string())
     }
 
     fn project(&self, slug: &str, cut: Cut) -> Result<Project, String> {
-        let board = self.board()?;
+        let disk = self.disk(slug)?;
         let read = |file: &str| -> Result<String, String> {
-            board
-                .read_file(slug, file)
-                .map_err(|e| e.to_string())?
+            self.read(&disk, slug, file)?
                 .ok_or_else(|| format!("{slug} has no {file} yet"))
         };
         let video = Video::parse(&read("video.kdl")?).map_err(|e| e.to_string())?;
-        let format_text = board
-            .read_file(slug, "format.kdl")
-            .map_err(|e| e.to_string())?;
+        let format_text = self.read(&disk, slug, "format.kdl")?;
         Ok(Project {
             script: Script::parse(&read("script.md")?).map_err(|e| e.to_string())?,
-            format: resolved_format(&board, slug, &video, format_text.as_deref())?,
+            format: resolved_format(&disk, slug, &video, format_text.as_deref())?,
             video,
             cut,
         })
@@ -946,7 +958,7 @@ impl ShotServer {
             }
             let cache = shot_analyze::cache::cache_path(&dir, take);
             let relative = cache.strip_prefix(&dir).unwrap_or(&cache);
-            confine::resolve(&self.repo, slug, &relative.to_string_lossy())?;
+            confine::resolve(&self.repo, slug, &dir, &relative.to_string_lossy())?;
             if let Some(transcript) =
                 shot_analyze::cache::read_cached(&dir, take).map_err(|e| e.to_string())?
             {
@@ -997,14 +1009,14 @@ impl ShotServer {
         ))
     }
 
-    /// Reads the project files from the branch tip of the video, else from the default branch.
+    /// Reads the project files from the video's worktree, opened as the front ends open it.
     fn read_video_files(&self, slug: &str) -> Result<String, String> {
-        let board = self.board()?;
+        let disk = self.open(slug)?;
         let mut out = String::new();
         let mut found = false;
         for file in VIDEO_FILES {
             let _ = writeln!(out, "== {file} ==");
-            match board.read_file(slug, file).map_err(|e| e.to_string())? {
+            match self.read(&disk, slug, file)? {
                 Some(content) => {
                     found = true;
                     out.push_str(&content);
@@ -1071,7 +1083,7 @@ impl ServerHandler for ShotServer {
 /// A video's format: its layer of differences over the preset and the channel's
 /// `formats/<format>.kdl`, as the app and export resolve it.
 fn resolved_format(
-    board: &Board,
+    disk: &style::Disk,
     slug: &str,
     video: &Video,
     text: Option<&str>,
@@ -1081,9 +1093,7 @@ fn resolved_format(
         .transpose()?
         .unwrap_or_default();
     let path = format!("formats/{}.kdl", video.format);
-    let channel = board
-        .read_repo_file(slug, &path)
-        .map_err(|e| e.to_string())?
+    let channel = style::Repo::read(disk, slug, &path)?
         .map(|bytes| {
             let text = String::from_utf8(bytes).map_err(|_| format!("{path} is not UTF-8"))?;
             FormatLayer::parse(&text).map_err(|e| format!("{path}:{e}"))

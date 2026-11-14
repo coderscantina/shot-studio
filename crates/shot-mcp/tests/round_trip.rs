@@ -27,6 +27,8 @@ fn channel() -> TempDir {
     let mut config = repo.config().unwrap();
     config.set_str("user.name", "Mike").unwrap();
     config.set_str("user.email", "mike@example.com").unwrap();
+    // As in every channel: recordings and caches stay out of git.
+    std::fs::write(dir.path().join(".gitignore"), "media/\n.shot/\n").unwrap();
     for (slug, kdl) in [
         (
             "alpha",
@@ -355,6 +357,27 @@ async fn scripts_are_checked_and_proposed_only_when_they_parse() {
         diff.contains("sources/post.md") && diff.contains("+# The post"),
         "{diff}"
     );
+}
+
+#[tokio::test]
+async fn reading_a_video_written_before_the_lock_shows_it_migrated() {
+    let dir = TempDir::new().unwrap();
+    let board = shot_board::Board::init(dir.path()).unwrap();
+    let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/projects/target");
+    let files = ["video.kdl", "script.md", "format.kdl", "cut.kdl"].map(|f| {
+        (
+            f.to_owned(),
+            std::fs::read_to_string(target.join(f)).unwrap(),
+        )
+    });
+    board.add_video("target", &files.into()).unwrap();
+    let client = connect(dir.path()).await;
+
+    let (error, text) = call(&client, "read_video", json!({ "slug": "target" })).await;
+    assert!(!error, "{text}");
+    let files = &text[text.find("== cut.kdl ==").unwrap()..];
+    assert!(!files.contains("by=silence"), "{files}");
+    assert!(!files.contains("pacing tight"), "{files}");
 }
 
 #[tokio::test]

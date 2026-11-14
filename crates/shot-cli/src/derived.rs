@@ -10,7 +10,7 @@ use shot_core::{CaptionStyle, Clip, DerivedCut, DerivedKind, Id, Micros, TimeRan
 pub struct DerivedArgs {
     /// The video folder.
     #[arg(long, global = true, default_value = ".")]
-    video: PathBuf,
+    pub(crate) video: PathBuf,
     #[command(subcommand)]
     action: DerivedAction,
 }

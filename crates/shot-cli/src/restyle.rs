@@ -4,7 +4,7 @@
 //!
 //! [0019]: ../../../docs/decisions/0019-semantic-video-elements-and-style.md
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::Args;
 use shot_mcp::style::{self, Disk, Repo};
@@ -18,8 +18,9 @@ pub struct RestyleArgs {
 }
 
 pub fn run(repo: PathBuf, args: RestyleArgs) -> Result<(), String> {
-    let _lock = crate::lock(&repo.join("videos").join(&args.slug))?;
-    let disk = Disk::new(repo);
+    let folder = crate::video_folder(&repo, Path::new(&args.slug))?;
+    let _lock = crate::lock(&folder)?;
+    let (disk, _) = Disk::locate(&folder)?;
     let built = style::build_video(&disk, &args.slug)?;
     if !built.shipped() {
         return Err(format!(

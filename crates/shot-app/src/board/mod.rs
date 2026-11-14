@@ -1079,9 +1079,14 @@ fn stepped(grid: &[Vec<String>], selected: Option<&str>, step: Step) -> Option<S
 }
 
 /// Reads what a card shows besides its `video.kdl`: the edited length from `cut.kdl` (less the
-/// lock's cuts), else the spoken length of `script.md`, and the next step.
+/// lock's cuts), else the spoken length of `script.md`, and the next step. The files come from
+/// the video's worktree when it has one, uncommitted edits included, else from its branch.
 fn card_info(board: &Board, slug: &str, video: &Video, proposals: usize) -> CardInfo {
-    let read = |file: &str| board.read_file(slug, file).ok().flatten();
+    let worktree = board.worktree_folder(slug);
+    let read = |file: &str| match &worktree {
+        Some(folder) => std::fs::read_to_string(folder.join(file)).ok(),
+        None => board.read_file(slug, file).ok().flatten(),
+    };
     let script = read("script.md").and_then(|text| Script::parse(&text).ok());
     let cut = read("cut.kdl")
         .and_then(|text| Cut::parse(&text).ok())

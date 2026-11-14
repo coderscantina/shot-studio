@@ -14,7 +14,6 @@
 
 pub mod proposal;
 
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -37,9 +36,6 @@ use proposal::{Change, Piece};
 pub(crate) const CONTEXT: &str = "ScriptScreen";
 /// Proposals with this name prefix are alternative hooks.
 const HOOK: &str = "hook-";
-
-/// The proposal an edit made in the default editor goes through on its way to the branch.
-const OWN_EDIT: &str = "own-edit";
 
 actions!(script, [AcceptProposal, RejectProposal, ContinueToRecord]);
 
@@ -326,9 +322,12 @@ impl ScriptScreen {
         }
     }
 
-    /// The script in the video's folder: the file Edit script opens.
+    /// The script in the video's folder, in its worktree once it is committed: the file Edit
+    /// script opens.
     fn file(&self) -> PathBuf {
-        self.repo.join("videos").join(&self.slug).join("script.md")
+        shot_mcp::style::video_folder(&self.repo, &self.slug)
+            .unwrap_or_else(|_| self.repo.join("videos").join(&self.slug))
+            .join("script.md")
     }
 
     /// Opens the script in the default editor, after putting the script this screen shows in
@@ -361,7 +360,8 @@ impl ScriptScreen {
         cx.notify();
     }
 
-    /// Puts what was saved in the editor since it opened on the video's branch, as one commit.
+    /// Puts what was saved in the editor since it opened on the video's branch, as one commit of
+    /// the worktree's `script.md`.
     fn take_own_edit(&mut self) {
         let (Some(opened), Ok(text)) = (&self.opened, fs::read_to_string(self.file())) else {
             return;
@@ -370,14 +370,9 @@ impl ScriptScreen {
             return;
         }
         let saved = Board::open(&self.repo).and_then(|board| {
-            // A proposal left by an edit that failed to land would block this one.
-            let _ = board.reject_proposal(&self.slug, OWN_EDIT);
-            let files = BTreeMap::from([("script.md".to_owned(), text.clone())]);
-            match board.create_proposal(&self.slug, OWN_EDIT, "📝 edit the script", &files) {
-                Ok(_) => board.accept_proposal(&self.slug, OWN_EDIT).map(drop),
-                Err(shot_board::Error::EmptyProposal) => Ok(()),
-                Err(e) => Err(e),
-            }
+            board
+                .commit_video_files(&self.slug, &["script.md"], "📝 edit the script")
+                .map(drop)
         });
         match saved {
             Ok(()) => {

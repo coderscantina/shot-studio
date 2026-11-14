@@ -10,7 +10,7 @@ use shot_capture::{Devices, Session, SessionConfig, Source};
 pub struct RecordArgs {
     /// The video folder. The take goes into its `media/<take>/`.
     #[arg(long, required_unless_present = "list_devices")]
-    video: Option<PathBuf>,
+    pub(crate) video: Option<PathBuf>,
     /// Display id from `--list-devices`. Defaults to the main display.
     #[arg(long)]
     display: Option<u32>,

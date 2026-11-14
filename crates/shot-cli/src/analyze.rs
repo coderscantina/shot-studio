@@ -14,7 +14,7 @@ use shot_mcp::bridge::{Claude, Reach, Session, new_log_dir};
 pub struct AnalyzeArgs {
     /// The video folder.
     #[arg(long)]
-    video: PathBuf,
+    pub(crate) video: PathBuf,
     /// One take, as in `media/<take>/`. Without it, every take.
     #[arg(long, value_parser = parse_id)]
     take: Option<Id>,

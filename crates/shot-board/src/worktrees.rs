@@ -169,8 +169,9 @@ impl Board {
         Ok(removed)
     }
 
-    /// The video folder in the worktree of `slug`, if it has one.
-    pub(crate) fn worktree_folder(&self, slug: &str) -> Option<PathBuf> {
+    /// The video folder in the worktree of `slug`, if it has one. Unlike [`Board::open_video`]
+    /// this never checks one out.
+    pub fn worktree_folder(&self, slug: &str) -> Option<PathBuf> {
         let worktree = self.video_worktree(slug)?;
         Some(worktree.path().join(video_dir(slug)))
     }

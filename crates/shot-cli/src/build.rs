@@ -23,7 +23,7 @@ use shot_ship::lock::LOCK_FILE as LOCK;
 pub struct BuildArgs {
     /// The video folder, holding cut.kdl and media/.
     #[arg(long)]
-    video: PathBuf,
+    pub(crate) video: PathBuf,
     /// Build again on every change to cut.kdl, a style layer, an element file or a take.
     #[arg(long, conflicts_with = "proposal")]
     watch: bool,
@@ -179,7 +179,7 @@ fn report(result: Result<usize, String>) {
 /// the recordings live) and the channel's style layers.
 #[derive(Clone)]
 struct Inputs {
-    video: PathBuf,
+    pub(crate) video: PathBuf,
     media: Option<PathBuf>,
     channel: Vec<PathBuf>,
 }
@@ -297,7 +297,7 @@ fn proposal_version(video: &Path, name: &str) -> Result<(Project, shot_core::Loc
     let root = video
         .canonicalize()
         .ok()
-        .and_then(|v| v.parent()?.parent().map(Path::to_owned))
+        .and_then(|v| shot_fs::channel_root(&v).map(Path::to_owned))
         .ok_or_else(|| format!("{} is not in a channel repo", video.display()))?;
     let files = Board::open(&root)
         .and_then(|board| board.proposal_files(&slug, name))

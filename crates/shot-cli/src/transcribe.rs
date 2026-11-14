@@ -11,7 +11,7 @@ use shot_core::{Id, Micros};
 pub struct TranscribeArgs {
     /// The video folder.
     #[arg(long)]
-    video: PathBuf,
+    pub(crate) video: PathBuf,
     /// The take id, as in `media/<take>/`.
     #[arg(long, value_parser = parse_id)]
     take: Id,

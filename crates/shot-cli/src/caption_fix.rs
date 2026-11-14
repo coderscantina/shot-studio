@@ -10,7 +10,7 @@ use shot_core::{CaptionFix, Cut};
 pub struct CaptionFixArgs {
     /// The video folder.
     #[arg(long)]
-    video: PathBuf,
+    pub(crate) video: PathBuf,
     /// The words as the transcript has them, matched ignoring case.
     heard: String,
     /// What captions show instead. Leave out to remove the fix.

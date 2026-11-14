@@ -11,11 +11,11 @@ use shot_ship::lock::LOCK_FILE;
 #[derive(Args)]
 pub struct StyleArgs {
     #[command(subcommand)]
-    action: StyleAction,
+    pub(crate) action: StyleAction,
 }
 
 #[derive(Subcommand)]
-enum StyleAction {
+pub(crate) enum StyleAction {
     /// Build the video's lock from its files and write cut.lock. A shipped video's lock is
     /// frozen at its release; `shot restyle` rebuilds it.
     Build {
@@ -62,7 +62,8 @@ pub fn run(repo: PathBuf, args: StyleArgs) -> Result<(), String> {
 /// Builds every video of the channel; one that fails is listed and left alone.
 fn build_all(repo: PathBuf) -> Result<(), String> {
     for slug in style::Repo::slugs(&Disk::new(&repo))? {
-        if let Err(e) = write(&repo.join("videos").join(&slug)) {
+        let folder = crate::video_folder(&repo, &repo.join("videos").join(&slug));
+        if let Err(e) = folder.and_then(|folder| write(&folder)) {
             println!("videos/{slug}: {e}");
         }
     }

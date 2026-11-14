@@ -15,7 +15,7 @@ use shot_ship::youtube::{Privacy, YouTube, YouTubeError};
 pub struct CheckArgs {
     /// The video folder.
     #[arg(long)]
-    video: PathBuf,
+    pub(crate) video: PathBuf,
     /// The cut to check.
     #[arg(long, default_value = "main")]
     cut: String,
@@ -47,7 +47,7 @@ pub fn check(args: CheckArgs) -> Result<(), String> {
 pub struct ThumbnailsArgs {
     /// The video folder.
     #[arg(long)]
-    video: PathBuf,
+    pub(crate) video: PathBuf,
     /// How many candidates to write.
     #[arg(long, default_value_t = 6)]
     count: usize,
@@ -91,7 +91,7 @@ pub fn thumbnails(args: ThumbnailsArgs) -> Result<(), String> {
 pub struct DescribeArgs {
     /// The video folder.
     #[arg(long)]
-    video: PathBuf,
+    pub(crate) video: PathBuf,
 }
 
 pub fn describe(args: DescribeArgs) -> Result<(), String> {
@@ -113,7 +113,7 @@ fn export_path(video: &Path, cut: &str) -> PathBuf {
 pub struct ShipArgs {
     /// The video folder, at <repo>/videos/<slug> in a channel repo.
     #[arg(long)]
-    video: PathBuf,
+    pub(crate) video: PathBuf,
     /// Render and check every cut and print what would ship, without uploading or tagging.
     #[arg(long)]
     dry_run: bool,

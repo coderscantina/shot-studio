@@ -286,10 +286,7 @@ fn name_of(preset: Preset) -> PresetName {
     }
 }
 
-/// The channel repo of a video folder `<repo>/videos/<slug>`, which brand paths are relative to.
-pub fn channel_root(video_dir: &Path) -> Option<&Path> {
-    video_dir.parent()?.parent()
-}
+pub use shot_fs::channel_root;
 
 impl Theme {
     /// The theme of the video in `video_dir` with `format` and `cut`, from its `cut.lock`.

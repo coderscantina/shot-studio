@@ -236,12 +236,25 @@ impl VideoFolder {
         if self.writing {
             return change(self);
         }
+        self.reopen_if_gone()?;
         let _lock = shot_fs::WriteLock::acquire(&self.dir)
             .map_err(|e| format!("{}: {e}", self.dir.display()))?;
         self.writing = true;
         let result = change(self);
         self.writing = false;
         result
+    }
+
+    /// Checks a channel video's worktree out again, at the same place, when it went: the board
+    /// removes the worktree of a merged branch that has no edits when it opens.
+    fn reopen_if_gone(&self) -> Result<(), String> {
+        if self.dir.exists() {
+            return Ok(());
+        }
+        match crate::board::channel::locate(&self.dir) {
+            Some((repo, slug)) => crate::board::channel::prepare(&repo, &slug).map(drop),
+            None => Ok(()),
+        }
     }
 
     /// Writes the files before the last change back. False when there is nothing to undo.

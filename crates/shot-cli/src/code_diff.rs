@@ -10,7 +10,7 @@ use shot_render::code_diff::{self, CodeDiffOverlay};
 pub struct CodeDiffArgs {
     /// The video folder.
     #[arg(long)]
-    video: PathBuf,
+    pub(crate) video: PathBuf,
     /// The git repository the code comes from.
     #[arg(long)]
     code: PathBuf,

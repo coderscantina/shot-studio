@@ -154,6 +154,76 @@ enum ProposalAction {
     Reject { slug: String, name: String },
 }
 
+/// The folder `shot` works on for `--video <video>`: for a video of a channel, given by its slug
+/// in the channel at `repo` or as the main checkout's `videos/<slug>`, its worktree ([0037]).
+/// Any other folder, and a video the channel has not committed, is used as given.
+///
+/// [0037]: ../../../docs/decisions/0037-a-worktree-per-video-branch.md
+pub(crate) fn video_folder(repo: &Path, video: &Path) -> Result<PathBuf, String> {
+    let channel = if video.is_dir() {
+        let dir = video
+            .canonicalize()
+            .map_err(|e| format!("{}: {e}", video.display()))?;
+        let slug = dir.file_name().and_then(|n| n.to_str()).map(str::to_owned);
+        shot_fs::channel_root(&dir)
+            .filter(|root| dir.ancestors().nth(2) == Some(*root))
+            .map(Path::to_owned)
+            .zip(slug)
+    } else if video.components().count() == 1 {
+        video
+            .to_str()
+            .map(|slug| (repo.to_owned(), slug.to_owned()))
+    } else {
+        None
+    };
+    let committed = |(repo, slug): &(PathBuf, String)| {
+        Board::open(repo).is_ok_and(|board| board.has_video(slug).unwrap_or(false))
+    };
+    match channel.filter(committed) {
+        Some((repo, slug)) => shot_mcp::style::video_folder(&repo, &slug),
+        None => Ok(video.to_owned()),
+    }
+}
+
+/// Points the command's `--video` at the folder `shot` works on, see [`video_folder`].
+fn resolve_video(cli: &mut Cli) -> Result<(), String> {
+    let video = match &mut cli.command {
+        Command::Record(args) => args.video.as_mut(),
+        Command::Migrate(args) => args.video.as_mut(),
+        Command::Transcribe(args) => Some(&mut args.video),
+        Command::Analyze(args) => Some(&mut args.video),
+        Command::CaptionFix(args) => Some(&mut args.video),
+        Command::Style(args) => match &mut args.action {
+            style::StyleAction::Build { video, all: false }
+            | style::StyleAction::Explain { video, .. } => Some(video),
+            _ => None,
+        },
+        #[cfg(target_os = "macos")]
+        Command::Export(args) => Some(&mut args.video),
+        #[cfg(target_os = "macos")]
+        Command::Build(args) => Some(&mut args.video),
+        #[cfg(target_os = "macos")]
+        Command::CodeDiff(args) => Some(&mut args.video),
+        #[cfg(target_os = "macos")]
+        Command::Overlays(args) => Some(&mut args.video),
+        #[cfg(target_os = "macos")]
+        Command::Derived(args) => Some(&mut args.video),
+        #[cfg(target_os = "macos")]
+        Command::Check(args) => Some(&mut args.video),
+        #[cfg(target_os = "macos")]
+        Command::Thumbnails(args) => Some(&mut args.video),
+        #[cfg(target_os = "macos")]
+        Command::Describe(args) => Some(&mut args.video),
+        #[cfg(target_os = "macos")]
+        Command::Ship(args) => Some(&mut args.video),
+        _ => None,
+    };
+    if let Some(video) = video {
+        *video = video_folder(&cli.repo, video)?;
+    }
+    Ok(())
+}
+
 /// Holds the writer lock of the video folder `video` until dropped, so another `shot`, the
 /// app or the MCP server waits instead of losing this command's edit.
 pub(crate) fn lock(video: &Path) -> Result<shot_fs::WriteLock, String> {
@@ -182,7 +252,8 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: Cli) -> Result<(), String> {
+fn run(mut cli: Cli) -> Result<(), String> {
+    resolve_video(&mut cli)?;
     match cli.command {
         Command::Models { action } => return models::run(action),
         Command::Transcribe(args) => return transcribe::run(args),
