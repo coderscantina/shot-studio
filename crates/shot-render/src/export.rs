@@ -1407,6 +1407,7 @@ fn run(
                             match derived.filter(|_| job.derived) {
                                 Some(derived) => crate::derived::render(
                                     &worker.renderer,
+                                    &mut worker.assets,
                                     derived,
                                     &job,
                                     cache,
@@ -1438,16 +1439,18 @@ fn run(
 }
 
 /// One render thread: its own GPU device, and a painter that keeps decoders and assets open
-/// across jobs.
+/// across jobs, and the assets a derived cut's second pass draws its cards with.
 struct Worker {
     renderer: Renderer,
     painter: Painter,
+    assets: crate::assets::Assets,
 }
 
 impl Worker {
     fn new(media: &Media, effects: Effects, theme: Arc<Theme>) -> Result<Self, ExportError> {
         Ok(Self {
             renderer: Renderer::new()?,
+            assets: crate::assets::Assets::with_theme(&media.dir, theme.clone()),
             painter: Painter::with_theme(&media.dir, effects, theme),
         })
     }

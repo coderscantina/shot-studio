@@ -19,7 +19,11 @@
 //!
 //! A derived cut is a clip of the content, not of the long video's frame: it has no intro, outro
 //! or transitions, its clips join hard, and its base chunks leave out the cards that frame the
-//! main cut, chapter bands and end cards ([0021]). Every other overlay inside a clip draws.
+//! main cut, chapter bands and end cards ([0021]). Every other overlay inside a clip draws. The
+//! overlays tied to the screen recording (highlights, callouts, blurs, b-roll and code diffs)
+//! draw in the base and follow the screen into the window. Link cards, lower thirds, pops and
+//! brand Lottie templates ([`crate::overlay::on_output`]) are left out of the base too and draw
+//! in the second pass on the derived frame, in its [`area`], so they show whole.
 //!
 //! [0021]: ../../../docs/decisions/0021-sound-transitions-and-bookends.md
 
@@ -35,8 +39,9 @@ use shot_core::{
 pub use crate::captions::Shown;
 use crate::captions::{Cue, Design};
 use crate::drawing::Drawing;
-use crate::frame::Frame;
+use crate::frame::{Frame, Look};
 use crate::layout::{BACKGROUND, Canvas, Layer, LayoutSpec, Rect, Scene, Source, Sources};
+use crate::overlay::{Area, Stage};
 use crate::plan::{ExportPlan, PlannedSegment, frame_time};
 use crate::zoom::punch_at;
 
@@ -59,6 +64,20 @@ pub fn canvas(kind: DerivedKind) -> Canvas {
             width: 1080,
             height: 1080,
         },
+    }
+}
+
+/// Where a derived cut's cards, pops and brand templates sit: clear of the buttons the apps
+/// draw at the right of a Short and of the captions below, sized so a link card with its
+/// margins (1740 4K pixels) fills the width.
+pub fn area(kind: DerivedKind) -> Area {
+    let rect = match kind {
+        DerivedKind::Short => Rect::new(40.0, 192.0, 930.0, 1270.0),
+        DerivedKind::XClip => Rect::new(54.0, 54.0, 1026.0, 820.0),
+    };
+    Area {
+        rect,
+        scale: rect.width() / 1740.0,
     }
 }
 
@@ -155,7 +174,7 @@ impl DerivedPlan {
             panic!("{} is the main cut", derived.name);
         };
         let fps = inputs.fps;
-        let (main, derived) = (&without_cards(main), &without_cards(derived));
+        let (main, derived) = (&base_of(main), &without_cards(derived));
         let mut main_plan = ExportPlan::new(main, fps, inputs.media);
         crate::overlay::key_chunks(&mut main_plan, inputs.assets, inputs.theme);
         let mut plan = ExportPlan::new(derived, fps, inputs.media);
@@ -212,6 +231,8 @@ impl DerivedPlan {
             }
             chunks.push(segment_chunks);
         }
+        // The overlays the second pass draws, with the brand they draw in.
+        crate::overlay::key_chunks(&mut plan, inputs.assets, inputs.theme);
         Self {
             kind,
             canvas: canvas(kind),
@@ -235,9 +256,11 @@ impl DerivedPlan {
     }
 
     /// The frame of chunk `chunk` of segment `segment`, `index` frames in. Its one layer shows
-    /// the window of the base frame, passed as the screen source.
-    pub fn frame(&self, segment: usize, chunk: usize, index: usize) -> Frame {
+    /// the window of the base frame, passed as the screen source; the segment's overlays that
+    /// lay out on the output draw over it with `look`, and the caption on top.
+    pub fn frame(&self, segment: usize, chunk: usize, index: usize, look: &Look) -> Frame {
         let derived = &self.chunks[segment][chunk];
+        let planned = &self.plan.segments[segment];
         let left = f32::from(derived.windows[index]);
         let width = window_width(self.kind);
         let main = MAIN.width as f32;
@@ -248,17 +271,42 @@ impl DerivedPlan {
             self.canvas.width as f32,
             self.canvas.height as f32,
         );
+        let mut scene = Scene {
+            background: BACKGROUND,
+            layers: vec![Layer::new(Source::Screen, full, crop, 0.0)],
+        };
         let mut drawing = Drawing::default();
+        let t = frame_time(
+            planned.chunks[chunk].frames.start + index as u64,
+            self.plan.fps,
+        );
+        for overlay in planned
+            .segment
+            .overlays
+            .iter()
+            .filter(|o| crate::overlay::on_output(o))
+        {
+            crate::overlay::apply(
+                overlay,
+                &mut Stage {
+                    t,
+                    canvas: self.canvas,
+                    area: area(self.kind),
+                    look,
+                    screen: &mut None,
+                    scene: &mut scene,
+                    drawing: &mut drawing,
+                    cutaway: &mut None,
+                },
+            );
+        }
         if let Some(shown) = derived.captions[index] {
             drawing
                 .over
                 .push(self.design.shape(&self.cues[shown.cue], shown, self.canvas));
         }
         Frame {
-            scene: Scene {
-                background: BACKGROUND,
-                layers: vec![Layer::new(Source::Screen, full, crop, 0.0)],
-            },
+            scene,
             drawing,
             cutaway: None,
             cutout: None,
@@ -284,10 +332,21 @@ fn without_cards(output: &Output) -> Output {
     output
 }
 
+/// The main output as a derived cut's base chunks draw it: without its cards, and without the
+/// overlays the second pass draws on the derived frame.
+fn base_of(main: &Output) -> Output {
+    let mut output = without_cards(main);
+    for segment in output.chapters.iter_mut().flat_map(|c| &mut c.segments) {
+        segment.overlays.retain(|o| !crate::overlay::on_output(o));
+    }
+    output
+}
+
 /// Renders the derived chunks of `job` into the cache from their base chunks, waiting for bases
 /// that are still rendering.
 pub(crate) fn render(
     renderer: &crate::graph::Renderer,
+    assets: &mut crate::assets::Assets,
     plan: &DerivedPlan,
     job: &crate::export::Job,
     cache: &crate::export::Cache,
@@ -308,6 +367,8 @@ pub(crate) fn render(
         quality: QUALITY,
     })?;
     let mut files = ChunkFiles::new(job.chunks, cache, plan.canvas, chunk_done);
+    let segment = &plan.plan.segments[job.segment].segment;
+    let look = assets.look(&segment.take, &segment.overlays, Effects::default())?;
     for (index, chunk) in job.range.clone().zip(job.chunks) {
         let derived = &plan.chunks[job.segment][index];
         pending.wait(derived.base.hash)?;
@@ -330,7 +391,7 @@ pub(crate) fn render(
                 .ok_or_else(ends)?;
             let target = encoder.input_buffer()?;
             renderer.draw(
-                &plan.frame(job.segment, index, i),
+                &plan.frame(job.segment, index, i, &look),
                 Sources {
                     screen: Some(&*base.buffer),
                     camera: None,
@@ -596,6 +657,85 @@ short s {
         let first = plan.chunks[0][0].windows[0];
         let last = *plan.chunks[0].last().unwrap().windows.last().unwrap();
         assert!(last > first + 500, "{first} to {last}");
+    }
+
+    /// The 9:16 golden: a link card on a Short's frame over a flat base is whole, inside the
+    /// Short's area, where cut out of the 16:9 frame it would lose its left half.
+    #[test]
+    #[ignore = "needs the GPU"]
+    fn a_link_card_in_a_short_is_whole() {
+        use crate::graph::Renderer;
+        use crate::surface::{BufferPool, Matrix, Range, read_rgb};
+
+        let with_card = CUT.replace(
+            "        layout face from=0 to=10_000_000\n",
+            "        layout face from=0 to=10_000_000\n        overlay link-card from=1_000_000 to=7_000_000 {\n            url \"https://github.com/coderscantina/shot-studio/pull/1\"\n        }\n",
+        );
+        let renderer = Renderer::new().unwrap();
+        let pool = |c: Canvas| BufferPool::new(c.width, c.height, Range::Full, Matrix::Bt709);
+        let base = pool(MAIN).unwrap().buffer().unwrap();
+        let flat = Frame {
+            scene: Scene {
+                background: [0.1, 0.1, 0.12],
+                layers: Vec::new(),
+            },
+            drawing: Drawing::default(),
+            cutaway: None,
+            cutout: None,
+        };
+        let none = Sources {
+            screen: None,
+            camera: None,
+        };
+        renderer.draw(&flat, none, &base).unwrap();
+        let look = Look {
+            take: Some(Id::new("t01").unwrap()),
+            ..Look::default()
+        };
+        // 4 s in: the fifth chunk of the clip from 2 s, the card settled.
+        let render = |cut: &str| {
+            let plan = plan(&project(cut), &HashMap::new());
+            let target = pool(plan.canvas).unwrap().buffer().unwrap();
+            let sources = Sources {
+                screen: Some(&*base),
+                camera: None,
+            };
+            renderer
+                .draw(&plan.frame(0, 4, 0, &look), sources, &target)
+                .unwrap();
+            read_rgb(&target).unwrap()
+        };
+        let (plain, card) = (render(CUT), render(&with_card));
+        let short = canvas(DerivedKind::Short);
+        let changed: Vec<(u32, u32)> = (0..short.height)
+            .flat_map(|y| (0..short.width).map(move |x| (x, y)))
+            .filter(|&(x, y)| {
+                let i = (y * short.width + x) as usize;
+                (0..3).any(|c| plain[i][c].abs_diff(card[i][c]) > 8)
+            })
+            .collect();
+        let bounds = |pick: fn(&(u32, u32)) -> u32| {
+            let values = changed.iter().map(pick);
+            (values.clone().min().unwrap(), values.max().unwrap())
+        };
+        let ((left, right), (top, bottom)) = (bounds(|p| p.0), bounds(|p| p.1));
+        let safe = area(DerivedKind::Short).rect;
+        assert!(
+            safe.left <= left as f32 && (right as f32) < safe.right,
+            "across {left}..{right}, the area {}..{}",
+            safe.left,
+            safe.right
+        );
+        assert!(
+            safe.top <= top as f32 && (bottom as f32) < safe.bottom,
+            "down {top}..{bottom}, the area {}..{}",
+            safe.top,
+            safe.bottom
+        );
+        assert!(
+            (right - left) as f32 > 0.8 * safe.width(),
+            "the card spans {left}..{right}"
+        );
     }
 
     #[test]

@@ -232,45 +232,96 @@ fn pass<E: From<TimelineAudioError>>(
     score: &Score,
     mut out: impl FnMut(&mut [f32]) -> Result<(), E>,
 ) -> Result<(), E> {
-    let mut chain = VoiceChain::new();
-    let mut mix = score.mix();
-    let mut skip = VoiceChain::LATENCY;
-    let bleeps = audio.bleeps().to_vec();
-    let mut emitted = 0u64;
-    let mut emit = |samples: &mut [f32]| -> Result<(), E> {
-        let drop = skip.min(samples.len());
-        skip -= drop;
-        let samples = &mut samples[drop..];
-        if samples.is_empty() {
-            return Ok(());
+    let mut pass = Pass::new(audio, score, 0);
+    let total = audio.len();
+    let mut block = Vec::with_capacity(BLOCK as usize);
+    while pass.read < total {
+        block.clear();
+        pass.step(audio, BLOCK.min(total - pass.read) as usize, &mut block)?;
+        if !block.is_empty() {
+            out(&mut block)?;
         }
-        let at = emitted;
-        emitted += samples.len() as u64;
-        for bleep in &bleeps {
-            let from = bleep.start.max(at);
-            let to = bleep.end.min(emitted);
-            for n in from..to {
-                samples[(n - at) as usize] =
+    }
+    block.clear();
+    pass.flush(&mut block);
+    if block.is_empty() {
+        return Ok(());
+    }
+    out(&mut block)
+}
+
+/// The voice chain, the bleeps and the score's mix from output sample `start` on, read piece by
+/// piece. Export runs it from 0 over the whole output; the preview starts it anywhere, a little
+/// early, since the chain and the ducking settle in.
+pub struct Pass {
+    chain: VoiceChain,
+    mix: Mix,
+    bleeps: Vec<Range<u64>>,
+    /// Chain output still to drop, its lead-in.
+    skip: usize,
+    /// The output sample the next chain output is.
+    at: u64,
+    /// The next input sample to read.
+    read: u64,
+}
+
+impl Pass {
+    pub fn new(audio: &TimelineAudio, score: &Score, start: u64) -> Self {
+        Self {
+            chain: VoiceChain::new(),
+            mix: score.mix_from(start),
+            bleeps: audio.bleeps().to_vec(),
+            skip: VoiceChain::LATENCY,
+            at: start,
+            read: start,
+        }
+    }
+
+    /// The next input sample to read.
+    pub fn read_at(&self) -> u64 {
+        self.read
+    }
+
+    /// Reads `len` more input samples through the chain and mix and appends what comes out to
+    /// `out`, which lags the input by the chain's latency.
+    pub fn step(
+        &mut self,
+        audio: &mut TimelineAudio,
+        len: usize,
+        out: &mut Vec<f32>,
+    ) -> Result<(), TimelineAudioError> {
+        let begin = out.len();
+        audio.read(self.read..self.read + len as u64, out)?;
+        self.read += len as u64;
+        self.chain.process(&mut out[begin..]);
+        self.emit(begin, out);
+        Ok(())
+    }
+
+    /// Appends the chain's last samples, after the final step.
+    pub fn flush(&mut self, out: &mut Vec<f32>) {
+        let begin = out.len();
+        self.chain.flush(out);
+        self.emit(begin, out);
+    }
+
+    /// Drops the lead-in from the chain output from `begin` on, then lays the bleeps and the mix
+    /// over the rest.
+    fn emit(&mut self, begin: usize, out: &mut Vec<f32>) {
+        let drop = self.skip.min(out.len() - begin);
+        self.skip -= drop;
+        out.drain(begin..begin + drop);
+        let samples = &mut out[begin..];
+        let (from, to) = (self.at, self.at + samples.len() as u64);
+        for bleep in &self.bleeps {
+            for n in bleep.start.max(from)..bleep.end.min(to) {
+                samples[(n - from) as usize] =
                     crate::overlay::redact::tone(n, n - bleep.start, bleep.end - bleep.start);
             }
         }
-        mix.mix(samples);
-        out(samples)
-    };
-    let total = audio.len();
-    let mut block = Vec::with_capacity(BLOCK as usize);
-    let mut at = 0;
-    while at < total {
-        let end = (at + BLOCK).min(total);
-        block.clear();
-        audio.read(at..end, &mut block)?;
-        chain.process(&mut block);
-        emit(&mut block)?;
-        at = end;
+        self.mix.mix(samples);
+        self.at = to;
     }
-    block.clear();
-    chain.flush(&mut block);
-    emit(&mut block)
 }
 
 #[cfg(test)]

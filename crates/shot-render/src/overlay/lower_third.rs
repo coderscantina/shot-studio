@@ -33,7 +33,7 @@ pub(crate) fn apply(overlay: &Overlay, stage: &mut Stage) {
         return;
     };
     let theme = stage.theme();
-    let (canvas, s, t) = (stage.canvas, stage.scale(), stage.t);
+    let (area, s, t) = (stage.area.rect, stage.scale(), stage.t);
     let motion = params.motion(theme);
     let palette = &theme.palette;
     let subtitle = params.text("subtitle");
@@ -44,8 +44,8 @@ pub(crate) fn apply(overlay: &Overlay, stage: &mut Stage) {
         .max(subtitle.map_or(0, |s| s.chars().count() * 4 / 7));
     let width = (longest as f32 * size * 0.56 + 160.0 * s).max(700.0 * s);
     let height = if subtitle.is_some() { 230.0 } else { 160.0 } * s;
-    let left = 120.0 * s;
-    let top = canvas.height as f32 * 0.78;
+    let left = area.left + 120.0 * s;
+    let top = area.top + area.height() * 0.78;
     let text_range = TimeRange::new(
         Micros(overlay.range.from().0 + motion.stagger.0),
         overlay.range.to(),

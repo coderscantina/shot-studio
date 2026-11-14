@@ -127,20 +127,20 @@ impl LinkCard {
     }
 }
 
-/// The card at the bottom left: it comes in from the left edge as one sheet, its title in the
-/// preset's kinetic type a stagger later.
+/// The card at the bottom left of the area: it comes in from the left edge as one sheet, its
+/// title in the preset's kinetic type a stagger later.
 pub(crate) fn apply(overlay: &Overlay, stage: &mut Stage) {
     let Some(card) = LinkCard::of(overlay) else {
         return;
     };
     let theme = stage.theme();
-    let (canvas, s, t) = (stage.canvas, stage.scale(), stage.t);
+    let (area, s, t) = (stage.area.rect, stage.scale(), stage.t);
     let motion = Params(overlay).motion(theme);
     let palette = &theme.palette;
     let (label, title) = card.text();
-    let width = (1500.0 * s).min(canvas.width as f32 * 0.8);
-    let height = 300.0 * s;
     let margin = 120.0 * s;
+    let width = (1500.0 * s).min(area.width() - 2.0 * margin);
+    let height = 300.0 * s;
     let (mark, mark_color) = card.badge();
     let stripe = if card.accent {
         palette.accent
@@ -214,10 +214,10 @@ pub(crate) fn apply(overlay: &Overlay, stage: &mut Stage) {
         size: [width, height],
         radius: 36.0 * s,
         rest: [
-            margin + width / 2.0,
-            canvas.height as f32 * 0.9 - height / 2.0,
+            area.left + margin + width / 2.0,
+            area.top + area.height() * 0.9 - height / 2.0,
         ],
-        from: [-(width + 2.0 * margin), 0.0],
+        from: [-(width + 2.0 * margin) - area.left, 0.0],
         fill: palette.card.faded(0.96),
         shapes,
         scale: s,

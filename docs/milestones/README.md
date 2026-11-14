@@ -63,7 +63,7 @@ Found by agents and waiting for a task. Remove a line when it's fixed.
 - Stingers and derived cuts do not snap to the beat. The bookend title and word-pop captions have no phase sounds. The contract's `sounds` row does not yet say which templates count as cards or pops, that clicks need a ripple, or that a phase plays on its first frame.
 - The shot-app watchdog test (`the_watchdog_names_where_a_stalled_thread_waits_or_runs`) fails about four runs in five at load average 10 to 20: a sample can land before the thread starts sleeping.
 - The contract does not yet describe which transition joins a bookend, where the intro goes, what each title shows, or take handles. Bumpers are cached per video, not per channel as decision 0021 says.
-- Placed sounds and lock overlays cannot be removed in the app yet; that waits for the provenance and scope design round. The transition mark style and Picture's placement buttons are not in the mockup and need Mike's design call.
+- How a removed lock overlay or sound shows its provenance waits for the design round, and a rule's sound cannot be removed in the app yet (only a placed one). The transition mark style and Picture's placement buttons are not in the mockup and need Mike's design call.
 - The app's sound, callout, pop and Lottie placement were driven by an in-app script calling the button handlers, not by real clicks; the Lottie import is covered only by its unit test.
 - The end card does not draw the brand logo yet, and a brand font file has only gone through a unit test, not a real export.
 - vello's coverage order varies between runs; rectangle shadows are snapped to whole pixels, but a rare one-bit flip in text or other shapes is still possible.
@@ -72,7 +72,6 @@ Found by agents and waiting for a task. Remove a line when it's fixed.
 - `shot-render`'s painter returns no screen layer, so the editor engine lays out a paused frame a second time for callout clicks; and it has no decoration hook, so `--bench-edit --glass` draws its reel in a pass of its own.
 - On a migrated video the Cut screen's rule switches and pacing only show; changing the rules waits for the rule editor (milestone 10 item 7). A lock cut on a kind outside the six pacing kinds shows as a person's cut in the app.
 - The preview's loudness gain comes from one measuring pass, without export's limiter trials; a new gain fades in when it lands.
-- `shot-render` keeps export's score (bed, lock music and sfx at their output samples) private and `shot-core` its settings diff, so the app has its own copies of both (`score.rs`, `style::layer`).
 - A migrated video folder outside a channel repo keeps its lock as it is: edits there write `cut.kdl` but do not rebuild `cut.lock`, as `shot export` does not.
 - The bundled sounds and music beds are unheard: Mike should check by ear that each sound fits its name and that the bed loop seams (bed-lofi most of all) are clean.
 - Beats are detected per music file on every run; decision 0023 asks for a cache keyed by the file's hash.
@@ -90,7 +89,7 @@ Found by agents and waiting for a task. Remove a line when it's fixed.
 - Agents sharing the target dir overwrite each other's `release/shot`; copy the binary before measuring or running it from a worktree.
 - Linear ideas are not wired: no Linear MCP server or CLI was available.
 - Face reframing is untested on a real face; Vision does not detect the fixture's pixel face.
-- Overlays laid out for 16:9 get cut off inside a Short's 9:16 window.
+- In a Short, a callout's label is placed towards the middle of the 16:9 frame and can still fall outside the window, and a code diff's panel is wider than the window. Both are drawn in the base with the screen.
 - The export job queue starts with the shortest jobs although its comment says longest first.
 - The b-roll lane color and the Overlays pane icons are local stand-ins, not theme tokens and Hugeicons.
 - The app cannot preview a derived cut.

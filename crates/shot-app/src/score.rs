@@ -1,4 +1,4 @@
-//! The preview's finished sound, made like export's ([`shot_render::voice`]): the plan's voice
+//! The preview's finished sound, made by export's [`Pass`]: the plan's voice
 //! ([`shot_render::export::plan_audio`]) through the voice chain, bleeps over it, export's
 //! [`Score`] of music, sound effects, the brand's sounds and the bumpers' own sound
 //! ([`shot_render::export::preview_score`]), and the gain to the loudness target with the
@@ -10,14 +10,13 @@
 //! a pass over the whole cut on a thread of its own, export's first pass, and glides in when it
 //! lands, so the sound does not jump.
 
-use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use shot_audio::{CEILING_DBTP, CROSSFADE, Finish, Meter, Mix, TARGET_LUFS, VoiceChain};
+use shot_audio::{CEILING_DBTP, CROSSFADE, Finish, Meter, TARGET_LUFS, VoiceChain};
 use shot_media::audio::SAMPLE_RATE;
 use shot_render::audio::{TimelineAudio, TimelineAudioError};
-use shot_render::voice::Score;
+use shot_render::voice::{Pass, Score};
 
 /// How early the chain starts before the first heard sample.
 const PREROLL: u64 = CROSSFADE;
@@ -27,63 +26,9 @@ const PASS_BLOCK: usize = SAMPLE_RATE as usize / 4;
 /// constant of 50 ms.
 const GLIDE: f32 = 1.0 / (SAMPLE_RATE as f32 / 20.0);
 
-/// Voice chain, bleeps and mix from output sample `start` on, export's `pass`.
-struct Voice {
-    chain: VoiceChain,
-    mix: Mix,
-    bleeps: Vec<Range<u64>>,
-    /// Chain output still to drop, its lead-in.
-    skip: usize,
-    /// The output sample the next chain output is.
-    at: u64,
-    /// The next input sample to read.
-    read: u64,
-}
-
-impl Voice {
-    fn new(audio: &TimelineAudio, score: &Score, start: u64) -> Self {
-        Self {
-            chain: VoiceChain::new(),
-            mix: score.mix_from(start),
-            bleeps: audio.bleeps().to_vec(),
-            skip: VoiceChain::LATENCY,
-            at: start,
-            read: start,
-        }
-    }
-
-    /// Reads `len` more input samples through the chain and mix, appends what comes out to
-    /// `out`, which lags the input by the chain's latency.
-    fn step(
-        &mut self,
-        audio: &mut TimelineAudio,
-        len: usize,
-        out: &mut Vec<f32>,
-    ) -> Result<(), TimelineAudioError> {
-        let begin = out.len();
-        audio.read(self.read..self.read + len as u64, out)?;
-        self.read += len as u64;
-        self.chain.process(&mut out[begin..]);
-        let drop = self.skip.min(out.len() - begin);
-        self.skip -= drop;
-        out.drain(begin..begin + drop);
-        let samples = &mut out[begin..];
-        let (from, to) = (self.at, self.at + samples.len() as u64);
-        for bleep in &self.bleeps {
-            for n in bleep.start.max(from)..bleep.end.min(to) {
-                samples[(n - from) as usize] =
-                    shot_render::overlay::redact::tone(n, n - bleep.start, bleep.end - bleep.start);
-            }
-        }
-        self.mix.mix(samples);
-        self.at = to;
-        Ok(())
-    }
-}
-
 /// The finished sound from an output sample on, read piece by piece.
 pub struct Finished {
-    voice: Voice,
+    voice: Pass,
     /// The limiter alone: the gain to the target is [`Finished::gain`], so it can change.
     finish: Finish,
     /// Finished output still to drop: the limiter's lead-in, then the preroll.
@@ -100,7 +45,7 @@ impl Finished {
         let start = at.saturating_sub(PREROLL);
         let gain = linear(gain_db);
         Self {
-            voice: Voice::new(audio, score, start),
+            voice: Pass::new(audio, score, start),
             finish: Finish::new(0.0, CEILING_DBTP),
             skip: Finish::LATENCY + (at - start) as usize,
             buffer: Vec::new(),
@@ -150,16 +95,16 @@ pub fn gain(
     cancel: &Arc<AtomicU64>,
     generation: u64,
 ) -> Result<Option<f64>, TimelineAudioError> {
-    let mut voice = Voice::new(audio, score, 0);
+    let mut voice = Pass::new(audio, score, 0);
     let mut meter = Meter::new();
     let total = audio.len() + VoiceChain::LATENCY as u64;
     let mut block = Vec::with_capacity(PASS_BLOCK);
-    while voice.read < total {
+    while voice.read_at() < total {
         if cancel.load(Ordering::Relaxed) != generation {
             return Ok(None);
         }
         block.clear();
-        let len = PASS_BLOCK.min((total - voice.read) as usize);
+        let len = PASS_BLOCK.min((total - voice.read_at()) as usize);
         voice.step(audio, len, &mut block)?;
         meter.add(&block);
     }

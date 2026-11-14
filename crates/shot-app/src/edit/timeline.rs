@@ -24,7 +24,7 @@ use gpui::{
 };
 use gpui_component::menu::ContextMenuExt;
 use gpui_component::tooltip::Tooltip;
-use shot_core::{Applied, Layout, Placed, RemovedBy, TakeAt, TimeRange, WordState};
+use shot_core::{Applied, Id, Layout, Placed, RemovedBy, TakeAt, TimeRange, WordState};
 use shot_render::join::BookendKind;
 use shot_render::overlay::highlight;
 use shot_render::plan::frame_time;
@@ -133,8 +133,9 @@ pub enum Pick {
 pub(super) enum MenuOn {
     Selection,
     Pick,
-    /// A zoom or overlay of the style rules, which the lanes only show, with its name.
-    Lock(String),
+    /// A zoom, overlay or sound of the lock, which the lanes cannot move, with its name and
+    /// what a remove takes out, if it can.
+    Lock(String, Option<(Id, shot_core::Instance)>),
     /// An empty spot, where the playhead now is.
     Empty,
 }
@@ -177,8 +178,10 @@ enum Grip {
 /// A zoom or an overlay on its lane.
 pub struct Item {
     pub at: TakeAt,
-    /// Its index in `cut.kdl`, `None` for the lock's, which the lanes only show.
+    /// Its index in `cut.kdl`, `None` for the lock's, which the lanes cannot move.
     pub placed: Option<Placed>,
+    /// For the lock's overlays: the take and the instance a remove turns off.
+    pub lock: Option<(Id, shot_core::Instance)>,
     pub frames: Range<u64>,
     pub text: String,
 }
@@ -1793,13 +1796,13 @@ fn lock_moments<T: Clone>(
     this: &EditScreen,
     window: &Range<u64>,
     cx: &Context<EditScreen>,
-    pick: impl Fn(&shot_core::Instance) -> Option<T>,
+    pick: impl Fn(&Id, &shot_core::Instance) -> Option<T>,
 ) -> Vec<(u64, T)> {
     let lock = this.folder.read(cx).lock();
     let mut out = Vec::new();
     for take in &lock.takes {
         for instance in &take.instances {
-            if let Some(value) = pick(instance) {
+            if let Some(value) = pick(&take.take, instance) {
                 let frames = this.map.outputs_of(&take.take, instance.applied.start());
                 out.extend(
                     frames
@@ -1814,44 +1817,61 @@ fn lock_moments<T: Clone>(
 }
 
 /// Neutral marks for the lock's sound effects, named by their sound. Clicking the lane moves
-/// the playhead there and opens the sound picker above it.
+/// the playhead there and opens the sound picker above it; the menu of a sound a person placed
+/// removes it.
 fn sound_lane(
     this: &EditScreen,
     window: &Range<u64>,
     x: &impl Fn(u64) -> f32,
     cx: &mut Context<EditScreen>,
 ) -> impl IntoElement {
-    let sounds = lock_moments(this, window, cx, |i| match &i.applied {
-        Applied::Sfx { sound, .. } => Some(sound.to_string()),
+    let sounds = lock_moments(this, window, cx, |take, i| match &i.applied {
+        Applied::Sfx { sound, .. } => {
+            let placed = i.provenance.layer == shot_core::Layer::Override;
+            Some((sound.to_string(), placed.then(|| (take.clone(), i.clone()))))
+        }
         _ => None,
     });
     div()
         .id("sound-lane")
         .size_full()
         .cursor_pointer()
-        .children(sounds.into_iter().map(|(frame, name)| {
-            div()
-                .absolute()
-                .top(px(4.))
-                .bottom(px(4.))
-                .left(gpui::relative(x(frame)))
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .child(div().w(px(2.)).h_full().rounded(px(1.)).bg(BODY))
-                .child(
+        .children(
+            sounds
+                .into_iter()
+                .enumerate()
+                .map(|(key, (frame, (name, lock)))| {
+                    let title = format!("Sound: {name}");
                     div()
-                        .px(px(6.))
-                        .rounded(px(4.))
-                        .bg(BLOCK)
-                        .text_color(BODY)
-                        .text_size(TEXT_XS)
-                        .font_weight(FontWeight::MEDIUM)
-                        .line_height(px(20.))
-                        .whitespace_nowrap()
-                        .child(name),
-                )
-        }))
+                        .id(("sound", key))
+                        .absolute()
+                        .top(px(4.))
+                        .bottom(px(4.))
+                        .left(gpui::relative(x(frame)))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .child(div().w(px(2.)).h_full().rounded(px(1.)).bg(BODY))
+                        .child(
+                            div()
+                                .px(px(6.))
+                                .rounded(px(4.))
+                                .bg(BLOCK)
+                                .text_color(BODY)
+                                .text_size(TEXT_XS)
+                                .font_weight(FontWeight::MEDIUM)
+                                .line_height(px(20.))
+                                .whitespace_nowrap()
+                                .child(name),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |this, _: &MouseDownEvent, _, _| {
+                                this.lanes.menu = Some(MenuOn::Lock(title.clone(), lock.clone()));
+                            }),
+                        )
+                }),
+        )
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(|this, event: &MouseDownEvent, _, cx| {
@@ -1879,7 +1899,7 @@ fn music_lane(
     if let Some(bed) = &this.folder.read(cx).project.cut.music {
         blocks.push((0, this.map.frames, music::summary(bed), true));
     }
-    let all = lock_moments(this, &(0..this.map.frames), cx, |i| match &i.applied {
+    let all = lock_moments(this, &(0..this.map.frames), cx, |_, i| match &i.applied {
         Applied::Music { file, .. } => Some(file.clone()),
         _ => None,
     });
@@ -2128,6 +2148,7 @@ fn zoom_items(this: &EditScreen, cx: &Context<EditScreen>) -> Vec<Item> {
             items.push(Item {
                 at,
                 placed,
+                lock: None,
                 frames,
                 text: format!("{}%", zoom.scale),
             });
@@ -2207,6 +2228,7 @@ fn item_lane(
             match item.placed {
                 None => {
                     let title = format!("{what}: {}", item.text);
+                    let lock = item.lock;
                     element
                         .child(item.text)
                         .tooltip(|window, cx| {
@@ -2215,7 +2237,7 @@ fn item_lane(
                         .on_mouse_down(
                             MouseButton::Right,
                             cx.listener(move |this, _: &MouseDownEvent, _, _| {
-                                this.lanes.menu = Some(MenuOn::Lock(title.clone()));
+                                this.lanes.menu = Some(MenuOn::Lock(title.clone(), lock.clone()));
                             }),
                         )
                 }
