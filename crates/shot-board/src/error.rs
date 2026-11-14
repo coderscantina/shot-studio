@@ -33,6 +33,12 @@ pub enum Error {
     UnknownProposal { slug: String, name: String },
     #[error("accepting the proposal conflicts in: {}", paths.join(", "))]
     Conflict { paths: Vec<String> },
+    #[error("`{slug}` has uncommitted changes in: {}, commit or discard them first", paths.join(", "))]
+    Uncommitted { slug: String, paths: Vec<String> },
+    #[error("`{0}` has no worktree, open the video first")]
+    NoWorktree(String),
+    #[error("the channel repo has no working tree")]
+    Bare,
     #[error("`{0}` is not shipped yet")]
     NotShipped(String),
     #[error("the channel already has a video `{0}`")]
