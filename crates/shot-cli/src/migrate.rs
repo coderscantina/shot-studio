@@ -1,5 +1,5 @@
 //! `shot migrate`: moves videos written before the lock onto style rules, one or every video of
-//! the channel. Opening a video migrates it too ([`shot_mcp::style::open`]); this also runs
+//! the channel, and the channel's brand onto theme files. Opening a video migrates it too ([`shot_mcp::style::open`]); this also runs
 //! analysis for every take without an elements file first, so the rules find their elements.
 
 use std::path::{Path, PathBuf};
@@ -17,6 +17,9 @@ pub struct MigrateArgs {
 }
 
 pub fn run(repo: PathBuf, args: MigrateArgs) -> Result<(), String> {
+    if args.video.is_none() && shot_mcp::brand::migrate(&repo)? {
+        println!("brand/brand.kdl: its look moved to brand/themes/");
+    }
     let videos = match args.video {
         Some(video) => vec![video],
         None => style::Repo::slugs(&Disk::new(&repo))?

@@ -5,8 +5,11 @@
 //! [0024]: ../../../docs/decisions/0024-content-stays-in-cut-kdl-style-moves-to-the-lock.md
 
 // `keyword_enum!` writes helpers the old grammar has no use for.
+mod brand;
 #[allow(dead_code)]
 pub(crate) mod old;
+
+pub use brand::{BrandMigrateError, migrate_brand};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -383,6 +386,7 @@ fn settings_diff(old: &Format, channel: &Format) -> FormatLayer {
         window: (old.window != channel.window).then_some(effects.window),
         layout_switch: (old.layout_switch != channel.layout_switch).then(|| old.layout_switch()),
         inputs: differs(old.inputs(), channel.inputs()),
+        theme: None,
         brand: None,
         rules: StyleSheet::default(),
     }

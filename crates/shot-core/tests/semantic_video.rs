@@ -11,6 +11,7 @@ use shot_core::{
 };
 
 const BRAND: &str = include_str!("../../../fixtures/examples/channel/brand/brand.kdl");
+const DARK: &str = include_str!("../../../fixtures/examples/channel/brand/themes/cantina-dark.kdl");
 const THEME: &str =
     include_str!("../../../fixtures/examples/channel/brand/themes/cantina-light.kdl");
 const CHANNEL_FORMAT: &str = include_str!("../../../fixtures/examples/channel/formats/opinion.kdl");
@@ -47,7 +48,9 @@ struct Channel {
 
 impl Channel {
     fn example() -> Self {
-        let brand = Brand::parse(BRAND).unwrap();
+        let brand = Brand::parse(BRAND)
+            .unwrap()
+            .with_look(&Brand::parse_theme(DARK).unwrap());
         let assets = brand
             .assets()
             .into_iter()
@@ -107,6 +110,7 @@ fn assert_in_contract(example: &str) {
 fn channel_examples_round_trip() {
     for (text, written) in [
         (BRAND, Brand::parse(BRAND).unwrap().to_kdl()),
+        (DARK, Brand::parse_theme(DARK).unwrap().to_kdl()),
         (THEME, Brand::parse_theme(THEME).unwrap().to_kdl()),
         (
             CHANNEL_FORMAT,
@@ -162,8 +166,16 @@ fn a_saved_theme_holds_a_look_only() {
     ] {
         let err = Brand::parse_theme(&format!("{node}\n")).unwrap_err();
         assert_eq!(err.line, line, "{err}");
-        assert!(err.message.contains("unknown node"), "{err}");
+        assert!(err.message.contains("belongs to the channel"), "{err}");
     }
+    // A brand that names a theme keeps no look of its own.
+    let inline = BRAND.replace(
+        "theme cantina-dark\n",
+        "theme cantina-dark\ncolors accent=\"#000000\"\n",
+    );
+    let err = Brand::parse(&inline).unwrap_err();
+    assert_eq!(err.line, 3, "{err}");
+    assert!(err.message.contains("brand/themes/"), "{err}");
     let no_length = BRAND.replace(" length=5_000_000 {", " {");
     let err = Brand::parse(&no_length).unwrap_err();
     assert!(err.message.contains("length"), "{err}");
@@ -366,7 +378,7 @@ fn grammar_errors_name_the_line() {
 
     let transition_on_a_url = BRAND.replace("    sfx pop\n", "    transition dip\n");
     let err = Brand::parse(&transition_on_a_url).unwrap_err();
-    assert_eq!(err.line, 34, "{err}");
+    assert_eq!(err.line, 27, "{err}");
 
     let twice = CUT.replace(
         "override t02 filler at=30_000_000",
@@ -664,4 +676,68 @@ fn the_camera_node_cuts_the_person_out_on_its_own_or_with_the_frame() {
         "camera cutout=#false\n"
     );
     assert!(Brand::parse("camera cutout=1\n").is_err());
+}
+
+#[test]
+fn the_nearest_layer_naming_a_theme_picks_the_look_and_its_brand_block_lays_over_it() {
+    let mut channel = Channel::example();
+    let file = Brand::parse(BRAND).unwrap();
+    channel.format.theme = Some(id("cantina-light"));
+    let picked = shot_core::picked_theme(&file, &channel.format, &channel.video).cloned();
+    assert_eq!(picked, Some(id("cantina-light")));
+    channel.brand = file.with_look(&Brand::parse_theme(THEME).unwrap());
+    let lock = channel.lock();
+    // The light theme replaces the dark look: its card and bundled fonts, no font file.
+    assert_eq!(lock.brand.colors.card, Some(shot_core::Color([0xff; 3])));
+    assert_eq!(
+        lock.brand.fonts.heading,
+        Some(shot_core::Font::Bundled(shot_core::BundledFont::Inter))
+    );
+    assert!(lock.assets.iter().all(|a| !a.path.contains("fonts/")));
+    // The video's brand block lays over the theme the layer below picked.
+    assert_eq!(
+        lock.brand.colors.accent,
+        Some(shot_core::Color([0xff, 0x7a, 0x59]))
+    );
+    // A video naming a theme is nearer than its channel format.
+    channel.video.theme = Some(id("cantina-dark"));
+    let picked = shot_core::picked_theme(&file, &channel.format, &channel.video);
+    assert_eq!(picked, Some(&id("cantina-dark")));
+}
+
+#[test]
+fn a_rule_naming_a_preset_writes_its_overlay_into_the_lock() {
+    let mut channel = Channel::example();
+    let rule = "on chapter-end {\n    overlay preset=speaker\n}\n";
+    channel.video = FormatLayer::parse(&format!("{FORMAT}{rule}")).unwrap();
+    assert!(channel.video.to_kdl().ends_with(rule), "it writes back");
+    let lock = channel.lock();
+    let placed: Vec<_> = lock
+        .takes
+        .iter()
+        .flat_map(|t| &t.instances)
+        .filter(|i| i.element.target == Target::ChapterEnd)
+        .filter_map(|i| match &i.applied {
+            Applied::Overlay {
+                template,
+                range,
+                params,
+            } => Some((
+                template.clone(),
+                range.to().0 - range.from().0,
+                params.len(),
+            )),
+            _ => None,
+        })
+        .collect();
+    assert!(!placed.is_empty());
+    assert!(
+        placed
+            .iter()
+            .all(|p| *p == (id("lower-third"), 5_000_000, 3))
+    );
+
+    channel.video = FormatLayer::parse(&rule.replace("speaker", "host")).unwrap();
+    let err = build(&channel.input()).unwrap_err().to_string();
+    assert!(err.contains("`host`"), "{err}");
 }

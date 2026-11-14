@@ -18,6 +18,7 @@ mod migrate;
 mod script;
 mod style;
 mod takes;
+mod themes;
 pub mod thumbnail;
 mod timeline;
 mod transcript;
@@ -52,8 +53,8 @@ pub use lock::{
     Applied, Asset, ElementRef, Instance, LOCK_VERSION, Lock, LockTake, Orphan, Provenance,
 };
 pub use migrate::{
-    MigrateError, MigrateInput, Migration, Report as MigrationReport, migrate,
-    without_old_settings, written_before_lock,
+    BrandMigrateError, MigrateError, MigrateInput, Migration, Report as MigrationReport, migrate,
+    migrate_brand, without_old_settings, written_before_lock,
 };
 pub use script::{Beat, Script, ScriptChapter};
 pub use style::{
@@ -61,6 +62,9 @@ pub use style::{
     TRANSITION_LENGTH, Target, TransitionKind,
 };
 pub use takes::{Attempt, Group, Lineup, Row, RowAt, TakeWords, word_diff, words_in};
+pub use themes::{
+    BRAND_FILE, DEFAULT_THEME, FileChange, ThemeError, Themes, picked_theme, theme_file,
+};
 pub use timeline::{
     ChapterSegments, ContentHash, MediaId, Output, OutputKind, RENDERER_VERSION, SceneSwitch,
     Segment, Timeline,

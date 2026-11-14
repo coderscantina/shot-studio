@@ -6,8 +6,8 @@ use std::fmt;
 use crate::takes::{holds, middle};
 use crate::{
     Applied, Attempt, Chapter, Cut, ElementKind, Id, Layout, LayoutChange, LayoutSwitch, Lineup,
-    Lock, Micros, Music, Override, RangeEdit, Rating, Row, RowAt, TakeEdit, Target, TimeRange,
-    Transcript, Word, Zoom, ZoomShape,
+    Lock, Micros, Music, Overlay, Override, RangeEdit, Rating, Row, RowAt, TakeEdit, Target,
+    TimeRange, Transcript, Word, Zoom, ZoomShape,
 };
 
 /// One take block of the main cut: the chapter and the take's position in that chapter. A take
@@ -36,6 +36,8 @@ pub enum EditError {
     TakeInDerived { derived: Id, take: Id },
     /// No `layout` range starts or ends at this media time in the addressed take block.
     NoLayoutEdge(Micros),
+    /// The main cut keeps nothing of this take at this media time.
+    NotKept { take: Id, at: Micros },
 }
 
 /// A zoom or an overlay of a take block, by its index in the block's list.
@@ -86,6 +88,11 @@ impl fmt::Display for EditError {
             Self::TakeInDerived { derived, take } => write!(
                 f,
                 "`{derived}` uses take {take}, which would leave the cut: remove its clips first"
+            ),
+            Self::NotKept { take, at } => write!(
+                f,
+                "the cut keeps nothing of take {take} at {:.2} s",
+                at.0 as f64 / 1e6
             ),
         }
     }
@@ -488,6 +495,26 @@ impl Cut {
                 Some(WordView { word, state })
             })
             .collect())
+    }
+
+    /// Places `overlay`, a written node, in the block of the main cut that keeps `take` at the
+    /// overlay's start, over the block's other overlays: how a person or a tool places an
+    /// overlay preset ([`crate::OverlayPreset::place`]).
+    pub fn place_overlay(&self, take: &Id, overlay: Overlay) -> Result<Cut, EditError> {
+        let at = overlay.range.from();
+        let kept = TimeRange::new(at, Micros(at.0 + 1)).expect("a microsecond");
+        let mut cut = self.clone();
+        let block = cut
+            .chapters
+            .iter_mut()
+            .flat_map(|c| &mut c.takes)
+            .find(|edit| edit.take == *take && edit.keeps(kept))
+            .ok_or_else(|| EditError::NotKept {
+                take: take.clone(),
+                at,
+            })?;
+        block.overlays.push(overlay);
+        Ok(cut)
     }
 
     fn take(&self, at: TakeAt) -> Result<&TakeEdit, EditError> {

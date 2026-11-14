@@ -5,9 +5,9 @@
 //! [0020]: ../../../docs/decisions/0020-channel-brand-and-shared-styles.md
 //! [0023]: ../../../docs/decisions/0023-motion-system-and-lottie-templates.md
 //!
-//! The channel file also names the theme its look is and holds the channel's overlay presets.
-//! Neither is part of a resolved brand: other themes live in `brand/themes/<id>.kdl`, read with
-//! [`Brand::parse_theme`] ([0029]).
+//! The channel file holds the channel's parts ([`Brand::channel`]) and names its theme; every
+//! look ([`Brand::look`]) is a file `brand/themes/<id>.kdl`, read with [`Brand::parse_theme`]
+//! ([0029]). The theme name and the overlay presets are not part of a resolved brand.
 //!
 //! [0029]: ../../../docs/decisions/0029-several-themes-per-channel.md
 
@@ -16,8 +16,8 @@ use kdl::KdlValue;
 use crate::captions::LOOK_PROPS;
 use crate::kdl_io::{FromKdl, Node, Source, ToKdl, Writer, keyword_enum, quote};
 use crate::{
-    CaptionLook, Color, FormatKind, Id, LayoutName, Micros, ParamValue, ParseError, Shadow,
-    StyleSheet,
+    CaptionLook, Color, FormatKind, Id, LayoutName, Micros, Overlay, ParamValue, ParseError,
+    Shadow, StyleSheet, TimeRange,
 };
 
 /// A style imported from a git repo at a commit, the lowest layer of the brand.
@@ -407,7 +407,8 @@ pub struct Brand {
     /// Sorted by name, each name once.
     pub templates: Vec<LottieTemplate>,
     pub rules: StyleSheet,
-    /// The name of the theme this look is, in the channel file only. Not resolved.
+    /// The theme the channel uses, `brand/themes/<id>.kdl`, in the channel file only. Not
+    /// resolved.
     pub theme: Option<Id>,
     /// Sorted by name, each name once, in the channel file only. Not resolved.
     pub overlay_presets: Vec<OverlayPreset>,
@@ -416,11 +417,20 @@ pub struct Brand {
 /// Which nodes a brand block may hold.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BrandScope {
-    /// `brand/brand.kdl`: everything.
+    /// `brand/brand.kdl`: everything, but no look fields beside a `theme`.
     File,
+    /// `brand/brand.kdl` as migration reads it, look fields beside a `theme` too.
+    OldFile,
     /// `brand { ... }` in a format file: no imports and no rules, those are the layer's own.
     Patch,
+    /// `brand/themes/<id>.kdl`: the look fields only.
+    Theme,
 }
+
+/// The nodes of a look, what a theme file holds. Every other node belongs to the channel.
+const LOOK_NODES: [&str; 7] = [
+    "fonts", "colors", "logo", "camera", "captions", "motion", "preset",
+];
 
 impl Brand {
     pub fn parse(text: &str) -> Result<Self, ParseError> {
@@ -432,15 +442,31 @@ impl Brand {
         Self::read(src.versioned(&doc)?, BrandScope::File)
     }
 
-    /// A saved theme, `brand/themes/<id>.kdl`: the grammar of a format layer's `brand` block,
-    /// without imports, rules, a theme name or overlay presets.
+    /// A theme, `brand/themes/<id>.kdl`: the look fields of a format layer's `brand` block.
+    /// The channel's parts are refused, they live in `brand/brand.kdl`.
     pub fn parse_theme(text: &str) -> Result<Self, ParseError> {
         let src = Source {
             file: "theme.kdl",
             text,
         };
         let doc = src.parse()?;
-        Self::read(src.nodes(&doc), BrandScope::Patch)
+        Self::read(src.versioned(&doc)?, BrandScope::Theme)
+    }
+
+    /// `brand/brand.kdl` or a theme file written before themes were files, as migration reads
+    /// them: a look beside a `theme`, and channel parts in a theme.
+    pub(crate) fn parse_old(text: &str, theme: bool) -> Result<Self, ParseError> {
+        let src = Source {
+            file: if theme { "theme.kdl" } else { "brand.kdl" },
+            text,
+        };
+        let doc = src.parse()?;
+        let scope = if theme {
+            BrandScope::Patch
+        } else {
+            BrandScope::OldFile
+        };
+        Self::read(src.versioned(&doc)?, scope)
     }
 
     pub(crate) fn read<'a>(
@@ -453,9 +479,26 @@ impl Brand {
         let (mut end_card, mut camera, mut motion, mut stinger) = (None, None, None, None);
         let mut captions = None;
         let mut theme = None;
+        // The first look node of a channel file, refused when the file also names a theme.
+        let mut inline_look = None;
         for node in nodes {
+            let look = LOOK_NODES.contains(&node.name());
+            if scope == BrandScope::Theme && !look {
+                return Err(node.error(format!(
+                    "`{}` belongs to the channel in brand/brand.kdl, not to a theme",
+                    node.name()
+                )));
+            }
+            let file = matches!(scope, BrandScope::File | BrandScope::OldFile);
+            if scope == BrandScope::File && look && inline_look.is_none() {
+                inline_look = Some(node.error(format!(
+                    "`{}` is part of a look: a brand that names a theme keeps its look in \
+                     brand/themes/<theme>.kdl",
+                    node.name()
+                )));
+            }
             match node.name() {
-                "import" if scope == BrandScope::File => {
+                "import" if file => {
                     node.expect(1, &["rev", "style"])?;
                     brand.imports.push(Import {
                         url: node.arg(0)?,
@@ -579,11 +622,11 @@ impl Brand {
                     }
                     brand.templates.push(template);
                 }
-                "theme" if scope == BrandScope::File => {
+                "theme" if file => {
                     node.expect(1, &[])?;
                     node.set_once(&mut theme, node.arg(0)?)?;
                 }
-                "overlay-preset" if scope == BrandScope::File => {
+                "overlay-preset" if file => {
                     let preset = OverlayPreset::read(node)?;
                     if brand.overlay_presets.iter().any(|p| p.name == preset.name) {
                         return Err(
@@ -592,9 +635,12 @@ impl Brand {
                     }
                     brand.overlay_presets.push(preset);
                 }
-                "on" if scope == BrandScope::File => brand.rules.add(node)?,
+                "on" if file => brand.rules.add(node)?,
                 _ => return Err(node.unknown()),
             }
+        }
+        if let (Some(_), Some(error)) = (&theme, inline_look) {
+            return Err(error);
         }
         brand.fonts = fonts.unwrap_or_default();
         brand.colors = colors.unwrap_or_default();
@@ -754,6 +800,54 @@ impl Brand {
     /// Whether no node is set, so a `brand` block would be empty.
     pub fn is_empty(&self) -> bool {
         self == &Self::default()
+    }
+
+    /// The look fields only, what a theme file holds: fonts, colors, logo, camera, captions,
+    /// motion and the feel presets.
+    pub fn look(&self) -> Self {
+        Self {
+            fonts: self.fonts.clone(),
+            colors: self.colors.clone(),
+            logo: self.logo.clone(),
+            camera: self.camera,
+            handheld: self.handheld,
+            cutout: self.cutout,
+            captions: self.captions.clone(),
+            motion: self.motion.clone(),
+            presets: self.presets.clone(),
+            ..Self::default()
+        }
+    }
+
+    /// Without the look fields: the channel's parts that stay through a theme switch, such as
+    /// imports, rules, sounds, bookends, templates, layouts, overlay presets and the theme name.
+    pub fn channel(&self) -> Self {
+        self.with_look(&Self::default())
+    }
+
+    /// The channel's parts of this brand with the look of `look`: what a video reads as its
+    /// brand file once the cascade picked a theme.
+    pub fn with_look(&self, look: &Self) -> Self {
+        let look = look.look();
+        Self {
+            imports: self.imports.clone(),
+            sounds: self.sounds.clone(),
+            intro: self.intro.clone(),
+            outro: self.outro.clone(),
+            end_card: self.end_card,
+            layouts: self.layouts.clone(),
+            stinger: self.stinger.clone(),
+            templates: self.templates.clone(),
+            rules: self.rules.clone(),
+            theme: self.theme.clone(),
+            overlay_presets: self.overlay_presets.clone(),
+            ..look
+        }
+    }
+
+    /// Whether any look field is set.
+    pub fn has_look(&self) -> bool {
+        !self.look().is_empty()
     }
 
     /// `over` laid on this brand: its fields replace, field by field inside `fonts`, `colors`,
@@ -929,6 +1023,17 @@ impl Preset {
 }
 
 impl OverlayPreset {
+    /// The overlay that placing the preset at `at` writes: its template and parameters, for
+    /// its length.
+    pub fn place(&self, at: Micros) -> Overlay {
+        Overlay {
+            template: self.template.clone(),
+            range: TimeRange::new(at, Micros(at.0.saturating_add(self.length.0)))
+                .expect("a preset has a length"),
+            params: self.params.clone(),
+        }
+    }
+
     fn read(node: Node<'_>) -> Result<Self, ParseError> {
         node.expect_block(1, &["template", "length"])?;
         let mut params: Vec<(Id, ParamValue)> = Vec::new();

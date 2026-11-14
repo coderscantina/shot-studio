@@ -1,5 +1,5 @@
-//! `shot overlays`: place bleeps and blurs from the transcript, fill a b-roll slot, and check
-//! every overlay against its template. Link cards, highlights and b-roll slots for what a take
+//! `shot overlays`: place bleeps and blurs from the transcript, fill a b-roll slot, place one of
+//! the brand's overlay presets, and check every overlay against its template. Link cards, highlights and b-roll slots for what a take
 //! shows are style rules.
 
 use std::path::PathBuf;
@@ -41,6 +41,15 @@ enum OverlaysAction {
         #[arg(long)]
         file: String,
     },
+    /// Place one of the brand's overlay presets at a moment of a take, for the preset's length.
+    Preset {
+        preset: String,
+        #[arg(long)]
+        take: String,
+        /// Media time in seconds where the overlay starts.
+        #[arg(long)]
+        at: f64,
+    },
     /// List every overlay and check it against its template.
     Check,
 }
@@ -56,7 +65,7 @@ struct Phrase {
 
 pub fn run(args: OverlaysArgs) -> Result<(), String> {
     let (_lock, opened) = crate::open(&args.video)?;
-    let project = opened.project;
+    let (project, disk) = (opened.project, opened.disk);
     let take = |id: &str| Id::new(id).ok_or_else(|| format!("{id} is not a take id"));
     let micros = |seconds: f64| Micros((seconds * 1e6).round() as u64);
     let fail = |e: overlay_rules::OverlayRuleError| e.to_string();
@@ -86,6 +95,26 @@ pub fn run(args: OverlaysArgs) -> Result<(), String> {
             }
             overlay_rules::fill_b_roll(&project.cut, &take(&id)?, micros(at), &file)
                 .map_err(fail)?
+        }
+        OverlaysAction::Preset {
+            preset,
+            take: id,
+            at,
+        } => {
+            let preset = Id::new(&preset).ok_or_else(|| format!("{preset} is not a preset id"))?;
+            if !disk.in_channel() {
+                return Err("overlay presets live in a channel's brand".into());
+            }
+            let themes = shot_mcp::brand::read(disk.root())?;
+            let overlay = themes
+                .preset(&preset)
+                .map_err(|e| e.to_string())?
+                .place(micros(at));
+            overlay::check(&overlay).map_err(|e| format!("{preset}: {e}"))?;
+            project
+                .cut
+                .place_overlay(&take(&id)?, overlay)
+                .map_err(|e| e.to_string())?
         }
         OverlaysAction::Check => return check(&project.cut),
     };

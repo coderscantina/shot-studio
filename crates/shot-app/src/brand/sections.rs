@@ -1269,7 +1269,7 @@ impl ThemeEditor {
 
     fn overlays_section(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let selected = self.preset.as_ref().and_then(|(n, _)| n.clone());
-        let presets = self.themes.brand.overlay_presets.clone();
+        let presets = self.themes.brand().overlay_presets.clone();
         let mut list = div().flex().flex_col().gap(px(2.));
         for preset in &presets {
             let on = selected.as_ref() == Some(&preset.name);

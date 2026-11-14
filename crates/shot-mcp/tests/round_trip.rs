@@ -102,14 +102,17 @@ async fn lists_the_tools_and_leaves_review_to_the_human() {
             "activity",
             "caption_fixes",
             "create_proposal",
+            "delete_theme",
             "describe",
             "explain_instance",
             "list_proposals",
+            "list_themes",
             "list_videos",
             "move_card",
             "proposal_diff",
             "propose_cut",
             "propose_override",
+            "propose_preset",
             "propose_review",
             "propose_rule",
             "propose_script",
@@ -117,10 +120,13 @@ async fn lists_the_tools_and_leaves_review_to_the_human() {
             "read_lock",
             "read_transcript",
             "read_video",
+            "rename_theme",
             "review_queue",
             "rule_scope",
+            "save_theme",
             "script_checks",
             "thumbnail_frames",
+            "use_theme",
         ]
     );
 }
@@ -502,4 +508,25 @@ async fn paths_and_slugs_stay_inside_the_video_folder() {
             "{name}: {text}"
         );
     }
+}
+
+#[tokio::test]
+async fn use_theme_switches_the_channel_as_the_app_does() {
+    let dir = channel();
+    let brand = dir.path().join("brand");
+    std::fs::create_dir_all(brand.join("themes")).unwrap();
+    std::fs::write(brand.join("brand.kdl"), "theme dark\nsounds zoom=whoosh\n").unwrap();
+    for (name, accent) in [("dark", "#101418"), ("light", "#eef1f4")] {
+        let file = brand.join(format!("themes/{name}.kdl"));
+        std::fs::write(file, format!("colors accent=\"{accent}\"\n")).unwrap();
+    }
+    let client = connect(dir.path()).await;
+    let (error, text) = call(&client, "use_theme", json!({ "theme": "light" })).await;
+    assert!(!error, "{text}");
+    let written = std::fs::read_to_string(brand.join("brand.kdl")).unwrap();
+    assert_eq!(written, "theme light\nsounds zoom=whoosh\n");
+    let (_, text) = call(&client, "list_themes", json!({})).await;
+    assert_eq!(text, "dark\nlight (active)\n");
+    let (error, text) = call(&client, "delete_theme", json!({ "theme": "light" })).await;
+    assert!(error && text.contains("use another one"), "{text}");
 }

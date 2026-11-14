@@ -4,7 +4,7 @@
 use shot_core::{Format, FormatLayer};
 
 /// The video's `format.kdl` layer that gives `format` over `base`, the settings below it: the
-/// settings that differ, with the layer's brand fields and rules kept. An optional setting
+/// settings that differ, with the layer's theme, brand fields and rules kept. An optional setting
 /// `format` leaves at its default is written out, since leaving it out inherits `base`'s.
 pub fn layer(format: &Format, base: &Format, current: &FormatLayer) -> FormatLayer {
     fn differs<T: PartialEq>(a: T, b: T) -> Option<T> {
@@ -30,6 +30,7 @@ pub fn layer(format: &Format, base: &Format, current: &FormatLayer) -> FormatLay
         window: (format.window != base.window).then_some(effects.window),
         layout_switch: (format.layout_switch != base.layout_switch).then(|| format.layout_switch()),
         inputs: differs(format.inputs(), base.inputs()),
+        theme: current.theme.clone(),
         brand: current.brand.clone(),
         rules: current.rules.clone(),
     }

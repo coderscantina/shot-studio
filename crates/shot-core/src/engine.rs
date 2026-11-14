@@ -9,8 +9,8 @@ use crate::style::ActiveRule;
 use crate::timeline::ContentHash;
 use crate::{
     Attr, AttrValue, Brand, Cut, Decision, Effect, EffectKey, Element, ElementKind, Elements,
-    FormatLayer, Id, Layer, Micros, Override, OverrideEffect, ParamValue, RangeEdit, Selector,
-    StyleSheet, Target, TimeRange,
+    FormatLayer, Id, Layer, Micros, OverlayPreset, Override, OverrideEffect, ParamValue, RangeEdit,
+    Selector, StyleSheet, Target, TimeRange,
 };
 
 /// Everything a build reads. The caller does the IO: parsing the files, fetching the imports
@@ -41,6 +41,10 @@ pub enum StyleError {
     MissingAsset(String),
     /// Two element files for one take.
     DuplicateElements(Id),
+    /// A rule names an overlay preset the brand does not have.
+    UnknownPreset { rule: Selector, preset: Id },
+    /// A rule's preset places a template the rule places itself.
+    PresetClash { rule: Selector, preset: Id },
 }
 
 impl fmt::Display for StyleError {
@@ -52,6 +56,14 @@ impl fmt::Display for StyleError {
             ),
             Self::MissingAsset(path) => write!(f, "the brand names `{path}`, which has no hash"),
             Self::DuplicateElements(take) => write!(f, "two element files for take {take}"),
+            Self::UnknownPreset { rule, preset } => write!(
+                f,
+                "rule `on {rule}` names overlay preset `{preset}`, which brand/brand.kdl does not have"
+            ),
+            Self::PresetClash { rule, preset } => write!(
+                f,
+                "rule `on {rule}` places the template of overlay preset `{preset}` twice"
+            ),
         }
     }
 }
@@ -98,7 +110,10 @@ pub fn build(input: &StyleInput<'_>) -> Result<Lock, StyleError> {
         (Layer::Brand, &input.brand.rules),
         (Layer::Format, &input.format.rules),
         (Layer::Video, &input.video.rules),
-    ]));
+    ]))
+    .into_iter()
+    .map(|rule| with_presets(rule, &input.brand.overlay_presets))
+    .collect::<Result<Vec<_>, _>>()?;
 
     let mut takes = Vec::new();
     for take in take_order(input.cut) {
@@ -115,6 +130,49 @@ pub fn build(input: &StyleInput<'_>) -> Result<Lock, StyleError> {
         brand,
         takes,
     })
+}
+
+/// `rule` with each overlay preset it names resolved into the overlay the preset places, so the
+/// lock carries the instance and a later preset change does not reach a shipped lock.
+fn with_presets(mut rule: ActiveRule, presets: &[OverlayPreset]) -> Result<ActiveRule, StyleError> {
+    let mut resolved = false;
+    for effect in &mut rule.effects {
+        let Effect::Preset(name) = effect else {
+            continue;
+        };
+        let preset =
+            presets
+                .iter()
+                .find(|p| p.name == *name)
+                .ok_or_else(|| StyleError::UnknownPreset {
+                    rule: rule.selector.clone(),
+                    preset: name.clone(),
+                })?;
+        *effect = Effect::Overlay {
+            template: preset.template.clone(),
+            length: Some(preset.length),
+            copies: Vec::new(),
+            params: preset.params.clone(),
+        };
+        resolved = true;
+    }
+    if resolved {
+        rule.effects.sort_by_key(Effect::key);
+        if let Some(pair) = rule.effects.windows(2).find(|w| w[0].key() == w[1].key()) {
+            let EffectKey::Overlay(template) = pair[0].key() else {
+                unreachable!("only presets resolve into a key the rule may have");
+            };
+            let preset = presets
+                .iter()
+                .find(|p| p.template == template)
+                .map_or(template, |p| p.name.clone());
+            return Err(StyleError::PresetClash {
+                rule: rule.selector,
+                preset,
+            });
+        }
+    }
+    Ok(rule)
 }
 
 /// Takes of the main cut in order of first appearance.
@@ -481,6 +539,7 @@ fn apply(effect: &Effect, subject: &Subject<'_>) -> Option<Applied> {
     let t = subject.t;
     Some(match effect {
         Effect::Cut { .. } => unreachable!("cuts go through apply_cut"),
+        Effect::Preset(_) => unreachable!("the build resolves presets"),
         Effect::Layout(layout) => Applied::Layout {
             layout: *layout,
             range: subject.span()?,

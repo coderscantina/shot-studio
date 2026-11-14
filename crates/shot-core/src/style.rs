@@ -295,6 +295,10 @@ pub enum Effect {
         /// Literal parameters in file order, names unique and not among `copies`.
         params: Vec<(Id, ParamValue)>,
     },
+    /// `overlay preset=<id>`: the brand's overlay preset of that name, from the element's start
+    /// for the preset's length. The build resolves it into an [`Effect::Overlay`]; only rules
+    /// name presets.
+    Preset(Id),
     /// A sound at the element's start, `gain` dB at most 0.
     Sfx { sound: Id, gain: i16 },
     /// How the chapter starting here joins the one before. Only on `chapter-start` and
@@ -317,6 +321,8 @@ pub enum EffectKey {
     Layout,
     Zoom,
     Overlay(Id),
+    /// An overlay preset by name, until the build resolves it to its template.
+    Preset(Id),
     Sfx,
     Transition,
     Music,
@@ -329,7 +335,7 @@ impl EffectKey {
             Self::Cut => "cut",
             Self::Layout => "layout",
             Self::Zoom => "zoom",
-            Self::Overlay(_) => "overlay",
+            Self::Overlay(_) | Self::Preset(_) => "overlay",
             Self::Sfx => "sfx",
             Self::Transition => "transition",
             Self::Music => "music",
@@ -339,9 +345,11 @@ impl EffectKey {
 
     pub(crate) fn write(&self, w: &mut Writer) {
         w.node(self.name());
-        if let Self::Overlay(template) = self {
-            w.arg(template);
-        }
+        match self {
+            Self::Overlay(template) => w.arg(template),
+            Self::Preset(preset) => w.prop("preset", preset),
+            _ => w,
+        };
     }
 }
 
@@ -352,6 +360,7 @@ impl Effect {
             Self::Layout(_) => EffectKey::Layout,
             Self::Zoom { .. } => EffectKey::Zoom,
             Self::Overlay { template, .. } => EffectKey::Overlay(template.clone()),
+            Self::Preset(preset) => EffectKey::Preset(preset.clone()),
             Self::Sfx { .. } => EffectKey::Sfx,
             Self::Transition { .. } => EffectKey::Transition,
             Self::Music { .. } => EffectKey::Music,
@@ -397,6 +406,10 @@ impl Effect {
                     lead: node.opt_prop("lead")?.unwrap_or_default(),
                     shape: ZoomShape::read(node)?,
                 }
+            }
+            "overlay" if node.opt_prop::<Id>("preset")?.is_some() => {
+                node.expect(0, &["preset"])?;
+                Self::Preset(node.prop("preset")?)
             }
             "overlay" => {
                 node.expect_block(1, &["for"])?;
@@ -536,6 +549,7 @@ impl Effect {
                 }
                 w.close();
             }
+            Self::Preset(_) => w.end(),
             Self::Sfx { sound, gain } => {
                 w.arg(sound);
                 if *gain != 0 {
