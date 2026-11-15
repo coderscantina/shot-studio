@@ -866,7 +866,14 @@ impl Override {
                             };
                             OverrideEffect::Off(key)
                         }
-                        _ => OverrideEffect::Set(Effect::read(child, Target::Kind(kind))?),
+                        _ => match Effect::read(child, Target::Kind(kind))? {
+                            Effect::Preset(_) => {
+                                return Err(child.error(
+                                    "an override names a template; overlay presets are for rules",
+                                ));
+                            }
+                            effect => OverrideEffect::Set(effect),
+                        },
                     };
                     if effects.iter().any(|e| e.key() == effect.key()) {
                         return Err(child.error(format!("duplicate `{name}`")));

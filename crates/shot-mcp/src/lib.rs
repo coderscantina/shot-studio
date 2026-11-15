@@ -12,6 +12,7 @@
 //! [0005]: ../../docs/decisions/0005-privacy-text-only-to-claude.md
 
 pub mod agents;
+pub mod brand;
 pub mod bridge;
 mod confine;
 pub mod style;
@@ -289,6 +290,52 @@ struct ProposeOverrideArgs {
     /// The override's children as KDL, one per line: `keep`, `cut`, an effect such as
     /// `zoom 140 hold=1_000_000`, or `zoom off`.
     effects: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ListThemesArgs {}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ThemeArgs {
+    /// The theme id, its file `brand/themes/<id>.kdl`, as list_themes shows it.
+    theme: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SaveThemeArgs {
+    /// The new theme's id: lowercase letters, digits and dashes.
+    name: String,
+    /// The theme whose look to copy; the channel's theme when left out.
+    from: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct RenameThemeArgs {
+    /// The theme's id now.
+    from: String,
+    /// Its new id: lowercase letters, digits and dashes.
+    to: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ProposePresetArgs {
+    /// The video slug.
+    slug: String,
+    /// Proposal name: lowercase letters, digits and dashes.
+    name: String,
+    /// The commit subject.
+    subject: String,
+    /// The overlay preset's id, as list_themes shows it.
+    preset: String,
+    /// The take id.
+    take: String,
+    /// Where the overlay starts, media time of the take in microseconds.
+    at_us: u64,
 }
 
 #[tool_router]
@@ -875,6 +922,112 @@ impl ShotServer {
         Ok(CallToolResult::success(content))
     }
 
+    #[tool(
+        description = "The channel's themes, the one it uses marked (active), and its overlay presets with template and length.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false,
+        )
+    )]
+    fn list_themes(&self, Parameters(_): Parameters<ListThemesArgs>) -> Result<String, String> {
+        Ok(brand::list_text(&brand::read(&self.repo)?))
+    }
+
+    #[tool(
+        description = "Make a theme the channel's: changes the one `theme` line of brand/brand.kdl in the channel's working tree, as the app's theme window does. Every video built afterwards uses it, unless its format layer names another theme; shipped videos keep their look.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false,
+        )
+    )]
+    fn use_theme(&self, Parameters(args): Parameters<ThemeArgs>) -> Result<String, String> {
+        let theme = theme_id(&args.theme)?;
+        brand::activate(&self.repo, &theme)?;
+        Ok(format!("the channel uses theme {theme}\n"))
+    }
+
+    #[tool(
+        description = "Save a copy of a theme's look as a new theme, brand/themes/<name>.kdl. The channel keeps using its theme.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false,
+        )
+    )]
+    fn save_theme(&self, Parameters(args): Parameters<SaveThemeArgs>) -> Result<String, String> {
+        let name = theme_id(&args.name)?;
+        let from = args.from.as_deref().map(theme_id).transpose()?;
+        brand::save(&self.repo, &name, from.as_ref())?;
+        Ok(format!("saved theme {name}\n"))
+    }
+
+    #[tool(
+        description = "Rename a theme: its file, and the `theme` line of brand/brand.kdl when the channel uses it. A theme a format layer names is not renamed.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false,
+        )
+    )]
+    fn rename_theme(
+        &self,
+        Parameters(args): Parameters<RenameThemeArgs>,
+    ) -> Result<String, String> {
+        let (from, to) = (theme_id(&args.from)?, theme_id(&args.to)?);
+        brand::rename(&self.repo, &from, &to)?;
+        Ok(format!("renamed theme {from} to {to}\n"))
+    }
+
+    #[tool(
+        description = "Delete a theme's file. The theme the channel uses and a theme a format layer names are not deleted.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false,
+        )
+    )]
+    fn delete_theme(&self, Parameters(args): Parameters<ThemeArgs>) -> Result<String, String> {
+        let theme = theme_id(&args.theme)?;
+        brand::delete(&self.repo, &theme)?;
+        Ok(format!("deleted theme {theme}\n"))
+    }
+
+    #[tool(
+        description = "Propose placing one of the brand's overlay presets in a video as a branch: an overlay node with the preset's template and parameters, from a take's media time for the preset's length, in the take block that keeps that moment. To place a preset wherever an element occurs, propose a rule with `overlay preset=<id>` instead.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false,
+        )
+    )]
+    fn propose_preset(
+        &self,
+        Parameters(args): Parameters<ProposePresetArgs>,
+    ) -> Result<String, String> {
+        let take = take_id(&args.take)?;
+        let preset =
+            Id::new(&args.preset).ok_or_else(|| format!("`{}` is not a preset id", args.preset))?;
+        let themes = brand::read(&self.repo)?;
+        let overlay = themes
+            .preset(&preset)
+            .map_err(|e| e.to_string())?
+            .place(Micros(args.at_us));
+        let cut = self
+            .cut(&args.slug)?
+            .place_overlay(&take, overlay)
+            .map_err(|e| e.to_string())?;
+        let files = BTreeMap::from([("cut.kdl".to_owned(), cut.to_kdl())]);
+        self.propose(&args.slug, &args.name, &args.subject, files)
+    }
+
     fn board(&self) -> Result<Board, String> {
         Board::open(&self.repo)
             .map_err(|e| format!("{} is not a channel repo: {e}", self.repo.display()))
@@ -1112,6 +1265,11 @@ fn validate(file: &str, text: &str) -> Result<(), String> {
         _ => Ok(()),
     };
     parsed.map_err(|e| format!("{file} does not parse: {e}"))
+}
+
+fn theme_id(text: &str) -> Result<Id, String> {
+    Id::new(text)
+        .ok_or_else(|| format!("`{text}` is not a theme id: lowercase letters, digits and dashes"))
 }
 
 fn take_id(text: &str) -> Result<Id, String> {

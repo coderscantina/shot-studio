@@ -11,6 +11,7 @@ mod models;
 mod record;
 mod restyle;
 mod style;
+mod theme;
 mod transcribe;
 
 use std::path::{Path, PathBuf};
@@ -85,7 +86,7 @@ enum Command {
     /// Snapshot a commit range into sources/ and type it out as a code-diff overlay.
     #[cfg(target_os = "macos")]
     CodeDiff(code_diff::CodeDiffArgs),
-    /// Place a bleep, blur or b-roll, or check every overlay against its template.
+    /// Place a bleep, blur, b-roll or overlay preset, or check every overlay against its template.
     #[cfg(target_os = "macos")]
     Overlays(overlays::OverlaysArgs),
     /// Add, list or remove Shorts and X clips; export one with `export --cut <name>`.
@@ -97,6 +98,8 @@ enum Command {
     Migrate(migrate::MigrateArgs),
     /// Rebuild a shipped video's frozen lock on purpose, for a new release.
     Restyle(restyle::RestyleArgs),
+    /// List the channel's themes, or use, save, rename or delete one.
+    Theme(theme::ThemeArgs),
     /// Run the MCP server on stdio.
     Mcp(agent::McpArgs),
     /// Ask Claude through the local Claude Code CLI, with the MCP server attached.
@@ -262,6 +265,7 @@ fn run(mut cli: Cli) -> Result<(), String> {
         Command::Style(args) => return style::run(cli.repo, args),
         Command::Migrate(args) => return migrate::run(cli.repo, args),
         Command::Restyle(args) => return restyle::run(cli.repo, args),
+        Command::Theme(args) => return theme::run(&cli.repo, args),
         _ => {}
     }
     if let Command::Mcp(args) = cli.command {
@@ -365,6 +369,7 @@ fn run(mut cli: Cli) -> Result<(), String> {
         | Command::Style(_)
         | Command::Migrate(_)
         | Command::Restyle(_)
+        | Command::Theme(_)
         | Command::Analyze(_)
         | Command::CaptionFix(_) => {
             unreachable!("handled before opening the board")

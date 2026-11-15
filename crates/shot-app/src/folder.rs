@@ -294,6 +294,8 @@ impl VideoFolder {
         if let Some(path) = self.brand_path()
             && snapshot.channel_brand != fs::read_to_string(&path).ok()
         {
+            let repo = path.parent().and_then(Path::parent).unwrap_or(&path);
+            let _channel = shot_fs::WriteLock::channel(repo).map_err(|e| e.to_string())?;
             match &snapshot.channel_brand {
                 Some(text) => write(&path, text)?,
                 None => fs::remove_file(&path).map_err(|e| format!("{}: {e}", path.display()))?,
@@ -323,6 +325,7 @@ impl VideoFolder {
 
     fn store_format(&mut self, format: Format) -> Result<(), String> {
         self.layer = FormatLayer {
+            theme: self.layer.theme.take(),
             brand: self.layer.brand.take(),
             rules: std::mem::take(&mut self.layer.rules),
             ..shot_core::settings_diff(&format, &self.base)
@@ -448,8 +451,8 @@ impl VideoFolder {
         Ok(imported)
     }
 
-    /// Lays `look` over the channel brand's caption look in `brand/brand.kdl` and drops the
-    /// video's own, so every video of the channel uses it. Brand files are not part of undo.
+    /// Lays `look` over the caption look of the channel's theme and drops the video's own, so
+    /// every video of the channel uses it. Brand files are not part of undo.
     pub fn set_brand_captions(&mut self, look: shot_core::CaptionLook) -> Result<(), String> {
         self.writing(|folder| folder.store_brand_captions(look))
     }
@@ -461,39 +464,19 @@ impl VideoFolder {
                 "The caption look of a channel lives in its brand, and this video is not in one",
             )?
             .to_owned();
-        let path = repo.join("brand/brand.kdl");
-        let mut brand = match fs::read_to_string(&path) {
-            Ok(text) => {
-                shot_core::Brand::parse(&text).map_err(|e| format!("brand/brand.kdl:{e}"))?
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => shot_core::Brand::default(),
-            Err(e) => return Err(format!("{}: {e}", path.display())),
-        };
-        brand.captions = brand.captions.merge(&look);
-        fs::create_dir_all(repo.join("brand")).map_err(|e| e.to_string())?;
-        write(&path, &brand.to_kdl())?;
+        shot_mcp::brand::change(&repo, |themes| {
+            Ok(themes.with_active_look(|theme| theme.captions = theme.captions.merge(&look)))
+        })?;
         let mut format = self.project.format.clone();
         format.caption_look = shot_core::CaptionLook::default();
         self.write_format(format)?;
         self.rebuild_lock()
     }
 
-    /// The channel's `brand/brand.kdl`, where channel layouts live: `None` for a video outside
-    /// a channel repo, whose brand is the default one.
+    /// The channel's `brand/brand.kdl`, where channel layouts and overlay presets live: `None`
+    /// for a video outside a channel repo, whose brand is the default one.
     pub fn brand_path(&self) -> Option<PathBuf> {
         Some(self.channel_root()?.join("brand/brand.kdl"))
-    }
-
-    /// The channel's brand as its file says, the empty brand before it has one.
-    pub fn channel_brand(&self) -> Result<Brand, String> {
-        let Some(path) = self.brand_path() else {
-            return Ok(Brand::default());
-        };
-        match fs::read_to_string(&path) {
-            Ok(text) => Brand::parse(&text).map_err(|e| format!("brand/brand.kdl:{e}")),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Brand::default()),
-            Err(e) => Err(format!("{}: {e}", path.display())),
-        }
     }
 
     /// Saves `layout` in the channel's brand, replacing the one of its name, and offers it on
@@ -503,14 +486,14 @@ impl VideoFolder {
         let path = self.brand_path().ok_or(
             "Channel layouts live in a channel's brand, and this video is not in a channel",
         )?;
+        let repo = path
+            .parent()
+            .and_then(Path::parent)
+            .expect("brand/brand.kdl is in a repo")
+            .to_owned();
         self.as_one_change(|folder| {
-            let mut brand = folder.channel_brand()?;
             let name = Layout::Custom(layout.name);
-            brand.set_layout(layout);
-            if let Some(dir) = path.parent() {
-                fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-            }
-            write(&path, &brand.to_kdl())?;
+            shot_mcp::brand::change(&repo, |themes| Ok(themes.set_layout(layout)))?;
             let mut format = folder.project.format.clone();
             let listed = format.other_layouts.contains(&name);
             if on_keys && !listed && format.default_layout != name {

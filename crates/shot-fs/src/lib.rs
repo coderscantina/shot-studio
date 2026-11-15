@@ -2,9 +2,9 @@
 //!
 //! [`write`] replaces a file so that a crash or a full disk leaves the old file or the new one,
 //! never an empty or partial one. [`WriteLock`] makes the app, `shot` and the MCP server wait
-//! for each other while they read, change and write one video's files. [`channel_root`] finds
-//! the channel repo of a video folder. `shot-core` does no IO, so this is the one place every
-//! writer shares.
+//! for each other while they read, change and write one video's files, or a channel's `brand/`.
+//! [`channel_root`] finds the channel repo of a video folder. `shot-core` does no IO, so this is
+//! the one place every writer shares.
 
 use std::fs::{self, File};
 use std::io::{self, Write};
@@ -79,9 +79,11 @@ pub fn channel_root(video_dir: &Path) -> Option<&Path> {
         .then_some(root)
 }
 
-/// The advisory lock on a video folder's files, `<video>/.shot/write.lock`. Take it before
-/// reading the files a change starts from and hold it until the last write; dropping it lets
-/// the next writer in. It is not reentrant: taking it twice in one process waits forever.
+/// The advisory lock on a video folder's files, `<video>/.shot/write.lock`, or on a channel's
+/// `brand/`, `<repo>/.shot/brand.lock`. Take it before reading the files a change starts from
+/// and hold it until the last write; dropping it lets the next writer in. It is not reentrant:
+/// taking it twice in one process waits forever. A writer that needs both takes the video's
+/// first.
 #[must_use = "the lock is released when this is dropped"]
 pub struct WriteLock {
     _file: File,
@@ -90,13 +92,23 @@ pub struct WriteLock {
 impl WriteLock {
     /// Waits until no other writer holds the lock of `video`, then holds it.
     pub fn acquire(video: &Path) -> io::Result<Self> {
-        let dir = video.join(".shot");
+        Self::at(video, "write.lock")
+    }
+
+    /// Waits until no other writer holds the lock of the `brand/` folder of the channel repo
+    /// at `repo`, then holds it.
+    pub fn channel(repo: &Path) -> io::Result<Self> {
+        Self::at(repo, "brand.lock")
+    }
+
+    fn at(root: &Path, name: &str) -> io::Result<Self> {
+        let dir = root.join(".shot");
         fs::create_dir_all(&dir)?;
         let file = File::options()
             .create(true)
             .write(true)
             .truncate(false)
-            .open(dir.join("write.lock"))?;
+            .open(dir.join(name))?;
         file.lock()?;
         Ok(Self { _file: file })
     }

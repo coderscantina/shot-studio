@@ -4,7 +4,7 @@ use crate::brand::BrandScope;
 use crate::captions::{CaptionLook, LOOK_PROPS};
 use crate::kdl_io::{FromKdl, Node, Source, ToKdl, Writer, keyword_enum, quote, required};
 use crate::migrate::old::{OldSettings, refused};
-use crate::{Brand, Micros, ParseError, StyleSheet, Transition};
+use crate::{Brand, Id, Micros, ParseError, StyleSheet, Transition};
 
 keyword_enum! {
     /// The four shipped formats. Each has a preset `format.kdl`.
@@ -422,7 +422,9 @@ pub struct FormatLayer {
     pub window: Option<WindowStyle>,
     pub layout_switch: Option<Transition>,
     pub inputs: Option<Inputs>,
-    /// Fields of the brand this layer changes.
+    /// The theme this layer uses instead of the brand's; the nearest layer that names one wins.
+    pub theme: Option<Id>,
+    /// Fields of the brand this layer changes, laid over the theme.
     pub brand: Option<Brand>,
     pub rules: StyleSheet,
 }
@@ -493,6 +495,10 @@ impl FormatLayer {
                     Transition::read(node, &["length", "sound"])?,
                 )?,
                 "record" => node.set_once(&mut layer.inputs, Inputs::read(node)?)?,
+                "theme" => {
+                    node.expect(1, &[])?;
+                    node.set_once(&mut layer.theme, node.arg(0)?)?;
+                }
                 "brand" => {
                     node.expect_block(0, &[])?;
                     let patch = Brand::read(node.children(), BrandScope::Patch)?;
@@ -609,6 +615,9 @@ impl FormatLayer {
                 .prop("system-audio", &inputs.system_audio)
                 .end();
         }
+        if let Some(theme) = &self.theme {
+            w.node("theme").arg(theme).end();
+        }
         if let Some(brand) = &self.brand {
             w.node("brand").open();
             brand.write(&mut w);
@@ -636,6 +645,7 @@ impl From<&Format> for FormatLayer {
             window: format.window,
             layout_switch: format.layout_switch.clone(),
             inputs: format.inputs,
+            theme: None,
             brand: None,
             rules: StyleSheet::default(),
         }

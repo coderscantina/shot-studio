@@ -258,12 +258,7 @@ pub fn add_lottie(repo: &Path, source: &Path) -> Result<LottieImport, String> {
             "`{name}` is a built-in template; rename the file to add it as a sticker"
         ));
     }
-    let brand_path = repo.join("brand/brand.kdl");
-    let mut brand = match fs::read_to_string(&brand_path) {
-        Ok(text) => Brand::parse(&text).map_err(|e| format!("brand/brand.kdl:{e}"))?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Brand::default(),
-        Err(e) => return Err(format!("{}: {e}", brand_path.display())),
-    };
+    let brand = shot_mcp::brand::read(repo)?.brand;
     if brand.templates.iter().any(|t| t.name == name) {
         return Err(format!("the brand already declares `{name}`"));
     }
@@ -297,14 +292,18 @@ pub fn add_lottie(repo: &Path, source: &Path) -> Result<LottieImport, String> {
             })
         })
         .collect();
-    brand.templates.push(LottieTemplate {
+    let template = LottieTemplate {
         name: name.clone(),
         file: file.clone(),
         slots,
-    });
-    brand.templates.sort_by(|a, b| a.name.cmp(&b.name));
-    shot_fs::write(&brand_path, brand.to_kdl())
-        .map_err(|e| format!("{}: {e}", brand_path.display()))?;
+    };
+    shot_mcp::brand::change(repo, |themes| {
+        Ok(themes.with_channel(|brand| {
+            brand.templates.retain(|t| t.name != template.name);
+            brand.templates.push(template);
+            brand.templates.sort_by(|a, b| a.name.cmp(&b.name));
+        }))
+    })?;
     Ok(LottieImport::Added {
         name,
         file,

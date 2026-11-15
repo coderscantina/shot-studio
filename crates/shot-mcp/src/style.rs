@@ -77,6 +77,11 @@ impl Disk {
         }
     }
 
+    /// The channel repo, or the video's folder for a channel of one.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// Whether the video is in a channel repo rather than a channel of one.
     pub fn in_channel(&self) -> bool {
         self.alone.is_none()
@@ -283,7 +288,7 @@ pub fn inputs(repo: &dyn Repo, slug: &str) -> Result<Inputs, String> {
     let video_layer = parsed(&path, layer_text, FormatLayer::parse)?.unwrap_or_default();
     let (path, format_text) = read(format!("formats/{}.kdl", video.format))?;
     let format = parsed(&path, format_text, FormatLayer::parse)?.unwrap_or_default();
-    let (brand, imported, assets) = brand_inputs(repo, slug, &[&video_layer, &format])?;
+    let (brand, imported, assets) = brand_inputs(repo, slug, &format, &video_layer)?;
     let mut takes: Vec<&Id> = Vec::new();
     for take in cut.chapters.iter().flat_map(|c| &c.takes).map(|t| &t.take) {
         if !takes.contains(&take) {
@@ -303,18 +308,26 @@ pub fn inputs(repo: &dyn Repo, slug: &str) -> Result<Inputs, String> {
     })
 }
 
-/// The channel's brand, its imports read from `styles/<id>.kdl`, and the hashes of the files
-/// they and the brand blocks of `layers` name.
+/// The channel's brand with the look of the theme the layers pick, its imports read from
+/// `styles/<id>.kdl`, and the hashes of the files they and the brand blocks of the layers name.
 type BrandInputs = (Brand, Vec<Brand>, BTreeMap<String, ContentHash>);
 
 fn brand_inputs(
     repo: &dyn Repo,
     slug: &str,
-    layers: &[&FormatLayer],
+    channel: &FormatLayer,
+    video: &FormatLayer,
 ) -> Result<BrandInputs, String> {
     let read = |path: String| text(repo, slug, &path).map(|t| (path, t));
-    let (path, brand_text) = read("brand/brand.kdl".to_owned())?;
-    let brand = parsed(&path, brand_text, Brand::parse)?.unwrap_or_default();
+    let (path, brand_text) = read(shot_core::BRAND_FILE.to_owned())?;
+    let mut brand = parsed(&path, brand_text, Brand::parse)?.unwrap_or_default();
+    if let Some(theme) = shot_core::picked_theme(&brand, channel, video) {
+        let (path, theme_text) = read(shot_core::theme_file(theme))?;
+        let theme_text =
+            theme_text.ok_or_else(|| format!("{path} is missing, theme `{theme}` is named"))?;
+        let look = parsed(&path, Some(theme_text), Brand::parse_theme)?.unwrap_or_default();
+        brand = brand.with_look(&look);
+    }
     let mut imported = Vec::new();
     for import in &brand.imports {
         let (path, import_text) = read(format!("styles/{}.kdl", import.style))?;
@@ -322,7 +335,9 @@ fn brand_inputs(
             .ok_or_else(|| format!("{path} is missing, the brand imports {}", import.style))?;
         imported.push(parsed(&path, Some(import_text), Brand::parse)?.unwrap_or_default());
     }
-    let patches = layers.iter().filter_map(|l| l.brand.as_ref());
+    let patches = [channel, video]
+        .into_iter()
+        .filter_map(|l| l.brand.as_ref());
     let named = imported
         .iter()
         .chain([&brand])
@@ -376,6 +391,8 @@ pub struct Opened {
 ///   reason when that would change its frames. Its files are written, the channel's format too
 ///   when migration gives it rules.
 /// - A video with a lock loses the old settings its format files still hold.
+/// - The channel's brand files written before themes were files are migrated first, holding
+///   the channel's lock, see [`crate::brand::migrate`].
 /// - The lock is built from the files and written when it changed, unless the video shipped.
 /// - A video migrated in its worktree gets the files the migration wrote committed on its
 ///   branch, on their own ([0035]). A channel format the migration gave rules stays an
@@ -384,6 +401,9 @@ pub struct Opened {
 /// [0035]: ../../../docs/decisions/0035-every-video-on-style-rules.md
 pub fn open(dir: &Path) -> Result<Opened, String> {
     let (disk, slug) = Disk::locate(dir)?;
+    if disk.in_channel() {
+        crate::brand::migrate(&disk.root)?;
+    }
     let read = |path: &str| text(&disk, &slug, path);
     let lock_path = video_path(&slug, "cut.lock");
     let format_path = video_path(&slug, "format.kdl");
@@ -467,7 +487,8 @@ fn migrate(disk: &Disk, slug: &str, format: &str, cut: &str) -> Result<Migration
     let channel = read(&channel_path)?.unwrap_or_default();
     let (channel_layer, _) =
         shot_core::without_old_settings(&channel).map_err(|e| format!("{channel_path}: {e}"))?;
-    let (brand, imported, assets) = brand_inputs(disk, slug, &[&channel_layer])?;
+    let (brand, imported, assets) =
+        brand_inputs(disk, slug, &channel_layer, &FormatLayer::default())?;
     let elements_dir = disk.path(&path("elements"));
     let takes: Vec<Id> = match std::fs::read_dir(&elements_dir) {
         Ok(entries) => entries

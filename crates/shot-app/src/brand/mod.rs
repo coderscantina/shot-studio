@@ -1,12 +1,13 @@
-//! The channel's theme window: every part of `brand/brand.kdl` as controls in sections (colors,
-//! fonts, logo, camera, motion, captions, sounds, intro and outro, end card), a generator that
-//! proposes looks from one accent or the logo, the channel's saved themes ([0029]) and its
-//! overlay presets, beside a live preview of a real take drawn by `shot-render` in the theme.
+//! The channel's theme window: a theme's look and the channel's sounds and bookends as controls
+//! in sections (colors, fonts, logo, camera, motion, captions, sounds, intro and outro, end
+//! card), a generator that proposes looks from one accent or the logo, the channel's themes in
+//! `brand/themes/` ([0029]) and its overlay presets, beside a live preview of a real take drawn
+//! by `shot-render` in the theme.
 //!
-//! Every control writes the files at once through [`store::Themes`]; the window keeps its own
-//! undo history of the brand and theme files (⌘Z, ⌘⇧Z). Typing in one field is one step.
-//! Opened from the board window, the studio (⌘⇧B, or ⌘⇧O on the overlay presets) and by
-//! [`open_overlay_preset`].
+//! Every control writes the files at once through [`store::Themes`], the core's operations; the
+//! window keeps its own undo history of the brand files (⌘Z, ⌘⇧Z), where switching the theme is
+//! one line of `brand/brand.kdl`. Typing in one field is one step. Opened from the board window,
+//! the studio (⌘⇧B, or ⌘⇧O on the overlay presets) and by [`open_overlay_preset`].
 //!
 //! [0029]: ../../../../docs/decisions/0029-several-themes-per-channel.md
 
@@ -189,7 +190,9 @@ pub(crate) enum Key {
 /// The channel's `brand/brand.kdl` as written, empty when it cannot be read: its overlay
 /// presets and templates for the Edit screen.
 pub fn channel_brand(repo: &Path) -> Brand {
-    Themes::open(repo).map(|t| t.brand).unwrap_or_default()
+    Themes::open(repo)
+        .map(|t| t.files.brand)
+        .unwrap_or_default()
 }
 
 /// The open theme windows by channel.
@@ -321,7 +324,8 @@ pub struct ThemeEditor {
 impl ThemeEditor {
     fn new(themes: Themes, _: &mut Window, cx: &mut Context<Self>) -> Self {
         let sample = Sample::find(&themes.repo);
-        let seed = generate::Palette::of(&themes.brand.colors).accent;
+        let seed =
+            generate::Palette::of(&themes.look(&themes.active()).unwrap_or_default().colors).accent;
         let mut editor = Self {
             selected: themes.active(),
             themes,
@@ -354,7 +358,7 @@ impl ThemeEditor {
     fn look(&self) -> Brand {
         self.themes
             .look(&self.selected)
-            .unwrap_or_else(|| store::look_of(&self.themes.brand))
+            .unwrap_or_else(|| self.themes.brand().clone())
     }
 
     /// The look the preview shows: the one on trial from the generator, else the selected one.
@@ -369,10 +373,7 @@ impl ThemeEditor {
 
     /// The brand file a video would read with the shown look, for drawing and checks.
     fn shown_brand(&self) -> Result<Brand, String> {
-        let brand = self
-            .themes
-            .with_look(&self.themes.active(), &self.shown_look())
-            .brand;
+        let brand = self.themes.brand().with_look(&self.shown_look());
         let format = self
             .sample
             .as_ref()
@@ -395,7 +396,7 @@ impl ThemeEditor {
         if section == Section::Overlays && self.preset.is_none() {
             let first = self
                 .themes
-                .brand
+                .brand()
                 .overlay_presets
                 .first()
                 .map(|p| p.name.clone());
@@ -435,7 +436,7 @@ impl ThemeEditor {
         };
         let lower_third = self
             .themes
-            .brand
+            .brand()
             .overlay_presets
             .iter()
             .find(|p| p.template.as_str() == templates::lower_third::TEMPLATE)
@@ -568,8 +569,13 @@ impl ThemeEditor {
     ) {
         let mut look = self.look();
         change(&mut look);
-        let next = self.themes.with_look(&self.selected, &look);
-        self.commit(next, key, cx);
+        match self.themes.with_look(&self.selected, &look) {
+            Ok(next) => self.commit(next, key, cx),
+            Err(error) => {
+                self.error = Some(error);
+                cx.notify();
+            }
+        }
     }
 
     // Themes.
@@ -694,7 +700,7 @@ impl ThemeEditor {
         };
         let Some(preset) = self
             .themes
-            .brand
+            .brand()
             .overlay_presets
             .iter()
             .find(|p| p.name == name)
@@ -729,7 +735,7 @@ impl ThemeEditor {
     fn new_preset(&mut self, template: &Id, cx: &mut Context<Self>) {
         let names: Vec<Id> = self
             .themes
-            .brand
+            .brand()
             .overlay_presets
             .iter()
             .map(|p| p.name.clone())
@@ -755,7 +761,7 @@ impl ThemeEditor {
         if old.as_ref() != Some(&name)
             && self
                 .themes
-                .brand
+                .brand()
                 .overlay_presets
                 .iter()
                 .any(|p| p.name == name)
@@ -796,7 +802,7 @@ impl ThemeEditor {
         self.commit(next, None, cx);
         let first = self
             .themes
-            .brand
+            .brand()
             .overlay_presets
             .first()
             .map(|p| p.name.clone());
@@ -811,7 +817,7 @@ impl ThemeEditor {
         let editor = editor.clone();
         let found = self
             .themes
-            .brand
+            .brand()
             .overlay_presets
             .iter()
             .find(|p| p.name == *name);
