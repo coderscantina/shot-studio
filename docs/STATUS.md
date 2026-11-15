@@ -4,16 +4,18 @@ Updated 2026-11-15. Read by agents at the start of a thread; rewrite it before h
 
 ## Branches
 
-`main` is the branch of record and is public at https://github.com/coderscantina/shot-studio. Local `main` holds milestones 01 to 14 (the council polish, milestone 13 and 14 were fast-forwarded in on 2026-11-14) and is ahead of `origin/main`, not pushed.
+`main` is the branch of record and is public at https://github.com/coderscantina/shot-studio. Local `main` holds milestones 01 to 15 and is ahead of `origin/main`, not pushed. It is the only local branch.
 
-`m15/integration` is on top of `main`, finished, checked and not merged: [milestone 15](milestones/15-one-video-model-transitions-and-themes.md), built by seven streams and merged. [Evidence](evidence/m15-one-video-model.md).
+`main` holds [milestone 15](milestones/15-one-video-model-transitions-and-themes.md), built by seven streams and merged. [Evidence](evidence/m15-one-video-model.md).
 - One kind of video: every video opens on style rules, old ones migrate on open, a lone folder is a channel of one ([0035](decisions/0035-every-video-on-style-rules.md)).
 - One transition type for chapter edges and layout switches, one painter path, exact first and last frames ([0036](decisions/0036-one-transition-type.md)).
 - Themes as files picked by `theme <id>` in `brand.kdl` or any format layer, `shot theme`, MCP theme and preset tools, presets in rules, a channel lock ([0029](decisions/0029-several-themes-per-channel.md)).
 - A worktree per video branch at `.shot/worktrees/<slug>`, migration as its own commit, accept commits a person's edits first, read-only MCP tools write nothing ([0037](decisions/0037-a-worktree-per-video-branch.md)).
 - Removing lock overlays and placed sounds, cards inside a Short's safe area, the app's copies of render and core code gone.
 
-fmt, workspace clippy and `cargo test --workspace` pass on `m15/integration`; the GPU tests pass except the known `frame_grid` gap. No worktrees, no other local branches.
+fmt, workspace clippy and `cargo test --workspace` pass on `main`; the GPU tests pass except the known `frame_grid` gap. No worktrees.
+
+A local bundle from `scripts/bundle.sh` is in `dist/`: `Shot Studio.app` and `Shot-Studio-26.11.7.dmg`, signed ad hoc, with Mike's uncommitted app icon. `dist/` is not in git.
 
 ## Uncommitted work
 
@@ -25,7 +27,7 @@ No app is running. Generated media is in `$HOME/.cache/shot-studio-fixtures`. Th
 
 ## Waiting on Mike
 
-- Merge `m15/integration` into `main`, and push `main`.
+- Push `main`.
 - The [open decisions](milestones/README.md#open-decisions): resting-cursor zooms (gone with `shot autozoom`), the card size in Shorts, 0034 (cut-out camera, best judged on a real face), the zoom ramp ease, the four reels, the milestone 10 item 7 design round, the website domain (postponed).
 - The [prerequisites](milestones/README.md#prerequisites-from-mike): the prompter beam splitter check, the YouTube OAuth client, the org signing secrets.
 
