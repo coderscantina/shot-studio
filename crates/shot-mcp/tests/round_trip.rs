@@ -366,7 +366,7 @@ async fn scripts_are_checked_and_proposed_only_when_they_parse() {
 }
 
 #[tokio::test]
-async fn reading_a_video_written_before_the_lock_shows_it_migrated() {
+async fn reading_a_video_written_before_the_lock_shows_it_migrated_and_writes_nothing() {
     let dir = TempDir::new().unwrap();
     let board = shot_board::Board::init(dir.path()).unwrap();
     let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/projects/target");
@@ -377,6 +377,20 @@ async fn reading_a_video_written_before_the_lock_shows_it_migrated() {
         )
     });
     board.add_video("target", &files.into()).unwrap();
+    let repo = Repository::open(dir.path()).unwrap();
+    let branches = |repo: &Repository| {
+        let mut names: Vec<String> = repo
+            .branches(None)
+            .unwrap()
+            .map(|b| b.unwrap().0.name().unwrap().unwrap().to_owned())
+            .collect();
+        names.sort();
+        names
+    };
+    let (before, tip) = (
+        branches(&repo),
+        repo.revparse_single("video/target").unwrap().id(),
+    );
     let client = connect(dir.path()).await;
 
     let (error, text) = call(&client, "read_video", json!({ "slug": "target" })).await;
@@ -384,6 +398,19 @@ async fn reading_a_video_written_before_the_lock_shows_it_migrated() {
     let files = &text[text.find("== cut.kdl ==").unwrap()..];
     assert!(!files.contains("by=silence"), "{files}");
     assert!(!files.contains("pacing tight"), "{files}");
+    let (error, text) = call(&client, "read_lock", json!({ "slug": "target" })).await;
+    assert!(!error, "{text}");
+
+    // A brand edit nobody committed: channel files come from the main checkout.
+    std::fs::create_dir_all(dir.path().join("brand")).unwrap();
+    std::fs::write(dir.path().join("brand/brand.kdl"), "theme missing\n").unwrap();
+    let (error, text) = call(&client, "read_lock", json!({ "slug": "target" })).await;
+    assert!(error && text.contains("themes/missing.kdl"), "{text}");
+    std::fs::remove_dir_all(dir.path().join("brand")).unwrap();
+
+    assert!(!dir.path().join(".shot/worktrees").exists());
+    assert_eq!(branches(&repo), before);
+    assert_eq!(repo.revparse_single("video/target").unwrap().id(), tip);
 }
 
 #[tokio::test]

@@ -317,6 +317,32 @@ impl Board {
         Ok(Some(self.repo.find_blob(entry.id())?.content().to_vec()))
     }
 
+    /// The file names directly inside `dir` (relative to the repo root) as video `slug` sees
+    /// them, empty if there is no such folder.
+    pub fn read_repo_dir(&self, slug: &str, dir: &str) -> Result<Vec<String>> {
+        if !proposals::is_inside(dir) {
+            return Err(Error::InvalidPath(dir.to_owned()));
+        }
+        let tip = if proposals::is_channel_path(dir) {
+            self.default_tip()?
+        } else {
+            self.tip(slug)?
+        };
+        let Ok(tree) = tip
+            .tree()?
+            .get_path(Path::new(dir))
+            .and_then(|e| e.to_object(&self.repo))
+            .and_then(|o| o.peel_to_tree())
+        else {
+            return Ok(Vec::new());
+        };
+        Ok(tree
+            .iter()
+            .filter(|e| e.kind() == Some(git2::ObjectType::Blob))
+            .filter_map(|e| Some(e.name().ok()?.to_owned()))
+            .collect())
+    }
+
     /// The commit a video is read from: its branch tip, else the default branch if it has the
     /// video folder.
     fn tip(&self, slug: &str) -> Result<Commit<'_>> {

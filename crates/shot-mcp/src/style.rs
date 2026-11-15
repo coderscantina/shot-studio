@@ -22,6 +22,8 @@ use shot_core::{
 pub trait Repo {
     /// The bytes of `path` as video `slug` sees them, `None` if the file does not exist.
     fn read(&self, slug: &str, path: &str) -> Result<Option<Vec<u8>>, String>;
+    /// The names of the files directly inside `dir`, empty if there is no such folder.
+    fn list(&self, slug: &str, dir: &str) -> Result<Vec<String>, String>;
     /// Every video of the channel, sorted.
     fn slugs(&self) -> Result<Vec<String>, String>;
 }
@@ -135,6 +137,17 @@ impl Repo for Disk {
         }
     }
 
+    fn list(&self, _slug: &str, dir: &str) -> Result<Vec<String>, String> {
+        let dir = self.path(dir);
+        match std::fs::read_dir(&dir) {
+            Ok(entries) => Ok(entries
+                .filter_map(|e| e.ok()?.file_name().into_string().ok())
+                .collect()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(e) => Err(format!("{}: {e}", dir.display())),
+        }
+    }
+
     fn slugs(&self) -> Result<Vec<String>, String> {
         if let Some(slug) = &self.alone {
             return Ok(vec![slug.clone()]);
@@ -173,6 +186,10 @@ impl Repo for Git<'_> {
         self.0.read_repo_file(slug, path).map_err(|e| e.to_string())
     }
 
+    fn list(&self, slug: &str, dir: &str) -> Result<Vec<String>, String> {
+        self.0.read_repo_dir(slug, dir).map_err(|e| e.to_string())
+    }
+
     fn slugs(&self) -> Result<Vec<String>, String> {
         let cards = self.0.cards().map_err(|e| e.to_string())?;
         Ok(cards.into_iter().map(|c| c.slug).collect())
@@ -191,6 +208,10 @@ impl Repo for Patched<'_> {
             Some(text) => Ok(Some(text.clone().into_bytes())),
             None => self.inner.read(slug, path),
         }
+    }
+
+    fn list(&self, slug: &str, dir: &str) -> Result<Vec<String>, String> {
+        self.inner.list(slug, dir)
     }
 
     fn slugs(&self) -> Result<Vec<String>, String> {
@@ -477,7 +498,22 @@ const MIGRATED: [&str; 3] = ["cut.kdl", "format.kdl", "cut.lock"];
 /// Migrates video `slug`, written before the lock, with the elements it has, and writes the
 /// migrated files and the lock.
 fn migrate(disk: &Disk, slug: &str, format: &str, cut: &str) -> Result<MigrationReport, String> {
-    let read = |path: &str| text(disk, slug, path);
+    let (files, report) = migration(disk, slug, format, cut)?;
+    for (path, text) in files {
+        disk.write(&path, &text)?;
+    }
+    Ok(report)
+}
+
+/// What [`migrate`] writes, as repo paths with their text in the order they are written, and
+/// its report. Reads only. Refused when a build of the migrated files gives another lock.
+fn migration(
+    repo: &dyn Repo,
+    slug: &str,
+    format: &str,
+    cut: &str,
+) -> Result<(Vec<(String, String)>, MigrationReport), String> {
+    let read = |path: &str| text(repo, slug, path);
     let path = |file: &str| video_path(slug, file);
     let video = parsed(&path("video.kdl"), read(&path("video.kdl"))?, Video::parse)?
         .ok_or_else(|| format!("{} is missing", path("video.kdl")))?;
@@ -488,17 +524,13 @@ fn migrate(disk: &Disk, slug: &str, format: &str, cut: &str) -> Result<Migration
     let (channel_layer, _) =
         shot_core::without_old_settings(&channel).map_err(|e| format!("{channel_path}: {e}"))?;
     let (brand, imported, assets) =
-        brand_inputs(disk, slug, &channel_layer, &FormatLayer::default())?;
-    let elements_dir = disk.path(&path("elements"));
-    let takes: Vec<Id> = match std::fs::read_dir(&elements_dir) {
-        Ok(entries) => entries
-            .filter_map(|e| e.ok()?.file_name().into_string().ok())
-            .filter_map(|name| Id::new(name.strip_suffix(".jsonl")?))
-            .collect(),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(e) => return Err(format!("{}: {e}", elements_dir.display())),
-    };
-    let elements = read_elements(disk, slug, &takes)?;
+        brand_inputs(repo, slug, &channel_layer, &FormatLayer::default())?;
+    let takes: Vec<Id> = repo
+        .list(slug, &path("elements"))?
+        .iter()
+        .filter_map(|name| Id::new(name.strip_suffix(".jsonl")?))
+        .collect();
+    let elements = read_elements(repo, slug, &takes)?;
     let migration = shot_core::migrate(&MigrateInput {
         video: &video,
         script: &script,
@@ -511,20 +543,103 @@ fn migrate(disk: &Disk, slug: &str, format: &str, cut: &str) -> Result<Migration
         assets: &assets,
     })
     .map_err(|e| format!("videos/{slug} does not open: {e}"))?;
+    let mut files = Vec::new();
     if let Some(channel) = &migration.channel {
-        disk.write(&channel_path, &channel.to_kdl())?;
+        files.push((channel_path, channel.to_kdl()));
     }
-    disk.write(&path("cut.kdl"), &migration.cut.to_kdl())?;
-    disk.write(&path("format.kdl"), &migration.video.to_kdl())?;
-    disk.write(&path("cut.lock"), &migration.lock.to_kdl())?;
-    let rebuilt = build_video(disk, slug)?;
+    files.push((path("cut.kdl"), migration.cut.to_kdl()));
+    files.push((path("format.kdl"), migration.video.to_kdl()));
+    files.push((path("cut.lock"), migration.lock.to_kdl()));
+    let migrated: BTreeMap<String, String> = files.iter().cloned().collect();
+    let rebuilt = build_video(
+        &Patched {
+            inner: repo,
+            files: &migrated,
+        },
+        slug,
+    )?;
     if rebuilt.lock != migration.lock {
         return Err(format!(
             "{}: a build of the migrated files gives another lock",
             path("cut.lock")
         ));
     }
-    Ok(migration.report)
+    Ok((files, migration.report))
+}
+
+/// Where a [`Snapshot`] reads from.
+pub enum Source {
+    Disk(Disk),
+    /// A video's branch tip, with the channel's files from the main checkout ([0037]).
+    ///
+    /// [0037]: ../../../docs/decisions/0037-a-worktree-per-video-branch.md
+    Board(Board, Disk),
+}
+
+/// The files of a video as a read-only tool sees them, `files` laid over `source`.
+pub struct Snapshot {
+    source: Source,
+    files: BTreeMap<String, String>,
+}
+
+impl From<Disk> for Snapshot {
+    fn from(disk: Disk) -> Self {
+        Self {
+            source: Source::Disk(disk),
+            files: BTreeMap::new(),
+        }
+    }
+}
+
+impl Snapshot {
+    /// `source` as it is, with the migration of a video written before the lock laid over it
+    /// in memory. Nothing is written.
+    pub fn migrated(source: Source, slug: &str) -> Result<Self, String> {
+        let mut snapshot = Self {
+            source,
+            files: BTreeMap::new(),
+        };
+        let read = |path: String| text(&snapshot, slug, &path);
+        let format = read(video_path(slug, "format.kdl"))?.unwrap_or_default();
+        let cut = read(video_path(slug, "cut.kdl"))?.unwrap_or_default();
+        if read(video_path(slug, "cut.lock"))?.is_none()
+            && shot_core::written_before_lock(&format, &cut)
+        {
+            snapshot.files = migration(&snapshot, slug, &format, &cut)?
+                .0
+                .into_iter()
+                .collect();
+        }
+        Ok(snapshot)
+    }
+}
+
+impl Repo for Snapshot {
+    fn read(&self, slug: &str, path: &str) -> Result<Option<Vec<u8>>, String> {
+        if let Some(text) = self.files.get(path) {
+            return Ok(Some(text.clone().into_bytes()));
+        }
+        match &self.source {
+            Source::Disk(disk) => disk.read(slug, path),
+            Source::Board(_, channel) if !path.starts_with("videos/") => channel.read(slug, path),
+            Source::Board(board, _) => Git(board).read(slug, path),
+        }
+    }
+
+    fn list(&self, slug: &str, dir: &str) -> Result<Vec<String>, String> {
+        match &self.source {
+            Source::Disk(disk) => disk.list(slug, dir),
+            Source::Board(_, channel) if !dir.starts_with("videos/") => channel.list(slug, dir),
+            Source::Board(board, _) => Git(board).list(slug, dir),
+        }
+    }
+
+    fn slugs(&self) -> Result<Vec<String>, String> {
+        match &self.source {
+            Source::Disk(disk) => disk.slugs(),
+            Source::Board(board, _) => Git(board).slugs(),
+        }
+    }
 }
 
 /// Seconds with one decimal, as the other tools print times.
