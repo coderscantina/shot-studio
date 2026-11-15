@@ -19,7 +19,7 @@ Mark a milestone complete only after its acceptance criteria pass and an evidenc
 | 12 | [Styled monitor and watch builds](12-styled-monitor-and-watch-builds.md) | 10, 11 | App, Media, Agents | Built on `milestone/10-12`; watch rebuild 7.8 to 13.5 s, the URL card latency waits for Mike. [Evidence](../evidence/m12-styled-monitor-and-watch-builds.md) |
 | 13 | [Takes, scenes and studio tools](13-takes-scenes-and-studio-tools.md) | 10, 11, 12 | All roles | Built on `m13/integration`; decisions 0026 to 0030 and 0032 wait for Mike. [Evidence](../evidence/m13-takes-scenes-and-studio-tools.md) |
 | 14 | [Hardening from FilmCraft and EffectCraft](14-hardening-from-filmcraft-and-effectcraft.md) | 13 | All roles | Built on `m14/integration`; decisions 0033 and 0034 wait for Mike. [Evidence](../evidence/m14-hardening.md) |
-| 15 | [One video model, one transition type, themes as files](15-one-video-model-transitions-and-themes.md) | 14 | All roles | In progress on `m15/integration`. |
+| 15 | [One video model, one transition type, themes as files](15-one-video-model-transitions-and-themes.md) | 14 | All roles | Built on `m15/integration`; the app check and the quiet bench are in the report. [Evidence](../evidence/m15-one-video-model.md) |
 | 09 | [Release gate](09-release-gate.md) | 01 to 08, 10 to 12 | Core | Items 1 to 3 and 6 built (release.sh, workflow, bundle, cask, credits); signing waits for Mike's Apple secrets. [Evidence](../evidence/m09/release-machinery.md) |
 
 Milestone 02 is a go/no-go gate. If gpui can't show a 4K60 VideoToolbox decode without a CPU copy, stop and bring the measurements to Mike before 03 starts, because the UI choice changes.
@@ -36,6 +36,8 @@ Waiting for Mike. One line each with a recommendation and a link to its record. 
 - Website and domain: `shot-studio.app` or `shot.coderscantina.com`, postponed by Mike on 2026-11-08. No website is linked until then.
 - Cut-out camera ([0034](../decisions/0034-cut-out-camera-from-person-masks.md)): `camera cutout=<bool>` on the brand, masks from Vision's balanced person segmentation cached by `shot analyze`, plain camera with a 200 ms crossfade where no person is found. Recommended: adopt, after one look at a real face.
 - Zoom ramps use the smooth zoom's spring, which reads shorter than the ramp's number (a 1.5 s ramp looks done in about 0.5 s). An ease over the whole ramp would also change today's smooth zooms. Recommended: watch one first, see `docs/evidence/m13/c-ramp-in-sequence.png`.
+- Resting-cursor zooms went with `shot autozoom` in milestone 15: no style rule zooms where the cursor rests or fits a zoom to keep the cursor in view. Recommended: a `cursor-rest` element from `shot analyze` and a zoom rule in the product-tour preset.
+- Cards in a Short fill the safe area's width, a link card title about 37 px tall on a 1080 px frame. Recommended: look at `derived::tests::a_link_card_in_a_short_is_whole`'s frame before tuning.
 - Milestone 10 item 7: a design-variants round for provenance, the scope choice and the rule editor, plus the transition mark style and Picture's placement buttons.
 
 Settled on 2026-11-14: 0026 to 0028, 0030, 0032 and 0033 adopted, 0029 adopted with the theme as a pointer, and 0035 to 0037 adopted for milestone 15.
@@ -53,6 +55,9 @@ Settled on 2026-11-08: every Proposed record (0011, 0013 to 0025) adopted, the l
 
 Found by agents and waiting for a task. Remove a line when it's fixed.
 
+- After milestone 15: `shot style scope` and the MCP propose and reach tools still read branch tips, not worktrees; an idea's default `script.md`, `format.kdl` and `cut.lock` stay uncommitted in its worktree; `shot migrate` and `style build --all` create a worktree for every video, shipped ones too; `move_into` leaves the moved text files untracked in the main checkout. A worktree whose branch was deleted and whose only changes are staged can be removed.
+- `shot caption-fix` refuses an old video instead of migrating it, and `shot overlays b-roll` cannot fill a slot a rule placed. `README.md` and the technical briefing still name `shot autocut`.
+- The painter opens the incoming side of a transition half a second early on the render thread; hiding that pause fully needs a decode thread in `shot-media`.
 - The app has a placeholder icon, unstripped binaries (105 MB), and CI does not catch a stale `crates.txt`.
 - One watch save of six took 65 s: its build took 9.7 s but the change was noticed about 55 s late, cause not found (the disk was nearly full). `shot check` still takes about 40 s on one export because seeks past 250 s cost 150 ms in VideoToolbox; a forward-reading keyframe decoder in shot-media would fix it. An export needs about 12.8 GB free for the main cut (`<cut>.partial` beside the old file). On the sound-effect-heavy channel one save re-rendered far more than 2 chunks, likely `beat-sync` moving later cards when the cut shortens.
 - Captions draw over the link card on the monitor (export keeps main-cut captions in the sidecar). The Record layout switcher from the mockup is not built; the Styled/Raw switch takes its place.
