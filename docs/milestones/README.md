@@ -56,10 +56,9 @@ Found by agents and waiting for a task. Remove a line when it's fixed.
 - The app has a placeholder icon, unstripped binaries (105 MB), and CI does not catch a stale `crates.txt`.
 - One watch save of six took 65 s: its build took 9.7 s but the change was noticed about 55 s late, cause not found (the disk was nearly full). `shot check` still takes about 40 s on one export because seeks past 250 s cost 150 ms in VideoToolbox; a forward-reading keyframe decoder in shot-media would fix it. An export needs about 12.8 GB free for the main cut (`<cut>.partial` beside the old file). On the sound-effect-heavy channel one save re-rendered far more than 2 chunks, likely `beat-sync` moving later cards when the cut shortens.
 - Captions draw over the link card on the monitor (export keeps main-cut captions in the sidecar). The Record layout switcher from the mockup is not built; the Styled/Raw switch takes its place.
-- Zoom-through and morph do not start exactly on the outgoing frame (likely the shutter blur sampling ahead), and the editor counts frames at 60 fps, so cut points miss the frame grid of other take rates by up to 20 ms. Both tests are `#[ignore]`d with numbers.
+- The editor counts frames at 60 fps, so cut points miss the frame grid of other take rates by up to 20 ms. The test is `#[ignore]`d with numbers.
 - The app keeps a video in memory and can overwrite a change `shot` made meanwhile; it needs a changed-on-disk check. `brand.kdl` writes from several videos take no lock.
 - The control socket stays behind when the app is killed, and `commands` lists about 225 actions per window.
-- The painter has no prefetch for the second side of a two-sided transition (the engine queues 18 frames instead), and `paint` does not return the screen layer it drew, so the engine lays out paused frames twice to map callout clicks. `--bench-edit --glass` draws its own pass although `Painter::set_decoration` now exists.
 - Stingers and derived cuts do not snap to the beat. The bookend title and word-pop captions have no phase sounds. The contract's `sounds` row does not yet say which templates count as cards or pops, that clicks need a ripple, or that a phase plays on its first frame.
 - The shot-app watchdog test (`the_watchdog_names_where_a_stalled_thread_waits_or_runs`) fails about four runs in five at load average 10 to 20: a sample can land before the thread starts sleeping.
 - The contract does not yet describe which transition joins a bookend, where the intro goes, what each title shows, or take handles. Bumpers are cached per video, not per channel as decision 0021 says.
@@ -69,7 +68,6 @@ Found by agents and waiting for a task. Remove a line when it's fixed.
 - vello's coverage order varies between runs; rectangle shadows are snapped to whole pixels, but a rare one-bit flip in text or other shapes is still possible.
 - The first seek after playback in the editor engine takes about 0.5 s.
 - `shot check` (`check_cut`) and the Ship screen's cut length read the timeline without bookends, so with an intro the chapter rules and the length are off by the bookends.
-- `shot-render`'s painter returns no screen layer, so the editor engine lays out a paused frame a second time for callout clicks; and it has no decoration hook, so `--bench-edit --glass` draws its reel in a pass of its own.
 - On a migrated video the Cut screen's rule switches and pacing only show; changing the rules waits for the rule editor (milestone 10 item 7). A lock cut on a kind outside the six pacing kinds shows as a person's cut in the app.
 - The preview's loudness gain comes from one measuring pass, without export's limiter trials; a new gain fades in when it lands.
 - `shot-render` keeps export's score (bed, lock music and sfx at their output samples) private and `shot-core` its settings diff, so the app has its own copies of both (`score.rs`, `style::layer`).

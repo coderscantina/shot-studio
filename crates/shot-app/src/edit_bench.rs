@@ -12,9 +12,9 @@
 //! request to the frame being ready in the queue, the display hand-off excluded.
 //!
 //! `--glass` draws a launch preset reel (glass card with a soft shadow, tilt and kinetic headline,
-//! a motion blurred badge, word pop captions) over every frame, 6 s of every 12 s, the costliest
-//! motion the renderer has, in a pass of its own over the painted frame. Each run prints the
-//! bookends and transitions it played through.
+//! a motion blurred badge, word pop captions) over every segment frame, 6 s of every 12 s of take
+//! time, the costliest motion the renderer has, through the painter's decoration hook. Each run
+//! prints the bookends and transitions it played through.
 
 use std::time::{Duration, Instant};
 

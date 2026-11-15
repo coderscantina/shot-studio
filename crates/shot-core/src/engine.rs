@@ -528,10 +528,9 @@ fn apply(effect: &Effect, subject: &Subject<'_>) -> Option<Applied> {
             at: t,
             gain: *gain,
         },
-        Effect::Transition { kind, length } => Applied::Transition {
-            kind: *kind,
+        Effect::Transition(transition) => Applied::Transition {
+            transition: transition.clone(),
             at: t,
-            length: *length,
         },
         Effect::Music { file, gain, duck } => Applied::Music {
             file: file.clone(),

@@ -14,9 +14,10 @@
 //!
 //! Each phase lands on a frame: the first frame drawn at or after its time, the first that shows
 //! the move in that phase. Overlays, zooms and clicks are in take time, so that frame plays
-//! wherever the output shows it and nowhere the cut leaves it out. Transitions are in output
-//! frames already: the bare key at the window's start, `-travel` and `-impact` on the cut,
-//! `-settle` at the window's end.
+//! wherever the output shows it and nowhere the cut leaves it out. Transitions between pieces
+//! are in output frames already: the bare key at the window's start, `-travel` and `-impact` on
+//! the cut, `-settle` at the window's end. One that names its own sound (`sound=<name>`) plays
+//! that instead, at the window's start, placed by export.
 //!
 //! [0021]: ../../../docs/decisions/0021-sound-transitions-and-bookends.md
 //! [0023]: ../../../docs/decisions/0023-motion-system-and-lottie-templates.md
@@ -25,7 +26,7 @@ use std::collections::HashSet;
 
 use shot_audio::Anchor;
 use shot_audio::phases::{Move, move_sounds};
-use shot_core::{Effects, Id, Micros, SoundEffect, SoundKey, SwitchSound};
+use shot_core::{Effects, Id, Micros, SoundEffect, SoundKey, TransitionSound};
 
 use crate::motion::Part;
 use crate::overlay::Params;
@@ -59,7 +60,11 @@ pub(crate) fn automatic<'a>(
     let sample = |frame: u64| frame * per_frame;
     let has = |effect: SoundEffect| brand.iter().any(|(key, _)| key.effect == effect);
 
+    // A transition between pieces plays the brand's keys unless it names its own sound.
     for transition in &plan.transitions {
+        if matches!(transition.sound, Some(TransitionSound::Named(_))) {
+            continue;
+        }
         let mv = Move {
             effect: SoundEffect::Transition,
             start: sample(transition.window.start),
@@ -108,7 +113,7 @@ pub(crate) fn automatic<'a>(
             takes.push(take.clone());
         }
         if let Some(switch) = &planned.segment.switch
-            && switch.switch.sound == Some(SwitchSound::Brand)
+            && switch.transition.sound == Some(TransitionSound::Brand)
             && has(SoundEffect::Transition)
             && switches.insert((take.clone(), switch.at))
         {

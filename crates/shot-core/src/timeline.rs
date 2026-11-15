@@ -7,8 +7,8 @@ use crate::cut::{
 };
 use crate::lock::{Applied, LockTake};
 use crate::{
-    CaptionLook, CaptionStyle, DerivedKind, Effects, Id, Layout, LayoutSwitch, Lock, Micros,
-    Project, SwitchKind, TimeRange, ZoomMotion,
+    CaptionLook, CaptionStyle, DerivedKind, Effects, Id, Layout, Lock, Micros, Project, TimeRange,
+    Transition, TransitionKind, ZoomMotion,
 };
 
 /// Bumped whenever the renderer's output changes for the same input, so cached chunks expire.
@@ -89,7 +89,7 @@ pub struct SceneSwitch {
     pub from: Layout,
     pub to: Layout,
     /// What `cut.kdl` writes on the edge, else the format's `layout-switch`.
-    pub switch: LayoutSwitch,
+    pub transition: Transition,
     /// From the edge for the switch's length, cut short by the next edge.
     pub window: TimeRange,
 }
@@ -103,7 +103,7 @@ impl SceneSwitch {
 
     /// Whether the switch draws anything over `span`: a cut changes no pixels.
     pub fn draws_over(&self, span: TimeRange) -> bool {
-        self.switch.kind != SwitchKind::Cut && self.window.overlaps(span)
+        self.transition.kind != TransitionKind::Cut && self.window.overlaps(span)
     }
 }
 
@@ -273,7 +273,7 @@ impl Output {
         if let Some(s) = &segment.switch
             && span.is_some_and(|span| s.draws_over(span))
         {
-            h.tagged(1, s.switch.kind.as_str().as_bytes());
+            h.tagged(1, s.transition.kind.as_str().as_bytes());
             h.str(s.from.as_str());
             h.u64(s.at.0);
             h.range(s.window);
@@ -385,7 +385,7 @@ impl Segment {
 fn take_segments(
     take: &TakeEdit,
     default_layout: Layout,
-    default_switch: &LayoutSwitch,
+    default_switch: &Transition,
     lock: Option<&LockTake>,
 ) -> Vec<Segment> {
     let mut zooms = take.zooms.clone();
@@ -483,7 +483,7 @@ fn subtract(range: TimeRange, cuts: &[TimeRange]) -> Vec<TimeRange> {
 fn scene_switches(
     take: &TakeEdit,
     default_layout: Layout,
-    default_switch: &LayoutSwitch,
+    default_switch: &Transition,
 ) -> Vec<SceneSwitch> {
     let first = take.ranges.iter().find_map(|r| match r {
         RangeEdit::Keep(range) => Some(range.from()),
@@ -521,8 +521,8 @@ fn scene_switches(
                         .find(|c| c.range.to() == at)
                         .and_then(|c| c.exit.as_ref())
                 });
-            let switch = written.unwrap_or(default_switch).clone();
-            let mut end = Micros(at.0 + switch.length.0);
+            let transition = written.unwrap_or(default_switch).clone();
+            let mut end = Micros(at.0 + transition.length.0);
             if let Some((next, ..)) = edges.get(i + 1) {
                 end = end.min(*next);
             }
@@ -531,7 +531,7 @@ fn scene_switches(
                 from,
                 to,
                 window: TimeRange::new(at, end)?,
-                switch,
+                transition,
             })
         })
         .collect()

@@ -4,7 +4,7 @@ use crate::brand::BrandScope;
 use crate::captions::{CaptionLook, LOOK_PROPS};
 use crate::kdl_io::{FromKdl, Node, Source, ToKdl, Writer, keyword_enum, quote, required};
 use crate::migrate::old::{OldSettings, refused};
-use crate::{Brand, Micros, ParseError, StyleSheet};
+use crate::{Brand, Micros, ParseError, StyleSheet, Transition};
 
 keyword_enum! {
     /// The four shipped formats. Each has a preset `format.kdl`.
@@ -225,92 +225,6 @@ impl ToKdl for LayoutName {
 }
 
 keyword_enum! {
-    /// How a layout switch inside a take moves from one layout to the next.
-    pub enum SwitchKind {
-        /// Every slot springs from its place in the old layout to its place in the new one.
-        Morph = "morph",
-        Dissolve = "dissolve",
-        /// The old layout punches in, the new one punches out, motion blurred.
-        ZoomThrough = "zoom-through",
-        Cut = "cut",
-    }
-}
-
-/// What a layout switch plays: the brand's `transition` sounds by phase, or one sound by name.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum SwitchSound {
-    Brand,
-    Named(crate::Id),
-}
-
-impl FromKdl for SwitchSound {
-    fn from_kdl(value: &KdlValue) -> Result<Self, String> {
-        let id = crate::Id::from_kdl(value)?;
-        Ok(if id.as_str() == "brand" {
-            Self::Brand
-        } else {
-            Self::Named(id)
-        })
-    }
-}
-
-impl ToKdl for SwitchSound {
-    fn write_kdl(&self, out: &mut String) {
-        match self {
-            Self::Brand => out.push_str("brand"),
-            Self::Named(id) => id.write_kdl(out),
-        }
-    }
-}
-
-/// How a layout switch inside a take draws and sounds: `<kind> length=<time> sound=<sound>`, on a
-/// `layout` range's `in` or `out` and as the format's `layout-switch` default.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct LayoutSwitch {
-    pub kind: SwitchKind,
-    /// From the edge into the new layout.
-    pub length: Micros,
-    pub sound: Option<SwitchSound>,
-}
-
-impl LayoutSwitch {
-    /// The length when none is written.
-    pub const LENGTH: Micros = Micros(500_000);
-
-    /// Every switch without a written one, unless the format sets another default.
-    pub const DEFAULT: Self = Self {
-        kind: SwitchKind::Morph,
-        length: Self::LENGTH,
-        sound: None,
-    };
-
-    pub(crate) fn read(node: Node<'_>) -> Result<Self, ParseError> {
-        node.expect(1, &["length", "sound"])?;
-        let length = node.opt_prop("length")?.unwrap_or(Self::LENGTH);
-        if length == Micros(0) {
-            return Err(node.error("`length` is longer than 0"));
-        }
-        Ok(Self {
-            kind: node.arg(0)?,
-            length,
-            sound: node.opt_prop("sound")?,
-        })
-    }
-
-    /// Writes the arguments and properties after the node's name.
-    pub(crate) fn write(&self, w: &mut Writer) {
-        w.arg(&self.kind);
-        if self.length != Self::LENGTH {
-            w.prop("length", &self.length);
-        }
-        if let Some(sound) = &self.sound {
-            w.prop("sound", sound);
-        }
-        w.end();
-    }
-}
-
-keyword_enum! {
     /// How every zoom of a video moves in, out and between centers.
     pub enum ZoomMotion {
         Instant = "instant",
@@ -404,8 +318,8 @@ pub struct Format {
     pub keystrokes: Option<Keystrokes>,
     pub window: Option<WindowStyle>,
     /// How layout switches inside a take move where `cut.kdl` sets nothing. `None` means
-    /// [`LayoutSwitch::DEFAULT`].
-    pub layout_switch: Option<LayoutSwitch>,
+    /// [`Transition::SWITCH`].
+    pub layout_switch: Option<Transition>,
     /// The tracks a take records. `None` records every track.
     pub inputs: Option<Inputs>,
 }
@@ -506,7 +420,7 @@ pub struct FormatLayer {
     pub cursor: Option<CursorStyle>,
     pub keystrokes: Option<Keystrokes>,
     pub window: Option<WindowStyle>,
-    pub layout_switch: Option<LayoutSwitch>,
+    pub layout_switch: Option<Transition>,
     pub inputs: Option<Inputs>,
     /// Fields of the brand this layer changes.
     pub brand: Option<Brand>,
@@ -574,9 +488,10 @@ impl FormatLayer {
                     node.set_once(&mut layer.keystrokes, node.arg(0)?)?;
                 }
                 "window" => node.set_once(&mut layer.window, WindowStyle::read(node)?)?,
-                "layout-switch" => {
-                    node.set_once(&mut layer.layout_switch, LayoutSwitch::read(node)?)?
-                }
+                "layout-switch" => node.set_once(
+                    &mut layer.layout_switch,
+                    Transition::read(node, &["length", "sound"])?,
+                )?,
                 "record" => node.set_once(&mut layer.inputs, Inputs::read(node)?)?,
                 "brand" => {
                     node.expect_block(0, &[])?;
@@ -736,8 +651,8 @@ impl Format {
     }
 
     /// How a layout switch moves where `cut.kdl` sets nothing.
-    pub fn layout_switch(&self) -> LayoutSwitch {
-        self.layout_switch.clone().unwrap_or(LayoutSwitch::DEFAULT)
+    pub fn layout_switch(&self) -> Transition {
+        self.layout_switch.clone().unwrap_or(Transition::SWITCH)
     }
 
     /// The render settings with the defaults filled in.

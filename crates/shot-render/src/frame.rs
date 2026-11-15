@@ -13,15 +13,16 @@
 //!   [`shot_analyze::masks`].
 //! - **Overlays**: the templates of [`crate::overlay`], in file order, later ones on top.
 //! - **Scene switch**: inside a morph's window the layout is the old one sprung into the new
-//!   ([`crate::layout::LayoutSpec::morph`]), its moving slots motion blurred like a smooth zoom. A dissolve or
-//!   zoom-through draws two shots, see [`crate::paint`].
+//!   ([`crate::layout::LayoutSpec::morph`]), its moving slots motion blurred like a smooth zoom,
+//!   over a shutter that stays inside the window, so its first frame is the old layout's. Every
+//!   other kind draws two shots, see [`crate::paint`].
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use shot_core::{
-    DeviceFrame, Effects, Id, Keystrokes, Layout, Micros, Overlay, SceneSwitch, Shadow, SwitchKind,
-    Zoom,
+    DeviceFrame, Effects, Id, Keystrokes, Layout, Micros, Overlay, SceneSwitch, Shadow, TimeRange,
+    TransitionKind, Zoom,
 };
 
 use shot_analyze::masks::{Cutout, PersonMasks};
@@ -80,7 +81,7 @@ impl Shot<'_> {
     /// The morph `time` is inside, if any.
     fn morph(&self) -> Option<&SceneSwitch> {
         self.switch.filter(|s| {
-            s.switch.kind == SwitchKind::Morph
+            s.transition.kind == TransitionKind::Morph
                 && s.window.from() <= self.time
                 && self.time < s.window.to()
         })
@@ -92,6 +93,15 @@ impl Shot<'_> {
 pub fn morph_at(switch: &SceneSwitch, t: Micros) -> f32 {
     let spring = Spring::new(1.0, 0.82).settling_in(switch.window.duration());
     spring.value(t.0.saturating_sub(switch.window.from().0) as f32 / 1e6)
+}
+
+/// The shutter at `t`, narrowed to stay inside `window`.
+fn shutter_within(t: Micros, window: TimeRange) -> [Micros; 2] {
+    let [open, _] = materials::shutter(t);
+    let half = (t.0 - open.0)
+        .min(t.0.saturating_sub(window.from().0))
+        .min(window.to().0.saturating_sub(t.0));
+    [Micros(t.0 - half), Micros(t.0 + half)]
 }
 
 /// The canvas motion of `close` against `open` as the crop motion of `drawn`'s frame that shows
@@ -151,7 +161,11 @@ pub fn compose(
     let spec = spec_at(shot.time);
     let mut scene = scene_at(shot.time);
     if crate::zoom::eases(shot.zooms, effects.zoom_motion) || morph.is_some() {
-        let [open, close] = materials::shutter(shot.time).map(scene_at);
+        let shutter = match &morph {
+            Some((switch, _)) => shutter_within(shot.time, switch.window),
+            None => materials::shutter(shot.time),
+        };
+        let [open, close] = shutter.map(scene_at);
         for layer in &mut scene.layers {
             let find = |scene: &Scene| {
                 scene

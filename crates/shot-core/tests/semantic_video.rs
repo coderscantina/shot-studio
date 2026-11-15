@@ -204,10 +204,7 @@ fn a_later_layer_replaces_a_rule_with_the_same_selector_or_switches_it_off() {
     assert!(at_hook.iter().all(|(_, layer)| *layer == Layer::Brand));
     assert!(at_hook.iter().any(|(a, _)| matches!(
         a,
-        Applied::Transition {
-            kind: shot_core::TransitionKind::Dip,
-            ..
-        }
+        Applied::Transition { transition, .. } if transition.kind == shot_core::TransitionKind::Dip
     )));
 }
 

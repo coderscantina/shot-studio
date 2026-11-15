@@ -2,9 +2,9 @@
 //! switches a timeline finds in a take and the chunks they key.
 
 use shot_core::{
-    Brand, ContentHash, Cut, FormatKind, FormatLayer, Layout, LayoutName, LayoutSwitch, Lock,
-    MediaId, Micros, Project, Script, Segment, SwitchKind, SwitchSound, TimeRange, Timeline, Track,
-    Video,
+    Brand, ContentHash, Cut, Effect, FormatKind, FormatLayer, Layout, LayoutName, Lock, MediaId,
+    Micros, Project, RuleBody, Script, Segment, TimeRange, Timeline, Track, Transition,
+    TransitionKind, TransitionSound, Video,
 };
 
 const BRAND: &str = include_str!("../../../fixtures/examples/scenes/brand.kdl");
@@ -68,32 +68,79 @@ fn the_examples_round_trip_and_are_in_the_contract() {
     assert_eq!(talk.slots[0].focus, [45, 50]);
     let layer = FormatLayer::parse(FORMAT).unwrap();
     assert_eq!(layer.layouts.unwrap()[2], custom("talk-left"));
-    assert_eq!(layer.layout_switch.unwrap().sound, Some(SwitchSound::Brand));
+    assert_eq!(
+        layer.layout_switch.unwrap().sound,
+        Some(TransitionSound::Brand)
+    );
+}
+
+#[test]
+fn a_chapter_rule_and_a_layout_edge_write_one_transition_alike() {
+    let format = "on chapter-start {\n    transition dip length=800_000 sound=whoosh\n}\n";
+    let layer = FormatLayer::parse(format).unwrap();
+    assert_eq!(layer.to_kdl(), format);
+    let cut = CUT.replace("in dissolve length=400_000", "in dip length=800_000");
+    let parsed = Cut::parse(&cut).unwrap();
+    assert_eq!(parsed.to_kdl(), cut);
+    let RuleBody::Effects(effects) = &layer.rules.rules[0].body else {
+        panic!("a rule with effects");
+    };
+    let edge = parsed.chapters[0].takes[0].layouts[0]
+        .enter
+        .clone()
+        .unwrap();
+    assert_eq!(effects, &[Effect::Transition(edge)]);
 }
 
 #[test]
 fn a_take_switches_on_every_edge_with_the_written_or_the_format_switch() {
     let timeline = evaluate(&project(CUT));
-    let switches: Vec<(u64, Layout, Layout, SwitchKind, u64)> = segments(&timeline)
+    let switches: Vec<(u64, Layout, Layout, TransitionKind, u64)> = segments(&timeline)
         .into_iter()
         .filter_map(|s| s.switch.as_ref())
-        .map(|s| (s.at.0, s.from, s.to, s.switch.kind, s.window.duration().0))
+        .map(|s| {
+            (
+                s.at.0,
+                s.from,
+                s.to,
+                s.transition.kind,
+                s.window.duration().0,
+            )
+        })
         .collect();
     let side = custom("side-by-side");
     let talk = custom("talk-left");
     assert_eq!(
         switches,
         [
-            (8_000_000, Layout::Face, side, SwitchKind::Dissolve, 400_000),
+            (
+                8_000_000,
+                Layout::Face,
+                side,
+                TransitionKind::Dissolve,
+                400_000
+            ),
             (
                 20_000_000,
                 side,
                 Layout::Face,
-                SwitchKind::ZoomThrough,
+                TransitionKind::ZoomThrough,
                 500_000
             ),
-            (24_000_000, Layout::Face, talk, SwitchKind::Morph, 600_000),
-            (30_000_000, talk, Layout::Face, SwitchKind::Morph, 600_000),
+            (
+                24_000_000,
+                Layout::Face,
+                talk,
+                TransitionKind::Morph,
+                600_000
+            ),
+            (
+                30_000_000,
+                talk,
+                Layout::Face,
+                TransitionKind::Morph,
+                600_000
+            ),
         ]
     );
 }
@@ -134,10 +181,7 @@ fn a_switch_keys_only_the_chunks_of_its_window() {
     assert!(hard.is_ok());
     let none = keys(&evaluate(&project(&cut)));
     let mut plain = project(CUT);
-    plain.format.layout_switch = Some(LayoutSwitch {
-        kind: SwitchKind::Cut,
-        ..LayoutSwitch::DEFAULT
-    });
+    plain.format.layout_switch = Some(Transition::new(TransitionKind::Cut));
     plain.cut.chapters[0].takes[0]
         .layouts
         .iter_mut()
@@ -147,7 +191,10 @@ fn a_switch_keys_only_the_chunks_of_its_window() {
         });
     assert_eq!(none.len(), keys(&evaluate(&plain)).len());
     let first = segments(&evaluate(&project(&cut)))[1].clone();
-    assert_eq!(first.switch.as_ref().unwrap().switch.kind, SwitchKind::Cut);
+    assert_eq!(
+        first.switch.as_ref().unwrap().transition.kind,
+        TransitionKind::Cut
+    );
     assert!(
         !first
             .switch
