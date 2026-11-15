@@ -660,31 +660,70 @@ fn commits_only_the_named_files_of_a_worktree() {
 }
 
 #[test]
-fn accepting_into_a_video_with_uncommitted_changes_to_its_files_is_refused() {
+fn accepting_commits_a_persons_edits_to_the_files_it_touches_then_merges() {
     let channel = Channel::new(&[("alpha", VIDEO)]);
     let board = channel.board();
     let folder = board.open_video("alpha").unwrap();
-    std::fs::write(folder.join("cut.kdl"), "chapter \"Mine\"\n").unwrap();
-    for (name, file) in [("cut", "cut.kdl"), ("script", "script.md")] {
-        board
-            .create_proposal("alpha", name, "✏️ edit", &files(&[(file, "# Agent\n")]))
-            .unwrap();
-    }
-    let tip = channel.sha("video/alpha");
-
-    let Err(Error::Uncommitted { paths, .. }) = board.accept_proposal("alpha", "cut") else {
-        panic!("expected a refusal");
-    };
-    assert_eq!(paths, vec!["videos/alpha/cut.kdl"]);
-    assert_eq!(channel.sha("video/alpha"), tip);
-    assert!(channel.has_branch("proposal/alpha/cut"));
-
-    board.accept_proposal("alpha", "script").unwrap();
-    assert_eq!(
-        std::fs::read_to_string(folder.join("script.md")).unwrap(),
-        "# Agent\n"
+    write(
+        &folder.join("video.kdl"),
+        "title \"Mine\"\nstatus ideas\nformat opinion\n",
     );
-    assert_eq!(status(&folder), vec!["videos/alpha/cut.kdl"]);
+    write(&folder.join("script.md"), "# Mine\n");
+    board
+        .create_proposal(
+            "alpha",
+            "format",
+            "✏️ edit",
+            &files(&[(
+                "video.kdl",
+                "title \"Friday deploys\"\nstatus ideas\nformat tutorial\n",
+            )]),
+        )
+        .unwrap();
+
+    board.accept_proposal("alpha", "format").unwrap();
+
+    let repo = channel.repo();
+    let merge = repo.revparse_single("video/alpha").unwrap();
+    let merge = merge.peel_to_commit().unwrap();
+    assert_eq!(
+        merge.summary().unwrap(),
+        Some("🔀 accept format into alpha")
+    );
+    let edits = merge.parent(0).unwrap();
+    assert_eq!(edits.summary().unwrap(), Some("📝 edits before format"));
+    assert_eq!(
+        std::fs::read_to_string(folder.join("video.kdl")).unwrap(),
+        "title \"Mine\"\nstatus ideas\nformat tutorial\n"
+    );
+    assert_eq!(status(&folder), vec!["videos/alpha/script.md"]);
+}
+
+#[test]
+fn accepting_over_a_conflicting_edit_is_refused_with_the_files_and_keeps_the_edits_commit() {
+    let channel = Channel::new(&[("alpha", VIDEO)]);
+    let board = channel.board();
+    let folder = board.open_video("alpha").unwrap();
+    write(&folder.join("script.md"), "# Mine\n");
+    board
+        .create_proposal(
+            "alpha",
+            "script",
+            "✏️ edit",
+            &files(&[("script.md", "# Agent\n")]),
+        )
+        .unwrap();
+
+    let Err(Error::Conflict { paths }) = board.accept_proposal("alpha", "script") else {
+        panic!("expected a conflict");
+    };
+    assert_eq!(paths, vec!["videos/alpha/script.md"]);
+    assert!(channel.has_branch("proposal/alpha/script"));
+    assert_eq!(
+        channel.file_at("video/alpha", "videos/alpha/script.md"),
+        "# Mine\n"
+    );
+    assert!(status(&folder).is_empty());
 }
 
 #[test]

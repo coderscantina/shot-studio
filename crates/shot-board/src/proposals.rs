@@ -4,7 +4,7 @@
 //!
 //! [0004]: ../../../docs/decisions/0004-proposals-as-branches.md
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path};
 
 use git2::{BranchType, Commit, Delta, Diff, Patch};
@@ -218,12 +218,16 @@ impl Board {
 
     /// Merges the proposal into the video branch, or into the default branch for a proposal of
     /// channel files, fast-forward when that branch has not moved, else with a merge commit,
-    /// then deletes the proposal branch. On a conflict nothing changes and [`Error::Conflict`]
-    /// lists the paths. When the video's worktree has uncommitted edits to a file the merge
-    /// changes, nothing changes and [`Error::Uncommitted`] lists them.
+    /// then deletes the proposal branch. When the video's worktree has uncommitted edits to a
+    /// file the proposal touches, they are committed first as "📝 edits before <name>". On a
+    /// conflict the merge does not happen (that edits commit stays) and [`Error::Conflict`]
+    /// lists the paths.
     pub fn accept_proposal(&self, slug: &str, name: &str) -> Result<Accepted> {
         let head = self.proposal_head(slug, name)?;
-        let (branch, tip) = self.target(slug, &head)?;
+        let (branch, mut tip) = self.target(slug, &head)?;
+        if branch == branch_name(slug) && self.commit_edits_before(slug, name, &tip, &head)? {
+            tip = self.tip(slug)?;
+        }
 
         let (new_tip, fast_forward) = if self.repo.graph_descendant_of(head.id(), tip.id())? {
             (head.id(), true)
@@ -253,6 +257,37 @@ impl Board {
             head: new_tip.to_string(),
             fast_forward,
         })
+    }
+
+    /// Commits the worktree's edits to the video files the proposal changed since it left the
+    /// video branch. False when the video has no worktree or there was nothing to commit.
+    fn commit_edits_before(
+        &self,
+        slug: &str,
+        name: &str,
+        tip: &Commit<'_>,
+        head: &Commit<'_>,
+    ) -> Result<bool> {
+        if self.worktree_folder(slug).is_none() {
+            return Ok(false);
+        }
+        let base = self
+            .repo
+            .find_commit(self.repo.merge_base(tip.id(), head.id())?)?;
+        let diff = self
+            .repo
+            .diff_tree_to_tree(Some(&base.tree()?), Some(&head.tree()?), None)?;
+        let prefix = format!("{}/", video_dir(slug));
+        let files: BTreeSet<&str> = diff
+            .deltas()
+            .flat_map(|d| [d.old_file().path(), d.new_file().path()])
+            .flatten()
+            .filter_map(|p| p.to_str()?.strip_prefix(&prefix))
+            .collect();
+        let subject = format!("📝 edits before {name}");
+        Ok(self
+            .commit_video_files(slug, &files.into_iter().collect::<Vec<_>>(), &subject)?
+            .is_some())
     }
 
     /// Deletes the proposal branch.

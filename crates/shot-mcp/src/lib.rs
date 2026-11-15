@@ -87,6 +87,9 @@ pub async fn serve_stdio(
 pub struct ShotServer {
     repo: PathBuf,
     frame_task: bool,
+    /// Set for the call of a tool marked read-only: it never creates a worktree, a branch or a
+    /// commit, see [`ShotServer::video_dir`].
+    read_only: bool,
     tool_router: ToolRouter<Self>,
 }
 
@@ -300,6 +303,7 @@ impl ShotServer {
         Self {
             repo,
             frame_task: false,
+            read_only: false,
             tool_router,
         }
     }
@@ -880,32 +884,73 @@ impl ShotServer {
             .map_err(|e| format!("{} is not a channel repo: {e}", self.repo.display()))
     }
 
-    /// The video's folder, in its worktree once it is committed, see [`style::video_folder`].
+    /// The video's folder. A tool that writes gets it in the video's worktree, checked out on
+    /// first use, see [`style::video_folder`]. A read-only tool gets the worktree when there is
+    /// one, else the main checkout's folder, where the media and caches are, and creates nothing.
     fn video_dir(&self, slug: &str) -> Result<PathBuf, String> {
         confine::slug(slug)?;
-        let folder = style::video_folder(&self.repo, slug)?;
+        let folder = if self.read_only {
+            self.board()?
+                .worktree_folder(slug)
+                .unwrap_or_else(|| self.repo.join("videos").join(slug))
+        } else {
+            style::video_folder(&self.repo, slug)?
+        };
         confine::resolve(&self.repo, slug, &folder, "")
     }
 
+    /// What a read-only tool reads: the video's worktree when it exists, else its branch tip,
+    /// else a folder of the main checkout nobody committed yet. A video written before the lock
+    /// is migrated in memory.
+    fn snapshot(&self, slug: &str) -> Result<style::Snapshot, String> {
+        confine::slug(slug)?;
+        let board = self.board()?;
+        let source = match board.worktree_folder(slug) {
+            Some(folder) => style::Source::Disk(style::Disk::locate(&folder)?.0),
+            None => {
+                let loose = self.repo.join("videos").join(slug);
+                match board.has_video(slug) {
+                    Ok(false) if loose.join("video.kdl").exists() => {
+                        style::Source::Disk(style::Disk::locate(&loose)?.0)
+                    }
+                    _ => style::Source::Board(board),
+                }
+            }
+        };
+        style::Snapshot::migrated(source, slug)
+    }
+
     /// Opens the video's folder as every front end does, so a video written before the lock is
-    /// migrated before a tool reads it, and returns its files.
-    fn open(&self, slug: &str) -> Result<style::Disk, String> {
+    /// migrated before a tool reads it, and returns its files. A read-only tool writes nothing
+    /// and sees the migration in memory.
+    fn open(&self, slug: &str) -> Result<style::Snapshot, String> {
+        if self.read_only {
+            return self.snapshot(slug);
+        }
         let dir = self.video_dir(slug)?;
         if dir.join("video.kdl").exists() {
             let _lock =
                 shot_fs::WriteLock::acquire(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
             style::open(&dir)?;
         }
-        Ok(style::Disk::locate(&dir)?.0)
+        Ok(style::Disk::locate(&dir)?.0.into())
     }
 
-    /// The files of the video's folder as they are, for reads after [`ShotServer::open`].
-    fn disk(&self, slug: &str) -> Result<style::Disk, String> {
-        Ok(style::Disk::locate(&self.video_dir(slug)?)?.0)
+    /// The files of the video as they are, for reads after [`ShotServer::open`].
+    fn disk(&self, slug: &str) -> Result<style::Snapshot, String> {
+        if self.read_only {
+            return self.snapshot(slug);
+        }
+        Ok(style::Disk::locate(&self.video_dir(slug)?)?.0.into())
     }
 
     /// The text of `file` in the video's folder, `None` when it has none yet.
-    fn read(&self, disk: &style::Disk, slug: &str, file: &str) -> Result<Option<String>, String> {
+    fn read(
+        &self,
+        disk: &style::Snapshot,
+        slug: &str,
+        file: &str,
+    ) -> Result<Option<String>, String> {
         let path = style::video_path(slug, file);
         style::Repo::read(disk, slug, &path)?
             .map(|bytes| String::from_utf8(bytes).map_err(|_| format!("{path} is not UTF-8")))
@@ -1044,8 +1089,13 @@ impl ServerHandler for ShotServer {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
-        let server = self.clone();
+        let mut server = self.clone();
         let name = request.name.to_string();
+        server.read_only = self
+            .tool_router
+            .get(&name)
+            .and_then(|tool| tool.annotations.as_ref()?.read_only_hint)
+            .unwrap_or(false);
         let ran = tokio::spawn(async move {
             let call = ToolCallContext::new(&server, request, context);
             server.tool_router.call(call).await
@@ -1083,7 +1133,7 @@ impl ServerHandler for ShotServer {
 /// A video's format: its layer of differences over the preset and the channel's
 /// `formats/<format>.kdl`, as the app and export resolve it.
 fn resolved_format(
-    disk: &style::Disk,
+    disk: &style::Snapshot,
     slug: &str,
     video: &Video,
     text: Option<&str>,
