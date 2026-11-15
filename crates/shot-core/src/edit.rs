@@ -5,9 +5,9 @@ use std::fmt;
 
 use crate::takes::{holds, middle};
 use crate::{
-    Applied, Attempt, Chapter, Cut, ElementKind, Id, Layout, LayoutChange, Lineup, Lock, Micros,
-    Music, Override, RangeEdit, Rating, Row, RowAt, TakeEdit, Target, TimeRange, Transcript, Word,
-    Zoom, ZoomShape,
+    Applied, Attempt, Chapter, Cut, EffectKey, ElementKind, Id, Instance, Layer, Layout,
+    LayoutChange, Lineup, Lock, Micros, Music, Override, OverrideEffect, RangeEdit, Rating, Row,
+    RowAt, TakeEdit, Target, TimeRange, Transcript, Word, Zoom, ZoomShape,
 };
 
 /// One take block of the main cut: the chapter and the take's position in that chapter. A take
@@ -432,6 +432,36 @@ impl Cut {
                 edit.overlays.remove(index);
             }
         }))
+    }
+
+    /// Removes the lock's overlay or sound `instance` of `take` through the override of its
+    /// element: a sound a person placed loses its `sfx` node, any other overlay or sound is
+    /// turned off (`overlay <template> off`, `sfx off`). `None` for other instances and for
+    /// instances of no element kind.
+    pub fn remove_instance(&self, take: &Id, instance: &Instance) -> Option<Cut> {
+        let Target::Kind(kind) = instance.element.target else {
+            return None;
+        };
+        let key = match &instance.applied {
+            Applied::Overlay { template, .. } => EffectKey::Overlay(template.clone()),
+            Applied::Sfx { .. } => EffectKey::Sfx,
+            _ => return None,
+        };
+        let at = instance
+            .provenance
+            .override_at
+            .unwrap_or(instance.element.t);
+        let placed_sound = key == EffectKey::Sfx && instance.provenance.layer == Layer::Override;
+        let mut cut = self.with_override(take, kind, at, |o| {
+            o.effects.retain(|e| e.key() != key);
+            if !placed_sound {
+                o.effects.push(OverrideEffect::Off(key));
+                o.effects.sort_by_key(OverrideEffect::key);
+            }
+        });
+        cut.overrides
+            .retain(|o| o.decision.is_some() || !o.effects.is_empty());
+        Some(cut)
     }
 
     fn placed(&self, at: TakeAt, placed: Placed) -> Result<(), EditError> {

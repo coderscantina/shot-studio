@@ -44,7 +44,7 @@ use shot_core::{Id, Micros, Overlay, ParamValue, TimeRange};
 use crate::code_diff;
 use crate::drawing::{Drawing, Shape};
 use crate::frame::{Look, ScreenView};
-use crate::layout::{Canvas, Layer, Scene};
+use crate::layout::{Canvas, Layer, Rect, Scene};
 use crate::lottie::{SlotKind, SlotValue};
 use crate::motion::Motion;
 use crate::theme::Theme;
@@ -439,10 +439,50 @@ pub struct Cutaway {
     pub time: Micros,
 }
 
+/// Whether `overlay` lays its parts out on the output rather than on the screen recording: link
+/// cards, lower thirds, pops and brand Lottie templates. A derived cut draws these on its own
+/// frame, in its [`Area`], instead of cutting them out of the main frame.
+pub fn on_output(overlay: &Overlay) -> bool {
+    let name = overlay.template.as_str();
+    matches!(
+        name,
+        link_card::TEMPLATE | lower_third::TEMPLATE | pop::TEMPLATE
+    ) || spec(name).is_none()
+}
+
+/// Where the overlays that lay out on the output ([`on_output`]) place their parts: a rectangle
+/// of the canvas, and the canvas pixels per 4K pixel their parts are sized by. The main cut's is
+/// its whole canvas at the canvas's own scale; a derived cut's keeps clear of what the apps draw
+/// over it, see [`crate::derived::area`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Area {
+    pub rect: Rect,
+    pub scale: f32,
+}
+
+impl Area {
+    /// The whole of a 16:9 canvas.
+    pub fn full(canvas: Canvas) -> Self {
+        Self {
+            rect: Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32),
+            scale: canvas.width as f32 / 3840.0,
+        }
+    }
+
+    /// A point of a 16:9 frame, in 4K pixels, at the same place in the area.
+    pub fn point(&self, [x, y]: [f32; 2]) -> [f32; 2] {
+        [
+            self.rect.left + x * (self.rect.width() / 3840.0),
+            self.rect.top + y * (self.rect.height() / 2160.0),
+        ]
+    }
+}
+
 /// What one overlay can change of a frame, besides drawing on top.
 pub(crate) struct Stage<'a> {
     pub t: Micros,
     pub canvas: Canvas,
+    pub area: Area,
     pub look: &'a Look,
     /// The screen's layer and how its points map to the canvas, when the layout shows it.
     pub screen: &'a mut Option<(Layer, ScreenView)>,
@@ -458,7 +498,7 @@ impl<'a> Stage<'a> {
 
     /// Canvas pixels per 4K pixel.
     pub fn scale(&self) -> f32 {
-        self.canvas.width as f32 / 3840.0
+        self.area.scale
     }
 }
 
@@ -502,6 +542,7 @@ pub(crate) fn draw_alone(
         &mut Stage {
             t,
             canvas,
+            area: Area::full(canvas),
             look,
             screen: &mut None,
             scene: &mut frame.scene,
@@ -511,19 +552,20 @@ pub(crate) fn draw_alone(
     );
 }
 
-/// A brand Lottie template drawn over the whole frame: its composition scaled to the canvas
-/// width and centered, playing from the overlay's start and holding its last frame.
+/// A brand Lottie template drawn over the whole area: its composition scaled to the area's
+/// width and centered in it, playing from the overlay's start and holding its last frame.
 fn draw_full_frame(
     lottie: std::sync::Arc<crate::lottie::Filled>,
     overlay: &Overlay,
     stage: &mut Stage,
 ) {
     let (width, height) = lottie.size();
-    let scale = stage.canvas.width as f32 / width as f32;
-    let top = (stage.canvas.height as f32 - height as f32 * scale) / 2.0;
+    let area = stage.area.rect;
+    let scale = area.width() / width as f32;
+    let top = area.top + (area.height() - height as f32 * scale) / 2.0;
     stage.drawing.over.push(Shape::Lottie {
         lottie,
-        origin: [0.0, top],
+        origin: [area.left, top],
         scale,
         elapsed: Micros(stage.t.0 - overlay.range.from().0),
         opacity: 1.0,

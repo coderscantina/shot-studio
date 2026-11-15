@@ -67,10 +67,11 @@ fn a_short_reuses_main_chunks_and_a_parameter_re_renders_only_its_chunks() {
     // 0.8 s to 4.8 s, split at 2.8 s: 48..60, then 4 chunks, 168..180, then 3 chunks + 1.
     assert_eq!((main.chunks, main.rendered), (10, 10));
 
-    // 1.3 s to 4.1 s: frames 78..246 in eight derived chunks, all inside main chunks.
+    // 1.3 s to 4.1 s: frames 78..246 in eight derived chunks, all inside main chunks. The
+    // short draws its link cards itself, so the four bases under them render without the card.
     let short = run(dir.path(), &first, "s");
     assert_eq!((short.chunks, short.rendered), (8, 8));
-    assert_eq!((short.base_chunks, short.base_rendered), (8, 0));
+    assert_eq!((short.base_chunks, short.base_rendered), (8, 4));
     let again = run(dir.path(), &first, "s");
     assert_eq!(again.rendered, 0);
 

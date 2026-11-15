@@ -356,10 +356,12 @@ fn style_input<'a>(
     }
 }
 
-/// The settings of `old` that differ from the channel's, written so the cascade gives them
-/// back. An optional setting the old file left at its default is written out, since a layer
-/// that leaves it out inherits the channel's.
-fn settings_diff(old: &Format, channel: &Format) -> FormatLayer {
+/// The layer of settings that gives `old` over `channel`, the settings below it: the ones that
+/// differ, written so the cascade gives them back, with no brand and no rules. An optional
+/// setting `old` leaves at its default is written out, since a layer that leaves it out
+/// inherits the channel's. Migration writes a video's `format.kdl` with it, and the app every
+/// settings change.
+pub fn settings_diff(old: &Format, channel: &Format) -> FormatLayer {
     fn differs<T: PartialEq>(a: T, b: T) -> Option<T> {
         (a != b).then_some(a)
     }

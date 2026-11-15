@@ -4,7 +4,7 @@
 
 use gpui::{App, Context, Entity, Window, prelude::*, px};
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
-use shot_core::{Layout, Placed, TakeAt};
+use shot_core::{Id, Instance, Layout, Placed, TakeAt};
 use shot_render::plan::frame_time;
 
 use super::parts::layout_name;
@@ -43,7 +43,7 @@ enum Subject {
         removed: String,
     },
     Music,
-    Lock(String),
+    Lock(String, Option<(Id, Instance)>),
     /// An empty spot, with the playhead's layout and whether the cut has music.
     Empty {
         layout: Option<Layout>,
@@ -109,7 +109,7 @@ fn subject(this: &EditScreen, cx: &App) -> Subject {
             Some(Pick::Music) => Subject::Music,
             None => empty(),
         },
-        Some(MenuOn::Lock(title)) => Subject::Lock(title),
+        Some(MenuOn::Lock(title, lock)) => Subject::Lock(title, lock),
         Some(MenuOn::Empty) | None => empty(),
     }
 }
@@ -188,11 +188,19 @@ pub(super) fn context_menu(
             .separator()
             .item(play_item(screen)),
         Subject::Music => music::menu(menu, screen, window, cx),
-        Subject::Lock(title) => menu
-            .label(title)
-            .label("From the style rules")
-            .separator()
-            .item(play_item(screen)),
+        Subject::Lock(title, lock) => {
+            let menu = menu.label(title).label("From the style rules").separator();
+            let menu = match lock {
+                Some((take, instance)) => {
+                    let screen = screen.clone();
+                    menu.item(PopupMenuItem::new("Remove").on_click(move |_, _, cx| {
+                        screen.update(cx, |this, cx| this.remove_instance(&take, &instance, cx))
+                    }))
+                }
+                None => menu,
+            };
+            menu.item(play_item(screen))
+        }
         Subject::Empty { layout, music } => {
             let menu = menu
                 .submenu("Set layout here", window, cx, {

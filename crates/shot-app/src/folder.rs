@@ -322,7 +322,11 @@ impl VideoFolder {
     }
 
     fn store_format(&mut self, format: Format) -> Result<(), String> {
-        self.layer = crate::style::layer(&format, &self.base, &self.layer);
+        self.layer = FormatLayer {
+            brand: self.layer.brand.take(),
+            rules: std::mem::take(&mut self.layer.rules),
+            ..shot_core::settings_diff(&format, &self.base)
+        };
         write(&self.dir.join("format.kdl"), &self.layer.to_kdl())?;
         self.project.format = format;
         self.rebuild_lock()
@@ -378,6 +382,21 @@ impl VideoFolder {
     ) -> Result<(), String> {
         let cut = self.project.cut.decide(at, range, decision, &self.lock);
         self.write_cut(cut.map_err(|e| e.to_string())?)
+    }
+
+    /// Removes the lock's overlay or sound `instance` of `take` through its element's override,
+    /// see [`Cut::remove_instance`]. A change can be undone.
+    pub fn remove_instance(
+        &mut self,
+        take: &Id,
+        instance: &shot_core::Instance,
+    ) -> Result<(), String> {
+        let cut = self
+            .project
+            .cut
+            .remove_instance(take, instance)
+            .ok_or("Only the style rules' overlays and sounds can be removed here")?;
+        self.write_cut(cut)
     }
 
     /// Turns removed media in `range` of the block at `at` back into kept media: a person's
@@ -659,6 +678,75 @@ mod tests {
                 .contains("review")
         );
         assert_eq!(folder.project.cut.review_queue(folder.lock()).count(), 0);
+    }
+
+    #[test]
+    fn a_removed_lock_overlay_and_placed_sound_stay_removed_until_undo() {
+        let repo = tempfile::tempdir().unwrap();
+        let video = repo.path().join("videos/demo");
+        fs::create_dir_all(video.join("elements")).unwrap();
+        fs::create_dir_all(repo.path().join("formats")).unwrap();
+        let file = |path: &Path, text: &str| fs::write(path, text).unwrap();
+        file(
+            &repo.path().join("formats/opinion.kdl"),
+            shot_core::FormatKind::Opinion.preset_source(),
+        );
+        file(
+            &video.join("video.kdl"),
+            "title \"A\"\nstatus editing\nformat opinion\n",
+        );
+        file(&video.join("script.md"), "# A\n");
+        file(&video.join("format.kdl"), "");
+        file(
+            &video.join("cut.kdl"),
+            "chapter \"A\" {\n    take t01 {\n        keep from=0 to=20_000_000\n    }\n}\n\n\
+             override t01 word at=2_000_000 {\n    sfx pop\n}\n",
+        );
+        file(&video.join(LOCK_FILE), "lock 1\n");
+        file(
+            &video.join("elements/t01.jsonl"),
+            "{\"kind\":\"word\",\"t\":2000000,\"to\":2400000,\"by\":\"test\",\"text\":\"ship\"}\n\
+             {\"kind\":\"url\",\"t\":8000000,\"to\":9000000,\"by\":\"test\",\"url\":\"https://github.com/coderscantina/shot-studio\",\"host\":\"github\"}\n",
+        );
+        let take = Id::new("t01").unwrap();
+        let mut folder = VideoFolder::open(&video).unwrap();
+        let find = |folder: &VideoFolder, card: bool| {
+            folder.lock().take(&take).and_then(|t| {
+                t.instances
+                    .iter()
+                    .find(|i| match &i.applied {
+                        shot_core::Applied::Overlay { template, .. } => {
+                            card && template.as_str() == "link-card"
+                        }
+                        shot_core::Applied::Sfx { .. } => !card,
+                        _ => false,
+                    })
+                    .cloned()
+            })
+        };
+        let card = find(&folder, true).expect("the url rule places a card");
+        let sound = find(&folder, false).expect("the placed sound");
+
+        folder.remove_instance(&take, &card).unwrap();
+        folder.remove_instance(&take, &sound).unwrap();
+        assert_eq!(
+            fs::read_to_string(video.join("cut.kdl")).unwrap(),
+            "chapter \"A\" {\n    take t01 {\n        keep from=0 to=20_000_000\n    }\n}\n\n\
+             override t01 url at=8_000_000 {\n    overlay link-card off\n}\n",
+            "the card is off on its element and the sound's node is gone"
+        );
+        folder.rebuild_lock().unwrap();
+        assert!(find(&folder, true).is_none(), "a rebuild keeps it off");
+        assert!(find(&folder, false).is_none());
+
+        assert!(folder.undo().unwrap());
+        assert_eq!(
+            find(&folder, false),
+            Some(sound),
+            "undo brings the sound back"
+        );
+        assert!(folder.undo().unwrap());
+        assert_eq!(find(&folder, true), Some(card));
     }
 
     /// `scripts/fixtures.sh` writes the demo channel's videos as the app creates them: an empty

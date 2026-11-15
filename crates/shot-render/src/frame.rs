@@ -219,6 +219,7 @@ pub fn compose(
             &mut Stage {
                 t: shot.time,
                 canvas,
+                area: overlay::Area::full(canvas),
                 look,
                 screen: &mut screen,
                 scene: &mut scene,

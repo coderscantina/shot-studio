@@ -139,10 +139,12 @@ pub(crate) fn apply(overlay: &Overlay, stage: &mut Stage) {
     }
     .max(0.0);
     let opacity = (pose.enter * 2.5).clamp(0.0, 1.0) * (1.0 - pose.exit);
-    // In 4K pixels, scaled to the canvas.
-    let px = |name: &str, default: f32| p.int(name).map_or(default, |v| v as f32) * s;
-    let center = [px("x", 3840.0 * 0.72), px("y", 2160.0 * 0.32)];
-    let size = px("size", SIZE) * scale;
+    // In 4K pixels of a 16:9 frame, placed in the area.
+    let px = |name: &str, default: f32| p.int(name).map_or(default, |v| v as f32);
+    let center = stage
+        .area
+        .point([px("x", 3840.0 * 0.72), px("y", 2160.0 * 0.32)]);
+    let size = px("size", SIZE) * s * scale;
     if let Some(file) = image(overlay) {
         let Some(still) = stage.look.images.get(file) else {
             return;

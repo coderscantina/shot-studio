@@ -5,7 +5,8 @@
 //! The lanes and the pane show a person's overlays and the lock's alike. A person's can be
 //! changed: every action writes `cut.kdl`. Picking b-roll fills a slot from the files the video
 //! can use, a boolean parameter toggles in place, and
-//! remove drops the overlay. The lock's say which rule or override made them.
+//! remove drops the overlay. The lock's say which rule or override made them, and remove turns
+//! one off on its element's override.
 //!
 //! Add places an overlay at the playhead: one of the channel's overlay presets, written as a
 //! normal `overlay` node with its parameters, or a template with example values. Edit opens a
@@ -17,7 +18,9 @@ use gpui::{App, Context, Entity, FontWeight, Hsla, Window, div, prelude::*, px, 
 use gpui_component::Sizable;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
-use shot_core::{Applied, Cut, DerivedKind, Id, Overlay, OverlayPreset, ParamValue, TakeAt};
+use shot_core::{
+    Applied, Cut, DerivedKind, Id, Instance, Lock, Overlay, OverlayPreset, ParamValue, TakeAt,
+};
 use shot_render::overlay::{self, Params, broll, highlight, link_card};
 
 use super::EditScreen;
@@ -59,8 +62,18 @@ fn placed(this: &EditScreen, cx: &App) -> Vec<Placed> {
     out
 }
 
+/// The lock's instance of `take` that draws `overlay`.
+fn lock_instance<'a>(lock: &'a Lock, take: &Id, overlay: &Overlay) -> Option<&'a Instance> {
+    lock.take(take)?.instances.iter().find(|i| {
+        matches!(&i.applied, Applied::Overlay { template, range, params }
+            if *template == overlay.template
+                && *range == overlay.range
+                && *params == overlay.params)
+    })
+}
+
 /// Every overlay of the Overlays lane, or with `highlight` of the Highlight lane, a person's
-/// with its index in `cut.kdl`.
+/// with its index in `cut.kdl`, the lock's with its instance.
 pub fn lane_items(
     this: &EditScreen,
     highlight: bool,
@@ -76,13 +89,20 @@ pub fn lane_items(
             let Some(frames) = this.map.output_range(at, overlay.range) else {
                 continue;
             };
+            let placed = block
+                .overlays
+                .iter()
+                .position(|o| *o == overlay)
+                .map(shot_core::Placed::Overlay);
+            let lock = match placed {
+                Some(_) => None,
+                None => lock_instance(folder.lock(), &block.take, &overlay)
+                    .map(|i| (block.take.clone(), i.clone())),
+            };
             items.push(super::timeline::Item {
                 at,
-                placed: block
-                    .overlays
-                    .iter()
-                    .position(|o| *o == overlay)
-                    .map(shot_core::Placed::Overlay),
+                placed,
+                lock,
                 frames,
                 text: summary(&overlay),
             });
@@ -157,6 +177,22 @@ fn candidates(dir: &Path) -> Vec<String> {
 }
 
 impl EditScreen {
+    /// Removes the lock's overlay or sound `instance` of `take`, see
+    /// [`crate::folder::VideoFolder::remove_instance`].
+    pub(super) fn remove_instance(
+        &mut self,
+        take: &Id,
+        instance: &Instance,
+        cx: &mut Context<Self>,
+    ) {
+        let result = self.folder.update(cx, |folder, cx| {
+            folder.remove_instance(take, instance)?;
+            cx.notify();
+            Ok(())
+        });
+        self.wrote(result, cx);
+    }
+
     /// Changes the overlay at `index` of the block at `at`.
     fn change_overlay(
         &mut self,
@@ -361,21 +397,16 @@ pub fn pane(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement
                 p.index = index;
                 Made::Yours
             }
-            None => Made::Lock(
-                lock.take(&block.take)
-                    .and_then(|t| {
-                        t.instances.iter().find(|i| {
-                            matches!(&i.applied, Applied::Overlay { template, range, params }
-                                if *template == p.overlay.template
-                                    && *range == p.overlay.range
-                                    && *params == p.overlay.params)
-                        })
-                    })
-                    .map_or_else(
+            None => {
+                let instance = lock_instance(lock, &block.take, &p.overlay);
+                Made::Lock {
+                    provenance: instance.map_or_else(
                         || "From the style rules".to_owned(),
                         |i| crate::place::provenance(&i.provenance),
                     ),
-            ),
+                    instance: instance.map(|i| (block.take.clone(), i.clone())),
+                }
+            }
         };
         let checked = match &folder.theme {
             Ok(theme) => theme
@@ -507,8 +538,11 @@ fn add_menu(this: &EditScreen, cx: &mut Context<EditScreen>) -> impl IntoElement
 enum Made {
     /// A person's overlay in the take block, which the pane can change.
     Yours,
-    /// The lock's, with the rule or override that made it.
-    Lock(String),
+    /// The lock's, with the rule or override that made it and the instance to remove.
+    Lock {
+        provenance: String,
+        instance: Option<(Id, Instance)>,
+    },
 }
 
 /// What an overlay's template is, for a built-in one or a brand Lottie.
@@ -533,6 +567,10 @@ fn overlay_row(
         _ => rgb(BROLL),
     };
     let yours = matches!(made, Made::Yours);
+    let lock_instance = match made {
+        Made::Lock { instance, .. } => instance.clone(),
+        Made::Yours => None,
+    };
     let (at, index) = (p.at, p.index);
     let mut params = div().flex().flex_col().gap(px(2.)).pl(px(26.));
     for (name, value) in &overlay.params {
@@ -669,7 +707,21 @@ fn overlay_row(
                                 );
                             })),
                     )
-                }),
+                })
+                .children(lock_instance.map(|(take, instance)| {
+                    div()
+                        .id(("remove", key))
+                        .px(px(6.))
+                        .rounded(px(6.))
+                        .hover(|s| s.bg(FLOAT))
+                        .cursor_pointer()
+                        .text_size(TEXT_XS)
+                        .text_color(MUTED)
+                        .child("Remove")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.remove_instance(&take, &instance, cx);
+                        }))
+                })),
         )
         .child(
             div()
@@ -688,7 +740,7 @@ fn overlay_row(
                 .text_color(MUTED)
                 .child(match made {
                     Made::Yours => "Added by you".to_owned(),
-                    Made::Lock(provenance) => provenance.clone(),
+                    Made::Lock { provenance, .. } => provenance.clone(),
                 }),
         )
         .child(params)

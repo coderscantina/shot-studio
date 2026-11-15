@@ -52,7 +52,7 @@ pub use lock::{
     Applied, Asset, ElementRef, Instance, LOCK_VERSION, Lock, LockTake, Orphan, Provenance,
 };
 pub use migrate::{
-    MigrateError, MigrateInput, Migration, Report as MigrationReport, migrate,
+    MigrateError, MigrateInput, Migration, Report as MigrationReport, migrate, settings_diff,
     without_old_settings, written_before_lock,
 };
 pub use script::{Beat, Script, ScriptChapter};
