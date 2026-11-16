@@ -135,7 +135,11 @@ impl Focusable for CutScreen {
 }
 
 impl CutScreen {
-    pub fn new(folder: Entity<VideoFolder>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        folder: Entity<VideoFolder>,
+        import: Entity<crate::takes::import::Import>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         cx.observe(&folder, |this, _, cx| {
             this.bring_back_undone(cx);
             // The clip of the item on show may have changed with the cut.
@@ -144,7 +148,7 @@ impl CutScreen {
         })
         .detach();
         let transcribe = cx.new(|cx| Transcribe::new(folder.clone(), cx));
-        let takes = cx.new(|cx| TakesView::new(folder.clone(), cx));
+        let takes = cx.new(|cx| TakesView::new(folder.clone(), import, cx));
         let forward = cx.subscribe(&takes, |_, _, GoTo(screen), cx| cx.emit(GoTo(*screen)));
         // A video with several takes in the cut at the same beats opens on its takes.
         let tab = if takes.read(cx).needs_composing(cx) {

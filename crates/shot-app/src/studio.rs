@@ -21,6 +21,7 @@ use crate::folder::VideoFolder;
 use crate::record::{RecordScreen, Recorded};
 use crate::script::{ReadyToRecord, ScriptScreen};
 use crate::ship::ShipScreen;
+use crate::takes::import::Import;
 use crate::theme::*;
 use crate::ui::{ActionLook, alert, icon, mono, pane, proposal_action};
 
@@ -223,14 +224,16 @@ pub fn open_at(dir: &Path, screen: Option<Screen>, cx: &mut App) -> Result<(), S
 
 impl Studio {
     fn new(folder: Entity<VideoFolder>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let record = cx.new(|cx| RecordScreen::new(folder.clone(), cx));
-        let cut = cx.new(|cx| CutScreen::new(folder.clone(), cx));
+        let import = cx.new(|_| Import::new(folder.clone()));
+        let record = cx.new(|cx| RecordScreen::new(folder.clone(), import.clone(), cx));
+        let cut = cx.new(|cx| CutScreen::new(folder.clone(), import.clone(), cx));
         let edit = cx.new(|cx| EditScreen::new(folder.clone(), cx));
         let ship = cx.new(|cx| ShipScreen::new(folder.clone(), cx));
         let recorded = cx.subscribe_in(&record, window, |this, _, _: &Recorded, window, cx| {
-            this.edit.update(cx, |edit, cx| edit.show_last_chapter(cx));
-            this.cut.update(cx, |cut, cx| cut.recorded(cx));
-            this.show(Screen::Cut, window, cx);
+            this.recorded(window, cx);
+        });
+        let imported = cx.subscribe_in(&import, window, |this, _, _: &Recorded, window, cx| {
+            this.recorded(window, cx);
         });
         let continue_to_edit =
             cx.subscribe_in(&cut, window, |this, _, GoTo(screen), window, cx| {
@@ -243,7 +246,13 @@ impl Studio {
         // Focus that drops out of the window, as when the focused element stops rendering,
         // goes back to the shown screen instead of leaving its shortcuts dead.
         let focus_lost = cx.on_focus_lost(window, |this, window, cx| this.focus_screen(window, cx));
-        let mut subscriptions = vec![recorded, continue_to_edit, edit_to_record, focus_lost];
+        let mut subscriptions = vec![
+            recorded,
+            imported,
+            continue_to_edit,
+            edit_to_record,
+            focus_lost,
+        ];
         // Cards move on the board and in other windows: the nav catches up when this comes back.
         subscriptions.push(cx.observe_window_activation(window, |this, window, cx| {
             if window.is_window_active() {
@@ -292,6 +301,13 @@ impl Studio {
         };
         studio.refresh_status();
         studio
+    }
+
+    /// A new take is in the cut, recorded or imported: the Cut screen shows it.
+    fn recorded(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.edit.update(cx, |edit, cx| edit.show_last_chapter(cx));
+        self.cut.update(cx, |cut, cx| cut.recorded(cx));
+        self.show(Screen::Cut, window, cx);
     }
 
     /// Puts the script as the board has it into the folder, so Record prompts what the Script
