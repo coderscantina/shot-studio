@@ -474,7 +474,7 @@ impl LiveStyle {
         let mut inputs = style::inputs(&disk, &slug)?;
         inputs.elements.retain(|e| e.take() != take);
         inputs.elements.push(Elements::new(take.clone()));
-        let cut = crate::folder::appended(&project.cut, take, open_range(), &[], &project.format);
+        let cut = shot_prompter::appended(&project.cut, take, open_range(), &[], &project.format);
         let theme = Theme::load(&setup.dir, project.video.format, &cut)
             .map(Arc::new)
             .map_err(|e| e.to_string())?;
@@ -488,7 +488,7 @@ impl LiveStyle {
 
     /// The take styled with `elements` and `markers`.
     fn styled(&mut self, elements: &Elements, markers: &[Marker]) -> Result<Styled, String> {
-        let cut = crate::folder::appended(
+        let cut = shot_prompter::appended(
             &self.project.cut,
             &self.take,
             open_range(),

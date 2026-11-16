@@ -1,11 +1,27 @@
 //! Hotkey markers into `cut.kdl` nodes, once, when a take is appended (decision 0014).
 
 use shot_capture::events::{Mark, Marker};
-use shot_core::{Format, LayoutChange, Micros, Point, TakeEdit, TimeRange, Zoom};
+use shot_core::{Cut, Format, Id, LayoutChange, Micros, Point, TakeEdit, TimeRange, Zoom};
 
 /// Zoom of a Z marker.
 const ZOOM_SCALE: u16 = 150;
 const ZOOM_HOLD: Micros = Micros(2_000_000);
+
+/// `cut` with `take` appended as a chapter of its own that keeps `range`, its layout and zoom
+/// markers written as nodes: how a recording and an ingested clip join the cut.
+pub fn appended(
+    cut: &Cut,
+    take: &Id,
+    range: TimeRange,
+    markers: &[Marker],
+    format: &Format,
+) -> Cut {
+    let mut cut = cut.append_take(take.clone(), format!("Take {take}"), range);
+    if let Some(edit) = cut.chapters.last_mut().and_then(|c| c.takes.last_mut()) {
+        apply_markers(edit, markers, format);
+    }
+    cut
+}
 
 /// Writes a take's layout markers as `layout` nodes and its Z markers as a person's `zoom`
 /// nodes, centered on the cursor at the press.

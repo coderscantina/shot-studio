@@ -6388,6 +6388,7 @@ dependencies = [
  "shot-core",
  "shot-fs",
  "shot-mcp",
+ "shot-prompter",
  "shot-render",
  "shot-ship",
  "tempfile",

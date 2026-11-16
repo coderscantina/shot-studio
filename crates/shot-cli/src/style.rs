@@ -71,7 +71,7 @@ fn build_all(repo: PathBuf) -> Result<(), String> {
 }
 
 /// Opens the video in `video`, which builds its lock and writes it when it changed.
-fn write(video: &Path) -> Result<(), String> {
+pub(crate) fn write(video: &Path) -> Result<(), String> {
     let before = std::fs::read_to_string(video.join(LOCK_FILE)).ok();
     let (_, opened) = crate::open(video)?;
     let slug = &opened.slug;
