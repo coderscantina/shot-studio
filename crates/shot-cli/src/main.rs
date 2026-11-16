@@ -33,6 +33,8 @@ mod derived;
 #[cfg(target_os = "macos")]
 mod export;
 #[cfg(target_os = "macos")]
+mod ingest;
+#[cfg(target_os = "macos")]
 mod overlays;
 #[cfg(target_os = "macos")]
 mod ship;
@@ -77,6 +79,9 @@ enum Command {
     },
     /// Record a take into a video folder.
     Record(record::RecordArgs),
+    /// Make a clip from outside, such as a phone clip, the next take: appended, analysed, styled.
+    #[cfg(target_os = "macos")]
+    Ingest(ingest::IngestArgs),
     /// Render a video's cut to an MP4, reusing cached segments.
     #[cfg(target_os = "macos")]
     Export(export::ExportArgs),
@@ -202,6 +207,8 @@ fn resolve_video(cli: &mut Cli) -> Result<(), String> {
             _ => None,
         },
         #[cfg(target_os = "macos")]
+        Command::Ingest(args) => Some(&mut args.video),
+        #[cfg(target_os = "macos")]
         Command::Export(args) => Some(&mut args.video),
         #[cfg(target_os = "macos")]
         Command::Build(args) => Some(&mut args.video),
@@ -281,6 +288,10 @@ fn run(mut cli: Cli) -> Result<(), String> {
         Command::Describe(args) => return ship::describe(args),
         Command::Ship(args) => return ship::run_ship(args),
         _ => {}
+    }
+    #[cfg(target_os = "macos")]
+    if let Command::Ingest(args) = cli.command {
+        return ingest::run(args);
     }
     #[cfg(target_os = "macos")]
     if let Command::Export(args) = cli.command {
@@ -376,6 +387,7 @@ fn run(mut cli: Cli) -> Result<(), String> {
         }
         #[cfg(target_os = "macos")]
         Command::Export(_)
+        | Command::Ingest(_)
         | Command::Build(_)
         | Command::CodeDiff(_)
         | Command::Overlays(_)

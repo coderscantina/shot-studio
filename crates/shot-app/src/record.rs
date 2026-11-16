@@ -13,6 +13,9 @@
 //! instead. Stopping finishes the take, flushes the transcript to the cache, writes the take's
 //! elements and appends the take to `cut.kdl`. The Vision and Claude passes of the elements run
 //! after the rough cut, in `shot analyze`.
+//!
+//! Import clip, or a video dropped on the screen, makes a clip from outside the next take
+//! instead, see [`crate::takes::import`].
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -20,8 +23,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    App, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, ObjectFit,
-    ScrollHandle, Subscription, Window, actions, div, prelude::*, px, relative, surface,
+    App, Context, Div, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, FontWeight,
+    ObjectFit, ScrollHandle, Subscription, Window, actions, div, prelude::*, px, relative, surface,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::progress::Progress;
@@ -40,6 +43,7 @@ use shot_core::{Id, Inputs, Micros, Transcript};
 use crate::folder::VideoFolder;
 use crate::live::{Feeds, Heard, LiveTake, Rehearsal, Setup, View};
 use crate::prompter::{Live, PrompterPane, TogglePrompter};
+use crate::takes::import::Import;
 use crate::theme::*;
 use crate::ui::{self, alert, hint, icon, label, mono};
 
@@ -291,6 +295,7 @@ enum Picker {
 
 pub struct RecordScreen {
     folder: Entity<VideoFolder>,
+    import: Entity<Import>,
     devices: Devices,
     choice: Choice,
     open: Option<Picker>,
@@ -313,7 +318,12 @@ pub struct RecordScreen {
 impl EventEmitter<Recorded> for RecordScreen {}
 
 impl RecordScreen {
-    pub fn new(folder: Entity<VideoFolder>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        folder: Entity<VideoFolder>,
+        import: Entity<Import>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        cx.observe(&import, |_, _, cx| cx.notify()).detach();
         let devices = shot_capture::list_devices();
         let choice = Choice {
             display: devices.displays.iter().find(|d| d.main).map(|d| d.id),
@@ -350,6 +360,7 @@ impl RecordScreen {
         let prompter = cx.new(|cx| PrompterPane::new(folder.clone(), cx));
         Self {
             folder,
+            import,
             devices,
             choice,
             open: None,
@@ -499,7 +510,7 @@ impl RecordScreen {
                             });
                             match result {
                                 Ok(()) => {
-                                    this.analyze_later(&take, cx);
+                                    analyze_later(&this.folder, &take, cx);
                                     this.shared.set(Phase::Idle);
                                     cx.emit(Recorded);
                                 }
@@ -885,40 +896,41 @@ fn record(
     Ok((take.id, take.duration))
 }
 
-impl RecordScreen {
-    /// Adds what Vision and Claude find to the take's elements in a `shot analyze` of its own,
-    /// so it never holds up the rough cut, then rebuilds the video's lock with them.
-    /// Without the `shot` command or Claude Code that part is skipped.
-    fn analyze_later(&self, take: &Id, cx: &mut Context<Self>) {
-        let Ok(shot) = crate::agent::shot_executable() else {
-            return;
-        };
-        let mut command = std::process::Command::new(shot);
-        command
-            .args(["analyze", "--video"])
-            .arg(&self.folder.read(cx).dir)
-            .args(["--take", take.as_str()])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        if shot_mcp::bridge::Claude::find().is_some() {
-            command.arg("--claude");
-        }
-        let folder = self.folder.clone();
-        cx.spawn(async move |_, cx| {
-            let analyzed = cx
-                .background_spawn(async move { command.status() })
-                .await
-                .is_ok_and(|s| s.success());
-            if analyzed {
-                folder.update(cx, |folder, cx| {
-                    // A failed rebuild shows on the next edit; nothing waits on this one.
-                    let _ = folder.rebuild_lock();
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
+/// Adds what Vision and Claude find to the take's elements in a `shot analyze` of its own, so it
+/// never holds up the rough cut, then reads the take's transcript, which that writes for an
+/// imported clip, and rebuilds the video's lock. Without the `shot` command that part is
+/// skipped, and without Claude Code its pass.
+pub(crate) fn analyze_later(folder: &Entity<VideoFolder>, take: &Id, cx: &mut App) {
+    let Ok(shot) = crate::agent::shot_executable() else {
+        return;
+    };
+    let mut command = std::process::Command::new(shot);
+    command
+        .args(["analyze", "--video"])
+        .arg(&folder.read(cx).dir)
+        .args(["--take", take.as_str()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    if shot_mcp::bridge::Claude::find().is_some() {
+        command.arg("--claude");
     }
+    let folder = folder.clone();
+    cx.spawn(async move |cx| {
+        let analyzed = cx
+            .background_spawn(async move { command.status() })
+            .await
+            .is_ok_and(|s| s.success());
+        if analyzed {
+            folder.update(cx, |folder, cx| {
+                // A failed reload shows on the next edit; nothing waits on this one.
+                let _ = folder
+                    .load_transcripts()
+                    .and_then(|()| folder.rebuild_lock());
+                cx.notify();
+            });
+        }
+    })
+    .detach();
 }
 
 /// Stable words handed from the transcriber's thread to the recorder.
@@ -980,6 +992,13 @@ impl Render for RecordScreen {
             .gap(px(8.))
             .px(px(8.))
             .pb(px(8.))
+            .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(SELECTION))
+            .on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| {
+                if !busy {
+                    this.import
+                        .update(cx, |import, cx| import.drop_paths(paths, cx));
+                }
+            }))
             .child(self.tracks(busy, cx))
             .child(self.stage(&phase, cx))
             .map(|row| {
@@ -1216,7 +1235,20 @@ impl RecordScreen {
                     .pt(px(10.))
                     .flex()
                     .flex_col()
-                    .gap(px(4.))
+                    .gap(px(8.))
+                    .children(self.import.read(cx).row())
+                    .child(
+                        Button::new("import-clip")
+                            .small()
+                            .label("Import clip")
+                            .tooltip(
+                                "Make a phone clip or other video the next take. Or drop it here.",
+                            )
+                            .disabled(busy || self.import.read(cx).is_running())
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.import.update(cx, |import, cx| import.pick(cx))
+                            })),
+                    )
                     .child(
                         div()
                             .text_size(TEXT_SM)

@@ -6381,6 +6381,7 @@ dependencies = [
  "serde",
  "serde_json",
  "shot-core",
+ "shot-media",
  "tempfile",
  "thiserror 2.0.21",
 ]
@@ -6399,6 +6400,7 @@ dependencies = [
  "shot-core",
  "shot-fs",
  "shot-mcp",
+ "shot-prompter",
  "shot-render",
  "shot-ship",
  "tempfile",

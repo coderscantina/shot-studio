@@ -6,6 +6,8 @@ pub mod timing;
 #[cfg(target_os = "macos")]
 pub mod audio;
 #[cfg(target_os = "macos")]
+pub mod clip;
+#[cfg(target_os = "macos")]
 pub mod encode;
 #[cfg(target_os = "macos")]
 pub mod player;

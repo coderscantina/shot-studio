@@ -1,0 +1,1 @@
+I am filming this on my phone at the coffee shop. [[slnc 600]] The new deploy button finally works, and it took one line of config. [[slnc 500]] Back at the desk I will show you the diff and why the old script kept failing on Fridays.

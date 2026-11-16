@@ -12,6 +12,7 @@ shot-core = { path = "../shot-core" }
 shot-board = { path = "../shot-board" }
 shot-mcp = { path = "../shot-mcp" }
 shot-capture = { path = "../shot-capture" }
+shot-prompter = { path = "../shot-prompter" }
 shot-analyze = { path = "../shot-analyze" }
 shot-ship = { path = "../shot-ship" }
 shot-fs = { path = "../shot-fs" }
