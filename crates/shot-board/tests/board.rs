@@ -727,6 +727,78 @@ fn accepting_over_a_conflicting_edit_is_refused_with_the_files_and_keeps_the_edi
 }
 
 #[test]
+fn accepting_over_conflicts_takes_the_proposals_line_and_keeps_the_persons_other_edits() {
+    let channel = Channel::new(&[("alpha", VIDEO)]);
+    let board = channel.board();
+    let folder = board.open_video("alpha").unwrap();
+    let script = folder.join("script.md");
+    write(
+        &script,
+        "# T\n\n## Hook\n\n- old hook\n\n## Body\n\n- keep\n",
+    );
+    board
+        .commit_video_files("alpha", &["script.md"], "📝 write the script")
+        .unwrap();
+    board
+        .create_proposal(
+            "alpha",
+            "hook",
+            "✏️ hook",
+            &files(&[(
+                "script.md",
+                "# T\n\n## Hook\n\n- agent hook\n\n## Body\n\n- keep\n",
+            )]),
+        )
+        .unwrap();
+    write(
+        &script,
+        "# T\n\n## Hook\n\n- my hook\n\n## Body\n\n- keep, mine\n",
+    );
+
+    board
+        .accept_proposal_over_conflicts("alpha", "hook")
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&script).unwrap(),
+        "# T\n\n## Hook\n\n- agent hook\n\n## Body\n\n- keep, mine\n"
+    );
+    assert!(status(&folder).is_empty());
+}
+
+#[test]
+fn accepting_the_draft_then_a_hook_gives_the_draft_with_that_hook() {
+    let channel = Channel::new(&[("alpha", VIDEO)]);
+    let board = channel.board();
+    let folder = board.open_video("alpha").unwrap();
+    let draft = |hook: &str| format!("# T\n\n## Hook\n\n- {hook}\n\n## Body\n\n- one\n- two\n");
+    for (name, hook) in [
+        ("draft", "draft hook"),
+        ("hook-a", "hook a"),
+        ("hook-b", "hook b"),
+    ] {
+        board
+            .create_proposal(
+                "alpha",
+                name,
+                "✏️ draft",
+                &files(&[("script.md", &draft(hook))]),
+            )
+            .unwrap();
+    }
+
+    board
+        .accept_proposal_over_conflicts("alpha", "draft")
+        .unwrap();
+    board
+        .accept_proposal_over_conflicts("alpha", "hook-a")
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(folder.join("script.md")).unwrap(),
+        draft("hook a")
+    );
+}
+
+#[test]
 fn opening_the_board_removes_worktrees_of_merged_or_deleted_branches_without_changes() {
     let channel = Channel::new(&[("alpha", VIDEO), ("beta", VIDEO), ("gamma", VIDEO)]);
     let board = channel.board();
