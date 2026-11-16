@@ -8,6 +8,7 @@ Updated 2026-11-16. Read by agents at the start of a thread; rewrite it before h
 
 `m16/integration` holds [milestone 16](milestones/16-script-editor-and-clip-ingest.md), built by two streams and merged, not yet in `main`. Its worktree is `.claude/worktrees/m16-integration`. [Evidence](evidence/m16-script-editor-and-clip-ingest.md).
 - The Script screen edits `script.md` in the app: Druck's text core in a new `shot-editor` crate, live styling, spell checking, autosave into the worktree, Edit script gone ([0038](decisions/0038-script-editor-from-druck.md), Proposed).
+- Script writing held to [the bar](technical-briefing.md#the-bar-for-writing-a-script): suggestions always apply (the proposal wins on conflicting script lines, one Undo back), a run commits the person's script edits first and can be stopped, hooks to pick side by side, a chat that keeps every run with selectable Markdown answers and Copy, chapter prose counted in the outline.
 - `shot ingest`, Import clip and file drop make a phone clip the next take, upright, SDR, constant rate, then transcribed and cut like a recording ([0039](decisions/0039-ingested-clips-are-takes.md), Proposed).
 
 `main` holds [milestone 15](milestones/15-one-video-model-transitions-and-themes.md), built by seven streams and merged. [Evidence](evidence/m15-one-video-model.md).
