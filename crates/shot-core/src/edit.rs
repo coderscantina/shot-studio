@@ -447,15 +447,16 @@ impl Cut {
         }))
     }
 
-    /// Removes the lock's overlay or sound `instance` of `take` through the override of its
-    /// element: a sound a person placed loses its `sfx` node, any other overlay or sound is
-    /// turned off (`overlay <template> off`, `sfx off`). `None` for other instances and for
-    /// instances of no element kind.
+    /// Removes the lock's zoom, overlay or sound `instance` of `take` through the override of
+    /// its element: a sound a person placed loses its `sfx` node, any other zoom, overlay or
+    /// sound is turned off (`zoom off`, `overlay <template> off`, `sfx off`). `None` for other
+    /// instances and for instances of no element kind.
     pub fn remove_instance(&self, take: &Id, instance: &Instance) -> Option<Cut> {
         let Target::Kind(kind) = instance.element.target else {
             return None;
         };
         let key = match &instance.applied {
+            Applied::Zoom { .. } => EffectKey::Zoom,
             Applied::Overlay { template, .. } => EffectKey::Overlay(template.clone()),
             Applied::Sfx { .. } => EffectKey::Sfx,
             _ => return None,
@@ -1542,6 +1543,35 @@ mod tests {
             ]
         );
         assert_eq!(view[3].word.text, "w3");
+    }
+
+    #[test]
+    fn removing_a_rule_zoom_turns_it_off_on_its_element() {
+        let zoom = Instance {
+            applied: Applied::Zoom {
+                scale: 112,
+                range: range(2_000_000, 3_000_000),
+                center: None,
+                shape: ZoomShape::default(),
+            },
+            element: crate::ElementRef {
+                target: Target::Kind(ElementKind::Emphasis),
+                t: Micros(2_000_000),
+            },
+            provenance: crate::Provenance {
+                layer: Layer::Format,
+                rule: None,
+                override_at: None,
+            },
+        };
+        let removed = cut(vec![keep(0, 11_000_000)])
+            .remove_instance(&id(), &zoom)
+            .unwrap();
+        assert!(
+            removed
+                .to_kdl()
+                .ends_with("override t01 emphasis at=2_000_000 {\n    zoom off\n}\n")
+        );
     }
 
     #[test]

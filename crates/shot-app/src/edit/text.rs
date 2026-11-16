@@ -10,15 +10,16 @@ use gpui::{
 };
 use gpui_component::Sizable;
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_component::tooltip::Tooltip;
 use shot_core::{Layout, Micros, Placed, RangeEdit, TakeAt, WordState, Zoom};
 
 use super::EditScreen;
+use super::lane_menu::{self, Place};
 use super::marks::{self, Kind, Mark, MarkId, Own, Switch};
 use super::parts::{self, layout_name, row};
 use super::proposals::{self, Card};
-use super::timeline::{Pick, zoom_scales};
+use super::timeline::{MenuOn, Pick, zoom_scales};
 use crate::layout_store;
 use crate::model::{
     BlockDoc, CutRun, DocWord, Item, LAYOUT_KEYS, Paragraph, apply_layout, seconds, timecode,
@@ -39,7 +40,8 @@ pub struct TextState {
 }
 
 impl EditScreen {
-    /// Picks an effect from its chip: the inspector shows it and Delete removes a person's.
+    /// Picks an effect from its chip: the inspector shows it, and Delete removes a person's or
+    /// turns the style's off here.
     fn pick_mark(&mut self, id: MarkId, cx: &mut Context<Self>) {
         let Some(mark) = marks::marks(self, id.at, cx)
             .into_iter()
@@ -103,6 +105,58 @@ impl EditScreen {
                 .retain(|o| o.decision.is_some() || !o.effects.is_empty());
             Ok(cut)
         });
+        true
+    }
+
+    /// ⌘C: the selected words as text on the clipboard.
+    pub(super) fn copy_text(&mut self, cx: &mut Context<Self>) {
+        let Some(selection) = self.selection else {
+            return;
+        };
+        let Some(words) = self
+            .block(selection.at)
+            .and_then(|b| b.words.get(selection.words()))
+        else {
+            return;
+        };
+        let text = words
+            .iter()
+            .map(|w| w.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+    }
+
+    /// A right-click on an effect's chip picks it, and the menu offers what the inspector does:
+    /// a person's zoom or overlay by its pick, anything else by its lock instance.
+    fn menu_on_mark(&mut self, id: MarkId, cx: &mut Context<Self>) {
+        self.pick_mark(id, cx);
+        let Some(mark) = self.picked_mark(cx) else {
+            return;
+        };
+        self.lanes.menu = Some(match mark.own {
+            Some(Own::Placed(_)) => MenuOn::Pick,
+            _ => {
+                let take = self.block(id.at).map(|b| b.take.clone());
+                let lock = take.zip(mark.instance.clone());
+                MenuOn::Lock(format!("{}: {}", mark.name(), mark.label), lock)
+            }
+        });
+    }
+
+    /// Turns off the picked effect the style rules made, here only. Returns whether there was
+    /// one.
+    pub(super) fn remove_picked_style(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(mark) = self.picked_mark(cx) else {
+            return false;
+        };
+        let (Some(instance), Some(take)) = (
+            mark.instance,
+            self.block(mark.id.at).map(|b| b.take.clone()),
+        ) else {
+            return false;
+        };
+        self.remove_instance(&take, &instance, cx);
         true
     }
 
@@ -386,6 +440,7 @@ fn document(this: &mut EditScreen, follow: &Entity<bool>, cx: &mut Context<EditS
         .filter(|b| b.at.chapter == this.chapter)
         .collect();
     let default_layout = this.folder.read(cx).project.format.default_layout;
+    let screen = cx.entity();
     let columns = Columns::for_width(f32::from(this.document_bounds.get().size.width));
     let doc_row = |rail: Div, content: AnyElement| doc_row(columns, rail, content);
     let rail = |start, layout| rail(columns, start, layout);
@@ -497,8 +552,29 @@ fn document(this: &mut EditScreen, follow: &Entity<bool>, cx: &mut Context<EditS
                 .flex()
                 .flex_col()
                 .gap(px(22.))
+                // A right-click is on an empty spot unless a word or chip under it says
+                // otherwise as the event bubbles back up.
+                .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, _, _| {
+                    if event.button == MouseButton::Right {
+                        this.lanes.menu = Some(MenuOn::Empty);
+                    }
+                }))
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                        if this.lanes.menu == Some(MenuOn::Empty) {
+                            this.selection = None;
+                            this.lanes.picked = None;
+                            this.text.picked = None;
+                            cx.notify();
+                        }
+                    }),
+                )
                 .children(rows)
-                .children(floating_toolbar(this, columns.pad, cx)),
+                .children(floating_toolbar(this, columns.pad, cx))
+                .context_menu(move |menu, window, cx| {
+                    lane_menu::context_menu(menu, &screen, Place::Text, window, cx)
+                }),
         )
 }
 
@@ -881,6 +957,19 @@ fn word(
                 this.select_word(at, index, event.modifiers.shift, cx);
             }),
         )
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                let inside = this
+                    .selection
+                    .is_some_and(|s| s.at == at && s.words().contains(&index));
+                if !inside {
+                    this.text.picked = None;
+                    this.select_word(at, index, false, cx);
+                }
+                this.lanes.menu = Some(MenuOn::Selection);
+            }),
+        )
         .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
             if this.dragging
                 && event.pressed_button == Some(MouseButton::Left)
@@ -899,7 +988,7 @@ fn word(
 
 /// The chip where an effect starts: its icon and a few words in its hue, filled for a
 /// person's effect and outlined for the style's. A click picks it for the inspector, and
-/// Delete removes a person's.
+/// Delete removes a person's or turns the style's off here.
 fn mark_chip(this: &EditScreen, mark: &Mark, cx: &mut Context<EditScreen>) -> Stateful<Div> {
     let id = mark.id;
     let hue = mark.hue();
@@ -943,11 +1032,16 @@ fn mark_chip(this: &EditScreen, mark: &Mark, cx: &mut Context<EditScreen>) -> St
             }
         }))
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| this.menu_on_mark(id, cx)),
+        )
         .on_click(cx.listener(move |this, _, _, cx| this.pick_mark(id, cx)))
 }
 
 /// The chip where the layout switches: the layout's name, and a menu to change it or remove
-/// the switch, which brings the layout before it back.
+/// the switch, which brings the layout before it back. A click and a right-click open the same
+/// menu.
 fn layout_chip(
     this: &EditScreen,
     at: TakeAt,
@@ -955,14 +1049,19 @@ fn layout_chip(
     word: usize,
     cx: &mut Context<EditScreen>,
 ) -> impl IntoElement {
-    let screen = cx.entity();
-    let (layout, range, before) = (switch.run.layout, switch.run.range, switch.before);
-    let default = this.folder.read(cx).project.format.default_layout;
-    let choices = layout_choices(this, cx);
-    Button::new(("layout-switch", word_key(at, word)))
+    let menu = Rc::new(SwitchMenu {
+        screen: cx.entity(),
+        at,
+        range: switch.run.range,
+        layout: switch.run.layout,
+        before: switch.before,
+        default: this.folder.read(cx).project.format.default_layout,
+        choices: layout_choices(this, cx),
+    });
+    let key = word_key(at, word);
+    let button = Button::new(("layout-switch", key))
         .ghost()
         .xsmall()
-        .mr(px(5.))
         .child(
             div()
                 .flex()
@@ -972,36 +1071,60 @@ fn layout_chip(
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(TEXT)
                 .child(icon("layout", px(12.), MUTED))
-                .child(layout_name(layout))
+                .child(layout_name(switch.run.layout))
                 .child(icon("chevron-down", px(10.), MUTED)),
         )
-        .dropdown_menu(move |menu, _, _| {
-            let menu = menu.min_w(px(200.)).label("Layout from here");
-            let menu = choices.iter().fold(menu, |menu, choice| {
-                let (screen, choice) = (screen.clone(), *choice);
-                menu.item(
-                    PopupMenuItem::new(layout_name(choice))
-                        .checked(choice == layout)
-                        .on_click(move |_, _, cx| {
-                            screen.update(cx, |this, cx| {
-                                this.edit(cx, |cut| apply_layout(cut, at, range, choice, default))
-                            })
-                        }),
-                )
-            });
-            let screen = screen.clone();
-            menu.separator().item(
-                PopupMenuItem::new(format!(
-                    "Remove the switch, back to {}",
-                    layout_name(before)
-                ))
-                .on_click(move |_, _, cx| {
-                    screen.update(cx, |this, cx| {
-                        this.edit(cx, |cut| apply_layout(cut, at, range, before, default))
-                    })
-                }),
+        .dropdown_menu({
+            let menu = menu.clone();
+            move |m, _, _| menu.build(m)
+        });
+    div()
+        .id(("layout-switch-chip", key))
+        .mr(px(5.))
+        .child(button)
+        .context_menu(move |m, _, _| menu.build(m))
+}
+
+/// The menu of a layout switch chip.
+struct SwitchMenu {
+    screen: Entity<EditScreen>,
+    at: TakeAt,
+    range: shot_core::TimeRange,
+    layout: Layout,
+    before: Layout,
+    default: Layout,
+    choices: Vec<Layout>,
+}
+
+impl SwitchMenu {
+    fn build(&self, menu: PopupMenu) -> PopupMenu {
+        let Self {
+            at, range, default, ..
+        } = *self;
+        let set = |to: Layout| {
+            let screen = self.screen.clone();
+            move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
+                screen.update(cx, |this, cx| {
+                    this.edit(cx, |cut| apply_layout(cut, at, range, to, default))
+                })
+            }
+        };
+        let menu = menu.min_w(px(200.)).label("Layout from here");
+        let menu = self.choices.iter().fold(menu, |menu, &choice| {
+            menu.item(
+                PopupMenuItem::new(layout_name(choice))
+                    .checked(choice == self.layout)
+                    .on_click(set(choice)),
             )
-        })
+        });
+        menu.separator().item(
+            PopupMenuItem::new(format!(
+                "Remove the switch, back to {}",
+                layout_name(self.before)
+            ))
+            .on_click(set(self.before)),
+        )
+    }
 }
 
 /// The layouts on offer, one list for the switch menus and the L picker: the ones on the number
@@ -1013,7 +1136,7 @@ fn layout_choices(this: &EditScreen, cx: &App) -> Vec<Layout> {
 }
 
 /// A cut between words: a faint seam for short auto cuts, a red length chip for the rest.
-/// Clicking opens it to show the removed words.
+/// Clicking opens it to show the removed words, a right-click offers Restore.
 fn cut(at: TakeAt, run: &CutRun, open: bool, cx: &mut Context<EditScreen>) -> impl IntoElement {
     let key = (run.range.from().0 / 1000) as usize;
     let from = run.range.from();
@@ -1024,9 +1147,18 @@ fn cut(at: TakeAt, run: &CutRun, open: bool, cx: &mut Context<EditScreen>) -> im
         }
         cx.notify();
     });
+    let range = run.range;
+    let menu = cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+        this.selection = None;
+        this.text.picked = None;
+        this.lanes.picked = Some(Pick::Cut(at, range));
+        this.lanes.menu = Some(MenuOn::Pick);
+        cx.notify();
+    });
     if run.is_seam() && !open && run.words.is_empty() {
         return div()
             .id(("seam", key))
+            .on_mouse_down(MouseButton::Right, menu)
             .w(px(2.))
             .h(px(14.))
             .mx(px(3.))
@@ -1052,6 +1184,7 @@ fn cut(at: TakeAt, run: &CutRun, open: bool, cx: &mut Context<EditScreen>) -> im
         .cursor_pointer()
         .child(div().w(px(2.)).h(px(10.)).rounded(px(1.)).bg(CUT))
         .child(seconds(run.removed))
+        .on_mouse_down(MouseButton::Right, menu)
         .on_click(toggle)
 }
 
@@ -1440,6 +1573,7 @@ fn mark_section(this: &EditScreen, mark: Mark, cx: &mut Context<EditScreen>) -> 
         _ => None,
     };
     let own = mark.own.is_some();
+    let removable = own || mark.instance.is_some();
     div()
         .flex()
         .flex_col()
@@ -1488,7 +1622,7 @@ fn mark_section(this: &EditScreen, mark: Mark, cx: &mut Context<EditScreen>) -> 
                             cx.listener(move |this, _, _, cx| this.audition(name.clone(), cx)),
                         )
                 }))
-                .when(own, |row| {
+                .when(removable, |row| {
                     row.child(
                         tool("close", "Remove", super::DELETE_KEYS)
                             .id("text-mark-remove")
@@ -1503,6 +1637,8 @@ fn mark_section(this: &EditScreen, mark: Mark, cx: &mut Context<EditScreen>) -> 
         )
         .child(label(if own {
             "Move or trim it by its edges in the Timeline"
+        } else if removable {
+            "Remove turns it off here. Change the rule in the brand or the format to change it everywhere"
         } else {
             "Change the rule in the brand or the format to change it everywhere"
         }))

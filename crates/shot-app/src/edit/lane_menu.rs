@@ -1,6 +1,7 @@
-//! The Timeline lanes' right-click menu. A right-click selects the word or picks the block
-//! under it first, like Finder, so the menu is built from the selection or the pick. Items with
-//! a key dispatch the key's action: they show the key and do what it does.
+//! The right-click menu of the Timeline lanes and the Text transcript. A right-click selects the
+//! word or picks the block or chip under it first, like Finder, so the menu is built from the
+//! selection or the pick. Items with a key dispatch the key's action: they show the key and do
+//! what it does.
 
 use gpui::{App, Context, Entity, Window, prelude::*, px};
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
@@ -10,8 +11,8 @@ use shot_render::plan::frame_time;
 use super::parts::layout_name;
 use super::timeline::{MenuOn, Pick, ZOOM_SCALES, picked_text, removed_words, words};
 use super::{
-    AddZoom, BuildLayout, DeleteSelection, EditScreen, EditSwitch, Layout1, Layout2, Layout3,
-    Layout4, PickSound, RestoreSelection, ZoomToSelection, music,
+    AddHighlight, AddZoom, BuildLayout, CopyText, DeleteSelection, EditScreen, EditSwitch, Layout1,
+    Layout2, Layout3, Layout4, PickPop, PickSound, RestoreSelection, ZoomToSelection, music,
 };
 use crate::model::{FPS, seconds};
 
@@ -114,10 +115,18 @@ fn subject(this: &EditScreen, cx: &App) -> Subject {
     }
 }
 
+/// Where the menu opens: the two places differ only in the tools offered on words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Place {
+    Timeline,
+    Text,
+}
+
 /// The menu for what the right-click selected or picked.
 pub(super) fn context_menu(
     menu: PopupMenu,
     screen: &Entity<EditScreen>,
+    place: Place,
     window: &mut Window,
     cx: &mut Context<PopupMenu>,
 ) -> PopupMenu {
@@ -136,14 +145,21 @@ pub(super) fn context_menu(
             .when(kept, |m| m.item(keyed("Cut", DeleteSelection)))
             .when(removed, |m| m.item(keyed("Restore", RestoreSelection)))
             .when(kept, |m| m.item(keyed("Zoom", AddZoom)))
+            .when(kept && place == Place::Text, |m| {
+                m.item(keyed("Highlight", AddHighlight))
+                    .item(keyed("Pop", PickPop))
+            })
             .submenu("Layout", window, cx, {
                 let (screen, choices) = (screen.clone(), choices.clone());
                 move |m, _, _| layout_items(m, layout, &choices, &screen)
             })
             .item(sound_item(screen))
             .separator()
+            .item(keyed("Copy text", CopyText))
             .item(play_item(screen))
-            .item(keyed("Zoom lanes to selection", ZoomToSelection)),
+            .when(place == Place::Timeline, |m| {
+                m.item(keyed("Zoom lanes to selection", ZoomToSelection))
+            }),
         Subject::Zoom {
             at,
             index,
@@ -189,7 +205,17 @@ pub(super) fn context_menu(
             .item(play_item(screen)),
         Subject::Music => music::menu(menu, screen, window, cx),
         Subject::Lock(title, lock) => {
-            let menu = menu.label(title).label("From the style rules").separator();
+            let yours = lock
+                .as_ref()
+                .is_some_and(|(_, i)| i.provenance.layer == shot_core::Layer::Override);
+            let menu = menu
+                .label(title)
+                .label(if yours {
+                    "Yours"
+                } else {
+                    "From the style rules"
+                })
+                .separator();
             let menu = match lock {
                 Some((take, instance)) => {
                     let screen = screen.clone();

@@ -3,7 +3,9 @@
 //! switches. Read from the shown cut and the lock; the transcript draws them in the lanes' hues.
 
 use gpui::{App, Hsla, rgb};
-use shot_core::{Applied, Id, Layer, Layout, Micros, OverrideEffect, Placed, TakeAt, TimeRange};
+use shot_core::{
+    Applied, Id, Instance, Layer, Layout, Micros, OverrideEffect, Placed, TakeAt, TimeRange,
+};
 use shot_render::overlay::{self, broll, highlight, link_card};
 
 use super::EditScreen;
@@ -58,6 +60,9 @@ pub struct Mark {
     pub own: Option<Own>,
     /// Where an effect the style made comes from.
     pub style: Option<String>,
+    /// The lock's instance behind an effect the style made, which Remove turns off here, and
+    /// behind every sound.
+    pub instance: Option<Instance>,
 }
 
 impl Mark {
@@ -143,20 +148,20 @@ pub fn marks(this: &EditScreen, at: TakeAt, cx: &App) -> Vec<Mark> {
     };
     let lock = folder.lock();
     let lock_take = lock.take(&own.take);
-    let made_by = |kind: KindTag, from: Micros| -> Option<String> {
-        let instance = lock_take?
-            .instances
-            .iter()
-            .find(|i| match (&i.applied, kind) {
-                (Applied::Zoom { range, .. }, KindTag::Zoom) => range.from() == from,
-                (Applied::Overlay { range, .. }, KindTag::Overlay) => range.from() == from,
-                _ => false,
-            })?;
-        Some(crate::place::provenance(&instance.provenance))
+    let style = |mine: bool, instance: Option<&Instance>| -> Option<String> {
+        (!mine).then(|| {
+            instance.map_or("From the style rules".into(), |i| {
+                crate::place::provenance(&i.provenance)
+            })
+        })
     };
     let mut out = Vec::new();
     for (index, zoom) in crate::model::zooms(own, lock).iter().enumerate() {
         let mine = own.zooms.iter().position(|z| z == zoom);
+        let instance = mine
+            .is_none()
+            .then(|| crate::model::zoom_instance(lock, &own.take, zoom))
+            .flatten();
         out.push(Mark {
             id: MarkId {
                 at,
@@ -168,15 +173,16 @@ pub fn marks(this: &EditScreen, at: TakeAt, cx: &App) -> Vec<Mark> {
             range: zoom.range,
             label: format!("{}%", zoom.scale),
             own: mine.map(|i| Own::Placed(Placed::Zoom(i))),
-            style: mine
-                .is_none()
-                .then(|| made_by(KindTag::Zoom, zoom.range.from()))
-                .flatten()
-                .or_else(|| mine.is_none().then(|| "From the style rules".into())),
+            style: style(mine.is_some(), instance),
+            instance: instance.cloned(),
         });
     }
     for (index, placed) in crate::model::overlays(own, lock).iter().enumerate() {
         let mine = own.overlays.iter().position(|o| o == placed);
+        let instance = mine
+            .is_none()
+            .then(|| super::overlays::lock_instance(lock, &own.take, placed))
+            .flatten();
         out.push(Mark {
             id: MarkId {
                 at,
@@ -190,11 +196,8 @@ pub fn marks(this: &EditScreen, at: TakeAt, cx: &App) -> Vec<Mark> {
             range: placed.range,
             label: shorten(&super::overlays::summary(placed), 18),
             own: mine.map(|i| Own::Placed(Placed::Overlay(i))),
-            style: mine
-                .is_none()
-                .then(|| made_by(KindTag::Overlay, placed.range.from()))
-                .flatten()
-                .or_else(|| mine.is_none().then(|| "From the style rules".into())),
+            style: style(mine.is_some(), instance),
+            instance: instance.cloned(),
         });
     }
     // Sounds play from the lock only, a person's from an override on a word.
@@ -235,8 +238,9 @@ pub fn marks(this: &EditScreen, at: TakeAt, cx: &App) -> Vec<Mark> {
                 },
                 range: TimeRange::new(*t, Micros(t.0 + SOUND_REACH.0)).expect("a length"),
                 label: sound.to_string(),
-                own,
                 style: (!mine).then(|| crate::place::provenance(p)),
+                instance: Some(instance.clone()),
+                own,
             });
         }
     }

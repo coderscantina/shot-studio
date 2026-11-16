@@ -180,7 +180,7 @@ pub struct Item {
     pub at: TakeAt,
     /// Its index in `cut.kdl`, `None` for the lock's, which the lanes cannot move.
     pub placed: Option<Placed>,
-    /// For the lock's overlays: the take and the instance a remove turns off.
+    /// For the lock's zooms and overlays: the take and the instance a remove turns off.
     pub lock: Option<(Id, shot_core::Instance)>,
     pub frames: Range<u64>,
     pub text: String,
@@ -1264,7 +1264,13 @@ fn lanes(this: &EditScreen, window: Range<u64>, cx: &mut Context<EditScreen>) ->
                 )
                 .children(super::switch::popover(this, &window, &x, cx))
                 .context_menu(move |menu, window, cx| {
-                    super::lane_menu::context_menu(menu, &screen, window, cx)
+                    super::lane_menu::context_menu(
+                        menu,
+                        &screen,
+                        super::lane_menu::Place::Timeline,
+                        window,
+                        cx,
+                    )
                 }),
         )
         .child(toolbar(this, &runs, cx))
@@ -2135,7 +2141,8 @@ fn layout_lane(
         .children(super::switch::marks(this, window, x, cx))
 }
 
-/// Every zoom the edit shows, a person's with its index in `cut.kdl`.
+/// Every zoom the edit shows, a person's with its index in `cut.kdl`, the lock's with its
+/// instance.
 fn zoom_items(this: &EditScreen, cx: &Context<EditScreen>) -> Vec<Item> {
     let folder = this.folder.read(cx);
     let mut items = Vec::new();
@@ -2145,10 +2152,15 @@ fn zoom_items(this: &EditScreen, cx: &Context<EditScreen>) -> Vec<Item> {
                 continue;
             };
             let placed = block.zooms.iter().position(|z| z == zoom).map(Placed::Zoom);
+            let lock = match placed {
+                Some(_) => None,
+                None => model::zoom_instance(folder.lock(), &block.take, zoom)
+                    .map(|i| (block.take.clone(), i.clone())),
+            };
             items.push(Item {
                 at,
                 placed,
-                lock: None,
+                lock,
                 frames,
                 text: format!("{}%", zoom.scale),
             });

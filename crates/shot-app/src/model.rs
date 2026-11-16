@@ -159,6 +159,17 @@ pub fn zooms(edit: &TakeEdit, lock: &Lock) -> Vec<Zoom> {
     zooms
 }
 
+/// The lock's instance of `take` that plays `zoom`.
+pub fn zoom_instance<'a>(lock: &'a Lock, take: &Id, zoom: &Zoom) -> Option<&'a Instance> {
+    lock.take(take)?.instances.iter().find(|i| {
+        matches!(i.applied, Applied::Zoom { scale, range, center, shape }
+            if scale == zoom.scale
+                && range == zoom.range
+                && center == zoom.center
+                && shape == zoom.shape)
+    })
+}
+
 /// The block's overlays in drawing order: a person's, then the lock's that play in it.
 pub fn overlays(edit: &TakeEdit, lock: &Lock) -> Vec<Overlay> {
     let mut overlays = edit.overlays.clone();

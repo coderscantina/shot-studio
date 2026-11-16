@@ -76,6 +76,7 @@ fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-enter", edit::RecordTake, edit),
         KeyBinding::new("enter", edit::EditCaption, edit),
         KeyBinding::new("h", edit::AddHighlight, edit),
+        KeyBinding::new("cmd-c", edit::CopyText, edit),
         KeyBinding::new("p", edit::PickPop, edit),
         KeyBinding::new("l", edit::PickLayout, edit),
         KeyBinding::new("t", edit::EditSwitch, edit),

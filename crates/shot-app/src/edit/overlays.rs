@@ -63,7 +63,11 @@ fn placed(this: &EditScreen, cx: &App) -> Vec<Placed> {
 }
 
 /// The lock's instance of `take` that draws `overlay`.
-fn lock_instance<'a>(lock: &'a Lock, take: &Id, overlay: &Overlay) -> Option<&'a Instance> {
+pub(super) fn lock_instance<'a>(
+    lock: &'a Lock,
+    take: &Id,
+    overlay: &Overlay,
+) -> Option<&'a Instance> {
     lock.take(take)?.instances.iter().find(|i| {
         matches!(&i.applied, Applied::Overlay { template, range, params }
             if *template == overlay.template

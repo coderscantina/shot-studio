@@ -102,6 +102,7 @@ actions!(
         PickLayout,
         EditSwitch,
         BuildLayout,
+        CopyText,
     ]
 );
 
@@ -619,7 +620,7 @@ impl EditScreen {
     }
 
     fn delete_selection(&mut self, _: &DeleteSelection, _: &mut Window, cx: &mut Context<Self>) {
-        if self.remove_picked(cx) || self.remove_picked_sound(cx) {
+        if self.remove_picked(cx) || self.remove_picked_sound(cx) || self.remove_picked_style(cx) {
             self.text.picked = None;
             return;
         }
@@ -968,6 +969,7 @@ impl Render for EditScreen {
                 cx.listener(|this, _: &EditCaption, window, cx| this.edit_caption_line(window, cx)),
             )
             .on_action(cx.listener(|this, _: &AddHighlight, _, cx| this.add_highlight(cx)))
+            .on_action(cx.listener(|this, _: &CopyText, _, cx| this.copy_text(cx)))
             .on_action(
                 cx.listener(|this, _: &PickPop, _, cx| this.toggle_picker(place::Picker::Pop, cx)),
             )
