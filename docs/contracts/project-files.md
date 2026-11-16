@@ -927,7 +927,7 @@ Markdown with a fixed shape, read line by line:
 - Text between a chapter heading and its first beat is the chapter's note, joined like a beat's script.
 - Blank lines separate paragraphs. Other headings (`###` and deeper), text before the first chapter and beats before the first chapter are errors with a line number.
 
-`shot-core` only reads this file. The script agent writes it as plain text.
+`shot-core` only reads this file. The app's script editor writes it as typed, and the script agent as plain text.
 
 ```markdown
 # Why we deploy on Fridays

@@ -89,6 +89,14 @@ form_urlencoded = "1.2.2"
 security-framework = "3.7.0"
 # FSEvents for `shot build --watch`, the version already in the lockfile.
 notify = "8.2.1"
+# The script editor's Markdown spans, without HTML output.
+pulldown-cmark = { version = "0.13.6", default-features = false }
+# Grapheme and word steps for the script editor's caret, the version already in the lockfile.
+unicode-segmentation = "1.13.3"
+# The channel the spell checker's answers come back on, the version already in the lockfile.
+futures = { version = "0.3.34", default-features = false, features = ["std"] }
+# NSSpellChecker for the script editor, on the same 0.3.2 train gpui-pre uses.
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "block2", "NSSpellChecker"] }
 
 [profile.release]
 debug = "line-tables-only"

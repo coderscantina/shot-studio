@@ -1,41 +1,55 @@
-//! The Script screen: the outline, sources and script checks, the script as a document, and the
+//! The Script screen: the outline, sources and script checks, the script in an editor, and the
 //! script agent.
 //!
-//! The script is read from the video's branch through `shot-board`. Claude changes it only by
-//! proposing ([0004]): each proposal shows inline where it applies as struck and inserted
-//! words with Accept (Tab), Reject (Esc) and Another take. Tab and Esc act only while a
-//! proposal is selected. Proposals named `hook-*` are alternative hooks, shown as options in
-//! the agent pane; picking one accepts it and rejects the others. The branch stays out of
-//! sight. Edit script opens the script in the default editor, and what is saved there lands on
-//! the branch when the window comes back. Continue to record marks the script ready and moves
-//! on.
+//! The editor writes `script.md` in the video's worktree as typed: on a pause of 750 ms, when
+//! focus leaves the screen, when the window loses focus and on quit, each time through an
+//! atomic write. The edit stays uncommitted until something commits it, as accepting a proposal
+//! does ([0037]). Every change parses the script again, so the outline, sources, checks and
+//! spoken length follow as you type, and the line `Script::parse` refuses is marked with its
+//! message. When the screen opens or the window comes back, a `script.md` changed on disk
+//! replaces the text as one undo step, unless the editor holds an edit not yet saved. A new
+//! video, with no script or only its title, starts from `# <title>` and one `## ` chapter.
+//!
+//! Claude changes the script only by proposing ([0004]): each proposal shows as a card above
+//! the editor with struck and inserted words, Accept (Tab), Reject (Esc) and Another take, and
+//! the selected one marks the lines it changes. Tab and Esc act only while a proposal is
+//! selected. Accept saves the editor first. Proposals named `hook-*` are alternative hooks,
+//! shown as options in the agent pane; picking one accepts it and rejects the others. The
+//! branch stays out of sight. Continue to record commits the script, marks it ready and moves
+//! on, since Record reads the script from the branch.
 //!
 //! [0004]: ../../../docs/decisions/0004-proposals-as-branches.md
+//! [0037]: ../../../docs/decisions/0037-a-worktree-per-video-branch.md
 
 pub mod proposal;
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use gpui::{
-    AnyElement, App, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla,
-    ScrollHandle, SharedString, Subscription, Window, actions, div, prelude::*, px,
+    App, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla,
+    SharedString, Subscription, Task, Window, actions, div, prelude::*, px,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use shot_board::Board;
-use shot_core::{Micros, Script, Status};
+use shot_core::{Micros, Script, Status, Video};
+use shot_editor::{Changed, EditorStyle, EditorView};
 use shot_mcp::agents::ScriptCommand;
 use shot_mcp::bridge::{Claude, Reach};
 use shot_ship::script_check::{self, ScriptFinding, ScriptReport};
 
 use crate::agent::{self, AgentRun};
 use crate::theme::*;
-use crate::ui::{ActionLook, Segment, icon, label, mono, pane, proposal_action, segmented};
+use crate::ui::{ActionLook, icon, label, mono, pane, proposal_action};
 use proposal::{Change, Piece};
 
 pub(crate) const CONTEXT: &str = "ScriptScreen";
 /// Proposals with this name prefix are alternative hooks.
 const HOOK: &str = "hook-";
+/// How long typing pauses before the script is saved.
+const SAVE_PAUSE: Duration = Duration::from_millis(750);
 
 actions!(script, [AcceptProposal, RejectProposal, ContinueToRecord]);
 
@@ -59,43 +73,43 @@ struct Source {
 pub struct ScriptScreen {
     repo: PathBuf,
     slug: String,
-    script: Result<Script, String>,
+    /// `script.md` in the video's worktree, which the editor saves to.
+    file: PathBuf,
+    editor: Entity<EditorView>,
+    /// `script.md` as last read from or written to disk, `None` while there is no file.
+    saved: Option<String>,
+    /// The editor holds an edit not written yet.
+    unsaved: bool,
+    save_later: Task<()>,
+    /// The script as last parsed without an error. While a line is wrong the outline, sources and
+    /// checks stay as they were, and the editor marks the line.
+    script: Option<Script>,
     report: Option<ScriptReport>,
     sources: Vec<Source>,
+    /// What each linked source is, read once per reload.
+    source_kinds: HashMap<String, String>,
     proposals: Vec<ScriptProposal>,
     /// The proposal Tab and Esc act on.
     selected: Option<String>,
-    full_script: bool,
     error: Option<String>,
     claude: Option<Claude>,
     run: Option<AgentRun>,
     input: Entity<InputState>,
-    /// The document, one child per chapter, so the outline can scroll to one.
-    scroll: ScrollHandle,
-    /// The line of the beat a check finding pointed at, shown marked.
-    target: Option<usize>,
-    /// The script on disk when Edit script opened it, to tell a saved edit from no edit.
-    opened: Option<String>,
     focus: FocusHandle,
-    _activation: Subscription,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl EventEmitter<ReadyToRecord> for ScriptScreen {}
 
+/// The screen gives the keys to the editor, inside the screen's own focus.
 impl Focusable for ScriptScreen {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus.clone()
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.editor.focus_handle(cx)
     }
 }
 
 impl ScriptScreen {
-    pub fn new(
-        repo: PathBuf,
-        slug: String,
-        full_script: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(repo: PathBuf, slug: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let input = cx.new(|cx| {
             InputState::new(window, cx).placeholder("Ask for changes, or type / for commands")
         });
@@ -106,126 +120,222 @@ impl ScriptScreen {
                     this.ask(&text, cx);
                 }
             }
-            InputEvent::Focus => {
-                this.selected = None;
-                cx.notify();
-            }
+            InputEvent::Focus => this.select(None, cx),
             _ => {}
         })
         .detach();
-        let activation = cx.observe_window_activation(window, |this, window, cx| {
-            if window.is_window_active() && this.opened.is_some() {
-                this.take_own_edit();
-                cx.notify();
+        let file = script_file(&repo, &slug);
+        let saved = fs::read_to_string(&file).ok();
+        let text = match saved.as_deref() {
+            Some(text) if !is_bare_title(text) => text.to_owned(),
+            Some(title) => format!("{}\n\n## ", title.trim_end()),
+            None => {
+                let title = fs::read_to_string(file.with_file_name("video.kdl"))
+                    .ok()
+                    .and_then(|kdl| Video::parse(&kdl).ok())
+                    .map_or_else(|| slug.clone(), |video| video.title);
+                format!("# {title}\n\n## ")
             }
-        });
+        };
+        let editor = cx.new(|cx| EditorView::new(&text, editor_style(), cx));
+        let focus = cx.focus_handle();
+        let subscriptions = vec![
+            cx.subscribe(&editor, |this, _, _: &Changed, cx| this.edited(cx)),
+            cx.on_focus(&editor.focus_handle(cx), window, |this, _, cx| {
+                this.select(None, cx)
+            }),
+            cx.on_focus_out(&focus, window, |this, _, _, cx| {
+                this.save(cx);
+            }),
+            cx.observe_window_activation(window, |this, window, cx| {
+                if window.is_window_active() {
+                    this.reload(cx);
+                } else {
+                    this.save(cx);
+                }
+                cx.notify();
+            }),
+            cx.on_app_quit(|this, cx| {
+                this.save(cx);
+                async {}
+            }),
+        ];
         let mut screen = Self {
             repo,
             slug,
-            script: Err(String::new()),
+            file,
+            editor,
+            saved,
+            unsaved: false,
+            save_later: Task::ready(()),
+            script: None,
             report: None,
             sources: Vec::new(),
+            source_kinds: HashMap::new(),
             proposals: Vec::new(),
             selected: None,
-            full_script,
             error: None,
             claude: Claude::find(),
             run: None,
             input,
-            scroll: ScrollHandle::new(),
-            target: None,
-            opened: None,
-            focus: cx.focus_handle(),
-            _activation: activation,
+            focus,
+            _subscriptions: subscriptions,
         };
-        screen.reload();
+        screen.reload(cx);
         screen
     }
 
-    /// Reads the script and its proposals from git.
-    pub fn reload(&mut self) {
-        let board = match Board::open(&self.repo) {
-            Ok(board) => board,
+    /// Reads `script.md` from disk and the proposals from git. A script changed on disk replaces
+    /// the editor's text unless the editor holds an unsaved edit.
+    pub fn reload(&mut self, cx: &mut Context<Self>) {
+        let on_disk = fs::read_to_string(&self.file).ok();
+        if on_disk != self.saved && !self.unsaved {
+            if let Some(text) = &on_disk {
+                self.editor
+                    .update(cx, |editor, cx| editor.set_text_external(text, cx));
+            }
+            self.saved = on_disk;
+        }
+        self.source_kinds.clear();
+        self.proposals = match Board::open(&self.repo) {
+            Ok(board) => board
+                .proposals(Some(&self.slug))
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|p| {
+                    let diff = board.proposal_diff(&p.slug, &p.name).ok()?;
+                    let file = diff.into_iter().find(|f| f.path == "script.md")?;
+                    Some(ScriptProposal {
+                        changes: proposal::changes(&file.patch),
+                        patch: file.patch,
+                        name: p.name,
+                        subject: p.subject,
+                    })
+                })
+                .collect(),
             Err(e) => {
-                self.script = Err(e.to_string());
-                return;
+                self.error = Some(e.to_string());
+                Vec::new()
             }
         };
-        let text = board.read_file(&self.slug, "script.md");
-        if let (Some(opened), Ok(Some(text))) = (&self.opened, &text) {
-            self.follow_branch(opened.clone(), text);
-        }
-        self.target = None;
-        self.script = match text {
-            Ok(Some(text)) => Script::parse(&text)
-                .map_err(|e| format!("Line {} of the script: {}", e.line, e.message)),
-            Ok(None) => Err(
-                "No script yet. Give Claude a brief to draft one, or write your own with Edit \
-                 script."
-                    .to_owned(),
-            ),
-            Err(e) => Err(e.to_string()),
-        };
-        self.report = self.script.as_ref().ok().map(script_check::check_script);
-        self.sources = self
-            .script
+        let selected = self
+            .selected
+            .take()
+            .filter(|s| self.proposals.iter().any(|p| &p.name == s));
+        self.select(selected, cx);
+        self.parse(cx);
+    }
+
+    /// Parses the editor's text: the outline, checks and sources follow it, and the line the
+    /// parser refuses is marked in the editor.
+    fn parse(&mut self, cx: &mut Context<Self>) {
+        let parsed = Script::parse(self.editor.read(cx).text());
+        let mark = parsed
             .as_ref()
-            .map(|script| {
-                let mut seen: Vec<Source> = Vec::new();
-                for target in script
-                    .chapters
-                    .iter()
-                    .flat_map(|c| &c.beats)
-                    .flat_map(|b| &b.sources)
-                {
-                    if seen.iter().any(|s| &s.target == target) {
-                        continue;
-                    }
-                    let kind = if target.starts_with("http") {
-                        "Link".to_owned()
-                    } else {
-                        match board.read_file(&self.slug, target) {
-                            Ok(Some(text)) => {
+            .err()
+            .map(|e| (e.line, SharedString::from(e.message.clone())));
+        self.editor
+            .update(cx, |editor, cx| editor.set_error(mark, cx));
+        let Ok(script) = parsed else {
+            return;
+        };
+        self.report = Some(script_check::check_script(&script));
+        let mut targets: Vec<String> = Vec::new();
+        for target in script
+            .chapters
+            .iter()
+            .flat_map(|c| &c.beats)
+            .flat_map(|b| &b.sources)
+        {
+            if !targets.contains(target) {
+                targets.push(target.clone());
+            }
+        }
+        self.script = Some(script);
+        // Git is read only for a source this reload has not seen yet, not on every key.
+        let board = targets
+            .iter()
+            .any(|t| !self.source_kinds.contains_key(t))
+            .then(|| Board::open(&self.repo).ok())
+            .flatten();
+        let sources = targets
+            .into_iter()
+            .map(|target| {
+                let kind = self
+                    .source_kinds
+                    .entry(target.clone())
+                    .or_insert_with(|| {
+                        if target.starts_with("http") {
+                            return "Link".to_owned();
+                        }
+                        match board.as_ref().map(|b| b.read_file(&self.slug, &target)) {
+                            Some(Ok(Some(text))) => {
                                 format!("Snapshot · {} words", text.split_whitespace().count())
                             }
                             _ => "Missing from sources/".to_owned(),
                         }
-                    };
-                    seen.push(Source {
-                        target: target.clone(),
-                        kind,
-                    });
-                }
-                seen
-            })
-            .unwrap_or_default();
-        self.proposals = board
-            .proposals(Some(&self.slug))
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|p| {
-                let diff = board.proposal_diff(&p.slug, &p.name).ok()?;
-                let file = diff.into_iter().find(|f| f.path == "script.md")?;
-                Some(ScriptProposal {
-                    changes: proposal::changes(&file.patch),
-                    patch: file.patch,
-                    name: p.name,
-                    subject: p.subject,
-                })
+                    })
+                    .clone();
+                Source { target, kind }
             })
             .collect();
-        if self
-            .selected
-            .as_ref()
-            .is_some_and(|s| !self.proposals.iter().any(|p| &p.name == s))
-        {
-            self.selected = None;
+        self.sources = sources;
+    }
+
+    /// The editor changed: parse again and save after a pause.
+    fn edited(&mut self, cx: &mut Context<Self>) {
+        self.unsaved = true;
+        self.parse(cx);
+        self.save_later = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SAVE_PAUSE).await;
+            this.update(cx, |this, cx| this.save(cx)).ok();
+        });
+        cx.notify();
+    }
+
+    /// Writes the editor's text to `script.md` if it holds an unsaved edit. False when the write
+    /// failed, with why in the screen's error.
+    fn save(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.unsaved {
+            return true;
         }
+        let text = self.editor.read(cx).text().to_owned();
+        match shot_fs::write(&self.file, &text) {
+            Ok(()) => {
+                self.saved = Some(text);
+                self.unsaved = false;
+                self.error = None;
+                true
+            }
+            Err(e) => {
+                self.error = Some(format!("The script was not saved: {e}"));
+                cx.notify();
+                false
+            }
+        }
+    }
+
+    /// Selects a proposal for Tab and Esc and marks the lines it changes in the editor.
+    fn select(&mut self, name: Option<String>, cx: &mut Context<Self>) {
+        let lines = name
+            .as_ref()
+            .and_then(|name| self.proposals.iter().find(|p| &p.name == name))
+            .map(|p| {
+                p.changes
+                    .iter()
+                    .map(|c| c.line..c.end.max(c.line + 1))
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.selected = name;
+        self.editor
+            .update(cx, |editor, cx| editor.set_highlights(lines, cx));
+        cx.notify();
     }
 
     fn ask(&mut self, text: &str, cx: &mut Context<Self>) {
         let command = match &self.script {
-            Ok(script) if !script.chapters.is_empty() => ScriptCommand::parse(text),
+            Some(script) if !script.chapters.is_empty() => ScriptCommand::parse(text),
             _ => ScriptCommand::Draft {
                 brief: text.trim().to_owned(),
             },
@@ -252,7 +362,7 @@ impl ScriptScreen {
                 agent::watch(
                     cx,
                     |this: &mut Self| this.run.as_mut(),
-                    |this, _| this.reload(),
+                    |this, cx| this.reload(cx),
                 );
             }
             Err(e) => self.error = Some(e),
@@ -260,7 +370,11 @@ impl ScriptScreen {
         cx.notify();
     }
 
+    /// Accepts a proposal after saving the editor, so the edit is committed before it.
     fn accept(&mut self, name: &str, cx: &mut Context<Self>) {
+        if !self.save(cx) {
+            return;
+        }
         let result = Board::open(&self.repo).and_then(|b| b.accept_proposal(&self.slug, name));
         if let Err(e) = result {
             self.error = Some(e.to_string());
@@ -277,7 +391,7 @@ impl ScriptScreen {
                 }
             }
         }
-        self.reload();
+        self.reload(cx);
         cx.notify();
     }
 
@@ -285,7 +399,7 @@ impl ScriptScreen {
         if let Err(e) = Board::open(&self.repo).and_then(|b| b.reject_proposal(&self.slug, name)) {
             self.error = Some(e.to_string());
         }
-        self.reload();
+        self.reload(cx);
         cx.notify();
     }
 
@@ -322,82 +436,19 @@ impl ScriptScreen {
         }
     }
 
-    /// The script in the video's folder, in its worktree once it is committed: the file Edit
-    /// script opens.
-    fn file(&self) -> PathBuf {
-        shot_mcp::style::video_folder(&self.repo, &self.slug)
-            .unwrap_or_else(|_| self.repo.join("videos").join(&self.slug))
-            .join("script.md")
-    }
-
-    /// Opens the script in the default editor, after putting the script this screen shows in
-    /// the folder, so the editor never opens an older one.
-    fn edit_script(&mut self, cx: &mut Context<Self>) {
-        let file = self.file();
-        let shown = Board::open(&self.repo)
-            .ok()
-            .and_then(|board| board.read_file(&self.slug, "script.md").ok().flatten());
-        let on_disk = fs::read_to_string(&file).ok();
-        let text = shown.or_else(|| on_disk.clone()).unwrap_or_default();
-        let opened = if on_disk.as_ref() == Some(&text) {
-            Ok(())
-        } else {
-            shot_fs::write(&file, &text)
-        }
-        .and_then(|()| {
-            std::process::Command::new("open")
-                .arg(&file)
-                .spawn()
-                .map(drop)
-        });
-        match opened {
-            Ok(()) => {
-                self.opened = Some(text);
-                self.error = None;
-            }
-            Err(e) => self.error = Some(format!("The script did not open in your editor: {e}")),
-        }
-        cx.notify();
-    }
-
-    /// Puts what was saved in the editor since it opened on the video's branch, as one commit of
-    /// the worktree's `script.md`.
-    fn take_own_edit(&mut self) {
-        let (Some(opened), Ok(text)) = (&self.opened, fs::read_to_string(self.file())) else {
-            return;
-        };
-        if *opened == text {
-            return;
-        }
-        let saved = Board::open(&self.repo).and_then(|board| {
-            board
-                .commit_video_files(&self.slug, &["script.md"], "📝 edit the script")
-                .map(drop)
-        });
-        match saved {
-            Ok(()) => {
-                self.opened = Some(text);
-                self.error = None;
-            }
-            Err(e) => self.error = Some(format!("Your edit did not reach the board: {e}")),
-        }
-        self.reload();
-    }
-
-    /// While the script is open in an editor, changes accepted here reach the file too, so the
-    /// next save there does not undo them. A file with unsaved-here edits stays as it is.
-    fn follow_branch(&mut self, opened: String, branch: &str) {
-        let file = self.file();
-        if opened != branch
-            && fs::read_to_string(&file).is_ok_and(|text| text == opened)
-            && shot_fs::write(&file, branch).is_ok()
-        {
-            self.opened = Some(branch.to_owned());
-        }
-    }
-
-    /// Marks the script ready, as moving its card to Ready to record does, and moves on.
+    /// Saves and commits the script, marks it ready, as moving its card to Ready to record does,
+    /// and moves on. Record reads the script from the branch.
     fn continue_to_record(&mut self, _: &ContinueToRecord, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.save(cx) {
+            return;
+        }
+        let committed = Board::open(&self.repo)
+            .and_then(|b| b.commit_video_files(&self.slug, &["script.md"], "📝 write the script"));
+        if let Err(e) = committed {
+            self.error = Some(format!("The script was not committed: {e}"));
+            cx.notify();
+            return;
+        }
         let status = crate::board::channel::status(&self.repo, &self.slug);
         if matches!(status, Some(Status::Ideas | Status::Scripting)) {
             let moved =
@@ -411,20 +462,10 @@ impl ScriptScreen {
         cx.emit(ReadyToRecord);
     }
 
-    /// Scrolls to the chapter of the beat on `line` and marks the beat.
-    fn show_beat(&mut self, line: usize, cx: &mut Context<Self>) {
-        let Ok(script) = &self.script else {
-            return;
-        };
-        if let Some(index) = script
-            .chapters
-            .iter()
-            .position(|c| c.beats.iter().any(|b| b.line == line))
-        {
-            self.scroll.scroll_to_top_of_item(index);
-            self.target = Some(line);
-            cx.notify();
-        }
+    /// Shows a 1-based line of the script at the top of the editor, with the caret on it.
+    fn show_line(&mut self, line: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.editor
+            .update(cx, |editor, cx| editor.go_to_line(line, window, cx));
     }
 
     fn outline(&self, cx: &mut Context<Self>) -> Div {
@@ -435,7 +476,7 @@ impl ScriptScreen {
             .flex_col()
             .gap(px(4.))
             .p(px(14.));
-        let Ok(script) = &self.script else {
+        let Some(script) = &self.script else {
             return column;
         };
         let report = self.report.as_ref().expect("a parsed script has a report");
@@ -478,9 +519,11 @@ impl ScriptScreen {
                                     .text_size(TEXT_SM)
                                     .text_color(MUTED),
                             )
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.scroll.scroll_to_top_of_item(index);
-                                cx.notify();
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                let text = this.editor.read(cx).text();
+                                if let Some(line) = chapter_lines(text).get(index).copied() {
+                                    this.show_line(line, window, cx);
+                                }
                             }))
                     }),
             )
@@ -567,9 +610,9 @@ impl ScriptScreen {
                         .when_some(line, |this, line| {
                             this.cursor_pointer()
                                 .hover(|s| s.text_color(STRONG))
-                                .on_click(
-                                    cx.listener(move |this, _, _, cx| this.show_beat(line, cx)),
-                                )
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.show_line(line, window, cx)
+                                }))
                         })
                 },
             ))
@@ -591,154 +634,40 @@ impl ScriptScreen {
             )
     }
 
+    /// The proposals as cards above the editor, which takes the rest of the pane.
     fn document(&self, cx: &mut Context<Self>) -> Div {
-        let entity = cx.entity();
-        let modes = vec![
-            Segment::new("Full script", self.full_script, {
-                let entity = entity.clone();
-                move |_, _, cx| {
-                    entity.update(cx, |this, cx| {
-                        this.full_script = true;
-                        cx.notify();
-                    })
-                }
-            }),
-            Segment::new("Beats", !self.full_script, move |_, _, cx| {
-                entity.update(cx, |this, cx| {
-                    this.full_script = false;
-                    cx.notify();
-                })
-            }),
-        ];
-        let body: Vec<AnyElement> = match &self.script {
-            Err(error) => vec![
-                div()
-                    .p(px(18.))
-                    .text_color(MUTED)
-                    .child(error.clone())
-                    .into_any_element(),
-            ],
-            Ok(script) => {
-                let report = self.report.as_ref().expect("a parsed script has a report");
-                let inline: Vec<(&ScriptProposal, &Change)> = self
-                    .proposals
-                    .iter()
-                    .filter(|p| !p.name.starts_with(HOOK))
-                    .flat_map(|p| p.changes.iter().map(move |c| (p, c)))
-                    .collect();
-                let mut shown = vec![false; inline.len()];
-                let mut sections = Vec::new();
-                // Each beat owns the lines from the end of the beat before it up to the next
-                // beat, so every changed line lands at exactly one beat.
-                let lines: Vec<usize> = script
-                    .chapters
-                    .iter()
-                    .flat_map(|c| &c.beats)
-                    .map(|b| b.line)
-                    .collect();
-                let mut beat_number = 0;
-                let mut start = 0;
-                for (chapter, length) in script.chapters.iter().zip(&report.chapters) {
-                    let mut section = div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(10.))
-                        .px(px(18.))
-                        .py(px(16.))
-                        .rounded(RADIUS_MD + px(2.))
-                        .bg(CARD)
-                        .child(
-                            div()
-                                .flex()
-                                .items_baseline()
-                                .gap(px(10.))
-                                .child(
-                                    div()
-                                        .text_size(px(17.))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(STRONG)
-                                        .child(chapter.title.clone()),
-                                )
-                                .child(div().flex_1())
-                                .child(mono(clock(*length)).text_size(TEXT_SM).text_color(MUTED)),
-                        );
-                    for beat in &chapter.beats {
-                        beat_number += 1;
-                        let end = lines.get(beat_number).copied().unwrap_or(usize::MAX);
-                        let here: Vec<usize> = (0..inline.len())
-                            .filter(|&i| !shown[i] && (start..end).contains(&inline[i].1.line))
-                            .collect();
-                        // A beat a proposal replaces shows struck inside the proposal instead.
-                        let replaced = inline
-                            .iter()
-                            .any(|(_, c)| (c.line..c.end).contains(&beat.line));
-                        if !replaced {
-                            let marked = self.target == Some(beat.line);
-                            section = section.child(beat_view(beat, self.full_script, marked));
-                        }
-                        for i in here {
-                            shown[i] = true;
-                            let (proposal, change) = inline[i];
-                            section = section.child(self.proposal_card(proposal, change, cx));
-                        }
-                        start = end;
-                    }
-                    sections.push(section.into_any_element());
-                }
-                for i in (0..inline.len()).filter(|&i| !shown[i]) {
-                    let (proposal, change) = inline[i];
-                    sections.push(self.proposal_card(proposal, change, cx).into_any_element());
-                }
-                sections
-            }
-        };
+        let cards: Vec<_> = self
+            .proposals
+            .iter()
+            .filter(|p| !p.name.starts_with(HOOK))
+            .flat_map(|p| p.changes.iter().map(move |c| (p, c)))
+            .map(|(proposal, change)| self.proposal_card(proposal, change, cx).into_any_element())
+            .collect();
         pane()
             .flex_1()
+            .min_w_0()
             .flex()
             .flex_col()
             .gap(px(12.))
-            .p(px(16.))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(14.))
-                    .child(segmented("script-mode", SUNK, modes).w(px(170.)))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(14.))
-                            .text_color(MUTED)
-                            .child("Beats for reactions, full script for tours"),
-                    )
-                    .child(
-                        proposal_action(
-                            "edit-script",
-                            "Edit script",
-                            Some("edit"),
-                            None,
-                            ActionLook::Plain,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| this.edit_script(cx))),
-                    ),
-            )
+            .pt(px(16.))
             .when_some(self.error.clone(), |this, error| {
-                this.child(div().text_color(CUT_TEXT).child(error))
+                this.child(div().px(px(16.)).text_color(CUT_TEXT).child(error))
             })
-            .child(
-                div()
-                    .id("script-document")
-                    .track_scroll(&self.scroll)
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.))
-                    .children(body),
-            )
+            .when(!cards.is_empty(), |this| {
+                this.child(
+                    div()
+                        .id("script-proposals")
+                        .flex_none()
+                        .max_h(px(360.))
+                        .overflow_y_scroll()
+                        .px(px(16.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.))
+                        .children(cards),
+                )
+            })
+            .child(div().flex_1().min_h_0().child(self.editor.clone()))
     }
 
     fn proposal_card(
@@ -795,9 +724,8 @@ impl ScriptScreen {
             .on_click(cx.listener({
                 let name = name.clone();
                 move |this, _, window, cx| {
-                    this.selected = Some(name.clone());
                     window.focus(&this.focus, cx);
-                    cx.notify();
+                    this.select(Some(name.clone()), cx);
                 }
             }))
             .child(
@@ -869,7 +797,7 @@ impl ScriptScreen {
                 .flex_col()
                 .gap(px(12.))
                 .when(self.run.is_none() && hooks.is_empty(), |this| {
-                    let drafted = self.script.as_ref().is_ok_and(|s| !s.chapters.is_empty());
+                    let drafted = self.script.as_ref().is_some_and(|s| !s.chapters.is_empty());
                     this.child(div().text_color(MUTED).line_height(px(22.)).child(if drafted {
                         "Ask for a change below, or pick a command. Claude's changes show up \
                          in the script as suggestions you accept or reject."
@@ -989,42 +917,6 @@ impl Render for ScriptScreen {
     }
 }
 
-/// A beat, `marked` with the warning tint when a check finding pointed at it.
-fn beat_view(beat: &shot_core::Beat, full_script: bool, marked: bool) -> Div {
-    let visual = beat.text.to_lowercase().starts_with("b-roll");
-    div()
-        .flex()
-        .gap(px(10.))
-        .when(marked, |this| {
-            this.mx(px(-8.))
-                .px(px(8.))
-                .my(px(-4.))
-                .py(px(4.))
-                .rounded(RADIUS_SM)
-                .bg(WARN_TINT)
-        })
-        .child(
-            div()
-                .flex_none()
-                .size(px(6.))
-                .mt(px(9.))
-                .rounded_full()
-                .bg(if marked { WARN } else { FAINT }),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(6.))
-                .line_height(px(24.))
-                .text_color(if visual { MUTED } else { BODY })
-                .child(beat.text.clone())
-                .when(full_script && !beat.script.is_empty(), |this| {
-                    this.child(div().text_color(MUTED).child(beat.script.clone()))
-                }),
-        )
-}
-
 /// One line per problem with the line of the beat it points at, beats without a source counted
 /// together.
 fn summarize(findings: &[ScriptFinding]) -> Vec<(String, Option<usize>)> {
@@ -1073,6 +965,55 @@ fn summarize(findings: &[ScriptFinding]) -> Vec<(String, Option<usize>)> {
     out
 }
 
+/// `script.md` in the video's folder, in its worktree once the video has a branch.
+fn script_file(repo: &std::path::Path, slug: &str) -> PathBuf {
+    shot_mcp::style::video_folder(repo, slug)
+        .unwrap_or_else(|_| repo.join("videos").join(slug))
+        .join("script.md")
+}
+
+/// Whether a script is only its `# title` line, as a new video's is.
+fn is_bare_title(text: &str) -> bool {
+    let text = text.trim();
+    text.starts_with("# ") && !text.contains('\n')
+}
+
+/// The 1-based lines of the chapter headings, in order.
+fn chapter_lines(text: &str) -> Vec<usize> {
+    text.lines()
+        .enumerate()
+        .filter(|(_, line)| line.trim().starts_with("## "))
+        .map(|(index, _)| index + 1)
+        .collect()
+}
+
+/// The editor in the app's type and colors.
+fn editor_style() -> EditorStyle {
+    EditorStyle {
+        font: SANS.into(),
+        mono: MONO.into(),
+        size: TEXT_BASE,
+        leading: 1.6,
+        title_size: px(26.),
+        chapter_size: px(19.),
+        heading: STRONG.into(),
+        text: TEXT.into(),
+        body: BODY.into(),
+        quiet: MUTED.into(),
+        link: ACCENT.into(),
+        code_background: RAISED.into(),
+        caret: ACCENT.into(),
+        selection: SELECTION.into(),
+        highlight: Hsla::from(ACCENT).opacity(0.08),
+        error: CUT_TEXT.into(),
+        error_background: CUT_TINT.into(),
+        misspelled: CUT.into(),
+        thumb: FAINT.into(),
+        max_width: px(720.),
+        padding: px(24.),
+    }
+}
+
 fn source_name(target: &str) -> String {
     target
         .strip_prefix("https://")
@@ -1093,6 +1034,13 @@ fn spoken_seconds(words: isize) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_video_is_a_bare_title_and_a_drafted_one_is_not() {
+        assert!(is_bare_title("# Agents that write your changelog\n"));
+        assert!(!is_bare_title("# Title\n\n## Hook\n"));
+        assert_eq!(chapter_lines("# Title\n\n## Hook\n\n- a\n## Wrap"), [3, 6]);
+    }
 
     #[test]
     fn a_finding_names_the_chapter_and_points_at_the_first_beat() {
