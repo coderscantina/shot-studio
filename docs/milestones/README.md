@@ -20,7 +20,7 @@ Mark a milestone complete only after its acceptance criteria pass and an evidenc
 | 13 | [Takes, scenes and studio tools](13-takes-scenes-and-studio-tools.md) | 10, 11, 12 | All roles | Built on `m13/integration`; decisions 0026 to 0030 and 0032 wait for Mike. [Evidence](../evidence/m13-takes-scenes-and-studio-tools.md) |
 | 14 | [Hardening from FilmCraft and EffectCraft](14-hardening-from-filmcraft-and-effectcraft.md) | 13 | All roles | Built on `m14/integration`; decisions 0033 and 0034 wait for Mike. [Evidence](../evidence/m14-hardening.md) |
 | 15 | [One video model, one transition type, themes as files](15-one-video-model-transitions-and-themes.md) | 14 | All roles | Built on `m15/integration`; the app check and the quiet bench are in the report. [Evidence](../evidence/m15-one-video-model.md) |
-| 16 | [Script editor and clip ingest](16-script-editor-and-clip-ingest.md) | 15 | App, Media, Agents | In progress on `m16/integration`; decisions 0038 and 0039 wait for Mike |
+| 16 | [Script editor and clip ingest](16-script-editor-and-clip-ingest.md) | 15 | App, Media, Agents | Built on `m16/integration`; decisions 0038 and 0039 wait for Mike, app import and drop and HDR tone mapping unverified. [Evidence](../evidence/m16-script-editor-and-clip-ingest.md) |
 | 09 | [Release gate](09-release-gate.md) | 01 to 08, 10 to 12 | Core | Items 1 to 3 and 6 built (release.sh, workflow, bundle, cask, credits); signing waits for Mike's Apple secrets. [Evidence](../evidence/m09/release-machinery.md) |
 
 Milestone 02 is a go/no-go gate. If gpui can't show a 4K60 VideoToolbox decode without a CPU copy, stop and bring the measurements to Mike before 03 starts, because the UI choice changes.
@@ -58,6 +58,8 @@ Settled on 2026-11-08: every Proposed record (0011, 0013 to 0025) adopted, the l
 
 Found by agents and waiting for a task. Remove a line when it's fixed.
 
+- After milestone 16: a change on disk while the script editor holds an unsaved edit is overwritten by the next save; Tab with no proposal selected moves focus out of the editor; a script that never parsed makes the agent draft from scratch. IME, outside-change reload, save on quit and mouse-drag selection in the editor are untested.
+- Ingest: HDR to SDR tone mapping is unproven, Import clip and file drop were never driven in the app (the control socket cannot switch screens or drop files), a 4K ingest peaks at about 2 GB, there is no MCP ingest tool, and a phone screen recording cannot be ingested as `screen.mp4`.
 - After milestone 15: `shot style scope` and the MCP propose and reach tools still read branch tips, not worktrees; an idea's default `script.md`, `format.kdl` and `cut.lock` stay uncommitted in its worktree; `shot migrate` and `style build --all` create a worktree for every video, shipped ones too; `move_into` leaves the moved text files untracked in the main checkout. A worktree whose branch was deleted and whose only changes are staged can be removed.
 - `shot caption-fix` refuses an old video instead of migrating it, and `shot overlays b-roll` cannot fill a slot a rule placed. `README.md` and the technical briefing still name `shot autocut`.
 - The painter opens the incoming side of a transition half a second early on the render thread; hiding that pause fully needs a decode thread in `shot-media`.
