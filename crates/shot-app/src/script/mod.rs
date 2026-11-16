@@ -10,33 +10,44 @@
 //! replaces the text as one undo step, unless the editor holds an edit not yet saved. A new
 //! video, with no script or only its title, starts from `# <title>` and one `## ` chapter.
 //!
-//! Claude changes the script only by proposing ([0004]): each proposal shows as a card above
-//! the editor with struck and inserted words, Accept (Tab), Reject (Esc) and Another take, and
-//! the selected one marks the lines it changes. Tab and Esc act only while a proposal is
-//! selected. Accept saves the editor first. Proposals named `hook-*` are alternative hooks,
-//! shown as options in the agent pane; picking one accepts it and rejects the others. The
-//! branch stays out of sight. Continue to record commits the script, marks it ready and moves
-//! on, since Record reads the script from the branch.
+//! Claude changes the script only by proposing ([0004]). A run first saves the editor and
+//! commits the person's script edits, so every proposal branches from the text on screen
+//! ([0038]); the editor stays editable while Claude works, and Stop (⌘.) ends the run. Each
+//! proposal shows as cards above the editor, one per chapter it changes, with struck and
+//! inserted words, the spoken time it adds or saves, Accept (Tab), Reject (Esc) and Another
+//! take; the selected one marks the lines it changes. ⌥↓ and ⌥↑ select the next or previous
+//! suggestion; Tab and Esc act only while one is selected. Accept saves the editor, and on
+//! lines the person changed too the proposal wins; the editor takes the new text as one step
+//! that one Undo takes back. Proposals named `hook-*` are alternative hooks, shown side by side
+//! with their full text and spoken length: Use this hook accepts an open draft first, then the
+//! hook, and rejects the other hooks; Reject all and Another set drop them, the second asking
+//! again. ⌘J puts the caret in the prompt box. The branch stays out of sight. Continue to record commits the script, marks it ready
+//! and moves on, since Record reads the script from the branch.
+//!
+//! The agent pane keeps every run of the session in order as a conversation ([`agent`]).
 //!
 //! [0004]: ../../../docs/decisions/0004-proposals-as-branches.md
 //! [0037]: ../../../docs/decisions/0037-a-worktree-per-video-branch.md
+//! [0038]: ../../../docs/decisions/0038-script-editor-from-druck.md
 
 pub mod proposal;
 
 use std::collections::HashMap;
 use std::fs;
+use std::ops::Range;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use gpui::{
-    App, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla,
-    SharedString, Subscription, Task, Window, actions, div, prelude::*, px,
+    App, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle,
+    Hsla, ScrollHandle, SharedString, StrikethroughStyle, StyledText, Subscription, Task, Window,
+    actions, div, prelude::*, px, relative,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use shot_board::Board;
-use shot_core::{Micros, Script, Status, Video};
+use shot_core::{Micros, Script, ScriptChapter, Status, Video};
 use shot_editor::{Changed, EditorStyle, EditorView};
-use shot_mcp::agents::ScriptCommand;
+use shot_mcp::agents::{DRAFT, HOOK, ScriptCommand};
 use shot_mcp::bridge::{Claude, Reach};
 use shot_ship::script_check::{self, ScriptFinding, ScriptReport};
 
@@ -46,12 +57,23 @@ use crate::ui::{ActionLook, icon, label, mono, pane, proposal_action};
 use proposal::{Change, Piece};
 
 pub(crate) const CONTEXT: &str = "ScriptScreen";
-/// Proposals with this name prefix are alternative hooks.
-const HOOK: &str = "hook-";
 /// How long typing pauses before the script is saved.
 const SAVE_PAUSE: Duration = Duration::from_millis(750);
 
-actions!(script, [AcceptProposal, RejectProposal, ContinueToRecord]);
+actions!(
+    script,
+    [
+        AcceptProposal,
+        RejectProposal,
+        NextSuggestion,
+        PreviousSuggestion,
+        RejectHooks,
+        AnotherSet,
+        FocusPrompt,
+        StopRun,
+        ContinueToRecord
+    ]
+);
 
 /// The script is ready and the person moves on to Record.
 pub struct ReadyToRecord;
@@ -62,6 +84,14 @@ struct ScriptProposal {
     subject: String,
     patch: String,
     changes: Vec<Change>,
+    /// Set for an alternative hook.
+    hook: Option<HookOption>,
+}
+
+/// A hook proposal's first chapter as the proposal has it, and how long it takes to say.
+struct HookOption {
+    chapter: ScriptChapter,
+    spoken: Micros,
 }
 
 /// A source the beats link, and what it is.
@@ -93,7 +123,9 @@ pub struct ScriptScreen {
     selected: Option<String>,
     error: Option<String>,
     claude: Option<Claude>,
-    run: Option<AgentRun>,
+    /// Every run of the session, oldest first.
+    runs: Vec<AgentRun>,
+    chat: ScrollHandle,
     input: Entity<InputState>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
@@ -113,16 +145,20 @@ impl ScriptScreen {
         let input = cx.new(|cx| {
             InputState::new(window, cx).placeholder("Ask for changes, or type / for commands")
         });
-        cx.subscribe(&input, |this, input, event: &InputEvent, cx| match event {
-            InputEvent::PressEnter { .. } => {
-                let text = input.read(cx).value().to_string();
-                if !text.trim().is_empty() {
-                    this.ask(&text, cx);
+        cx.subscribe_in(
+            &input,
+            window,
+            |this, input, event: &InputEvent, window, cx| match event {
+                InputEvent::PressEnter { .. } => {
+                    let text = input.read(cx).value().to_string();
+                    if !text.trim().is_empty() && this.ask(&text, cx) {
+                        input.update(cx, |input, cx| input.set_value("", window, cx));
+                    }
                 }
-            }
-            InputEvent::Focus => this.select(None, cx),
-            _ => {}
-        })
+                InputEvent::Focus => this.select(None, cx),
+                _ => {}
+            },
+        )
         .detach();
         let file = script_file(&repo, &slug);
         let saved = fs::read_to_string(&file).ok();
@@ -176,7 +212,8 @@ impl ScriptScreen {
             selected: None,
             error: None,
             claude: Claude::find(),
-            run: None,
+            runs: Vec::new(),
+            chat: ScrollHandle::new(),
             input,
             focus,
             _subscriptions: subscriptions,
@@ -205,11 +242,17 @@ impl ScriptScreen {
                 .filter_map(|p| {
                     let diff = board.proposal_diff(&p.slug, &p.name).ok()?;
                     let file = diff.into_iter().find(|f| f.path == "script.md")?;
+                    let hook = p
+                        .name
+                        .starts_with(HOOK)
+                        .then(|| hook_option(&board, &p.slug, &p.name))
+                        .flatten();
                     Some(ScriptProposal {
                         changes: proposal::changes(&file.patch),
                         patch: file.patch,
                         name: p.name,
                         subject: p.subject,
+                        hook,
                     })
                 })
                 .collect(),
@@ -315,84 +358,147 @@ impl ScriptScreen {
         }
     }
 
-    /// Selects a proposal for Tab and Esc and marks the lines it changes in the editor.
+    /// Selects a proposal for Tab and Esc and marks the lines it changes in the editor, for a
+    /// hook the first chapter.
     fn select(&mut self, name: Option<String>, cx: &mut Context<Self>) {
-        let lines = name
+        let lines = match name
             .as_ref()
             .and_then(|name| self.proposals.iter().find(|p| &p.name == name))
-            .map(|p| {
-                p.changes
-                    .iter()
-                    .map(|c| c.line..c.end.max(c.line + 1))
-                    .collect()
-            })
-            .unwrap_or_default();
+        {
+            Some(p) if p.hook.is_some() => first_chapter(self.editor.read(cx).text())
+                .into_iter()
+                .collect(),
+            Some(p) => p
+                .changes
+                .iter()
+                .map(|c| c.line..c.end.max(c.line + 1))
+                .collect(),
+            None => Vec::new(),
+        };
         self.selected = name;
         self.editor
             .update(cx, |editor, cx| editor.set_highlights(lines, cx));
         cx.notify();
     }
 
-    fn ask(&mut self, text: &str, cx: &mut Context<Self>) {
+    /// Sends what the person typed. False when no run started.
+    fn ask(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
         let command = match &self.script {
             Some(script) if !script.chapters.is_empty() => ScriptCommand::parse(text),
             _ => ScriptCommand::Draft {
                 brief: text.trim().to_owned(),
             },
         };
-        self.start(text.trim().to_owned(), command, cx);
+        self.start(text.trim().to_owned(), command, cx)
     }
 
-    fn start(&mut self, request: String, command: ScriptCommand, cx: &mut Context<Self>) {
+    fn running(&self) -> bool {
+        self.runs.last().is_some_and(AgentRun::running)
+    }
+
+    /// Starts a run after saving the editor and committing the person's script edits, so its
+    /// proposals branch from the text on screen. False when it did not start.
+    fn start(&mut self, request: String, command: ScriptCommand, cx: &mut Context<Self>) -> bool {
         let Some(claude) = self.claude.clone() else {
-            return;
+            return false;
         };
-        if self.run.as_ref().is_some_and(AgentRun::running) {
-            return;
+        if self.running() || !self.save(cx) {
+            return false;
         }
-        match AgentRun::start(
+        let committed = Board::open(&self.repo).and_then(|b| {
+            b.commit_video_files(&self.slug, &["script.md"], "📝 edits before asking Claude")
+        });
+        if let Err(e) = committed.or_else(|e| match e {
+            shot_board::Error::NoWorktree(_) => Ok(None),
+            e => Err(e),
+        }) {
+            self.error = Some(format!("The script was not committed: {e}"));
+            cx.notify();
+            return false;
+        }
+        let started = AgentRun::start(
             claude,
             &self.repo,
             request,
             command.prompt(&self.slug),
             Reach::Web,
-        ) {
+        );
+        let ok = started.is_ok();
+        match started {
             Ok(run) => {
-                self.run = Some(run);
+                self.runs.push(run);
+                self.chat.scroll_to_bottom();
                 agent::watch(
                     cx,
-                    |this: &mut Self| this.run.as_mut(),
-                    |this, cx| this.reload(cx),
+                    |this: &mut Self| this.runs.last_mut(),
+                    |this, cx| {
+                        this.chat.scroll_to_bottom();
+                        this.reload(cx);
+                    },
                 );
             }
             Err(e) => self.error = Some(e),
         }
         cx.notify();
+        ok
     }
 
-    /// Accepts a proposal after saving the editor, so the edit is committed before it.
+    /// Accepts a proposal after saving the editor. On lines the person changed too, the proposal
+    /// wins. Using a hook first accepts an open draft, which the hooks build on, and rejects the
+    /// other hooks. The editor takes the new text as one step that one Undo takes back.
     fn accept(&mut self, name: &str, cx: &mut Context<Self>) {
         if !self.save(cx) {
             return;
         }
-        let result = Board::open(&self.repo).and_then(|b| b.accept_proposal(&self.slug, name));
-        if let Err(e) = result {
-            self.error = Some(e.to_string());
-        } else {
-            self.error = None;
-            if name.starts_with(HOOK) {
-                for other in self
-                    .proposals
-                    .iter()
-                    .filter(|p| p.name.starts_with(HOOK) && p.name != name)
-                {
-                    let _ = Board::open(&self.repo)
-                        .and_then(|b| b.reject_proposal(&self.slug, &other.name));
-                }
+        let hook = self.hook_names().any(|hook| hook == name);
+        let draft = hook && self.proposals.iter().any(|p| p.name == DRAFT);
+        let others: Vec<String> = self
+            .hook_names()
+            .filter(|other| hook && *other != name)
+            .map(str::to_owned)
+            .collect();
+        let result = Board::open(&self.repo).and_then(|board| {
+            if draft {
+                board.accept_proposal_over_conflicts(&self.slug, DRAFT)?;
             }
+            board.accept_proposal_over_conflicts(&self.slug, name)?;
+            others
+                .iter()
+                .try_for_each(|other| board.reject_proposal(&self.slug, other))
+        });
+        self.error = result.err().map(|e| e.to_string());
+        if let Ok(text) = fs::read_to_string(&self.file) {
+            self.editor
+                .update(cx, |editor, cx| editor.set_text_accepted(&text, cx));
+            self.saved = Some(text);
         }
         self.reload(cx);
-        cx.notify();
+    }
+
+    fn hook_names(&self) -> impl Iterator<Item = &str> {
+        self.proposals
+            .iter()
+            .filter(|p| p.hook.is_some())
+            .map(|p| p.name.as_str())
+    }
+
+    fn reject_hooks(&mut self, cx: &mut Context<Self>) {
+        let hooks: Vec<String> = self.hook_names().map(str::to_owned).collect();
+        let result = Board::open(&self.repo).and_then(|board| {
+            hooks
+                .iter()
+                .try_for_each(|hook| board.reject_proposal(&self.slug, hook))
+        });
+        if let Err(e) = result {
+            self.error = Some(e.to_string());
+        }
+        self.reload(cx);
+    }
+
+    /// Drops the hooks and asks for three new ones.
+    fn another_set(&mut self, cx: &mut Context<Self>) {
+        self.reject_hooks(cx);
+        self.start("Another set of hooks".to_owned(), ScriptCommand::Hooks, cx);
     }
 
     fn reject(&mut self, name: &str, cx: &mut Context<Self>) {
@@ -414,7 +520,7 @@ impl ScriptScreen {
         };
         self.reject(name, cx);
         self.start(
-            "Another take".to_owned(),
+            format!("Another take on {name}"),
             ScriptCommand::AnotherTake {
                 proposal: name.to_owned(),
                 diff: patch,
@@ -423,17 +529,82 @@ impl ScriptScreen {
         );
     }
 
+    /// Tab accepts the selected suggestion and gives the keys back to the editor, so Undo
+    /// takes it back.
     fn on_accept(&mut self, _: &AcceptProposal, window: &mut Window, cx: &mut Context<Self>) {
         match self.selected.clone() {
-            Some(name) => self.accept(&name, cx),
+            Some(name) => {
+                self.accept(&name, cx);
+                window.focus(&self.editor.focus_handle(cx), cx);
+            }
             None => window.focus_next(cx),
         }
     }
 
-    fn on_reject(&mut self, _: &RejectProposal, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(name) = self.selected.clone() {
+    /// Esc rejects the selected suggestion, on a hook every hook, since they are one choice.
+    fn on_reject(&mut self, _: &RejectProposal, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(name) = self.selected.clone() else {
+            return;
+        };
+        if self.hook_names().any(|hook| hook == name) {
+            self.reject_hooks(cx);
+        } else {
             self.reject(&name, cx);
         }
+        window.focus(&self.editor.focus_handle(cx), cx);
+    }
+
+    fn on_focus_prompt(&mut self, _: &FocusPrompt, window: &mut Window, cx: &mut Context<Self>) {
+        self.input.update(cx, |input, cx| input.focus(window, cx));
+    }
+
+    fn on_next(&mut self, _: &NextSuggestion, window: &mut Window, cx: &mut Context<Self>) {
+        self.step_selection(true, window, cx);
+    }
+
+    fn on_previous(&mut self, _: &PreviousSuggestion, window: &mut Window, cx: &mut Context<Self>) {
+        self.step_selection(false, window, cx);
+    }
+
+    /// Selects the next or previous suggestion in the order they show, hooks first, and takes
+    /// the keys from the editor so Tab and Esc reach it.
+    fn step_selection(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let names: Vec<String> = self
+            .hook_names()
+            .chain(self.card_proposals().map(|p| p.name.as_str()))
+            .map(str::to_owned)
+            .collect();
+        let Some(last) = names.len().checked_sub(1) else {
+            return;
+        };
+        let at = (self.selected.as_ref()).and_then(|s| names.iter().position(|n| n == s));
+        let next = match (at, forward) {
+            (None, true) => 0,
+            (None, false) => last,
+            (Some(i), true) => (i + 1) % names.len(),
+            (Some(i), false) => i.checked_sub(1).unwrap_or(last),
+        };
+        window.focus(&self.focus, cx);
+        self.select(Some(names[next].clone()), cx);
+    }
+
+    fn on_reject_hooks(&mut self, _: &RejectHooks, _: &mut Window, cx: &mut Context<Self>) {
+        self.reject_hooks(cx);
+    }
+
+    fn on_another_set(&mut self, _: &AnotherSet, _: &mut Window, cx: &mut Context<Self>) {
+        self.another_set(cx);
+    }
+
+    fn on_stop(&mut self, _: &StopRun, _: &mut Window, _: &mut Context<Self>) {
+        if let Some(run) = self.runs.last() {
+            run.stop();
+        }
+    }
+
+    /// The proposals that show as cards: every one but the hooks.
+    fn card_proposals(&self) -> impl Iterator<Item = &ScriptProposal> {
+        self.proposals.iter().filter(|p| p.hook.is_none())
     }
 
     /// Saves and commits the script, marks it ready, as moving its card to Ready to record does,
@@ -634,14 +805,26 @@ impl ScriptScreen {
             )
     }
 
-    /// The proposals as cards above the editor, which takes the rest of the pane.
+    /// The hooks to pick from and the proposals as cards above the editor, which takes the rest
+    /// of the pane.
     fn document(&self, cx: &mut Context<Self>) -> Div {
+        let text = self.editor.read(cx).text().to_owned();
         let cards: Vec<_> = self
+            .card_proposals()
+            .flat_map(|p| p.changes.iter().map(move |c| (p, c)))
+            .map(|(proposal, change)| {
+                let chapter = change
+                    .chapter
+                    .clone()
+                    .or_else(|| chapter_at(&text, change.line));
+                self.proposal_card(proposal, change, chapter, cx)
+                    .into_any_element()
+            })
+            .collect();
+        let hooks: Vec<_> = self
             .proposals
             .iter()
-            .filter(|p| !p.name.starts_with(HOOK))
-            .flat_map(|p| p.changes.iter().map(move |c| (p, c)))
-            .map(|(proposal, change)| self.proposal_card(proposal, change, cx).into_any_element())
+            .filter_map(|p| Some((p, p.hook.as_ref()?)))
             .collect();
         pane()
             .flex_1()
@@ -653,27 +836,149 @@ impl ScriptScreen {
             .when_some(self.error.clone(), |this, error| {
                 this.child(div().px(px(16.)).text_color(CUT_TEXT).child(error))
             })
-            .when(!cards.is_empty(), |this| {
+            .when(!cards.is_empty() || !hooks.is_empty(), |this| {
                 this.child(
                     div()
                         .id("script-proposals")
                         .flex_none()
-                        .max_h(px(360.))
+                        .max_h(relative(0.6))
                         .overflow_y_scroll()
                         .px(px(16.))
                         .flex()
                         .flex_col()
                         .gap(px(8.))
+                        .when(!hooks.is_empty(), |this| {
+                            this.child(self.hook_choice(hooks, cx))
+                        })
                         .children(cards),
                 )
             })
             .child(div().flex_1().min_h_0().child(self.editor.clone()))
     }
 
+    /// The hook options side by side, each with its full text and spoken length, and Reject
+    /// all and Another set under them.
+    fn hook_choice(
+        &self,
+        hooks: Vec<(&ScriptProposal, &HookOption)>,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let options = hooks.into_iter().map(|(proposal, hook)| {
+            let name = proposal.name.clone();
+            let selected = self.selected.as_deref() == Some(name.as_str());
+            let letter = name.strip_prefix(HOOK).unwrap_or(&name).to_uppercase();
+            let paragraphs = (!hook.chapter.note.is_empty())
+                .then(|| div().text_color(BODY).child(hook.chapter.note.clone()))
+                .into_iter()
+                .chain(hook.chapter.beats.iter().flat_map(|beat| {
+                    [
+                        Some(div().text_color(TEXT).child(beat.text.clone())),
+                        (!beat.script.is_empty())
+                            .then(|| div().text_color(BODY).child(beat.script.clone())),
+                    ]
+                    .into_iter()
+                    .flatten()
+                }));
+            div()
+                .id(SharedString::from(format!("hook-option-{name}")))
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .px(px(14.))
+                .py(px(12.))
+                .rounded(RADIUS_MD)
+                .bg(SUNK)
+                .border_1()
+                .border_color(if selected {
+                    Hsla::from(ACCENT).opacity(0.5)
+                } else {
+                    Hsla::from(SUNK)
+                })
+                .cursor_pointer()
+                .on_click(cx.listener({
+                    let name = name.clone();
+                    move |this, _, window, cx| {
+                        window.focus(&this.focus, cx);
+                        this.select(Some(name.clone()), cx);
+                    }
+                }))
+                .child(
+                    div()
+                        .flex()
+                        .justify_between()
+                        .child(label(format!("Hook {letter}")))
+                        .child(
+                            mono(clock(hook.spoken))
+                                .text_size(TEXT_SM)
+                                .text_color(MUTED),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.))
+                        .line_height(px(22.))
+                        .children(paragraphs),
+                )
+                .child(
+                    div().flex().child(
+                        proposal_action(
+                            format!("use-{name}"),
+                            "Use this hook",
+                            None,
+                            selected.then_some("Tab"),
+                            if selected {
+                                ActionLook::Accent
+                            } else {
+                                ActionLook::Plain
+                            },
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| this.accept(&name, cx))),
+                    ),
+                )
+        });
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(label("Claude suggests · pick a hook"))
+            .child(div().flex().gap(px(8.)).children(options))
+            .child(
+                div()
+                    .flex()
+                    .gap(px(8.))
+                    .child(
+                        proposal_action(
+                            "reject-hooks",
+                            "Reject all",
+                            None,
+                            Some("Esc"),
+                            ActionLook::Plain,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.reject_hooks(cx))),
+                    )
+                    .child(
+                        proposal_action(
+                            "another-set",
+                            "Another set",
+                            Some("again"),
+                            None,
+                            ActionLook::Quiet,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.another_set(cx))),
+                    ),
+            )
+    }
+
     fn proposal_card(
         &self,
         proposal: &ScriptProposal,
         change: &Change,
+        chapter: Option<String>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let name = proposal.name.clone();
@@ -690,18 +995,17 @@ impl ScriptScreen {
             -1 => format!("adds {:.1} s", spoken_seconds(-saved)),
             _ => String::new(),
         };
-        let pieces = change.pieces.iter().map(|piece| match piece {
-            Piece::Same(text) => div().text_color(BODY).child(text.clone()),
-            Piece::Removed(text) => div()
-                .text_color(STRUCK)
-                .line_through()
-                .text_decoration_color(CUT)
-                .child(text.clone()),
-            Piece::Added(text) => div().text_color(INSERTED).child(text.clone()),
-        });
         let action = |id: &'static str, text, keys, look| {
             proposal_action(format!("{id}-{}", proposal.name), text, None, keys, look)
         };
+        let place = [
+            chapter,
+            (count > 1).then(|| format!("{} of {count}, accepted together", position + 1)),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ");
         div()
             .id(SharedString::from(format!(
                 "proposal-{}-{}",
@@ -733,24 +1037,15 @@ impl ScriptScreen {
                     .flex()
                     .gap(px(8.))
                     .child(label(format!("Claude suggests · {}", proposal.subject)))
-                    .when(count > 1, |this| {
-                        this.child(
-                            div()
-                                .text_size(TEXT_SM)
-                                .text_color(FAINT)
-                                .child(format!("{} of {count}, accepted together", position + 1)),
-                        )
-                    })
+                    .child(div().text_size(TEXT_SM).text_color(FAINT).child(place))
                     .child(div().flex_1())
                     .child(div().text_size(TEXT_SM).text_color(MUTED).child(saved_text)),
             )
             .child(
                 div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_x(px(5.))
+                    .text_color(BODY)
                     .line_height(px(24.))
-                    .children(pieces),
+                    .child(inline_change(&change.pieces)),
             )
             .child(
                 div()
@@ -781,12 +1076,7 @@ impl ScriptScreen {
             )
     }
 
-    fn agent_pane(&self, cx: &mut Context<Self>) -> Div {
-        let hooks: Vec<&ScriptProposal> = self
-            .proposals
-            .iter()
-            .filter(|p| p.name.starts_with(HOOK))
-            .collect();
+    fn agent_pane(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let body = match &self.claude {
             None => agent::setup_view(cx.listener(|this, _, _, cx| {
                 this.claude = Claude::find();
@@ -795,8 +1085,8 @@ impl ScriptScreen {
             Some(_) => div()
                 .flex()
                 .flex_col()
-                .gap(px(12.))
-                .when(self.run.is_none() && hooks.is_empty(), |this| {
+                .gap(px(20.))
+                .when(self.runs.is_empty(), |this| {
                     let drafted = self.script.as_ref().is_some_and(|s| !s.chapters.is_empty());
                     this.child(div().text_color(MUTED).line_height(px(22.)).child(if drafted {
                         "Ask for a change below, or pick a command. Claude's changes show up \
@@ -807,34 +1097,9 @@ impl ScriptScreen {
                          reject."
                     }))
                 })
-                .when_some(self.run.as_ref(), |this, run| {
-                    this.child(agent::steps_view(run))
-                })
-                .when(!hooks.is_empty(), |this| {
-                    this.child(div().text_color(BODY).child("Pick a hook:"))
-                        .children(hooks.into_iter().map(|hook| {
-                            let name = hook.name.clone();
-                            let text = hook
-                                .changes
-                                .first()
-                                .map(Change::added_text)
-                                .unwrap_or_else(|| hook.subject.clone());
-                            div()
-                                .id(SharedString::from(format!("hook-option-{name}")))
-                                .p(px(14.))
-                                .rounded(RADIUS_MD)
-                                .bg(RAISED)
-                                .text_color(TEXT)
-                                .cursor_pointer()
-                                .hover(|s| {
-                                    s.border_1().border_color(Hsla::from(ACCENT).opacity(0.5))
-                                })
-                                .child(text)
-                                .on_click(cx.listener(move |this, _, _, cx| this.accept(&name, cx)))
-                        }))
-                }),
+                .children(self.runs.iter().map(|run| agent::run_view(run, window, cx))),
         };
-        let running = self.run.as_ref().is_some_and(AgentRun::running);
+        let running = self.running();
         let chips = ScriptCommand::SLASH.map(|command| {
             div()
                 .id(SharedString::from(format!("slash-{command}")))
@@ -850,7 +1115,7 @@ impl ScriptScreen {
                 .when(running || self.claude.is_none(), |this| this.opacity(0.5))
                 .child(command)
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.start(command.to_owned(), ScriptCommand::parse(command), cx)
+                    this.start(command.to_owned(), ScriptCommand::parse(command), cx);
                 }))
         });
         pane()
@@ -884,6 +1149,7 @@ impl ScriptScreen {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
+                    .track_scroll(&self.chat)
                     .child(body),
             )
             .child(div().flex().flex_wrap().gap(px(6.)).children(chips))
@@ -898,13 +1164,19 @@ impl ScriptScreen {
 }
 
 impl Render for ScriptScreen {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .id("script")
             .key_context(CONTEXT)
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::on_accept))
             .on_action(cx.listener(Self::on_reject))
+            .on_action(cx.listener(Self::on_next))
+            .on_action(cx.listener(Self::on_previous))
+            .on_action(cx.listener(Self::on_reject_hooks))
+            .on_action(cx.listener(Self::on_another_set))
+            .on_action(cx.listener(Self::on_stop))
+            .on_action(cx.listener(Self::on_focus_prompt))
             .on_action(cx.listener(Self::continue_to_record))
             .size_full()
             .flex()
@@ -913,7 +1185,7 @@ impl Render for ScriptScreen {
             .pt(px(0.))
             .child(self.outline(cx))
             .child(self.document(cx))
-            .child(self.agent_pane(cx))
+            .child(self.agent_pane(window, cx))
     }
 }
 
@@ -978,6 +1250,68 @@ fn is_bare_title(text: &str) -> bool {
     text.starts_with("# ") && !text.contains('\n')
 }
 
+/// The pieces of a change as one wrapping text: struck words in red, inserted ones lime.
+fn inline_change(pieces: &[Piece]) -> StyledText {
+    let struck = HighlightStyle {
+        color: Some(STRUCK.into()),
+        strikethrough: Some(StrikethroughStyle {
+            thickness: px(1.),
+            color: Some(CUT.into()),
+        }),
+        ..Default::default()
+    };
+    let inserted = HighlightStyle {
+        color: Some(INSERTED.into()),
+        ..Default::default()
+    };
+    let mut text = String::new();
+    let mut highlights = Vec::new();
+    for piece in pieces {
+        let (words, style) = match piece {
+            Piece::Same(words) => (words, None),
+            Piece::Removed(words) => (words, Some(struck)),
+            Piece::Added(words) => (words, Some(inserted)),
+        };
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        let start = text.len();
+        text.push_str(words);
+        if let Some(style) = style {
+            highlights.push((start..text.len(), style));
+        }
+    }
+    StyledText::new(text).with_highlights(highlights)
+}
+
+/// A hook proposal's first chapter and its spoken length, read from the proposal's script.
+fn hook_option(board: &Board, slug: &str, name: &str) -> Option<HookOption> {
+    let (_, text) = board.proposal_file(slug, name, "script.md").ok()?;
+    let script = Script::parse(&text?).ok()?;
+    let spoken = script_check::check_script(&script).hook?;
+    Some(HookOption {
+        chapter: script.chapters.into_iter().next()?,
+        spoken,
+    })
+}
+
+/// The 1-based lines of the first chapter, from its heading to the next one.
+fn first_chapter(text: &str) -> Option<Range<usize>> {
+    let headings = chapter_lines(text);
+    let start = *headings.first()?;
+    Some(start..headings.get(1).copied().unwrap_or(text.lines().count() + 1))
+}
+
+/// The title of the chapter a 1-based line is in.
+fn chapter_at(text: &str, line: usize) -> Option<String> {
+    text.lines()
+        .take(line)
+        .filter_map(proposal::heading)
+        .last()
+        .filter(|title| !title.is_empty())
+        .map(str::to_owned)
+}
+
 /// The 1-based lines of the chapter headings, in order.
 fn chapter_lines(text: &str) -> Vec<usize> {
     text.lines()
@@ -1040,6 +1374,14 @@ mod tests {
         assert!(is_bare_title("# Agents that write your changelog\n"));
         assert!(!is_bare_title("# Title\n\n## Hook\n"));
         assert_eq!(chapter_lines("# Title\n\n## Hook\n\n- a\n## Wrap"), [3, 6]);
+        assert_eq!(
+            first_chapter("# Title\n\n## Hook\n\n- a\n## Wrap"),
+            Some(3..6)
+        );
+        assert_eq!(
+            chapter_at("# Title\n\n## Hook\n\n- a\n## Wrap", 5).as_deref(),
+            Some("Hook")
+        );
     }
 
     #[test]

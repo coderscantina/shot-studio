@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path};
 
-use git2::{BranchType, Commit, Delta, Diff, Patch};
+use git2::{BranchType, Commit, Delta, Diff, FileFavor, MergeOptions, Patch};
 
 use crate::{Board, Error, Result, branch_name, check_name, video_dir, video_path};
 
@@ -223,6 +223,20 @@ impl Board {
     /// conflict the merge does not happen (that edits commit stays) and [`Error::Conflict`]
     /// lists the paths.
     pub fn accept_proposal(&self, slug: &str, name: &str) -> Result<Accepted> {
+        self.accept(slug, name, FileFavor::Normal)
+    }
+
+    /// Like [`Board::accept_proposal`], but where the proposal and the video branch changed the
+    /// same lines, the proposal's lines win, so a text proposal always applies. The Script
+    /// screen accepts script suggestions this way ([0038]); the person's edits stay in the
+    /// edits commit before the merge.
+    ///
+    /// [0038]: ../../../docs/decisions/0038-script-editor-from-druck.md
+    pub fn accept_proposal_over_conflicts(&self, slug: &str, name: &str) -> Result<Accepted> {
+        self.accept(slug, name, FileFavor::Theirs)
+    }
+
+    fn accept(&self, slug: &str, name: &str, favor: FileFavor) -> Result<Accepted> {
         let head = self.proposal_head(slug, name)?;
         let (branch, mut tip) = self.target(slug, &head)?;
         if branch == branch_name(slug) && self.commit_edits_before(slug, name, &tip, &head)? {
@@ -234,7 +248,9 @@ impl Board {
         } else if tip.id() == head.id() || self.repo.graph_descendant_of(tip.id(), head.id())? {
             (tip.id(), true)
         } else {
-            let mut merged = self.repo.merge_commits(&tip, &head, None)?;
+            let mut options = MergeOptions::new();
+            options.file_favor(favor);
+            let mut merged = self.repo.merge_commits(&tip, &head, Some(&options))?;
             if merged.has_conflicts() {
                 return Err(Error::Conflict {
                     paths: conflict_paths(&merged)?,

@@ -1,7 +1,8 @@
 //! Checks on `script.md` before recording: hook length, spoken length, sources and visuals.
 //!
-//! Spoken time is estimated from the words a beat will say: its full script when it has one,
-//! else the beat itself, at [`WORDS_PER_MINUTE`].
+//! Spoken time is estimated from the words that will be said, at [`WORDS_PER_MINUTE`]: a
+//! chapter's prose before its first beat, and for each beat its full script when it has one,
+//! else the beat itself.
 
 use shot_core::{Beat, Micros, Script};
 
@@ -14,7 +15,7 @@ pub const VISUAL_GAP_MAX: Micros = Micros(90_000_000);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScriptReport {
-    /// Estimated spoken length per chapter, in script order.
+    /// Estimated spoken length per chapter, prose and beats, in script order.
     pub chapters: Vec<Micros>,
     pub total: Micros,
     /// The first chapter's spoken length, `None` without chapters.
@@ -68,7 +69,7 @@ pub fn check_script(script: &Script) -> ScriptReport {
     let chapters: Vec<Micros> = script
         .chapters
         .iter()
-        .map(|c| Micros(c.beats.iter().map(|b| spoken(b).0).sum()))
+        .map(|c| Micros(words(&c.note).0 + c.beats.iter().map(|b| spoken(b).0).sum::<u64>()))
         .collect();
     let hook = chapters.first().copied();
     if let Some(spoken) = hook.filter(|h| *h > HOOK_MAX) {
@@ -119,8 +120,12 @@ pub fn spoken(beat: &Beat) -> Micros {
     if is_visual_note(beat) && beat.script.is_empty() {
         return Micros(0);
     }
-    let words = text.split_whitespace().count() as u64;
-    Micros(words * 60_000_000 / WORDS_PER_MINUTE)
+    words(text)
+}
+
+/// The estimated time to say `text`.
+fn words(text: &str) -> Micros {
+    Micros(text.split_whitespace().count() as u64 * 60_000_000 / WORDS_PER_MINUTE)
 }
 
 /// A beat shows something besides the face: it links a source or is a b-roll note.
@@ -150,6 +155,21 @@ mod tests {
         assert_eq!(report.hook, Some(Micros(2_800_000)));
         assert_eq!(report.total, Micros(3_600_000));
         assert!(report.findings.is_empty(), "{:?}", report.findings);
+    }
+
+    #[test]
+    fn counts_a_chapters_prose_in_its_length_and_the_hook() {
+        let script = Script::parse(&format!(
+            "# A\n\n## Hook\n\n{}\n\n## Body\n\nTen words of prose said before the first beat here.\n\n- One more\n",
+            "word ".repeat(50)
+        ))
+        .unwrap();
+        let report = check_script(&script);
+        assert_eq!(report.chapters, [Micros(20_000_000), Micros(4_800_000)]);
+        assert!(matches!(
+            report.findings[0],
+            ScriptFinding::LongHook { spoken } if spoken == Micros(20_000_000)
+        ));
     }
 
     #[test]

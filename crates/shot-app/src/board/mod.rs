@@ -904,13 +904,13 @@ impl BoardScreen {
             )
     }
 
-    fn plan_pane(&self, cx: &mut Context<Self>) -> Div {
+    fn plan_pane(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let body = match (&self.claude, &self.plan) {
             (None, _) => agent::setup_view(cx.listener(|this, _, _, cx| {
                 this.claude = Claude::find();
                 cx.notify();
             })),
-            (Some(_), Some(run)) => agent::steps_view(run),
+            (Some(_), Some(run)) => agent::run_view(run, window, cx),
             (Some(_), None) => div(),
         };
         pane()
@@ -968,7 +968,7 @@ impl BoardScreen {
 }
 
 impl Render for BoardScreen {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let grid = self.grid();
         let columns: Vec<_> = Status::ALL
             .iter()
@@ -1030,7 +1030,9 @@ impl Render for BoardScreen {
             .p(px(8.))
             .pt(px(0.))
             .child(board)
-            .when(self.plan_open, |this| this.child(self.plan_pane(cx)))
+            .when(self.plan_open, |this| {
+                this.child(self.plan_pane(window, cx))
+            })
     }
 }
 
