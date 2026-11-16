@@ -68,7 +68,7 @@ pub use timeline::{
     ChapterSegments, ContentHash, MediaId, Output, OutputKind, RENDERER_VERSION, SceneSwitch,
     Segment, Timeline,
 };
-pub use transcript::{Transcript, Word};
+pub use transcript::{EDGE_PAD, Transcript, Word, cut_after, cut_before, word_cut};
 pub use transition::{Transition, TransitionKind, TransitionSound};
 pub use values::{Id, Micros, TimeRange};
 pub use video::{Date, Status, Video};

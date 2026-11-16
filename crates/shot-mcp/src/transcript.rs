@@ -366,8 +366,9 @@ mod tests {
             )
             .unwrap();
         let text = render(&removed, &lock, &transcripts());
+        // The cut takes "so" and the pause after it up to just before "um".
         assert!(
-            text.contains("0:00.2 w0 [so](manual) [um](filler) we"),
+            text.contains("0:00.0 w0 [so](manual) [um](filler) we"),
             "{text}"
         );
     }

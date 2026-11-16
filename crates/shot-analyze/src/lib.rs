@@ -28,6 +28,7 @@ pub use audio::decode_mono;
 pub use events::again_markers;
 pub use speech::{LEVEL_STEP, Speech, SpeechDetector};
 pub use transcribe::{Transcriber, normalize};
+pub use word_bounds::refine_track;
 
 /// Errors of model downloads, decoding, transcription, the caches and the elements file.
 #[derive(Debug, thiserror::Error)]

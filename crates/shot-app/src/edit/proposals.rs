@@ -1157,8 +1157,8 @@ mod tests {
                 Piece::Same("I read it".into()),
             ]
         );
-        // Brings back 1.8 s, cuts 0.8 s.
-        assert_eq!(found[0].saved, -1_000_000);
+        // Brings back 1.8 s, cuts 0.92 s: "scroll" and the pause after it.
+        assert_eq!(found[0].saved, -880_000);
         assert_eq!(saved_text(1_900_000), "saves 1.9 s");
     }
 }

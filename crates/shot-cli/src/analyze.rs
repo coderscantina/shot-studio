@@ -116,12 +116,22 @@ pub(crate) fn takes(video: &Path) -> Result<Vec<Id>, String> {
 /// without a mic has neither.
 fn listened(video: &Path, take: &Id) -> Result<(Transcript, shot_analyze::Speech), String> {
     let fail = |e: shot_analyze::Error| e.to_string();
-    let transcript = cache::read_cached(video, take).map_err(fail)?;
+    let mic = video.join("media").join(take.as_str()).join("mic.mp4");
+    let mut transcript = cache::read_cached(video, take).map_err(fail)?;
+    // Measuring is stable, so only transcripts made before word edges could grow change.
+    if let Some(cached) = &transcript
+        && mic.exists()
+    {
+        let measured = shot_analyze::refine_track(&mic, cached).map_err(fail)?;
+        if measured != *cached {
+            cache::write_cached(video, &measured).map_err(fail)?;
+            transcript = Some(measured);
+        }
+    }
     let speech = cache::read_speech(video, take).map_err(fail)?;
     if let (Some(transcript), Some(speech)) = (transcript, speech) {
         return Ok((transcript, speech));
     }
-    let mic = video.join("media").join(take.as_str()).join("mic.mp4");
     if !mic.exists() {
         return Ok((
             Transcript::new(take.clone()),

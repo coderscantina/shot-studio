@@ -293,7 +293,7 @@ async fn an_agent_reads_a_transcript_and_proposes_a_cut_of_recorded_words() {
     )
     .await;
     assert!(
-        diff.contains("+        remove from=1_000_000 to=1_800_000 by=manual"),
+        diff.contains("+        remove from=920_000 to=1_920_000 by=manual"),
         "{diff}"
     );
 

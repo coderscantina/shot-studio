@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use shot_core::{ElementKind, Micros, TimeRange, Transcript, Word};
+use shot_core::{ElementKind, Micros, TimeRange, Transcript, Word, cut_before};
 
 use crate::{Speech, normalize};
 
@@ -33,6 +33,8 @@ const SPEECH_PAD: u64 = 200_000;
 const REPEAT_GAP: Micros = Micros(2_000_000);
 /// A sentence restarted within this is a retake.
 const RESTART_WITHIN: Micros = Micros(20_000_000);
+/// Words at least this alike ([`similarity`]) count as the same word said again.
+const SOUNDS_ALIKE: f64 = 0.6;
 /// How far back an `again` marker looks for the start of the attempt it repeats.
 const AGAIN_LOOKBACK: Micros = Micros(120_000_000);
 
@@ -281,10 +283,14 @@ impl Finding {
     }
 }
 
-/// From the start of word `from` to the start of word `to`: the words in between go, and the
-/// cut lands where the kept word begins.
+/// From word `from` to word `to`: the words in between go, and the cut lands just before the
+/// kept word begins, see [`cut_before`].
 fn span(words: &[&W], from: usize, to: usize) -> Option<TimeRange> {
-    TimeRange::new(words[from].from(), words.get(to)?.from())
+    let before = |i: usize| i.checked_sub(1).map(|i| words[i].word.range);
+    TimeRange::new(
+        cut_before(before(from), words[from].word.range),
+        cut_before(before(to), words.get(to)?.word.range),
+    )
 }
 
 fn fillers(words: &[W], voice: &Voice) -> Vec<Finding> {
@@ -340,7 +346,9 @@ fn repeats(words: &[&W]) -> Vec<Finding> {
 }
 
 /// A sentence said again from its start, within the next two sentences: the earlier attempt
-/// goes, the later one is usually the clean version.
+/// goes, the later one is usually the clean version. Words that sound alike ("failing",
+/// "falling") match, so a corrected word does not hide the restart; one changed word after a
+/// shared opening of three is still sure, two after an opening of four ask.
 fn restarts(words: &[W]) -> Vec<Finding> {
     let all: Vec<&W> = words.iter().collect();
     let mut sentences = Vec::new();
@@ -362,13 +370,17 @@ fn restarts(words: &[W]) -> Vec<Finding> {
             {
                 break;
             }
+            let pair = |j: usize| (&all[a.start + j].text, &all[b.start + j].text);
+            let opening = (0..a.len()).take_while(|&j| pair(j).0 == pair(j).1).count();
             let mismatches = (0..a.len())
-                .filter(|&j| all[a.start + j].text != all[b.start + j].text)
+                .filter(|&j| similarity(pair(j).0, pair(j).1) < SOUNDS_ALIKE)
                 .count();
             let confidence = match mismatches {
                 0 if b.len() > a.len() => 92,
                 0 => 85,
+                1 if a.len() >= 6 && opening >= 3 => 85,
                 1 if a.len() >= 6 => 70,
+                2 if a.len() >= 8 && opening >= 4 => 70,
                 _ => continue,
             };
             if let Some(range) = span(&all, a.start, b.start) {
@@ -651,6 +663,27 @@ mod tests {
                 92
             )]
         );
+    }
+
+    #[test]
+    fn a_restart_that_corrects_two_words_still_cuts_the_first_attempt() {
+        let t = transcript(
+            "Your Stripe dashboard does. February, while the stocks were failing, was the most. February, while the stocks were falling, was the best month for growth in that data.",
+        );
+        assert_eq!(
+            run(&t, &[]),
+            [(
+                ElementKind::Retake,
+                "February, while the stocks were failing, was the most.".into(),
+                85
+            )]
+        );
+    }
+
+    #[test]
+    fn sentences_that_only_open_alike_are_not_a_restart() {
+        let t = transcript("We need to ship this week. We need to test what we ship first.");
+        assert_eq!(run(&t, &[]), []);
     }
 
     #[test]

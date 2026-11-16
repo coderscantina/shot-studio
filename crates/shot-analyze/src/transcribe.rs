@@ -356,7 +356,17 @@ impl Worker {
     /// Re-measures the words against the window audio, then pushes them to the transcript. A
     /// word is stable only while its audio is still in the window, so the window covers it.
     fn commit(&mut self, mut words: Vec<Word>) {
-        word_bounds::refine(&self.window, self.time(self.window_start), &mut words);
+        let after = self
+            .transcript
+            .words()
+            .last()
+            .map_or(Micros(0), |w| w.range.to());
+        word_bounds::refine(
+            &self.window,
+            self.time(self.window_start),
+            after,
+            &mut words,
+        );
         for word in words {
             (self.on_word)(&word);
             self.transcript

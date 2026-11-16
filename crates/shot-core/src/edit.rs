@@ -7,7 +7,7 @@ use crate::takes::{holds, middle};
 use crate::{
     Applied, Attempt, Chapter, Cut, EffectKey, ElementKind, Id, Instance, Layer, Layout,
     LayoutChange, Lineup, Lock, Micros, Music, Overlay, Override, OverrideEffect, RangeEdit,
-    Rating, Row, RowAt, TakeEdit, Target, TimeRange, Transcript, Word, Zoom, ZoomShape,
+    Rating, Row, RowAt, TakeEdit, Target, TimeRange, Transcript, Word, Zoom, ZoomShape, word_cut,
 };
 
 /// One take block of the main cut: the chapter and the take's position in that chapter. A take
@@ -203,9 +203,8 @@ impl Cut {
         }))
     }
 
-    /// Removes the media of the words that overlap `selection` as `remove ... by=manual`. The
-    /// cut runs from the start of the first word to the end of the last, so no word is half
-    /// cut.
+    /// Removes the media of the words that overlap `selection` as `remove ... by=manual`, with
+    /// one of the pauses around them, see [`word_cut`]. No word is half cut.
     pub fn delete_words(
         &self,
         at: TakeAt,
@@ -219,14 +218,21 @@ impl Cut {
                 got: transcript.take().clone(),
             });
         }
-        let mut covered = transcript
-            .words()
+        let words = transcript.words();
+        let first = words
             .iter()
-            .filter(|w| w.range.overlaps(selection));
-        let first = covered.next().ok_or(EditError::NoWords)?;
-        let last = covered.next_back().unwrap_or(first);
-        let span = TimeRange::new(first.range.from(), last.range.to())
-            .expect("words are ordered, so the span is not empty");
+            .position(|w| w.range.overlaps(selection))
+            .ok_or(EditError::NoWords)?;
+        let last = words
+            .iter()
+            .rposition(|w| w.range.overlaps(selection))
+            .unwrap_or(first);
+        let span = word_cut(
+            first.checked_sub(1).map(|i| words[i].range),
+            words[first].range,
+            words[last].range,
+            words.get(last + 1).map(|w| w.range),
+        );
         Ok(self.with_take(at, |edit| {
             replace_in_ranges(edit, span, |piece| RangeEdit::Remove(piece.range()));
         }))
@@ -1288,16 +1294,17 @@ mod tests {
     #[test]
     fn delete_in_the_middle_splits_the_keep() {
         let c = cut(vec![keep(0, 11_000_000)]);
-        // Words 2 and 3 are 2.2 s to 3.2 s and 3.3 s to 4.3 s.
+        // Words 2 and 3 are 2.2 s to 3.2 s and 3.3 s to 4.3 s. The cut starts half the gap
+        // before word 2 and ends half the gap before word 4, taking the pause after word 3.
         let after = c
             .delete_words(AT, &transcript(), range(2_500_000, 3_500_000))
             .unwrap();
         assert_eq!(
             ranges(&after),
             [
-                keep(0, 2_200_000),
-                removed(2_200_000, 4_300_000),
-                keep(4_300_000, 11_000_000)
+                keep(0, 2_150_000),
+                removed(2_150_000, 4_350_000),
+                keep(4_350_000, 11_000_000)
             ]
         );
     }
@@ -1308,7 +1315,7 @@ mod tests {
         let head = c.delete_words(AT, &transcript(), range(0, 100)).unwrap();
         assert_eq!(
             ranges(&head),
-            [removed(0, 1_000_000), keep(1_000_000, 11_000_000)]
+            [removed(0, 1_050_000), keep(1_050_000, 11_000_000)]
         );
         let tail = c
             .delete_words(AT, &transcript(), range(10_000_000, 10_500_000))
@@ -1316,9 +1323,9 @@ mod tests {
         assert_eq!(
             ranges(&tail),
             [
-                keep(0, 9_900_000),
-                removed(9_900_000, 10_900_000),
-                keep(10_900_000, 11_000_000)
+                keep(0, 9_850_000),
+                removed(9_850_000, 10_980_000),
+                keep(10_980_000, 11_000_000)
             ]
         );
     }
@@ -1333,9 +1340,9 @@ mod tests {
         assert_eq!(
             ranges(&after),
             [
-                keep(0, 1_100_000),
-                removed(1_100_000, 3_200_000),
-                keep(3_200_000, 11_000_000)
+                keep(0, 1_050_000),
+                removed(1_050_000, 3_250_000),
+                keep(3_250_000, 11_000_000)
             ]
         );
     }
@@ -1348,7 +1355,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             ranges(&merged),
-            [removed(0, 2_100_000), keep(2_100_000, 11_000_000)]
+            [removed(0, 2_150_000), keep(2_150_000, 11_000_000)]
         );
     }
 
