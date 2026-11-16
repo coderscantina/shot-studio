@@ -2,7 +2,7 @@
 
 use std::os::unix::fs::PermissionsExt;
 
-use shot_mcp::bridge::{Claude, Reach, Session, Step};
+use shot_mcp::bridge::{BridgeError, Claude, Reach, Session, Step, Stop};
 use tempfile::TempDir;
 
 const FAKE: &str = r#"#!/bin/sh
@@ -119,6 +119,20 @@ fn a_run_without_the_shot_server_stops_at_the_start() {
             .to_string()
             .contains("the shot MCP server did not start")
     );
+}
+
+#[test]
+fn a_stopped_run_kills_claude_and_says_so() {
+    let dir = TempDir::new().unwrap();
+    let claude = fake(
+        &dir,
+        "#!/bin/sh\ncat > /dev/null\necho '{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"m\",\"tools\":[\"mcp__shot__list_videos\"]}'\nexec sleep 30\n",
+    );
+    let stop = Stop::default();
+    let started = std::time::Instant::now();
+    let result = session(&dir).run_until(&claude, &stop, |_| stop.stop());
+    assert!(matches!(result, Err(BridgeError::Stopped)));
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
 }
 
 #[test]
