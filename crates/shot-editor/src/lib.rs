@@ -46,7 +46,8 @@ use spelling::Spelling;
 pub use keys::bind_keys;
 pub use layout::EditorStyle;
 
-/// The text changed by an edit, an undo or a redo. Not sent for [`EditorView::set_text_external`].
+/// The text changed by an edit, an undo or a redo. Not sent for [`EditorView::set_text_external`]
+/// or [`EditorView::set_text_accepted`].
 pub struct Changed;
 
 const BLINK: Duration = Duration::from_millis(500);
@@ -191,6 +192,16 @@ impl EditorView {
     /// Replaces the text with a change from outside, such as the file changing on disk, as one undo
     /// step. Only the part that differs is replaced, so the caret stays where it was around it.
     pub fn set_text_external(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.replace_text(text, EditKind::External, cx);
+    }
+
+    /// Replaces the text with a change the person asked for, such as an accepted suggestion, as
+    /// [`EditorView::set_text_external`] does, but one Undo takes it back.
+    pub fn set_text_accepted(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.replace_text(text, EditKind::Discrete, cx);
+    }
+
+    fn replace_text(&mut self, text: &str, kind: EditKind, cx: &mut Context<Self>) {
         let old = self.buffer.text();
         if old == text {
             return;
@@ -213,8 +224,7 @@ impl EditorView {
             head: map(self.selection.head),
         };
         let edit = Edit::new(removed, inserted);
-        let Ok(splice) =
-            (self.buffer).transact(EditKind::External, vec![edit], self.selection, after, now())
+        let Ok(splice) = (self.buffer).transact(kind, vec![edit], self.selection, after, now())
         else {
             return;
         };

@@ -138,6 +138,10 @@ fn bindings() -> Vec<KeyBinding> {
         // Script screen
         KeyBinding::new("tab", script::AcceptProposal, script),
         KeyBinding::new("escape", script::RejectProposal, script),
+        KeyBinding::new("alt-down", script::NextSuggestion, script),
+        KeyBinding::new("alt-up", script::PreviousSuggestion, script),
+        KeyBinding::new("cmd-.", script::StopRun, script),
+        KeyBinding::new("cmd-j", script::FocusPrompt, script),
         KeyBinding::new("cmd-enter", script::ContinueToRecord, script),
         // Ship screen
         KeyBinding::new("cmd-enter", ship::ShipVideo, ship),
