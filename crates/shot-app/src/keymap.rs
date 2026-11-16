@@ -14,6 +14,7 @@ use crate::{
 /// Binds the list. Call once at startup, before the menus are set, so they show the shortcuts.
 pub fn bind(cx: &mut App) {
     cx.bind_keys(bindings());
+    shot_editor::bind_keys(cx);
 }
 
 fn bindings() -> Vec<KeyBinding> {

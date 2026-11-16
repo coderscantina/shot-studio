@@ -252,16 +252,13 @@ impl Studio {
             }
         }));
         let planning = channel::locate(&folder.read(cx).dir).map(|(repo, slug)| {
-            let full_script =
-                folder.read(cx).project.format.prompter == shot_core::PrompterMode::FullScript;
             let board = cx.new(|cx| BoardScreen::new(repo.clone(), Some(slug.clone()), cx));
             subscriptions.push(cx.subscribe_in(
                 &board,
                 window,
                 |this, _, ShowCurrent(screen), window, cx| this.show(*screen, window, cx),
             ));
-            let script =
-                cx.new(|cx| ScriptScreen::new(repo.clone(), slug.clone(), full_script, window, cx));
+            let script = cx.new(|cx| ScriptScreen::new(repo.clone(), slug.clone(), window, cx));
             subscriptions.push(cx.subscribe_in(
                 &script,
                 window,
@@ -374,7 +371,7 @@ impl Studio {
             Screen::Board | Screen::Script => {
                 if let Some(Planning { board, script, .. }) = &self.planning {
                     board.update(cx, |board, _| board.reload());
-                    script.update(cx, |script, _| script.reload());
+                    script.update(cx, |script, cx| script.reload(cx));
                 }
             }
             Screen::Record | Screen::Cut => {}
