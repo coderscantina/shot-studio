@@ -218,7 +218,10 @@ pub fn open_at(dir: &Path, screen: Option<Screen>, cx: &mut App) -> Result<(), S
         studios.0.push((dir.clone(), window.into(), studio));
     }
     crate::welcome::remember(&dir);
-    cx.activate(true);
+    // An app driven over the control socket stays behind, so a person's typing never lands in it.
+    if !crate::control::enabled() {
+        cx.activate(true);
+    }
     Ok(())
 }
 
