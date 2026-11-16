@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Generates the deterministic test media and demo data.
 #
-#   scripts/fixtures.sh [small|target|demo|all] [--force]
+#   scripts/fixtures.sh [small|target|demo|phone-clip|all] [--force]
 #
 # Output goes to $SHOT_FIXTURES, default fixtures/generated/ (git-ignored). Agents in worktrees
 # set SHOT_FIXTURES=$HOME/.cache/shot-studio-fixtures so media survives worktree removal.
@@ -10,6 +10,8 @@
 # target  the 17 min 4K60 workload: screen, camera and mic tracks, events.jsonl and chapters.json,
 #         plus target-project/, the committed project text with the media linked into media/t01/
 # demo    demo-channel/, a git repo with videos in every board column, built from fixtures/projects
+# phone-clip  phone-clip.mov, a 20 s portrait phone clip to ingest: H.264 1920x1080 turned by its
+#         track transform, 29.97 fps with dropped frames, HLG tags, stereo 44.1 kHz AAC speech
 # all     everything (default)
 #
 # Outputs are skipped when every file exists and matches its sha256 in checksums.txt.
@@ -43,9 +45,9 @@ MODE=all
 FORCE=0
 for arg in "$@"; do
   case $arg in
-    small | target | demo | all) MODE=$arg ;;
+    small | target | demo | phone-clip | all) MODE=$arg ;;
     --force) FORCE=1 ;;
-    *) echo "usage: scripts/fixtures.sh [small|target|demo|all] [--force]" >&2; exit 2 ;;
+    *) echo "usage: scripts/fixtures.sh [small|target|demo|phone-clip|all] [--force]" >&2; exit 2 ;;
   esac
 done
 
@@ -347,6 +349,28 @@ gen_target_project() {
   log "target project linked at ${dst#"$ROOT"/}"
 }
 
+# ---------------------------------------------------------------- phone clip
+
+# A clip as a phone films it: 1920x1080 coded and turned upright by a -90 degree display matrix,
+# 29.97 fps with every 47th frame dropped so the timestamps vary, 10-bit HLG BT.2020 tags, and
+# stereo 44.1 kHz AAC. The rotation goes on in a remux, since encoding would apply it to the pixels.
+gen_phone_clip() {
+  local files=("$OUT/phone-clip.mov" "$OUT/phone-clip.txt")
+  if ((!FORCE)) && group_current "${files[@]}"; then log "phone clip up to date"; return; fi
+  log "20 s phone clip"
+  local aiff=$WORK/phone-clip.aiff
+  say -v "$VOICE" -f "$SPEC/phone-clip.txt" -o "$aiff"
+  ff -f lavfi -i "testsrc2=s=1920x1080:r=30000/1001:d=20" -i "$aiff" \
+    -filter_complex "[0:v]select='not(eq(mod(n,47),46))',format=yuv420p10le,setparams=color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc:range=tv[v];[1:a]apad,aresample=44100,pan=stereo|c0=c0|c1=c0[a]" \
+    -map '[v]' -map '[a]' -t 20 -fps_mode vfr \
+    -c:v libx264 -preset veryfast -crf 23 -threads 1 -x264-params "bframes=2:keyint=60" \
+    -c:a aac -b:a 128k "${BITEXACT[@]}" -f mov "$WORK/phone-clip.mov"
+  ff -display_rotation:v:0 -90 -i "$WORK/phone-clip.mov" -c copy "${BITEXACT[@]}" -f mov "$OUT/phone-clip.mov"
+  sed -E 's/ ?\[\[[^]]*\]\] ?/ /g' "$SPEC/phone-clip.txt" >"$OUT/phone-clip.txt"
+  rm -f "$aiff"
+  record "${files[@]}"
+}
+
 # ---------------------------------------------------------------- demo channel
 
 DEMO_STATUSES=(ideas scripting ready recorded editing shipped)
@@ -450,6 +474,7 @@ case $MODE in
   small) gen_small ;;
   target) gen_target; gen_target_project ;;
   demo) gen_demo ;;
-  all) gen_small; gen_target; gen_target_project; gen_demo ;;
+  phone-clip) gen_phone_clip ;;
+  all) gen_small; gen_target; gen_target_project; gen_demo; gen_phone_clip ;;
 esac
 log "done in $((SECONDS - start)) s, checksums in ${SUMS#"$ROOT"/}"
