@@ -77,6 +77,8 @@ pub struct Chapter {
     pub takes: Vec<Id>,
     /// Beats that have an attempt.
     pub covered: usize,
+    /// The take the cut plays for most of its beats.
+    pub plays: Option<Id>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -131,6 +133,7 @@ impl Outline {
                 let Some(chapter) = chapters.get_mut(index) else {
                     break;
                 };
+                let mut plays: Vec<(Id, usize)> = Vec::new();
                 for row in &group.rows {
                     chapter.covered += usize::from(!row.attempts.is_empty());
                     for attempt in &row.attempts {
@@ -138,10 +141,21 @@ impl Outline {
                             chapter.takes.push(attempt.take.clone());
                         }
                     }
+                    if let Some(choice) = cut.choice(row) {
+                        match plays.iter_mut().find(|(id, _)| *id == choice.take) {
+                            Some((_, beats)) => *beats += 1,
+                            None => plays.push((choice.take, 1)),
+                        }
+                    }
                 }
                 chapter
                     .takes
                     .sort_by_key(|id| ids.iter().position(|i| i == id));
+                // Ties go to the newer take, which plays in place of earlier attempts.
+                chapter.plays = plays
+                    .into_iter()
+                    .max_by_key(|(id, beats)| (*beats, ids.iter().position(|i| i == id)))
+                    .map(|(id, _)| id);
             }
         }
         let takes = ids
@@ -179,6 +193,25 @@ impl Outline {
         Self { chapters, takes }
     }
 
+    /// Takes that recorded more than one chapter, the way a take of the whole script does,
+    /// newest first.
+    pub fn script_takes(&self) -> impl Iterator<Item = &Take> {
+        self.takes.iter().rev().filter(|t| t.chapters.len() > 1)
+    }
+
+    /// Takes that recorded `chapter` alone, newest first.
+    pub fn chapter_takes(&self, chapter: usize) -> impl Iterator<Item = &Take> {
+        self.takes
+            .iter()
+            .rev()
+            .filter(move |t| t.chapters.len() == 1 && t.chapters.contains(&chapter))
+    }
+
+    /// Takes no beat of the script matched: free takes, imported clips, takes without words.
+    pub fn other_takes(&self) -> impl Iterator<Item = &Take> {
+        self.takes.iter().rev().filter(|t| t.chapters.is_empty())
+    }
+
     /// The first chapter after `chapter` that no take recorded yet, for the next take.
     pub fn next_open(&self, after: usize) -> Option<usize> {
         (after + 1..self.chapters.len()).find(|&c| self.chapters[c].takes.is_empty())
@@ -196,6 +229,31 @@ mod tests {
     use super::*;
 
     const SCRIPT: &str = "# T\n\n## Hook\n\n- One\n- Two\n\n## Demo\n\n- Three\n";
+
+    #[test]
+    fn takes_group_under_the_whole_script_a_chapter_or_neither() {
+        let take = |id: &str, chapters: &[usize]| Take {
+            id: Id::new(id).unwrap(),
+            length: Micros(0),
+            chapters: chapters.iter().copied().collect(),
+            in_cut: true,
+            transcribed: true,
+        };
+        let outline = Outline {
+            chapters: Vec::new(),
+            takes: vec![
+                take("t01", &[0, 1, 2]),
+                take("t02", &[1]),
+                take("t03", &[]),
+                take("t04", &[1]),
+            ],
+        };
+        let ids = |takes: Vec<&Take>| takes.iter().map(|t| t.id.to_string()).collect::<Vec<_>>();
+        assert_eq!(ids(outline.script_takes().collect()), ["t01"]);
+        assert_eq!(ids(outline.chapter_takes(1).collect()), ["t04", "t02"]);
+        assert!(outline.chapter_takes(0).next().is_none());
+        assert_eq!(ids(outline.other_takes().collect()), ["t03"]);
+    }
 
     #[test]
     fn a_part_names_the_beats_it_records() {

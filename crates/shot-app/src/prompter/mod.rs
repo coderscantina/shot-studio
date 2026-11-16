@@ -24,8 +24,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gpui::{App, Menu, MenuItem, actions};
-use shot_capture::Marks;
+use objc2_core_foundation::CFRetained;
+use objc2_core_video::CVPixelBuffer;
 use shot_capture::events::{Hotkey, Mark, Modifier};
+use shot_capture::{Marks, Preview};
 use shot_core::{Layout, Project};
 use shot_prompter::{Moved, Pace, Prompter};
 
@@ -99,10 +101,15 @@ pub struct Live {
     /// The scene the take shows: picked on the Record screen or with 1 to 4. `None` is the
     /// format's default layout. Shared with the monitor that rehearses it.
     pub scene: Scene,
+    /// The Record screen's live inputs, for the camera behind the text.
+    pub feed: Feed,
 }
 
 /// The scene picked for the take, shared between threads.
 pub type Scene = Arc<Mutex<Option<Layout>>>;
+
+/// The live inputs of the standby or the running take, while there are some.
+pub type Feed = Arc<Mutex<Option<Preview>>>;
 
 impl Live {
     pub fn new(project: &Project, pace: Pace) -> Arc<Self> {
@@ -111,6 +118,7 @@ impl Live {
             marks: Mutex::new(None),
             layouts: Mutex::new(Vec::new()),
             scene: Scene::default(),
+            feed: Feed::default(),
         });
         live.reset(project);
         live.lock().set_pace(pace);
@@ -154,6 +162,12 @@ impl Live {
             ),
             Moved::Again { beat } => marks.write(Mark::Again { beat }),
         }
+    }
+
+    /// The newest camera frame, while the inputs run.
+    pub fn camera(&self) -> Option<CFRetained<CVPixelBuffer>> {
+        let feed = self.feed.lock().expect("feed").clone()?;
+        feed.camera().map(|frame| frame.buffer)
     }
 
     /// Records only `beats` of the script, by index from 0, from the next start on.

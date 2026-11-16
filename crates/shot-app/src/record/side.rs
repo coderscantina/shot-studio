@@ -75,67 +75,63 @@ impl RecordScreen {
                 )
             })
             .when(has_beats, |pane| {
-                pane.child(self.part_row(
-                    Part::Script,
-                    "Whole script",
-                    format!(
-                        "{} chapters · ~{}",
-                        script.chapters.len(),
-                        minutes(spoken(&script, None), wpm)
-                    ),
-                    None,
-                    busy,
-                    cx,
-                ))
+                let script_takes: Vec<&Take> = self.outline.script_takes().collect();
+                let whole = Part::Script;
+                pane.child(
+                    self.part_row(
+                        whole,
+                        "Whole script",
+                        match script_takes.len() {
+                            0 => format!(
+                                "{} chapters · ~{}",
+                                script.chapters.len(),
+                                minutes(spoken(&script, None), wpm)
+                            ),
+                            n => format!(
+                                "{} · ~{}",
+                                takes_count(n),
+                                minutes(spoken(&script, None), wpm)
+                            ),
+                        },
+                        None,
+                        busy,
+                        cx,
+                    )
+                    .when(self.part == whole, |row| {
+                        row.child(
+                            div()
+                                .pl(px(36.))
+                                .pr(px(6.))
+                                .pb(px(4.))
+                                .text_size(TEXT_SM)
+                                .line_height(px(18.))
+                                .text_color(MUTED)
+                                .child(
+                                    "One take from start to end. Say a sentence again to retake \
+                                     it inline, or press Again to start the beat over.",
+                                ),
+                        )
+                    })
+                    .children(script_takes.into_iter().map(|take| {
+                        let chapters = script
+                            .chapters
+                            .iter()
+                            .filter(|c| !c.beats.is_empty())
+                            .count();
+                        let mut detail = format!("{} of {chapters} chapters", take.chapters.len());
+                        if !take.in_cut {
+                            detail.push_str(" · not in the cut");
+                        }
+                        self.take_row(take, detail, take.in_cut, true, busy, cx)
+                    })),
+                )
                 .children(
                     script
                         .chapters
                         .iter()
                         .enumerate()
                         .filter(|(_, c)| !c.beats.is_empty())
-                        .map(|(index, chapter)| {
-                            let takes = self
-                                .outline
-                                .chapters
-                                .get(index)
-                                .map_or(0, |c| c.takes.len());
-                            let covered = self.outline.chapters.get(index).map_or(0, |c| c.covered);
-                            let beats = chapter.beats.len();
-                            let status = match takes {
-                                0 => format!(
-                                    "{beats} beats · ~{}",
-                                    minutes(spoken(&script, Some(index)), wpm)
-                                ),
-                                1 => "1 take".into(),
-                                n => format!("{n} takes"),
-                            };
-                            let status = if takes > 0 && covered < beats {
-                                format!("{status} · {covered} of {beats} beats")
-                            } else {
-                                status
-                            };
-                            let done = takes > 0 && covered == beats;
-                            let mut row = self.part_row(
-                                Part::Chapter {
-                                    chapter: index,
-                                    from: 0,
-                                },
-                                &chapter.title,
-                                status,
-                                Some(done),
-                                busy,
-                                cx,
-                            );
-                            if let Part::Chapter {
-                                chapter: picked,
-                                from,
-                            } = self.part
-                                && picked == index
-                            {
-                                row = row.child(self.beats(index, from, &script, busy, cx));
-                            }
-                            row
-                        }),
+                        .map(|(index, chapter)| self.chapter_rows(index, chapter, wpm, busy, cx)),
                 )
             })
             .child(
@@ -146,36 +142,20 @@ impl RecordScreen {
                     .px(px(6.))
                     .pt(px(16.))
                     .pb(px(6.))
-                    .child(label("Takes"))
+                    .child(label(if has_beats { "Other takes" } else { "Takes" }))
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .child(
-                                div()
-                                    .text_size(TEXT_SM)
-                                    .text_color(MUTED)
-                                    .child(match count {
-                                        0 => "None yet".to_owned(),
-                                        1 => "1 take".to_owned(),
-                                        n => format!("{n} takes"),
-                                    }),
+                        Button::new("import-clip")
+                            .xsmall()
+                            .ghost()
+                            .label("Import clip")
+                            .tooltip(
+                                "Make a phone clip or other video the next take. Or drop it on \
+                                 this screen.",
                             )
-                            .child(
-                                Button::new("import-clip")
-                                    .xsmall()
-                                    .ghost()
-                                    .label("Import clip")
-                                    .tooltip(
-                                        "Make a phone clip or other video the next take. Or drop \
-                                         it on this screen.",
-                                    )
-                                    .disabled(busy || self.import.read(cx).is_running())
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.import.update(cx, |import, cx| import.pick(cx))
-                                    })),
-                            ),
+                            .disabled(busy || self.import.read(cx).is_running())
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.import.update(cx, |import, cx| import.pick(cx))
+                            })),
                     ),
             )
             .children(
@@ -184,13 +164,96 @@ impl RecordScreen {
                     .row()
                     .map(|row| row.px(px(6.)).pb(px(6.))),
             )
-            .children(
-                self.outline
-                    .takes
-                    .iter()
-                    .rev()
-                    .map(|take| self.take_row(take, &script, busy, cx)),
-            )
+            .when(count == 0, |pane| {
+                pane.child(
+                    div()
+                        .px(px(8.))
+                        .text_size(TEXT_SM)
+                        .text_color(MUTED)
+                        .child("None yet"),
+                )
+            })
+            .children({
+                let others: Vec<&Take> = if has_beats {
+                    self.outline.other_takes().collect()
+                } else {
+                    self.outline.takes.iter().rev().collect()
+                };
+                others.into_iter().map(|take| {
+                    let mut detail = if take.transcribed {
+                        "No beats matched".to_owned()
+                    } else {
+                        "No words yet".to_owned()
+                    };
+                    if !take.in_cut {
+                        detail.push_str(" · not in the cut");
+                    }
+                    self.take_row(take, detail, take.in_cut, false, busy, cx)
+                })
+            })
+    }
+
+    /// A chapter of the outline: its row, its beats while it is picked, and its own takes with
+    /// the one that plays lit.
+    fn chapter_rows(
+        &self,
+        index: usize,
+        chapter: &shot_core::ScriptChapter,
+        wpm: f32,
+        busy: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let script = self.folder.read(cx).project.script.clone();
+        let progress = self
+            .outline
+            .chapters
+            .get(index)
+            .cloned()
+            .unwrap_or_default();
+        let beats = chapter.beats.len();
+        let mut status = match &progress.plays {
+            None => format!(
+                "{beats} beats · ~{}",
+                minutes(spoken(&script, Some(index)), wpm)
+            ),
+            Some(take) => format!("{} plays", take_name(take)),
+        };
+        if !progress.takes.is_empty() && progress.covered < beats {
+            status.push_str(&format!(" · {} of {beats} beats", progress.covered));
+        }
+        if progress.takes.len() > 1 {
+            status.push_str(&format!(" · {}", takes_count(progress.takes.len())));
+        }
+        let done = !progress.takes.is_empty() && progress.covered == beats;
+        let mut rows = self.part_row(
+            Part::Chapter {
+                chapter: index,
+                from: 0,
+            },
+            &chapter.title,
+            status,
+            Some(done),
+            busy,
+            cx,
+        );
+        if let Part::Chapter {
+            chapter: picked,
+            from,
+        } = self.part
+            && picked == index
+        {
+            rows = rows.child(self.beats(index, from, &script, busy, cx));
+        }
+        let takes: Vec<&Take> = self.outline.chapter_takes(index).collect();
+        rows.children(takes.into_iter().map(|take| {
+            let plays = progress.plays.as_ref() == Some(&take.id);
+            let detail = if plays {
+                "Plays".to_owned()
+            } else {
+                "Not played".to_owned()
+            };
+            self.take_row(take, detail, plays, true, busy, cx)
+        }))
     }
 
     /// A row of the outline the next take can record.
@@ -331,30 +394,27 @@ impl RecordScreen {
             }))
     }
 
-    /// A take: what it recorded, how long, whether the cut plays it, Review and Remove.
-    fn take_row(&self, take: &Take, script: &Script, busy: bool, cx: &mut Context<Self>) -> Div {
+    /// A take: how long, `detail` on what it recorded and whether it plays, Review and Remove.
+    /// `lit` when the cut plays it there, `nested` under the part it recorded.
+    fn take_row(
+        &self,
+        take: &Take,
+        detail: String,
+        lit: bool,
+        nested: bool,
+        busy: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let id = take.id.clone();
-        let covers = if take.chapters.is_empty() {
-            if take.transcribed {
-                "No beats matched".to_owned()
-            } else {
-                "No words yet".to_owned()
-            }
-        } else {
-            take.chapters
-                .iter()
-                .filter_map(|&c| script.chapters.get(c).map(|c| c.title.as_str()))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
         let confirming = self.removing.as_ref() == Some(&take.id);
         let key = take.id.to_string();
         let row = div()
             .flex()
             .flex_col()
             .gap(px(8.))
-            .px(px(8.))
-            .py(px(8.))
+            .pl(px(if nested { 36. } else { 8. }))
+            .pr(px(8.))
+            .py(px(if nested { 4. } else { 8. }))
             .rounded(RADIUS_SM)
             .when(confirming, |row| row.bg(CUT_TINT))
             .child(
@@ -371,11 +431,7 @@ impl RecordScreen {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(icon(
-                                "takes",
-                                ICON_SM,
-                                if take.in_cut { ACCENT } else { FAINT },
-                            )),
+                            .child(icon("takes", ICON_SM, if lit { ACCENT } else { FAINT })),
                     )
                     .child(
                         div()
@@ -399,13 +455,13 @@ impl RecordScreen {
                                             .text_color(MUTED),
                                     ),
                             )
-                            .child(div().truncate().text_size(TEXT_SM).text_color(MUTED).child(
-                                if take.in_cut {
-                                    covers
-                                } else {
-                                    format!("{covers} · not in the cut")
-                                },
-                            )),
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(TEXT_SM)
+                                    .text_color(MUTED)
+                                    .child(detail),
+                            ),
                     )
                     .when(!busy && !confirming, |row| {
                         row.child(
@@ -511,6 +567,15 @@ fn spoken(script: &Script, chapter: Option<usize>) -> usize {
             text.split_whitespace().count()
         })
         .sum()
+}
+
+/// "1 take" or "3 takes".
+fn takes_count(n: usize) -> String {
+    if n == 1 {
+        "1 take".into()
+    } else {
+        format!("{n} takes")
+    }
 }
 
 /// "1:20" for `words` at `wpm`.

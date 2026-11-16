@@ -276,6 +276,25 @@ impl Prompter {
         self.beat()
     }
 
+    /// Scrolling on the prompter: `lines` lines on, back when negative, to the start of that
+    /// line and never out of the part. Voice follow and steady scroll go on from there.
+    pub fn step(&mut self, lines: isize) {
+        if self.lines.is_empty() {
+            return;
+        }
+        let first = self.beats[*self.part.start()].first_line;
+        let end = self
+            .beats
+            .get(*self.part.end() + 1)
+            .map_or(self.lines.len(), |b| b.first_line);
+        let to = self
+            .current
+            .saturating_add_signed(lines)
+            .clamp(first, end.saturating_sub(1).max(first));
+        self.rewind = None;
+        self.go_to_line(to);
+    }
+
     /// Voice follow: moves to where the newest recognized words reach, across lines and beats.
     /// When the reader starts a sentence of this beat or the one before over, it jumps back
     /// there and counts a retake. Says when it moved to another beat or started one over.
@@ -517,6 +536,24 @@ mod tests {
             Some("We ship every single week, on Friday afternoon.")
         );
         assert_eq!(view.beat, 1);
+    }
+
+    #[test]
+    fn scrolling_moves_by_lines_inside_the_part_and_voice_follows_from_there() {
+        let mut p = prompter(PrompterMode::FullScript);
+        p.select(0..=0);
+        p.step(2);
+        assert_eq!(
+            p.view().current.map(Line::text).as_deref(),
+            Some("And nothing burns.")
+        );
+        p.step(5);
+        assert_eq!(p.view().index, 2, "the part ends with the first beat");
+        p.step(-1);
+        p.hear(&["We", "ship", "every"]);
+        assert_eq!(p.view().said, 3);
+        p.step(-9);
+        assert_eq!((p.view().index, p.view().said), (0, 0));
     }
 
     #[test]

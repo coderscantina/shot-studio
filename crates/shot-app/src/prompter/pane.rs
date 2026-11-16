@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    App, Context, DisplayId, Div, Entity, FontWeight, Render, SharedString, Subscription, Window,
-    WindowHandle, WindowId, div, prelude::*, px,
+    App, Context, DisplayId, Div, Entity, FontWeight, Render, ScrollEvent, SharedString,
+    Subscription, Window, WindowHandle, WindowId, div, prelude::*, px,
 };
 use gpui_component::Sizable;
 use gpui_component::button::{Button, ButtonVariants};
@@ -40,8 +40,9 @@ struct Knob {
     show: fn(f32) -> String,
 }
 
-/// The sliders: text size in view, speed with steady scroll, the rest under "More settings".
-const KNOBS: [Knob; 6] = [
+/// The sliders: text size in view, speed with steady scroll, the rest under "More settings",
+/// the camera's with the camera on.
+const KNOBS: [Knob; 8] = [
     Knob {
         name: "Text size",
         range: settings::TEXT_SIZE,
@@ -90,9 +91,27 @@ const KNOBS: [Knob; 6] = [
         set: |s, v| s.speed = v,
         show: |v| format!("{v:.0} wpm"),
     },
+    Knob {
+        name: "Camera in countdown",
+        range: settings::CAMERA_OPACITY,
+        step: 5.,
+        get: |s| s.camera_countdown,
+        set: |s, v| s.camera_countdown = v,
+        show: |v| format!("{v:.0}%"),
+    },
+    Knob {
+        name: "Camera in prompter",
+        range: settings::CAMERA_OPACITY,
+        step: 5.,
+        get: |s| s.camera_prompter,
+        set: |s, v| s.camera_prompter = v,
+        show: |v| format!("{v:.0}%"),
+    },
 ];
 const TEXT_SIZE: usize = 0;
 const SPEED: usize = 5;
+/// How much of the camera shows in the countdown and while reading.
+const CAMERA: [usize; 2] = [6, 7];
 /// Line height, margins, width and reading line.
 const MORE: [usize; 4] = [1, 2, 3, 4];
 
@@ -147,6 +166,8 @@ pub struct PrompterPane {
     sliders: Vec<Entity<SliderState>>,
     /// The preview's scroll, see [`output::Flow`].
     flow: output::Flow,
+    /// Scrolling over the preview, see [`output::Wheel`].
+    wheel: output::Wheel,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -215,6 +236,7 @@ impl PrompterPane {
             picking: false,
             sliders,
             flow: output::Flow::default(),
+            wheel: output::Wheel::default(),
             _subscriptions: subscriptions,
         }
     }
@@ -679,20 +701,32 @@ impl Render for PrompterPane {
                 (f32::from(size.width), f32::from(size.height))
             });
         let live = self.live.clone();
+        let camera = s.camera.then(|| live.camera()).flatten();
         let prompter = live.lock();
         let view = prompter.view();
         let left = view.time_left.as_secs();
         let preview_height = PREVIEW_WIDTH * height / width;
+        let line = s.text_size * s.line_height * PREVIEW_WIDTH / width;
         let preview = div()
+            .id("prompter-preview")
             .w(px(PREVIEW_WIDTH))
             .h(px(preview_height))
             .flex_none()
             .rounded(RADIUS_MD)
             .overflow_hidden()
+            .on_scroll(cx.listener(move |pane, event: &ScrollEvent, _, cx| {
+                cx.stop_propagation();
+                let lines = pane.wheel.lines(event, line);
+                if lines != 0 {
+                    pane.live.lock().step(lines);
+                    cx.notify();
+                }
+            }))
             .child(output::page(
                 &view,
                 prompter.lines(),
                 &s,
+                camera,
                 PREVIEW_WIDTH / width,
                 (PREVIEW_WIDTH, preview_height),
                 &mut self.flow,
@@ -861,6 +895,28 @@ impl Render for PrompterPane {
                     .when(s.scroll == ScrollMode::Steady, |rows| {
                         rows.child(self.slider_row(SPEED))
                     })
+                    .child(row(
+                        "Camera",
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(10.))
+                            .child(
+                                Switch::new("prompter-camera")
+                                    .checked(s.camera)
+                                    .accessibility_label("Show the camera behind the text")
+                                    .on_click(cx.listener(|pane, on: &bool, _, cx| {
+                                        let on = *on;
+                                        pane.change(cx, |s| s.camera = on)
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .text_size(TEXT_SM)
+                                    .text_color(MUTED)
+                                    .child("Behind the text, dimmed"),
+                            ),
+                    ))
                     .child(self.disclosure(s.more, cx))
                     .when(s.more, |rows| {
                         rows.child(self.display_picker(cx))
@@ -875,6 +931,9 @@ impl Render for PrompterPane {
                                     })),
                             ))
                             .children(MORE.map(|index| self.slider_row(index)))
+                            .when(s.camera, |rows| {
+                                rows.children(CAMERA.map(|index| self.slider_row(index)))
+                            })
                             .child(row("Countdown", countdown.w_full()))
                             .child(row("Colors", colors.w_full()))
                             .when(s.scroll == ScrollMode::Pedal, |rows| {

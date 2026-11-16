@@ -17,6 +17,8 @@ pub const MARGIN: RangeInclusive<f32> = 0.0..=200.0;
 pub const TEXT_WIDTH: RangeInclusive<f32> = 40.0..=100.0;
 pub const READING_LINE: RangeInclusive<f32> = 10.0..=80.0;
 pub const SPEED: RangeInclusive<f32> = 80.0..=240.0;
+/// How much of the camera shows behind the text, in percent.
+pub const CAMERA_OPACITY: RangeInclusive<f32> = 0.0..=100.0;
 /// Countdown choices in seconds, 0 for none.
 pub const COUNTDOWNS: [u8; 4] = [0, 3, 5, 10];
 
@@ -45,6 +47,13 @@ pub struct Settings {
     /// Seconds the prompter counts down at the start of a take, 0 for none.
     pub countdown: u8,
     pub colors: Colors,
+    /// The live camera, dimmed, behind the text: framing and expression in view while reading.
+    pub camera: bool,
+    /// How much of the camera shows while the countdown runs, in percent: brighter, to check
+    /// the framing before the first line.
+    pub camera_countdown: f32,
+    /// How much of the camera shows the rest of the time, in percent: dim, so the text reads.
+    pub camera_prompter: f32,
     /// The key the Stream Deck pedal sends.
     pub advance: AdvanceKey,
     /// Hotkeys as plain letters instead of ⌃⌥ plus the letter. Plain letters are taken from
@@ -68,6 +77,9 @@ impl Default for Settings {
             speed: 150.0,
             countdown: 3,
             colors: Colors::Soft,
+            camera: false,
+            camera_countdown: 80.0,
+            camera_prompter: 40.0,
             advance: AdvanceKey::F18,
             plain_keys: false,
             more: false,
@@ -105,6 +117,16 @@ impl Settings {
         settings.text_width = clamp(settings.text_width, TEXT_WIDTH, base.text_width);
         settings.reading_line = clamp(settings.reading_line, READING_LINE, base.reading_line);
         settings.speed = clamp(settings.speed, SPEED, base.speed);
+        settings.camera_countdown = clamp(
+            settings.camera_countdown,
+            CAMERA_OPACITY,
+            base.camera_countdown,
+        );
+        settings.camera_prompter = clamp(
+            settings.camera_prompter,
+            CAMERA_OPACITY,
+            base.camera_prompter,
+        );
         if !COUNTDOWNS.contains(&settings.countdown) {
             settings.countdown = base.countdown;
         }
@@ -333,8 +355,18 @@ mod tests {
                 ..Settings::default()
             }
         );
-        let odd = Settings::parse(r#"{"line_height": 0.2, "countdown": 7, "speed": 1000}"#);
-        assert_eq!((odd.line_height, odd.countdown, odd.speed), (1.0, 3, 240.0));
+        let odd = Settings::parse(
+            r#"{"line_height": 0.2, "countdown": 7, "speed": 1000, "camera_prompter": 140}"#,
+        );
+        assert_eq!(
+            (
+                odd.line_height,
+                odd.countdown,
+                odd.speed,
+                odd.camera_prompter
+            ),
+            (1.0, 3, 240.0, 100.0)
+        );
         assert_eq!(Settings::parse("not json"), Settings::default());
     }
 

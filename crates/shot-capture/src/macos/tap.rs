@@ -25,7 +25,9 @@ use objc2_video_toolbox::{
 };
 
 pub(super) const SCREEN_MAX: (usize, usize) = (1920, 1080);
-const CAMERA_MAX: (usize, usize) = (640, 360);
+/// The camera fills the stage in the face scene and the monitor paints it into a 1920x1080
+/// canvas, so a smaller preview shows soft.
+const CAMERA_MAX: (usize, usize) = (1920, 1080);
 const REFRESH: Duration = Duration::from_micros(16_667);
 
 /// The newest raw frame of a source, with a counter that tells readers whether it is new.
@@ -58,7 +60,7 @@ impl Latest {
 }
 
 /// A preview frame: IOSurface-backed, `420f` with BT.601 colors, which is what gpui's surface
-/// element draws, scaled down to at most 1920x1080 for the screen and 640x360 for the camera.
+/// element draws, scaled down to at most 1920x1080.
 #[derive(Clone)]
 pub struct PreviewFrame {
     pub buffer: CFRetained<CVPixelBuffer>,

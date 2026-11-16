@@ -10,7 +10,7 @@ use gpui_component::progress::Progress;
 use gpui_component::{Disableable, Sizable};
 use shot_capture::Preview;
 
-use super::outline::length;
+use super::outline::{Part, length};
 use super::{Phase, RecordScreen, ReviewTakes, live_camera, live_screen, styled_screen};
 use crate::edit::parts::layout_name;
 use crate::edit::picture::thumbnail;
@@ -31,7 +31,19 @@ impl RecordScreen {
             .filter(|_| !busy);
         let blocked = self.choice.nothing_to_record();
         let script = &self.folder.read(cx).project.script;
-        let part = self.part.beats(script).map(|_| self.part.name(script));
+        let part = self.part.beats(script).map(|_| match self.part {
+            Part::Script => "Whole script, retakes inline".to_owned(),
+            Part::Chapter { chapter, .. }
+                if self
+                    .outline
+                    .chapters
+                    .get(chapter)
+                    .is_some_and(|c| !c.takes.is_empty()) =>
+            {
+                format!("Retake {}", self.part.name(script))
+            }
+            Part::Chapter { .. } => self.part.name(script),
+        });
         let recording = matches!(phase, Phase::Recording { .. });
         let (title, detail): (String, String) = match phase {
             Phase::Idle | Phase::Failed(_) | Phase::Finished { .. } => (

@@ -278,8 +278,9 @@ struct Shared {
     words: Mutex<Vec<String>>,
     /// Mic peak of the last buffer in dBFS, as f32 bits.
     level: Arc<AtomicU32>,
-    /// The live frames of the standby or the running session, while there is one.
-    preview: Mutex<Option<Preview>>,
+    /// The live frames of the standby or the running session, while there is one. Shared with
+    /// the prompter, which can show the camera behind its text.
+    preview: crate::prompter::Feed,
     /// The styled monitor of the standby or the running take, while there is one.
     monitor: Mutex<Option<Arc<View>>>,
     /// Why an input on standby did not start, other than a missing permission.
@@ -396,7 +397,7 @@ impl RecordScreen {
             phase: Mutex::new(Phase::Idle),
             words: Mutex::new(Vec::new()),
             level: Arc::new(AtomicU32::new(f32::NEG_INFINITY.to_bits())),
-            preview: Mutex::new(None),
+            preview: prompter.read(cx).live().feed.clone(),
             monitor: Mutex::new(None),
             standby_error: Mutex::new(None),
             standby_since: Mutex::new(None),

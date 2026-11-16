@@ -1,5 +1,6 @@
 //! The prompter output: a borderless window covering the prompter display, laid out for the
-//! Elgato Prompter's 1024x600 panel. Black, so the beam splitter shows nothing but the text.
+//! Elgato Prompter's 1024x600 panel. Black, so the beam splitter shows nothing but the text,
+//! unless the settings put the camera behind it. Scrolling over it moves the text by lines.
 //!
 //! Every way out works: Esc on the output, its close control, ⌘⇧P and the Prompter menu. The
 //! window also closes itself when it lands on another display, which macOS does when the
@@ -9,10 +10,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    App, Bounds, Context, DisplayId, Div, FocusHandle, FontWeight, HighlightStyle, Hsla, Render,
-    StyledText, Subscription, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle,
-    WindowKind, WindowOptions, div, prelude::*, px, rgb,
+    App, Bounds, Context, DisplayId, Div, FocusHandle, FontWeight, HighlightStyle, Hsla, ObjectFit,
+    Render, ScrollEvent, StyledText, Subscription, Window, WindowBackgroundAppearance,
+    WindowBounds, WindowHandle, WindowKind, WindowOptions, div, prelude::*, px, rgb, surface,
 };
+use objc2_core_foundation::CFRetained;
+use objc2_core_video::CVPixelBuffer;
 use shot_prompter::{Line, View};
 
 use super::settings::Settings;
@@ -27,6 +30,7 @@ pub struct PrompterOutput {
     live: Arc<Live>,
     pub settings: Settings,
     flow: Flow,
+    wheel: Wheel,
     focus: FocusHandle,
     _display: Subscription,
 }
@@ -100,6 +104,7 @@ impl PrompterOutput {
             live,
             settings,
             flow: Flow::default(),
+            wheel: Wheel::default(),
             focus,
             _display: watch,
         }
@@ -107,21 +112,31 @@ impl PrompterOutput {
 }
 
 impl Render for PrompterOutput {
-    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let live = self.live.clone();
+        let camera = self.settings.camera.then(|| live.camera()).flatten();
         let prompter = live.lock();
         let view = prompter.view();
         let viewport = window.viewport_size();
         let size = (f32::from(viewport.width), f32::from(viewport.height));
+        let row = self.settings.text_size * self.settings.line_height;
         div()
             .key_context(OUTPUT_CONTEXT)
             .track_focus(&self.focus)
             .size_full()
             .relative()
+            .on_scroll(cx.listener(move |this, event: &ScrollEvent, _, cx| {
+                let lines = this.wheel.lines(event, row);
+                if lines != 0 {
+                    this.live.lock().step(lines);
+                    cx.notify();
+                }
+            }))
             .child(page(
                 &view,
                 prompter.lines(),
                 &self.settings,
+                camera,
                 1.,
                 size,
                 &mut self.flow,
@@ -154,6 +169,23 @@ impl Render for PrompterOutput {
                             .on_click(|_, window, _| window.remove_window()),
                     ),
             )
+    }
+}
+
+/// Scrolling over a prompter page, turned into whole lines of the page's rows. What is left of a
+/// line waits for the next event, so slow and fast swipes both move by lines.
+#[derive(Default)]
+pub struct Wheel(f32);
+
+impl Wheel {
+    /// Lines `event` moves the text on a page whose rows are `row` points tall: forward when
+    /// the swipe pushes the text up, back when it pulls it down.
+    pub fn lines(&mut self, event: &ScrollEvent, row: f32) -> isize {
+        let row = row.max(1.);
+        self.0 -= f32::from(event.delta.pixel_delta(px(row)).y);
+        let lines = (self.0 / row).trunc();
+        self.0 -= lines * row;
+        lines as isize
     }
 }
 
@@ -312,11 +344,15 @@ impl Flow {
 }
 
 /// The whole output for `view` with the look of `settings`, at `scale` of the output's size: 1
-/// on the prompter, smaller in the pane's preview. `size` is the page's size in points.
+/// on the prompter, smaller in the pane's preview. `size` is the page's size in points. With a
+/// `camera` frame the camera fills the page behind the text, as visible as the settings say for
+/// the countdown or for reading.
+#[allow(clippy::too_many_arguments)]
 pub fn page(
     view: &View,
     lines: &[Line],
     settings: &Settings,
+    camera: Option<CFRetained<CVPixelBuffer>>,
     scale: f32,
     size: (f32, f32),
     flow: &mut Flow,
@@ -423,11 +459,29 @@ pub fn page(
     };
     div()
         .size_full()
+        .relative()
         .bg(rgb(0x000000))
         .font_family(SANS)
         .flex()
         .flex_col()
         .overflow_hidden()
+        .children(camera.map(|frame| {
+            let shown = if view.countdown.is_some() {
+                settings.camera_countdown
+            } else {
+                settings.camera_prompter
+            };
+            div()
+                .absolute()
+                .inset_0()
+                .child(surface(frame).size_full().object_fit(ObjectFit::Cover))
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .bg(gpui::black().opacity(1. - shown / 100.)),
+                )
+        }))
         .child(
             text.relative()
                 .flex_1()
