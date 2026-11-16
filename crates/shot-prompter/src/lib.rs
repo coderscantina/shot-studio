@@ -15,5 +15,5 @@ mod matcher;
 mod prompter;
 
 pub use listen::{Listener, follow_model};
-pub use markers::apply_markers;
+pub use markers::{appended, apply_markers};
 pub use prompter::{Line, Moved, Pace, Prompter, Retake, Scroll, View};

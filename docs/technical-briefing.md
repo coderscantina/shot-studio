@@ -26,6 +26,18 @@ Four things set it apart from Descript, Screen Studio, ScreenFlow and DaVinci Re
 - **The edit is a plain text file in git.** `cut.kdl` holds ranges, layouts and effects. Alternate cuts (Shorts, X clips) are derived from the main cut, agents propose changes you review as a diff, and every change is reversible.
 - **4K export beats realtime, and re-exports only redo what changed.** See [targets](#targets).
 
+### The bar for writing a script
+
+Set by Mike on 2026-11-16 after a script agent run ended in a hook picker that could not be used. Writing a script in the app is held to this:
+
+- **Never a dead end.** Every suggestion Claude makes can be accepted, rejected or taken again from where it shows. Accept always applies: on lines a person also changed, the accepted suggestion wins, and one Undo in the editor brings the person's text back. A suggestion is never refused for a merge conflict.
+- **Claude works on what you see.** A run starts from the editor's text: the screen saves it and commits a person's script edits before asking, so every suggestion is made against the current script.
+- **Writing never waits.** The editor takes input while Claude runs, and a run can be stopped.
+- **Suggestions say what they do.** Each one names what it changes, shows struck and inserted words, marks its lines in the script and says how much spoken time it adds or saves. A suggestion that rewrites the whole script shows per chapter, not as one wall of text.
+- **Hooks are a choice.** Alternatives stand side by side with their full text and spoken length. Using one applies it and drops the others; Another set asks again.
+- **The chat is a conversation.** Your requests and Claude's answers stay in order for the session. Answers render as Markdown and can be selected and copied, with a Copy button. Tool steps fold into one line once a run ends.
+- **Numbers you can trust.** The outline's length per chapter and in total counts every word that will be said: beats, their scripts and a chapter's prose. It updates as you type.
+
 Everything runs locally. Claude does judgement work (script drafts, unsure cuts, Shorts picks, caption fixes), never the heavy lifting.
 
 ### Audience

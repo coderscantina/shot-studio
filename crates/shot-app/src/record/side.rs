@@ -1,7 +1,9 @@
 //! The outline pane of the Record screen: what the next take records, and every take.
 
 use gpui::{Context, Div, FontWeight, Stateful, div, prelude::*, px};
+use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::tooltip::Tooltip;
+use gpui_component::{Disableable, Sizable};
 use shot_core::Script;
 
 use super::outline::{Part, Take, length};
@@ -147,14 +149,40 @@ impl RecordScreen {
                     .child(label("Takes"))
                     .child(
                         div()
-                            .text_size(TEXT_SM)
-                            .text_color(MUTED)
-                            .child(match count {
-                                0 => "None yet".to_owned(),
-                                1 => "1 take".to_owned(),
-                                n => format!("{n} takes"),
-                            }),
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .text_size(TEXT_SM)
+                                    .text_color(MUTED)
+                                    .child(match count {
+                                        0 => "None yet".to_owned(),
+                                        1 => "1 take".to_owned(),
+                                        n => format!("{n} takes"),
+                                    }),
+                            )
+                            .child(
+                                Button::new("import-clip")
+                                    .xsmall()
+                                    .ghost()
+                                    .label("Import clip")
+                                    .tooltip(
+                                        "Make a phone clip or other video the next take. Or drop \
+                                         it on this screen.",
+                                    )
+                                    .disabled(busy || self.import.read(cx).is_running())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.import.update(cx, |import, cx| import.pick(cx))
+                                    })),
+                            ),
                     ),
+            )
+            .children(
+                self.import
+                    .read(cx)
+                    .row()
+                    .map(|row| row.px(px(6.)).pb(px(6.))),
             )
             .children(
                 self.outline

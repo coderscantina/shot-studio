@@ -21,6 +21,7 @@ use crate::folder::VideoFolder;
 use crate::record::{RecordScreen, Recorded, ReviewTakes};
 use crate::script::{ReadyToRecord, ScriptScreen};
 use crate::ship::ShipScreen;
+use crate::takes::import::Import;
 use crate::theme::*;
 use crate::ui::{ActionLook, alert, icon, mono, pane, proposal_action};
 
@@ -217,18 +218,22 @@ pub fn open_at(dir: &Path, screen: Option<Screen>, cx: &mut App) -> Result<(), S
         studios.0.push((dir.clone(), window.into(), studio));
     }
     crate::welcome::remember(&dir);
-    cx.activate(true);
+    // An app driven over the control socket stays behind, so a person's typing never lands in it.
+    if !crate::control::enabled() {
+        cx.activate(true);
+    }
     Ok(())
 }
 
 impl Studio {
     fn new(folder: Entity<VideoFolder>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let record = cx.new(|cx| RecordScreen::new(folder.clone(), cx));
-        let cut = cx.new(|cx| CutScreen::new(folder.clone(), cx));
+        let import = cx.new(|_| Import::new(folder.clone()));
+        let record = cx.new(|cx| RecordScreen::new(folder.clone(), import.clone(), cx));
+        let cut = cx.new(|cx| CutScreen::new(folder.clone(), import.clone(), cx));
         let edit = cx.new(|cx| EditScreen::new(folder.clone(), cx));
         let ship = cx.new(|cx| ShipScreen::new(folder.clone(), cx));
         // A finished take stays on Record, so the next part records right away; Review opens
-        // the takes.
+        // the takes. An imported clip shows in Cut.
         let recorded = cx.subscribe(&record, |this, _, _: &Recorded, cx| {
             this.edit.update(cx, |edit, cx| edit.show_last_chapter(cx));
             this.cut.update(cx, |cut, cx| cut.recorded(cx));
@@ -238,6 +243,9 @@ impl Studio {
         let review = cx.subscribe_in(&record, window, |this, _, _: &ReviewTakes, window, cx| {
             this.cut.update(cx, |cut, cx| cut.show_takes(cx));
             this.show(Screen::Cut, window, cx);
+        });
+        let imported = cx.subscribe_in(&import, window, |this, _, _: &Recorded, window, cx| {
+            this.recorded(window, cx);
         });
         let continue_to_edit =
             cx.subscribe_in(&cut, window, |this, _, GoTo(screen), window, cx| {
@@ -253,6 +261,7 @@ impl Studio {
         let mut subscriptions = vec![
             recorded,
             review,
+            imported,
             continue_to_edit,
             edit_to_record,
             focus_lost,
@@ -269,16 +278,13 @@ impl Studio {
             }
         }));
         let planning = channel::locate(&folder.read(cx).dir).map(|(repo, slug)| {
-            let full_script =
-                folder.read(cx).project.format.prompter == shot_core::PrompterMode::FullScript;
             let board = cx.new(|cx| BoardScreen::new(repo.clone(), Some(slug.clone()), cx));
             subscriptions.push(cx.subscribe_in(
                 &board,
                 window,
                 |this, _, ShowCurrent(screen), window, cx| this.show(*screen, window, cx),
             ));
-            let script =
-                cx.new(|cx| ScriptScreen::new(repo.clone(), slug.clone(), full_script, window, cx));
+            let script = cx.new(|cx| ScriptScreen::new(repo.clone(), slug.clone(), window, cx));
             subscriptions.push(cx.subscribe_in(
                 &script,
                 window,
@@ -309,6 +315,13 @@ impl Studio {
         };
         studio.refresh_status();
         studio
+    }
+
+    /// A new take is in the cut, imported: the Cut screen shows it.
+    fn recorded(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.edit.update(cx, |edit, cx| edit.show_last_chapter(cx));
+        self.cut.update(cx, |cut, cx| cut.recorded(cx));
+        self.show(Screen::Cut, window, cx);
     }
 
     /// Puts the latest script into the folder, so Record prompts what the Script screen or an
@@ -400,7 +413,7 @@ impl Studio {
             Screen::Board | Screen::Script => {
                 if let Some(Planning { board, script, .. }) = &self.planning {
                     board.update(cx, |board, _| board.reload());
-                    script.update(cx, |script, _| script.reload());
+                    script.update(cx, |script, cx| script.reload(cx));
                 }
             }
             Screen::Record => self.take_script(cx),

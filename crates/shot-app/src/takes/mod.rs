@@ -8,16 +8,19 @@
 //! Shift with the arrows, or a click and a shift-click, marks words of the attempt. Enter puts
 //! the attempt, or the marked words, into the cut in place of what holds the beat now, and
 //! ⇧Enter assembles the whole cut from the picks. Every change is a write of `cut.kdl` through
-//! `shot-core`, so ⌘Z undoes it like any edit.
+//! `shot-core`, so ⌘Z undoes it like any edit. A video dropped on the view is imported as a
+//! take, see [`import`].
+
+pub mod import;
 
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
 use std::sync::Arc;
 
 use gpui::{
-    App, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle,
-    Hsla, InteractiveText, ObjectFit, ScrollHandle, StyledText, Subscription, Window, actions, div,
-    prelude::*, px, relative, surface,
+    App, Context, Div, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, FontWeight,
+    HighlightStyle, Hsla, InteractiveText, ObjectFit, ScrollHandle, StyledText, Subscription,
+    Window, actions, div, prelude::*, px, relative, surface,
 };
 use shot_core::{
     Attempt, Chapter, Cut, Elements, Id, Lineup, Micros, RangeEdit, Row, RowAt, TakeWords,
@@ -84,6 +87,7 @@ impl Mark {
 
 pub struct TakesView {
     folder: Entity<VideoFolder>,
+    import: Entity<import::Import>,
     takes: HashMap<Id, TakeData>,
     /// The take with the highest number in the media folder, transcribed or not.
     newest: Option<Id>,
@@ -173,7 +177,12 @@ fn seconds(t: Micros) -> String {
 }
 
 impl TakesView {
-    pub fn new(folder: Entity<VideoFolder>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        folder: Entity<VideoFolder>,
+        import: Entity<import::Import>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        cx.observe(&import, |_, _, cx| cx.notify()).detach();
         cx.observe(&folder, |this, _, cx| {
             this.reload(cx);
             // The clip may have changed with the cut.
@@ -184,6 +193,7 @@ impl TakesView {
         .detach();
         let mut view = Self {
             folder,
+            import,
             takes: HashMap::new(),
             newest: None,
             lineup: Lineup::default(),
@@ -1293,7 +1303,13 @@ impl Render for TakesView {
                 this.note = None;
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &Continue, _, cx| this.go_on(cx)));
+            .on_action(cx.listener(|this, _: &Continue, _, cx| this.go_on(cx)))
+            .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(SELECTION))
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                this.import
+                    .update(cx, |import, cx| import.drop_paths(paths, cx))
+            }))
+            .children(self.import.read(cx).row());
         if self.takes.is_empty() || self.lineup.takes().is_empty() {
             let untranscribed = std::fs::read_dir(self.folder.read(cx).dir.join("media"))
                 .is_ok_and(|mut entries| entries.next().is_some());

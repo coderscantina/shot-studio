@@ -1,6 +1,6 @@
 //! A script proposal as the Script screen shows it: inline struck and inserted words where the
-//! change applies, read from the proposal's unified diff of `script.md`. The branch behind it
-//! stays out of sight.
+//! change applies, read from the proposal's unified diff of `script.md`, one change per chapter
+//! it touches. The branch behind it stays out of sight.
 
 /// One run of words in an inline proposal.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,6 +17,8 @@ pub struct Change {
     pub line: usize,
     /// The line after the last one it replaces, `line` when it only inserts.
     pub end: usize,
+    /// The chapter heading the change starts with, if it does.
+    pub chapter: Option<String>,
     pub pieces: Vec<Piece>,
 }
 
@@ -40,18 +42,6 @@ impl Change {
             })
             .sum()
     }
-
-    /// The new text of the change, for hook options.
-    pub fn added_text(&self) -> String {
-        self.pieces
-            .iter()
-            .filter_map(|p| match p {
-                Piece::Added(text) | Piece::Same(text) => Some(text.as_str()),
-                Piece::Removed(_) => None,
-            })
-            .collect::<Vec<_>>()
-            .join(" ")
-    }
 }
 
 /// The changes in a unified diff of `script.md`, each a removed and added block word-diffed.
@@ -61,11 +51,7 @@ pub fn changes(patch: &str) -> Vec<Change> {
     let mut block: Option<(usize, Vec<String>, Vec<String>)> = None;
     let flush = |block: &mut Option<(usize, Vec<String>, Vec<String>)>, out: &mut Vec<Change>| {
         if let Some((line, removed, added)) = block.take() {
-            out.push(Change {
-                line,
-                end: line + removed.len(),
-                pieces: word_diff(&strip(&removed), &strip(&added)),
-            });
+            out.extend(by_chapter(line, &removed, &added));
         }
     };
     for text in patch.lines() {
@@ -98,12 +84,53 @@ pub fn changes(patch: &str) -> Vec<Change> {
     out
 }
 
+/// One change per chapter of a changed block, so a rewrite of the whole script reads chapter by
+/// chapter. The removed and the added lines are cut before each `## ` heading and paired in order.
+fn by_chapter(line: usize, removed: &[String], added: &[String]) -> Vec<Change> {
+    let (old, new) = (chapters(removed), chapters(added));
+    (0..old.len().max(new.len()))
+        .map(|i| {
+            let (start, gone) = old.get(i).copied().unwrap_or((removed.len(), &[]));
+            let came = new.get(i).map_or(&[][..], |(_, lines)| lines);
+            Change {
+                line: line + start,
+                end: line + start + gone.len(),
+                chapter: [came, gone]
+                    .iter()
+                    .find_map(|lines| heading(lines.first()?))
+                    .filter(|title| !title.is_empty())
+                    .map(str::to_owned),
+                pieces: word_diff(&strip(gone), &strip(came)),
+            }
+        })
+        .collect()
+}
+
+/// The runs of `lines` that start at each `## ` heading, with their offsets, after the run of
+/// lines before the first heading, which may be empty.
+fn chapters(lines: &[String]) -> Vec<(usize, &[String])> {
+    let mut starts = vec![0];
+    starts.extend((0..lines.len()).filter(|&i| heading(&lines[i]).is_some()));
+    let ends = starts.iter().skip(1).copied().chain([lines.len()]);
+    starts
+        .iter()
+        .zip(ends)
+        .map(|(&start, end)| (start, &lines[start..end]))
+        .collect()
+}
+
+/// The title of a `## ` chapter heading, empty for a chapter without one yet.
+pub fn heading(line: &str) -> Option<&str> {
+    let rest = line.trim().strip_prefix("##")?;
+    (rest.is_empty() || rest.starts_with(' ')).then(|| rest.trim())
+}
+
 /// Joins lines into one text without Markdown bullet and heading marks.
 fn strip(lines: &[String]) -> Vec<String> {
     lines
         .iter()
         .map(|l| {
-            let l = l.trim();
+            let l = l.trim_start();
             l.strip_prefix("- ")
                 .or_else(|| l.strip_prefix("* "))
                 .or_else(|| l.strip_prefix("## "))
@@ -200,10 +227,17 @@ mod tests {
             ]
         );
         assert_eq!(found[0].words_saved(), -2);
-        assert_eq!(
-            found[0].added_text(),
-            "Editors don't die. They become review tools"
-        );
+    }
+
+    #[test]
+    fn a_whole_script_draft_reads_as_one_change_per_chapter() {
+        let patch = "@@ -1,3 +1,9 @@\n # Title\n \n-## \n+## Hook\n+\n+- Most editing is boring\n+\n+## Body\n+\n+- One\n";
+        let found = changes(patch);
+        let chapters: Vec<_> = found.iter().map(|c| c.chapter.as_deref()).collect();
+        assert_eq!(chapters, [Some("Hook"), Some("Body")]);
+        assert_eq!((found[0].line, found[0].end), (3, 4));
+        assert_eq!((found[1].line, found[1].end), (4, 4));
+        assert_eq!(found[1].pieces, [Piece::Added("Body One".into())]);
     }
 
     #[test]

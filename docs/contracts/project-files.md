@@ -929,7 +929,7 @@ Markdown with a fixed shape, read line by line:
 - Text between a chapter heading and its first beat is the chapter's note, joined like a beat's script.
 - Blank lines separate paragraphs. Other headings (`###` and deeper), text before the first chapter and beats before the first chapter are errors with a line number.
 
-`shot-core` only reads this file. The script agent writes it as plain text.
+`shot-core` only reads this file. The app's script editor writes it as typed, and the script agent as plain text.
 
 ```markdown
 # Why we deploy on Fridays
@@ -968,6 +968,7 @@ media/t03/
 - **Take ids** are `t` and a number, at least two digits: `t01`, `t02`, ... `t100`. A new take gets the number after the highest take folder in `media/`, so an id is never reused while its folder exists, and a gap left by a deleted take is never filled. Deleting the newest take frees its id for the next recording. Cache keys hash the take's media identity as well as its id, so the new recording never reuses the old one's cache.
 - **One clock.** Every track and the event log share the take's media time, 0 at session start. A track may begin a little after 0 when its device delivers its first sample late.
 - **Fragmented MP4.** Each file is an initialization segment (`ftyp`, `moov`) followed by `moof` and `mdat` fragments of about 0.5 s, appended as they are encoded. Video has a keyframe every 0.5 s and no B-frames. A killed recording keeps every complete fragment and stays playable.
+- A take may come from `shot ingest` or the app's Import clip instead of a recording ([0039](../decisions/0039-ingested-clips-are-takes.md)): `camera.mp4` holds the clip's picture upright at a constant 30 or 60 fps, `mic.mp4` its sound when it has some, and `events.jsonl` is empty.
 - A track that is missing was not recorded, see `record` in [`format.kdl`](#formatkdl). Readers assume no track: without `camera.mp4` a layout draws content only, without `screen.mp4` the face only, and without `mic.mp4` the take has no words and its voice is silence.
 
 ## Cursor and key event log

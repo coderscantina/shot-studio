@@ -3,10 +3,10 @@
 Test media is generated, never committed ([0007](../docs/decisions/0007-generated-fixtures-only.md)).
 
 ```
-scripts/fixtures.sh [small|target|demo|all] [--force]
+scripts/fixtures.sh [small|target|demo|phone-clip|all] [--force]
 ```
 
-Output goes to `$SHOT_FIXTURES`, by default `fixtures/generated/` (git-ignored). Agents working in a git worktree set `SHOT_FIXTURES=$HOME/.cache/shot-studio-fixtures`, so media is generated once and survives removing the worktree. Needs macOS (`say`), ffmpeg with libx265, ffprobe and awk. `small` takes about 1.5 min, `target` several minutes on an M1 Pro, `demo` a second.
+Output goes to `$SHOT_FIXTURES`, by default `fixtures/generated/` (git-ignored). Agents working in a git worktree set `SHOT_FIXTURES=$HOME/.cache/shot-studio-fixtures`, so media is generated once and survives removing the worktree. Needs macOS (`say`), ffmpeg with libx265, ffprobe and awk. `small` takes about 1.5 min, `target` several minutes on an M1 Pro, `demo` a second, `phone-clip` about 15 s.
 
 `demo` always rebuilds the repo, since it is cheap. A rerun skips media groups whose files all match `checksums.txt`. `--force` regenerates and logs `unchanged` or `changed` per file. The output is deterministic: x265 runs with one frame thread and no pool, muxing is bitexact with no metadata, and the speech comes from `say` with a fixed voice (Samantha). A different voice or macOS speech version changes the speech checksums.
 
@@ -24,6 +24,8 @@ Output goes to `$SHOT_FIXTURES`, by default `fixtures/generated/` (git-ignored).
 | `target/chapters.json` | Eight chapters as `{"title","start_us","end_us"}`, all tracks share this timeline |
 | `target-project/` | Copy of `fixtures/projects/target/` (video.kdl, format.kdl, script.md, cut.kdl) with the target tracks hard-linked into `media/t01/` as `screen.mp4`, `camera.mp4`, `mic.mp4`, `events.jsonl` |
 | `demo-channel/` | Git repo built from `fixtures/projects/demo-channel/`, see below |
+| `phone-clip.mov` | 20 s as a phone films it, for `shot ingest`: H.264 1920x1080 turned portrait by a -90° display matrix, 29.97 fps with every 47th frame dropped so the timestamps vary, 10-bit with HLG BT.2020 tags, B-frames, stereo 44.1 kHz AAC with about 12 s of speech from `say` |
+| `phone-clip.txt` | What `phone-clip.mov` says, the ground truth for its transcript |
 | `demo-channel.refs` | Every ref of the demo repo with its sha |
 | `checksums.txt` | sha256 of every output |
 
@@ -41,6 +43,7 @@ Output goes to `$SHOT_FIXTURES`, by default `fixtures/generated/` (git-ignored).
 
 - `clean.txt` and the other clip texts are exactly what `say` speaks. `[[slnc N]]` is a pause of N ms. The generated `speech/*.txt` is the same text without that markup, the ground truth for transcription tests.
 - `screen-scenario.txt` is one 6 s loop of cursor moves, clicks and typing. Every screen segment and event log tiles it.
+- `phone-clip.txt` is what the phone clip says.
 - `chapters.tsv` lists chapter length, accent color and title. `narration-N.txt` is spoken in chapter N after 0.8 s of silence, then padded with silence to the chapter end.
 
 ## Event log

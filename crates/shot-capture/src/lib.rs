@@ -44,6 +44,8 @@
 
 pub mod clock;
 pub mod events;
+#[cfg(target_os = "macos")]
+pub mod ingest;
 pub mod take;
 
 #[cfg(target_os = "macos")]
@@ -53,6 +55,8 @@ use std::path::PathBuf;
 
 use shot_core::{Id, Micros};
 
+#[cfg(target_os = "macos")]
+pub use ingest::{IngestError, Ingested, Progress, ingest};
 #[cfg(target_os = "macos")]
 pub use macos::{Marks, Preview, PreviewFrame, Session, Standby, access, list_devices};
 

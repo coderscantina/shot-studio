@@ -14,6 +14,7 @@ use crate::{
 /// Binds the list. Call once at startup, before the menus are set, so they show the shortcuts.
 pub fn bind(cx: &mut App) {
     cx.bind_keys(bindings());
+    shot_editor::bind_keys(cx);
 }
 
 fn bindings() -> Vec<KeyBinding> {
@@ -143,6 +144,10 @@ fn bindings() -> Vec<KeyBinding> {
         // Script screen
         KeyBinding::new("tab", script::AcceptProposal, script),
         KeyBinding::new("escape", script::RejectProposal, script),
+        KeyBinding::new("alt-down", script::NextSuggestion, script),
+        KeyBinding::new("alt-up", script::PreviousSuggestion, script),
+        KeyBinding::new("cmd-.", script::StopRun, script),
+        KeyBinding::new("cmd-j", script::FocusPrompt, script),
         KeyBinding::new("cmd-enter", script::ContinueToRecord, script),
         // Ship screen
         KeyBinding::new("cmd-enter", ship::ShipVideo, ship),

@@ -1,7 +1,8 @@
 //! A control channel for agents: with `SHOT_CONTROL=1` the app listens on the Unix socket
 //! `$TMPDIR/shot-app-<pid>.sock` (user only, removed on quit). Each line is one JSON request,
 //! answered by one JSON line, `{"ok":true,...}` or `{"ok":false,"error":"..."}`. A line that is
-//! not a known request closes the connection.
+//! not a known request closes the connection. A studio window opened in this mode does not bring
+//! the app to the front.
 //!
 //! - `{"request":"windows"}`: `windows` with each window's `id`, `title` and `kind`.
 //! - `{"request":"commands","window":ID}`: `commands` with each action's `name`, its `keys` in
@@ -25,6 +26,7 @@ use std::time::Duration;
 use gpui::{AnyView, AnyWindowHandle, App, AppContext, AsKeystroke, Keystroke, Window};
 use gpui_component::Root;
 use objc2::msg_send;
+use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use serde::Deserialize;
@@ -146,11 +148,26 @@ fn handle(Job { request, reply }: Job, cx: &mut App) {
             in_window(window, cx, |window, cx| type_text(&text, window, cx))
         }
         Request::Screenshot { window, path } => {
-            match in_window(window, cx, |window, _| window_number(window)) {
-                Ok(Some(number)) => {
-                    // screencapture takes a moment, so it runs off the main thread.
-                    cx.background_spawn(async move {
-                        let _ = reply.send(capture(number, &path));
+            match in_window(window, cx, |window, _| native_window(window)) {
+                Ok(Some((number, view))) => {
+                    cx.spawn(async move |cx| {
+                        // A window behind others draws no frames, so it draws one now, outside
+                        // the app's update, as AppKit asks for it.
+                        // SAFETY: the view is gpui's live NSView, on the main thread.
+                        unsafe {
+                            let layer: *mut AnyObject = msg_send![&*view, layer];
+                            if !layer.is_null() {
+                                let _: () = msg_send![layer, setNeedsDisplay];
+                                let _: () = msg_send![layer, displayIfNeeded];
+                            }
+                        }
+                        // screencapture takes a moment, so it runs off the main thread, after
+                        // the frame is on screen.
+                        let captured = cx.background_spawn(async move {
+                            std::thread::sleep(Duration::from_millis(100));
+                            capture(number, &path)
+                        });
+                        let _ = reply.send(captured.await);
                     })
                     .detach();
                     return;
@@ -298,8 +315,8 @@ fn kind(root: AnyView, cx: &App) -> &'static str {
     .map_or("other", |(_, kind)| kind)
 }
 
-/// The window's CoreGraphics window number, which `screencapture -l` takes.
-fn window_number(window: &Window) -> Option<isize> {
+/// The window's CoreGraphics window number, which `screencapture -l` takes, and its view.
+fn native_window(window: &Window) -> Option<(isize, Retained<AnyObject>)> {
     let RawWindowHandle::AppKit(handle) = HasWindowHandle::window_handle(window).ok()?.as_raw()
     else {
         return None;
@@ -312,7 +329,7 @@ fn window_number(window: &Window) -> Option<isize> {
         if native.is_null() {
             return None;
         }
-        Some(msg_send![native, windowNumber])
+        Some((msg_send![native, windowNumber], Retained::retain(view)?))
     }
 }
 

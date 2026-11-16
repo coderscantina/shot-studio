@@ -15,7 +15,8 @@
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use serde_json::{Value, json};
 
@@ -124,6 +125,52 @@ pub enum BridgeError {
     },
     #[error("Claude Code stopped: {0}")]
     Claude(String),
+    #[error("stopped")]
+    Stopped,
+}
+
+/// Stops a [`Session::run_until`] from another thread by killing its `claude` process. Clones
+/// stop the same run.
+#[derive(Debug, Clone, Default)]
+pub struct Stop(Arc<Mutex<Stopping>>);
+
+#[derive(Debug, Default)]
+struct Stopping {
+    asked: bool,
+    child: Option<Child>,
+}
+
+impl Stop {
+    /// Stops the run now, or as soon as its `claude` process starts.
+    pub fn stop(&self) {
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        state.asked = true;
+        if let Some(child) = &mut state.child {
+            let _ = child.kill();
+        }
+    }
+
+    pub fn asked(&self) -> bool {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).asked
+    }
+
+    /// Keeps the running child where [`Stop::stop`] reaches it, killing it at once when a stop
+    /// came first.
+    fn hold(&self, mut child: Child) {
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.asked {
+            let _ = child.kill();
+        }
+        state.child = Some(child);
+    }
+
+    fn release(&self) -> Option<Child> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .child
+            .take()
+    }
 }
 
 impl Session {
@@ -180,9 +227,15 @@ impl Session {
     }
 
     /// Runs Claude to the end, calling `on_step` for every step. Returns the final answer.
-    pub fn run(
+    pub fn run(&self, claude: &Claude, on_step: impl FnMut(Step)) -> Result<String, BridgeError> {
+        self.run_until(claude, &Stop::default(), on_step)
+    }
+
+    /// Like [`Session::run`], ending early with [`BridgeError::Stopped`] when `stop` is used.
+    pub fn run_until(
         &self,
         claude: &Claude,
+        stop: &Stop,
         mut on_step: impl FnMut(Step),
     ) -> Result<String, BridgeError> {
         let io = |path: &Path| {
@@ -228,10 +281,11 @@ impl Session {
             let _ = stderr.read_to_string(&mut text);
             text
         });
+        let stdout = child.stdout.take().expect("stdout is piped");
+        stop.hold(child);
         let steps_path = self.log_dir.join("steps.jsonl");
         let mut steps_log = fs::File::create(&steps_path).map_err(io(&steps_path))?;
         let mut answer = None;
-        let stdout = child.stdout.take().expect("stdout is piped");
         for line in BufReader::new(stdout).lines() {
             let line = line.map_err(io(&claude.path))?;
             writeln!(steps_log, "{line}").map_err(io(&steps_path))?;
@@ -245,8 +299,10 @@ impl Session {
                     Step::Started { tools, .. }
                         if !tools.iter().any(|t| t.starts_with("mcp__shot__")) =>
                     {
-                        let _ = child.kill();
-                        let _ = child.wait();
+                        if let Some(mut child) = stop.release() {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                        }
                         return Err(BridgeError::Claude(format!(
                             "the shot MCP server did not start, check that `{} mcp` runs",
                             self.shot.display()
@@ -257,8 +313,14 @@ impl Session {
                 on_step(step);
             }
         }
+        let mut child = stop
+            .release()
+            .expect("the child is held until the run ends");
         let status = child.wait().map_err(io(&claude.path))?;
         let errors = errors.join().unwrap_or_default();
+        if stop.asked() {
+            return Err(BridgeError::Stopped);
+        }
         match answer {
             Some(text) if status.success() => Ok(text),
             _ => Err(BridgeError::Claude(

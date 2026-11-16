@@ -24,6 +24,8 @@ shot-ship = { path = "../shot-ship" }
 image = { workspace = true }
 shot-library = { path = "../shot-library" }
 shot-fs = { path = "../shot-fs" }
+# The Script screen's editor.
+shot-editor = { path = "../shot-editor" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { workspace = true }

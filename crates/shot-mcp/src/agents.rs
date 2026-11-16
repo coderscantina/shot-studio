@@ -10,8 +10,8 @@ for cuts, propose_rule for a style rule at the narrowest layer that fits, propos
 one element. A proposal is a branch the person accepts or rejects, so never ask for confirmation, \
 just propose. Name proposals with lowercase words and dashes. Keep the speaker's voice: read \
 their other scripts with read_video before writing. Never invent facts; say what you are unsure \
-about. End with two or three sentences on what you proposed and why, in plain text without \
-Markdown.";
+about. End with two or three sentences on what you proposed and why. The app renders your answer \
+as Markdown: bold, short lists and links are fine, headings and tables are not.";
 
 /// Added to [`SYSTEM`] for a [`Reach::Web`] session.
 pub const WEB: &str = "You can also search the web with WebSearch and read pages with WebFetch. \
@@ -31,6 +31,11 @@ pub fn system(reach: Reach) -> String {
         Reach::Project | Reach::FrameTask => SYSTEM.to_owned(),
     }
 }
+
+/// The proposal a draft of the whole script is named.
+pub const DRAFT: &str = "draft";
+/// The name prefix of alternative hooks: `hook-a`, `hook-b` and `hook-c`.
+pub const HOOK: &str = "hook-";
 
 /// A request to the script agent, typed in the Script screen's prompt box.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,14 +81,15 @@ impl ScriptCommand {
         let task = match self {
             Self::Draft { brief } => format!(
                 "Draft the script from this brief:\n\n{brief}\n\nRead the video and its \
-                 sources first. Then propose the whole script as `draft`, and three hooks for \
-                 it as hook-a, hook-b and hook-c, each the same script with a different first \
+                 sources first. Then propose the whole script as `{DRAFT}`, and three hooks for \
+                 it as {HOOK}a, {HOOK}b and {HOOK}c, each the same script with a different first \
                  beat."
             ),
-            Self::Hooks => "Propose three alternative hooks as hook-a, hook-b and hook-c: each \
-                            is the current script with only the first chapter's first beat \
-                            rewritten. Make them differ in approach, not in wording."
-                .to_owned(),
+            Self::Hooks => format!(
+                "Propose three alternative hooks as {HOOK}a, {HOOK}b and {HOOK}c: each is the \
+                 current script with only the first chapter's first beat rewritten. Make them \
+                 differ in approach, not in wording."
+            ),
             Self::Tighten => "Tighten the script: cut repetition and filler, keep every point \
                               and source. Propose it as `tighten`."
                 .to_owned(),

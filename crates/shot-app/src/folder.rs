@@ -65,22 +65,6 @@ struct Snapshot {
 /// How many writes undo can step back through.
 const HISTORY: usize = 200;
 
-/// `cut` with `take` appended as a chapter of its own that keeps `range`, its layout and zoom
-/// markers written as nodes.
-pub fn appended(
-    cut: &Cut,
-    take: &Id,
-    range: TimeRange,
-    markers: &[shot_capture::events::Marker],
-    format: &Format,
-) -> Cut {
-    let mut cut = cut.append_take(take.clone(), format!("Take {take}"), range);
-    if let Some(edit) = cut.chapters.last_mut().and_then(|c| c.takes.last_mut()) {
-        shot_prompter::apply_markers(edit, markers, format);
-    }
-    cut
-}
-
 fn read(dir: &Path, name: &str) -> Result<Option<String>, String> {
     let path = dir.join(name);
     match fs::read_to_string(&path) {
@@ -496,7 +480,7 @@ impl VideoFolder {
     fn store_take(&mut self, take: Id, range: TimeRange) -> Result<(), String> {
         let markers = shot_capture::events::read_markers(&self.media(&take, "events.jsonl"))
             .map_err(|e| format!("{take}/events.jsonl: {e}"))?;
-        let cut = appended(
+        let cut = shot_prompter::appended(
             &self.project.cut,
             &take,
             range,
