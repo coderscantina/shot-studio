@@ -409,6 +409,7 @@ impl RecordScreen {
         let confirming = self.removing.as_ref() == Some(&take.id);
         let key = take.id.to_string();
         let row = div()
+            .min_w_0()
             .flex()
             .flex_col()
             .gap(px(8.))
@@ -480,32 +481,40 @@ impl RecordScreen {
                     }),
             );
         if confirming {
+            // The question wraps above its buttons, so both fit in the narrow pane at any indent.
             row.child(
                 div()
+                    .min_w_0()
                     .flex()
-                    .items_center()
+                    .flex_col()
                     .gap(px(8.))
                     .child(
                         div()
-                            .flex_1()
+                            .min_w_0()
                             .text_size(TEXT_SM)
                             .line_height(px(18.))
                             .text_color(BODY)
                             .child("Remove from the video? The media goes to the Trash."),
                     )
                     .child(
-                        text_button(("keep", key.clone()), "Keep", false).on_click(cx.listener(
-                            |this, _, _, cx| {
-                                this.removing = None;
-                                cx.notify();
-                            },
-                        )),
-                    )
-                    .child(
-                        text_button(("confirm", key.clone()), "Remove", true).on_click({
-                            let id = id.clone();
-                            cx.listener(move |this, _, _, cx| this.remove_take(id.clone(), cx))
-                        }),
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap(px(8.))
+                            .child(text_button(("keep", key.clone()), "Keep", false).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.removing = None;
+                                    cx.notify();
+                                }),
+                            ))
+                            .child(
+                                text_button(("confirm", key.clone()), "Remove", true).on_click({
+                                    let id = id.clone();
+                                    cx.listener(move |this, _, _, cx| {
+                                        this.remove_take(id.clone(), cx)
+                                    })
+                                }),
+                            ),
                     ),
             )
         } else {

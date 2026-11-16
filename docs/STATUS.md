@@ -6,7 +6,7 @@ Updated 2026-11-17. Read by agents at the start of a thread; rewrite it before h
 
 `main` is the branch of record and is public at https://github.com/coderscantina/shot-studio. Local `main` holds milestones 01 to 16 and the record rework, and is ahead of `origin/main`, not pushed.
 
-`main` holds precise cuts by text, transcript menus and record changes (2026-11-17), four commits from `4ca5097`, not pushed:
+`main` holds precise cuts by text, transcript menus and record changes (2026-11-17), commits from `4ca5097` up to the take Remove fix, not pushed:
 - Word edges grow into the gaps where the audio still sounds (`word_bounds`), since Whisper starts a word after a pause up to 200 ms late and a cut there left its first syllable. `shot analyze` measures cached transcripts again against `mic.mp4` (stable, about 1 s a take).
 - One cut rule in `shot_core::word_cut`: Delete takes the words and the longer pause around them, edges 80 ms into the gaps. Retake findings cut just before the kept word the same way.
 - The restart detector matches words that sound alike ("failing", "falling") and treats one changed word after a shared opening of three as sure (85).
@@ -33,7 +33,7 @@ Updated 2026-11-17. Read by agents at the start of a thread; rewrite it before h
 
 fmt, workspace clippy and `cargo test --workspace` pass on `main` after the merge; the voice-follow lag fixture test passes (median -19 ms).
 
-A local bundle from `scripts/bundle.sh` is in `dist/`: `Shot Studio.app` and `Shot-Studio-26.11.7.dmg`, built from `main` after the milestone 16 merge with Mike's uncommitted app icon, signed with his Developer ID (hardened runtime), not notarized. `dist/` is not in git. Rebuilt 2026-11-17 from `main` at the status commit after `8b736bf`, with Mike's uncommitted app icon.
+A local bundle from `scripts/bundle.sh` is in `dist/`: `Shot Studio.app` and `Shot-Studio-26.11.7.dmg`, built from `main` after the milestone 16 merge with Mike's uncommitted app icon, signed with his Developer ID (hardened runtime), not notarized. `dist/` is not in git. Rebuilt 2026-11-17 from `main` with the take Remove fix, with Mike's uncommitted app icon.
 
 ## Uncommitted work
 
