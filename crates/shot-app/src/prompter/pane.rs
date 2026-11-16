@@ -40,7 +40,7 @@ struct Knob {
     show: fn(f32) -> String,
 }
 
-/// The sliders: text size and speed in view, the rest under "More settings".
+/// The sliders: text size in view, speed with steady scroll, the rest under "More settings".
 const KNOBS: [Knob; 6] = [
     Knob {
         name: "Text size",
@@ -145,6 +145,8 @@ pub struct PrompterPane {
     /// The display list is open.
     picking: bool,
     sliders: Vec<Entity<SliderState>>,
+    /// The preview's scroll, see [`output::Flow`].
+    flow: output::Flow,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -212,6 +214,7 @@ impl PrompterPane {
             asked: false,
             picking: false,
             sliders,
+            flow: output::Flow::default(),
             _subscriptions: subscriptions,
         }
     }
@@ -661,7 +664,7 @@ fn row(text: &'static str, control: impl IntoElement) -> Div {
 }
 
 impl Render for PrompterPane {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mode = self.folder.read(cx).project.format.prompter;
         let s = self.settings.clone();
         let (status, button) = self.status();
@@ -675,17 +678,30 @@ impl Render for PrompterPane {
                 let size = display.bounds().size;
                 (f32::from(size.width), f32::from(size.height))
             });
-        let prompter = self.live.lock();
+        let live = self.live.clone();
+        let prompter = live.lock();
         let view = prompter.view();
         let left = view.time_left.as_secs();
+        let preview_height = PREVIEW_WIDTH * height / width;
         let preview = div()
             .w(px(PREVIEW_WIDTH))
-            .h(px(PREVIEW_WIDTH * height / width))
+            .h(px(preview_height))
             .flex_none()
             .rounded(RADIUS_MD)
             .overflow_hidden()
-            .child(output::page(&view, &s, PREVIEW_WIDTH / width));
-        let chapter = format!("{} · beat {} of {}", view.chapter, view.beat, view.beats);
+            .child(output::page(
+                &view,
+                prompter.lines(),
+                &s,
+                PREVIEW_WIDTH / width,
+                (PREVIEW_WIDTH, preview_height),
+                &mut self.flow,
+                window,
+            ));
+        let chapter = format!(
+            "{} · beat {} of {}",
+            view.chapter, view.part_beat, view.part_beats
+        );
         let retakes = view.retakes;
         drop(prompter);
 
@@ -839,24 +855,26 @@ impl Render for PrompterPane {
                 div()
                     .flex()
                     .flex_col()
-                    .child(self.display_picker(cx))
-                    .child(row(
-                        "Mirror",
-                        Switch::new("prompter-mirror")
-                            .checked(s.mirror)
-                            .accessibility_label("Mirror the output")
-                            .on_click(cx.listener(|pane, on: &bool, _, cx| {
-                                let on = *on;
-                                pane.change(cx, |s| s.mirror = on)
-                            })),
-                    ))
                     .child(row("Shows", shows.w_full()))
                     .child(row("Scroll", scroll.w_full()))
                     .child(self.slider_row(TEXT_SIZE))
-                    .child(self.slider_row(SPEED))
+                    .when(s.scroll == ScrollMode::Steady, |rows| {
+                        rows.child(self.slider_row(SPEED))
+                    })
                     .child(self.disclosure(s.more, cx))
                     .when(s.more, |rows| {
-                        rows.children(MORE.map(|index| self.slider_row(index)))
+                        rows.child(self.display_picker(cx))
+                            .child(row(
+                                "Mirror",
+                                Switch::new("prompter-mirror")
+                                    .checked(s.mirror)
+                                    .accessibility_label("Mirror the output")
+                                    .on_click(cx.listener(|pane, on: &bool, _, cx| {
+                                        let on = *on;
+                                        pane.change(cx, |s| s.mirror = on)
+                                    })),
+                            ))
+                            .children(MORE.map(|index| self.slider_row(index)))
                             .child(row("Countdown", countdown.w_full()))
                             .child(row("Colors", colors.w_full()))
                             .when(s.scroll == ScrollMode::Pedal, |rows| {

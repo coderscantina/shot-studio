@@ -39,7 +39,9 @@ impl Follow {
         let before = self.prompter.position();
         self.prompter.hear(words);
         let now = Instant::now();
-        for slot in &mut self.highlighted[before..self.prompter.position()] {
+        // A restart moves back; the words stay highlighted from their first time.
+        let after = self.prompter.position().max(before);
+        for slot in &mut self.highlighted[before..after] {
             slot.get_or_insert(now);
         }
     }
@@ -176,12 +178,13 @@ fn voice_follow_lag_on_say_fixtures() {
         let words = ends.len();
         let known = ends.iter().flatten().count();
         println!(
-            "{}: {words} words, {known} timed, fast {} highlighted median {:.0} ms, stable {} highlighted median {:.0} ms",
+            "{}: {words} words, {known} timed, fast {} highlighted median {:.0} ms, stable {} highlighted median {:.0} ms, {} restarts heard",
             wav.file_stem().unwrap().to_string_lossy(),
             fast_lags.len(),
             median(&mut fast_lags),
             stable_lags.len(),
             median(&mut stable_lags),
+            fast.lock().unwrap().prompter.view().retakes,
         );
         said.0 += known;
         said.1 += fast_lags.len();

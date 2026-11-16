@@ -193,6 +193,12 @@ impl CutScreen {
         }
     }
 
+    /// Shows the takes, as Review on the Record screen asks.
+    pub fn show_takes(&mut self, cx: &mut Context<Self>) {
+        self.tab = Tab::Takes;
+        cx.notify();
+    }
+
     /// The Review and Takes switch for the title bar.
     pub fn title_controls(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let tab = self.tab;

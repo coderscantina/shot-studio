@@ -28,7 +28,8 @@ use shot_analyze::elements::heard_retakes;
 use shot_capture::Preview;
 use shot_capture::events::Marker;
 use shot_core::{
-    Applied, Elements, Id, Micros, Project, StyleInput, TimeRange, Timeline, Transcript, Word,
+    Applied, Elements, Id, Layout, Micros, Project, StyleInput, TimeRange, Timeline, Transcript,
+    Word,
 };
 use shot_mcp::style::{self, Disk, Inputs};
 use shot_prompter::Retake;
@@ -38,7 +39,7 @@ use shot_render::monitor::{Feed, Monitor, Styled};
 use shot_render::theme::Theme;
 use shot_ship::media::Planes;
 
-use crate::prompter::Live as Prompter;
+use crate::prompter::{Live as Prompter, Scene};
 
 /// The monitor's render size; the stage shows it at about 900 points, 1800 pixels.
 const CANVAS: Canvas = Canvas {
@@ -207,6 +208,7 @@ impl Rehearsal {
         preview: Preview,
         screen_size: (u32, u32),
         styled: Arc<AtomicBool>,
+        scene: Scene,
     ) -> Self {
         let view = Arc::new(View::default());
         let quit = Arc::new(AtomicBool::new(false));
@@ -214,7 +216,18 @@ impl Rehearsal {
             .name("shot-rehearsal".into())
             .spawn({
                 let (view, quit) = (view.clone(), quit.clone());
-                move || rehearse(&setup, &take, &preview, screen_size, &styled, &view, &quit)
+                move || {
+                    rehearse(
+                        &setup,
+                        &take,
+                        &preview,
+                        screen_size,
+                        &styled,
+                        &scene,
+                        &view,
+                        &quit,
+                    )
+                }
             })
             .expect("spawning the rehearsal thread");
         Self {
@@ -238,17 +251,20 @@ impl Drop for Rehearsal {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn rehearse(
     setup: &Setup,
     take: &Id,
     preview: &Preview,
     screen_size: (u32, u32),
     styled: &AtomicBool,
+    scene: &Scene,
     view: &View,
     quit: &AtomicBool,
 ) {
     let started = Instant::now();
-    let mut painter: Option<(Styled, Monitor)> = None;
+    // The style, the monitor, the painted style and the scene it shows.
+    let mut painter: Option<(LiveStyle, Monitor, Styled, Option<Layout>)> = None;
     let mut failed = false;
     let mut black = BlackWatch::default();
     let mut seen = (0, 0);
@@ -280,9 +296,15 @@ fn rehearse(
         let Some(screen) = screen.filter(|_| !failed) else {
             continue;
         };
-        if painter.is_none() {
-            let made = prepare(setup, take).and_then(|(mut live, monitor)| {
-                Ok((live.styled(&Elements::new(take.clone()), &[])?, monitor))
+        let picked = *scene.lock().expect("scene");
+        if painter.as_ref().is_none_or(|p| p.3 != picked) {
+            let made = match painter.take() {
+                Some((live, monitor, ..)) => Ok((live, monitor)),
+                None => prepare(setup, take),
+            }
+            .and_then(|(mut live, monitor)| {
+                let styled = live.styled(&Elements::new(take.clone()), &scene_marks(picked))?;
+                Ok((live, monitor, styled, picked))
             });
             match made {
                 Ok(made) => painter = Some(made),
@@ -293,7 +315,7 @@ fn rehearse(
                 }
             }
         }
-        let Some((styled, monitor)) = &mut painter else {
+        let Some((_, monitor, styled, _)) = &mut painter else {
             continue;
         };
         let feed = Feed {
@@ -527,6 +549,19 @@ impl LiveStyle {
             captions: main.captions,
         })
     }
+}
+
+/// The marker that starts a take in `scene`, as the take's own start writes it.
+fn scene_marks(scene: Option<Layout>) -> Vec<Marker> {
+    scene
+        .map(|layout| Marker {
+            t: Micros(0),
+            x: 0,
+            y: 0,
+            mark: shot_capture::events::Mark::Layout { layout },
+        })
+        .into_iter()
+        .collect()
 }
 
 fn open_range() -> TimeRange {

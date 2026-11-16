@@ -1,5 +1,17 @@
-//! The Record screen: device pickers, tracks with live levels and their privacy access, the
-//! transcript as stable words arrive from the mic, elapsed time, start and stop.
+//! The Record screen: the script's outline with the takes of each chapter, the part the next
+//! take records, the stage with its inputs and the scene it shows, and the prompter.
+//!
+//! Recording works part by part. The outline picks what the next take records: the whole
+//! script, a chapter, or a chapter from one of its beats. The prompter starts there and stops at
+//! the part's end, and a finished take stays on this screen: it joins the outline, the part
+//! moves on to the next chapter nobody recorded yet, and Review opens the take in the Cut
+//! screen's takes. A take that repeats beats plays in place of the earlier attempts (see
+//! [`VideoFolder::append_take`]). A take can be removed from the outline, its media to the Trash.
+//!
+//! The inputs sit in a bar over the stage: each chip says whether its track records, and opens
+//! its devices, switch and privacy access. The scene strip under the stage picks the layout the
+//! take starts in, which the styled monitor shows; while recording it switches scenes like the
+//! 1 to 4 hotkeys.
 //!
 //! While the screen shows, the selected inputs run on standby: the stage previews them (styled
 //! by a [`Rehearsal`] or raw) and the mic drives the meter, so everything can be checked before
@@ -23,10 +35,8 @@ use gpui::{
     App, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, ObjectFit,
     ScrollHandle, Subscription, Window, actions, div, prelude::*, px, relative, surface,
 };
-use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::progress::Progress;
-use gpui_component::switch::Switch;
-use gpui_component::{Disableable, Sizable};
+use gpui_component::Sizable;
+use gpui_component::button::Button;
 use objc2_core_video::{CVPixelBufferGetHeight, CVPixelBufferGetWidth};
 use shot_analyze::elements::{self, Depth};
 use shot_analyze::{SpeechDetector, Transcriber, cache, models};
@@ -39,9 +49,16 @@ use shot_core::{Id, Inputs, Micros, Transcript};
 
 use crate::folder::VideoFolder;
 use crate::live::{Feeds, Heard, LiveTake, Rehearsal, Setup, View};
-use crate::prompter::{Live, PrompterPane, TogglePrompter};
+use crate::prompter::{Live, PrompterPane, Scene, TogglePrompter};
 use crate::theme::*;
-use crate::ui::{self, alert, hint, icon, label, mono};
+use crate::ui::{self, alert, icon};
+
+mod inputs;
+mod outline;
+mod side;
+mod stage;
+
+use outline::{Outline, Part};
 
 pub(crate) const CONTEXT: &str = "RecordScreen";
 
@@ -49,10 +66,32 @@ pub(crate) const CONTEXT: &str = "RecordScreen";
 /// screen send their first frame well within it.
 const SILENT_AFTER: Duration = Duration::from_secs(4);
 
-actions!(record, [ToggleRecording]);
+actions!(
+    record,
+    [
+        ToggleRecording,
+        PreviousPart,
+        NextPart,
+        Scene1,
+        Scene2,
+        Scene3,
+        Scene4
+    ]
+);
 
 /// A finished take, emitted once it is in `cut.kdl`.
 pub struct Recorded;
+
+/// Review the takes, the newest focused, in the Cut screen.
+pub struct ReviewTakes;
+
+/// The take that just finished, as the stage reports it.
+struct Saved {
+    take: Id,
+    length: Micros,
+    /// Beats it took over from earlier takes.
+    replaced: usize,
+}
 
 /// What the recorder thread is doing.
 #[derive(Clone)]
@@ -245,6 +284,8 @@ struct Shared {
     standby_since: Mutex<Option<Instant>>,
     /// Whether the monitor shows the style or the raw feed.
     styled: Arc<AtomicBool>,
+    /// The scene the take shows, the prompter's, for the rehearsal.
+    scene: Scene,
 }
 
 impl Shared {
@@ -293,7 +334,8 @@ pub struct RecordScreen {
     folder: Entity<VideoFolder>,
     devices: Devices,
     choice: Choice,
-    open: Option<Picker>,
+    /// The input chip whose settings show under the bar.
+    open: Option<Track>,
     shared: Arc<Shared>,
     commands: Sender<Command>,
     focus: FocusHandle,
@@ -307,10 +349,20 @@ pub struct RecordScreen {
     /// The redraw loop of the standby runs.
     ticking: bool,
     permissions: Permissions,
+    /// What the next take records.
+    part: Part,
+    outline: Outline,
+    /// The outline is read again before the next render that shows it.
+    outline_stale: bool,
+    /// The take whose removal waits for a second click.
+    removing: Option<Id>,
+    saved: Option<Saved>,
     _focus_out: Option<Subscription>,
+    _folder: Subscription,
 }
 
 impl EventEmitter<Recorded> for RecordScreen {}
+impl EventEmitter<ReviewTakes> for RecordScreen {}
 
 impl RecordScreen {
     pub fn new(folder: Entity<VideoFolder>, cx: &mut Context<Self>) -> Self {
@@ -329,6 +381,7 @@ impl RecordScreen {
                 .map(|d| d.unique_id.clone()),
             inputs: folder.read(cx).project.format.inputs(),
         };
+        let prompter = cx.new(|cx| PrompterPane::new(folder.clone(), cx));
         let shared = Arc::new(Shared {
             phase: Mutex::new(Phase::Idle),
             words: Mutex::new(Vec::new()),
@@ -338,6 +391,7 @@ impl RecordScreen {
             standby_error: Mutex::new(None),
             standby_since: Mutex::new(None),
             styled: Arc::new(AtomicBool::new(true)),
+            scene: prompter.read(cx).live().scene.clone(),
         });
         let (commands, rx) = mpsc::channel();
         std::thread::Builder::new()
@@ -347,7 +401,11 @@ impl RecordScreen {
                 move || recorder(rx, &shared)
             })
             .expect("spawning the recorder thread");
-        let prompter = cx.new(|cx| PrompterPane::new(folder.clone(), cx));
+        let watch_folder = cx.observe(&folder, |this: &mut Self, _, cx| {
+            this.outline_stale = true;
+            cx.notify();
+        });
+        let outline = Outline::read(folder.read(cx));
         Self {
             folder,
             devices,
@@ -363,7 +421,13 @@ impl RecordScreen {
             on_screen: false,
             ticking: false,
             permissions: Permissions::read(),
+            part: Part::default(),
+            outline,
+            outline_stale: false,
+            removing: None,
+            saved: None,
             _focus_out: None,
+            _folder: watch_folder,
         }
     }
 
@@ -433,9 +497,107 @@ impl RecordScreen {
         matches!(self.phase(), Phase::Recording { .. })
     }
 
-    /// Starts the prompter over from the folder's script, after the script changed.
+    /// Starts the prompter over from the folder's script, after the script changed, on the
+    /// part picked if the script still has it.
     pub fn reload_script(&mut self, cx: &mut Context<Self>) {
-        self.prompter.update(cx, |prompter, cx| prompter.reset(cx));
+        let script = &self.folder.read(cx).project.script;
+        if self.part.beats(script).is_none() {
+            self.part = Part::Script;
+        }
+        self.outline_stale = true;
+        self.cue(cx);
+    }
+
+    /// Puts the prompter on the start of the part the next take records.
+    fn cue(&mut self, cx: &mut Context<Self>) {
+        let beats = self.part.beats(&self.folder.read(cx).project.script);
+        self.prompter.update(cx, |prompter, cx| {
+            prompter.reset(cx);
+            if let Some(beats) = beats {
+                prompter.live().select(beats);
+            }
+        });
+    }
+
+    /// Picks what the next take records.
+    fn pick_part(&mut self, part: Part, cx: &mut Context<Self>) {
+        if busy_stage(&self.phase()) {
+            return;
+        }
+        self.part = part;
+        self.cue(cx);
+        cx.notify();
+    }
+
+    /// Up and down through the whole script and its chapters.
+    fn step_part(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let chapters = self.folder.read(cx).project.script.chapters.len();
+        let parts: Vec<Part> = std::iter::once(Part::Script)
+            .chain((0..chapters).map(|chapter| Part::Chapter { chapter, from: 0 }))
+            .filter(|p| p.beats(&self.folder.read(cx).project.script).is_some())
+            .collect();
+        let at = parts
+            .iter()
+            .position(|p| match (p, self.part) {
+                (Part::Chapter { chapter: a, .. }, Part::Chapter { chapter: b, .. }) => *a == b,
+                (a, b) => *a == b,
+            })
+            .unwrap_or(0);
+        let next = if forward {
+            (at + 1).min(parts.len().saturating_sub(1))
+        } else {
+            at.saturating_sub(1)
+        };
+        if let Some(&part) = parts.get(next) {
+            self.pick_part(part, cx);
+        }
+    }
+
+    /// The scenes on 1 to 4, as the record hotkeys have them: the format's default layout and
+    /// its other layouts.
+    fn scenes(&self, cx: &App) -> Vec<shot_core::Layout> {
+        let format = &self.folder.read(cx).project.format;
+        std::iter::once(format.default_layout)
+            .chain(format.other_layouts.iter().copied())
+            .take(4)
+            .collect()
+    }
+
+    /// Picks scene `index` of [`RecordScreen::scenes`]: the take starts in it, or while
+    /// recording, switches to it.
+    fn pick_scene(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(&layout) = self.scenes(cx).get(index) {
+            self.prompter.read(cx).live().set_scene(layout);
+            cx.notify();
+        }
+    }
+
+    /// Removes `take` after a second click on its Remove.
+    fn remove_take(&mut self, take: Id, cx: &mut Context<Self>) {
+        if busy_stage(&self.phase()) {
+            return;
+        }
+        if self.removing.as_ref() != Some(&take) {
+            self.removing = Some(take);
+            cx.notify();
+            return;
+        }
+        self.removing = None;
+        let result = self.folder.update(cx, |folder, cx| {
+            let result = folder.remove_take(&take);
+            cx.notify();
+            result
+        });
+        match result {
+            Ok(()) => {
+                if self.saved.as_ref().is_some_and(|s| s.take == take) {
+                    self.saved = None;
+                }
+            }
+            Err(error) => self.error = Some(error.into()),
+        }
+        self.outline_stale = true;
+        cx.notify();
     }
 
     fn toggle(&mut self, _: &ToggleRecording, _: &mut Window, cx: &mut Context<Self>) {
@@ -447,8 +609,10 @@ impl RecordScreen {
                 self.error = None;
                 let setup = self.setup(cx);
                 self.shared.set(Phase::Loading);
-                let (live, hotkeys) = self.prompter.update(cx, |prompter, cx| {
-                    prompter.reset(cx);
+                self.saved = None;
+                self.removing = None;
+                self.cue(cx);
+                let (live, hotkeys) = self.prompter.update(cx, |prompter, _| {
                     prompter.arm();
                     (prompter.live(), prompter.log_filter())
                 });
@@ -498,9 +662,17 @@ impl RecordScreen {
                                 result
                             });
                             match result {
-                                Ok(()) => {
+                                Ok(replaced) => {
                                     this.analyze_later(&take, cx);
                                     this.shared.set(Phase::Idle);
+                                    this.saved = Some(Saved {
+                                        take,
+                                        length: duration,
+                                        replaced,
+                                    });
+                                    this.outline_stale = true;
+                                    this.move_on(cx);
+                                    this.restart(cx);
                                     cx.emit(Recorded);
                                 }
                                 Err(error) => {
@@ -532,6 +704,21 @@ impl RecordScreen {
             }
         })
         .detach();
+    }
+
+    /// After a take of a chapter: the next chapter nobody recorded yet becomes the part.
+    fn move_on(&mut self, cx: &mut Context<Self>) {
+        if let Part::Chapter { chapter, .. } = self.part {
+            self.outline = Outline::read(self.folder.read(cx));
+            self.outline_stale = false;
+            if let Some(next) = self.outline.next_open(chapter) {
+                self.part = Part::Chapter {
+                    chapter: next,
+                    from: 0,
+                };
+            }
+        }
+        self.cue(cx);
     }
 
     fn next_take(&self, cx: &App) -> Id {
@@ -651,6 +838,7 @@ fn watch(setup: Setup, take: Id, choice: &Choice, shared: &Shared) -> OnStandby 
         preview.clone(),
         screen_size(choice.display),
         shared.styled.clone(),
+        shared.scene.clone(),
     );
     shared.show(Some((preview, rehearsal.view())));
     *shared.standby_since.lock().expect("standby start") = Some(Instant::now());
@@ -754,7 +942,7 @@ fn record(
             .map_err(|e| e.to_string())?;
             let listener = shot_prompter::Listener::new(&follow, {
                 let live = live.clone();
-                move |words| live.lock().hear(words)
+                move |words: &[String]| live.hear(words)
             })?;
             Some((Arc::new(transcriber), sink, listener))
         }
@@ -801,6 +989,7 @@ fn record(
     let session = Session::start(config)?;
     let origin = Instant::now() - Duration::from_micros(session.elapsed().0);
     live.set_marks(Some(session.marks()));
+    live.mark_start();
     let preview = session.preview();
     live_take.record(Feeds {
         take: session.id().clone(),
@@ -955,6 +1144,10 @@ impl Render for RecordScreen {
         }
         let busy = busy_stage(&phase);
         self.follow_inputs(busy, cx);
+        if self.outline_stale && !busy {
+            self.outline = Outline::read(self.folder.read(cx));
+            self.outline_stale = false;
+        }
         let has_beats = self
             .folder
             .read(cx)
@@ -974,14 +1167,20 @@ impl Render for RecordScreen {
             .on_action(cx.listener(|this, _: &TogglePrompter, _, cx| {
                 this.prompter.update(cx, |prompter, cx| prompter.toggle(cx))
             }))
+            .on_action(cx.listener(|this, _: &PreviousPart, _, cx| this.step_part(false, cx)))
+            .on_action(cx.listener(|this, _: &NextPart, _, cx| this.step_part(true, cx)))
+            .on_action(cx.listener(|this, _: &Scene1, _, cx| this.pick_scene(0, cx)))
+            .on_action(cx.listener(|this, _: &Scene2, _, cx| this.pick_scene(1, cx)))
+            .on_action(cx.listener(|this, _: &Scene3, _, cx| this.pick_scene(2, cx)))
+            .on_action(cx.listener(|this, _: &Scene4, _, cx| this.pick_scene(3, cx)))
             .flex_1()
             .min_h_0()
             .flex()
             .gap(px(8.))
             .px(px(8.))
             .pb(px(8.))
-            .child(self.tracks(busy, cx))
-            .child(self.stage(&phase, cx))
+            .child(self.outline_pane(busy, cx))
+            .child(self.stage(&phase, busy, cx))
             .map(|row| {
                 // Without beats the prompter has nothing to show, so the live transcript stays.
                 if has_beats {
@@ -1089,540 +1288,6 @@ impl RecordScreen {
             })),
         )
     }
-    fn tracks(&self, busy: bool, cx: &mut Context<Self>) -> impl IntoElement {
-        let inputs = self.choice.inputs;
-        let display = self
-            .devices
-            .displays
-            .iter()
-            .find(|d| Some(d.id) == self.choice.display);
-        let name_of = |list: &[shot_capture::Device], id: &Option<String>, none: &str| {
-            id.as_ref()
-                .and_then(|id| list.iter().find(|d| &d.unique_id == id))
-                .map_or(none.to_owned(), |d| d.name.clone())
-        };
-        let level = f32::from_bits(self.shared.level.load(Ordering::Relaxed));
-        let camera_black = self.choice.camera().is_some()
-            && self
-                .shared
-                .monitor
-                .lock()
-                .expect("monitor")
-                .as_ref()
-                .is_some_and(|view| view.camera_black());
-        let dir = self.folder.read(cx).dir.clone();
-        let free = free_space(&dir).map_or(String::new(), |bytes| {
-            format!(", {} GB free", bytes / 1_000_000_000)
-        });
-        ui::pane()
-            .id("tracks")
-            .w(px(256.))
-            .flex_none()
-            .flex()
-            .flex_col()
-            .gap(px(6.))
-            .p(px(12.))
-            .overflow_y_scroll()
-            .child(label("Tracks").px(px(4.)).pt(px(2.)).pb(px(6.)))
-            .child(
-                self.source(
-                    Picker::Display,
-                    Track::Screen,
-                    "display",
-                    "Screen",
-                    display.map_or(String::new(), |d| format!("{}x{}", d.width, d.height)),
-                    display.map_or("No display".into(), |d| self.screen_name(d)),
-                    busy,
-                    cx,
-                )
-                .when(inputs.screen, |card| {
-                    card.child(access(Permission::ScreenRecording, self.permissions.screen))
-                }),
-            )
-            .child(
-                self.source(
-                    Picker::Camera,
-                    Track::Camera,
-                    "camera",
-                    "Camera",
-                    String::new(),
-                    name_of(
-                        &self.devices.cameras,
-                        &self.choice.camera,
-                        "No camera connected",
-                    ),
-                    busy,
-                    cx,
-                )
-                .when(self.choice.camera().is_some(), |card| {
-                    card.child(access(Permission::Camera, self.permissions.camera))
-                })
-                .when(camera_black, |card| {
-                    card.child(
-                        div()
-                            .text_size(TEXT_SM)
-                            .text_color(WARN)
-                            .child("Black frames. Check the lens cover. The take still records."),
-                    )
-                }),
-            )
-            .child(
-                self.source(
-                    Picker::Mic,
-                    Track::Mic,
-                    "mic",
-                    "Mic",
-                    if level.is_finite() && self.choice.mic().is_some() {
-                        format!("{level:.0} dB")
-                    } else {
-                        String::new()
-                    },
-                    name_of(&self.devices.mics, &self.choice.mic, "No mic connected"),
-                    busy,
-                    cx,
-                )
-                .when(self.choice.mic().is_some(), |card| {
-                    card.child(meter(level))
-                        .child(access(Permission::Microphone, self.permissions.mic))
-                }),
-            )
-            .child(
-                card()
-                    .when(!inputs.system_audio, |card| card.bg(WELL))
-                    .child(self.track_head(
-                        Track::SystemAudio,
-                        "system-audio",
-                        "System audio",
-                        String::new(),
-                        busy,
-                        cx,
-                    ))
-                    .child(if inputs.system_audio {
-                        card_value("Sound the Mac plays")
-                    } else {
-                        off_line(Track::SystemAudio)
-                    }),
-            )
-            .child(
-                card()
-                    .child(card_head("cursor", "Cursor and keys", "events".into()))
-                    .child(card_value("Zooms and ripples stay editable"))
-                    .child(access(Permission::InputMonitoring, self.permissions.events)),
-            )
-            .child(
-                div()
-                    .mt_auto()
-                    .px(px(4.))
-                    .pt(px(10.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.))
-                    .child(
-                        div()
-                            .text_size(TEXT_SM)
-                            .text_color(MUTED)
-                            .child(format!("Crash safe{free}")),
-                    ),
-            )
-    }
-
-    /// A tile's head: the track's icon and name, its reading, and the switch that turns it on
-    /// or off for the next take.
-    fn track_head(
-        &self,
-        track: Track,
-        icon_name: &'static str,
-        name: &'static str,
-        meta: String,
-        busy: bool,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let on = track.get(self.choice.inputs);
-        div()
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .child(icon(icon_name, ICON, if on { TEXT } else { FAINT }))
-            .child(
-                div()
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(if on { TEXT } else { MUTED })
-                    .child(name),
-            )
-            .child(div().flex_1())
-            .when(on, |row| {
-                row.child(mono(meta).text_size(TEXT_SM).text_color(MUTED))
-            })
-            .child(
-                // Its own element, so a click on the switch does not open the device list.
-                div()
-                    .id((name, 1usize))
-                    .on_click(|_, _, cx| cx.stop_propagation())
-                    .child(
-                        Switch::new((name, 0usize))
-                            .small()
-                            .checked(on)
-                            .disabled(busy)
-                            .when(busy, |switch| {
-                                switch.tooltip("Tracks stay as they are while a take records")
-                            })
-                            .accessibility_label(track.label())
-                            .on_click(cx.listener(move |this, on: &bool, _, cx| {
-                                this.switch(track, *on, cx)
-                            })),
-                    ),
-            )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn source(
-        &self,
-        picker: Picker,
-        track: Track,
-        icon_name: &'static str,
-        name: &'static str,
-        meta: String,
-        value: String,
-        busy: bool,
-        cx: &mut Context<Self>,
-    ) -> gpui::Stateful<Div> {
-        let on = track.get(self.choice.inputs);
-        let pickable = !busy && on;
-        let open = self.open == Some(picker) && pickable;
-        let options: Vec<(Option<String>, String)> = match picker {
-            Picker::Display => self
-                .devices
-                .displays
-                .iter()
-                .map(|d| {
-                    (
-                        Some(d.id.to_string()),
-                        format!("{}, {}x{}", self.screen_name(d), d.width, d.height),
-                    )
-                })
-                .collect(),
-            Picker::Camera | Picker::Mic => {
-                let list = if picker == Picker::Camera {
-                    &self.devices.cameras
-                } else {
-                    &self.devices.mics
-                };
-                list.iter()
-                    .map(|d| (Some(d.unique_id.clone()), d.name.clone()))
-                    .collect()
-            }
-        };
-        let selected = match picker {
-            Picker::Display => self.choice.display.map(|d| d.to_string()),
-            Picker::Camera => self.choice.camera.clone(),
-            Picker::Mic => self.choice.mic.clone(),
-        };
-        card()
-            .id(name)
-            .when(!on, |card| card.bg(WELL))
-            .when(pickable, |card| {
-                card.cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.open = if this.open == Some(picker) {
-                            None
-                        } else {
-                            Some(picker)
-                        };
-                        cx.notify();
-                    }))
-            })
-            .child(self.track_head(track, icon_name, name, meta, busy, cx))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .child(if on {
-                        card_value(value)
-                    } else {
-                        off_line(track)
-                    })
-                    .child(div().flex_1())
-                    .when(pickable, |row| {
-                        row.child(icon("chevron-down", ICON_SM, MUTED))
-                    }),
-            )
-            .when(open, |card| {
-                card.child(div().flex().flex_col().gap(px(1.)).pt(px(4.)).children(
-                    options.into_iter().enumerate().map(|(index, (id, text))| {
-                        let on = id == selected;
-                        div()
-                            .id((name, index + 2))
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .h(px(32.))
-                            .px(px(8.))
-                            .rounded(RADIUS_SM)
-                            .text_size(px(14.))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(FLOAT))
-                            .when(on, |row| row.bg(FLOAT).text_color(STRONG))
-                            .child(div().flex_1().truncate().child(text))
-                            .when(on, |row| row.child(icon("check", ICON_SM, STRONG)))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                match picker {
-                                    Picker::Display => {
-                                        this.choice.display =
-                                            id.as_ref().and_then(|d| d.parse().ok())
-                                    }
-                                    Picker::Camera => this.choice.camera = id.clone(),
-                                    Picker::Mic => this.choice.mic = id.clone(),
-                                }
-                                this.restart(cx);
-                                this.open = None;
-                                cx.stop_propagation();
-                                cx.notify();
-                            }))
-                    }),
-                ))
-            })
-    }
-
-    fn stage(&self, phase: &Phase, cx: &mut Context<Self>) -> impl IntoElement {
-        let live = self.shared.preview.lock().expect("preview").clone();
-        let screen = live.as_ref().and_then(Preview::screen);
-        let camera = live.as_ref().and_then(Preview::camera);
-        let problem = self
-            .preview_problem(screen.is_some(), camera.is_some())
-            .filter(|_| !busy_stage(phase));
-        let blocked = self.choice.nothing_to_record();
-        let (title, detail): (String, String) = match phase {
-            Phase::Idle | Phase::Failed(_) | Phase::Finished { .. } => (
-                format!("Take {}", self.next_take(cx)),
-                if let Some(reason) = blocked {
-                    reason.into()
-                } else if !self.choice.inputs.screen && self.choice.camera().is_none() {
-                    "Sound only: this take records no picture. Press Space to start.".into()
-                } else if self.standby_starting() {
-                    "Starting the preview.".into()
-                } else if problem.is_some() {
-                    "Check the problem above first. Space still records the inputs that started."
-                        .into()
-                } else {
-                    "Press Space or the record button to start.".into()
-                },
-            ),
-            Phase::Downloading { .. } => (
-                "Downloading the speech model".into(),
-                "Once, on first use. Recording starts when it is ready.".into(),
-            ),
-            Phase::Loading => (
-                "Starting".into(),
-                "Loading the speech model and the capture devices.".into(),
-            ),
-            Phase::Recording { take, .. } => (
-                format!("Recording take {take}"),
-                "Space stops and opens the take in Edit.".into(),
-            ),
-            Phase::Finishing => (
-                "Finishing the take".into(),
-                "Writing the last fragments and the transcript.".into(),
-            ),
-        };
-        let elapsed = match phase {
-            Phase::Recording { started, .. } => started.elapsed(),
-            _ => Duration::ZERO,
-        };
-        let recording = matches!(phase, Phase::Recording { .. });
-        let start = if problem.is_some() {
-            "Record anyway"
-        } else {
-            "Start"
-        };
-        let styled = self.shared.styled.load(Ordering::Relaxed);
-        let monitor = self.shared.monitor.lock().expect("monitor").clone();
-        let monitor_error = monitor.as_ref().and_then(|m| m.error()).filter(|_| styled);
-        let monitored = monitor.and_then(|m| m.frame()).filter(|_| styled);
-        ui::pane()
-            .flex_1()
-            .min_w_0()
-            .flex()
-            .flex_col()
-            .gap(px(12.))
-            .p(px(14.))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(12.))
-                    .child(
-                        div()
-                            .text_size(px(17.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(title),
-                    )
-                    .child(
-                        div()
-                            .text_color(MUTED)
-                            .child(self.folder.read(cx).project.video.title.clone()),
-                    )
-                    .child(
-                        ui::segmented(
-                            "monitor",
-                            WELL,
-                            [("Styled", true), ("Raw", false)]
-                                .into_iter()
-                                .map(|(name, on)| {
-                                    let shared = self.shared.clone();
-                                    ui::Segment::new(name, styled == on, move |_, window, _| {
-                                        shared.styled.store(on, Ordering::Relaxed);
-                                        window.refresh();
-                                    })
-                                })
-                                .collect(),
-                        )
-                        .ml_auto()
-                        .w(px(180.)),
-                    ),
-            )
-            .children(monitor_error.map(|e| {
-                div()
-                    .ml_auto()
-                    .mt(px(-6.))
-                    .text_size(TEXT_SM)
-                    .text_color(MUTED)
-                    .truncate()
-                    .child(format!("Showing the raw feed: {e}"))
-            }))
-            .children(self.failure())
-            .children(problem.map(|problem| {
-                alert(problem).child(
-                    Button::new("retry-preview")
-                        .small()
-                        .label("Try again")
-                        .on_click(cx.listener(|this, _, _, cx| this.restart(cx))),
-                )
-            }))
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .rounded(px(12.))
-                    .bg(gpui::rgb(0x050607))
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .gap(px(14.))
-                    .map(|stage| match (monitored, screen.clone(), camera.clone()) {
-                        (Some(frame), _, _) => stage.child(styled_screen(frame)),
-                        (None, Some(screen), camera) => stage.child(live_screen(screen, camera)),
-                        (None, None, Some(camera)) => stage.child(live_camera(camera)),
-                        (None, None, None) => stage,
-                    })
-                    .when(recording && screen.is_none() && camera.is_none(), |stage| {
-                        stage.child(
-                            div()
-                                .size(px(14.))
-                                .rounded_full()
-                                .bg(RECORD)
-                                .border_4()
-                                .border_color(gpui::Hsla::from(RECORD).opacity(0.18)),
-                        )
-                    })
-                    .when_some(
-                        match phase {
-                            Phase::Downloading { done, total } => Some((*done, *total)),
-                            _ => None,
-                        },
-                        |stage, (done, total)| {
-                            stage.child(
-                                div()
-                                    .w(px(320.))
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(8.))
-                                    .child(
-                                        Progress::new("model")
-                                            .value(done as f32 / total.max(1) as f32 * 100.0),
-                                    )
-                                    .child(
-                                        mono(format!(
-                                            "{} of {} MB",
-                                            done / 1_000_000,
-                                            total / 1_000_000
-                                        ))
-                                        .text_size(TEXT_SM)
-                                        .text_color(MUTED),
-                                    ),
-                            )
-                        },
-                    )
-                    .when(screen.is_none() && camera.is_none(), |stage| {
-                        stage.child(div().text_color(MUTED).child(detail))
-                    }),
-            )
-            .children(
-                self.prompter
-                    .update(cx, |prompter, _| prompter.toast())
-                    .map(|toast| div().flex().justify_center().child(toast)),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(20.))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(12.))
-                            .child(
-                                Button::new("record-button")
-                                    .danger()
-                                    .disabled(blocked.is_some() && !recording)
-                                    .when_some(blocked.filter(|_| !recording), |button, reason| {
-                                        button.tooltip(reason)
-                                    })
-                                    .accessibility_label(if recording {
-                                        "Stop recording"
-                                    } else {
-                                        "Start recording"
-                                    })
-                                    .w(px(46.))
-                                    .h(px(46.))
-                                    .rounded(px(12.))
-                                    .child(
-                                        div()
-                                            .size(px(14.))
-                                            .bg(ON_ACCENT)
-                                            .when(recording, |d| d.rounded(px(3.)))
-                                            .when(!recording, |d| d.rounded_full()),
-                                    )
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.toggle(&ToggleRecording, window, cx)
-                                    })),
-                            )
-                            .child(
-                                mono(format!(
-                                    "{:02}:{:02}",
-                                    elapsed.as_secs() / 60,
-                                    elapsed.as_secs() % 60
-                                ))
-                                .text_size(px(26.))
-                                .font_weight(FontWeight::MEDIUM),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .justify_center()
-                            .when(recording, |row| row.child(self.prompter.read(cx).legend())),
-                    )
-                    .when(blocked.is_none() || recording, |row| {
-                        row.child(hint("Space", if recording { "Stop" } else { start }))
-                    }),
-            )
-    }
-
     fn transcript(&self, phase: &Phase) -> impl IntoElement {
         let words = self.shared.words.lock().expect("words").join(" ");
         let empty = match (self.choice.mic(), phase) {
@@ -1733,43 +1398,6 @@ fn busy_stage(phase: &Phase) -> bool {
         phase,
         Phase::Idle | Phase::Failed(_) | Phase::Finished { .. }
     )
-}
-
-fn card() -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(8.))
-        .p(px(12.))
-        .rounded(RADIUS_MD)
-        .bg(CARD)
-}
-
-fn card_head(icon_name: &'static str, name: &'static str, meta: String) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .gap(px(8.))
-        .child(icon(icon_name, ICON, TEXT))
-        .child(div().font_weight(FontWeight::MEDIUM).child(name))
-        .child(div().flex_1())
-        .child(mono(meta).text_size(TEXT_SM).text_color(MUTED))
-}
-
-/// What a switched-off track means for the next take. It wraps, the tile is narrow.
-fn off_line(track: Track) -> Div {
-    div()
-        .text_size(TEXT_SM)
-        .text_color(MUTED)
-        .child(track.off())
-}
-
-fn card_value(text: impl Into<gpui::SharedString>) -> Div {
-    div()
-        .text_size(TEXT_SM)
-        .text_color(MUTED)
-        .truncate()
-        .child(text.into())
 }
 
 /// A track's privacy access: allowed, waiting for the macOS prompt, or how to allow it.

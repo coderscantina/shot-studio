@@ -1,6 +1,6 @@
 # Status
 
-Updated 2026-11-15. Read by agents at the start of a thread; rewrite it before handing back.
+Updated 2026-11-16. Read by agents at the start of a thread; rewrite it before handing back.
 
 ## Branches
 
@@ -15,11 +15,17 @@ Updated 2026-11-15. Read by agents at the start of a thread; rewrite it before h
 
 fmt, workspace clippy and `cargo test --workspace` pass on `main`; the GPU tests pass except the known `frame_grid` gap. No worktrees.
 
-A local bundle from `scripts/bundle.sh` is in `dist/`: `Shot Studio.app` and `Shot-Studio-26.11.7.dmg`, signed ad hoc, with Mike's uncommitted app icon. `dist/` is not in git.
+A local bundle from `scripts/bundle.sh` is in `dist/`: `Shot Studio.app` and `Shot-Studio-26.11.7.dmg`, built 2026-11-16 with the uncommitted record rework and Mike's app icon, signed with his Developer ID (hardened runtime), not notarized. `dist/` is not in git.
 
 ## Uncommitted work
 
 Mike's own app icon work: `README.md`, `packaging/macos/AppIcon.icns`, `AppIcon.svg` and `scripts/app-icon.sh`. Not touched by agents.
+
+The record experience rework (2026-11-16), on `main`, not committed, waiting for Mike's look:
+- Record screen: an outline pane (whole script, chapters with take counts and coverage, the picked chapter's beats to start from, every take with Review and Remove), input chips over the stage, a scene strip (1 to 4) that restyles the monitor and switches scenes while recording. A finished take stays on Record and the part moves to the next unrecorded chapter. `crates/shot-app/src/record/` (was `record.rs`).
+- A retake plays in place of earlier attempts at the same beats (`VideoFolder::append_take`), and removing a take sends its media to the Trash (`crate::trash`). Contract text in `project-files.md`.
+- Prompter: one text size with opacity for read and upcoming lines, chapter labels, a column that glides so the line read sits on the reading line; voice follow matches the spoken script in beats mode, writes `next` and `again` markers, and jumps back on a restart heard twice; the script reloads whenever Record shows. Display and mirror moved under More settings, speed shows only with steady scroll.
+- fmt, workspace clippy and `cargo test --workspace` pass; the voice-follow lag fixture test passes (median -19 ms).
 
 ## Running
 

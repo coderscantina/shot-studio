@@ -16,13 +16,60 @@ const MATCH: i32 = 3;
 const MISMATCH: i32 = -2;
 const GAP: i32 = -1;
 
+/// Script words before the position a restart may jump back to.
+const REWIND: usize = 40;
+/// Agreeing words a restart needs, so a common phrase never pulls the prompter back.
+const REWIND_HITS: u32 = 4;
+/// How far behind the position a restart must land: the heard words of the last decode still
+/// end a word or two behind where the prompter moved.
+const REWIND_GAP: usize = 4;
+
 /// The script position after the heard words, as a count of words said, when it moves past
 /// `from`. `script` and `heard` are normalized words.
 pub fn advance(script: &[String], from: usize, heard: &[String]) -> Option<usize> {
     let heard = &heard[heard.len().saturating_sub(HEARD)..];
     let lo = from.saturating_sub(BACK).min(script.len());
     let hi = (from + AHEAD).min(script.len());
-    let window = &script[lo..hi];
+    let run = best_run(&script[lo..hi], heard, false, 0)?;
+    let to = lo + run.end;
+    let next_word = to == from + 1 && script[from].chars().count() >= 4;
+    (to > from && (run.hits >= 2 || next_word)).then_some(to)
+}
+
+/// Where the reader started over: the end of a run of the newest heard words that lies well
+/// behind `from`, but not before `floor`. `None` while the heard words agree with the position.
+pub fn rewind(script: &[String], from: usize, floor: usize, heard: &[String]) -> Option<usize> {
+    let heard = &heard[heard.len().saturating_sub(HEARD)..];
+    let lo = from.saturating_sub(REWIND).max(floor).min(script.len());
+    let hi = from.min(script.len());
+    if hi <= lo {
+        return None;
+    }
+    let run = best_run(&script[lo..hi], heard, true, 0)?;
+    let to = lo + run.end;
+    if run.hits < REWIND_HITS || to + REWIND_GAP > from {
+        return None;
+    }
+    // The same words may also be read where the prompter is, as a phrase the script repeats:
+    // a run that ends close to the position, as good as the one behind, keeps it there.
+    let near = from.saturating_sub(BACK).min(script.len());
+    let ahead = (from + AHEAD).min(script.len());
+    let close = (from + 1).saturating_sub(REWIND_GAP).saturating_sub(near);
+    let here = best_run(&script[near..ahead], heard, true, close).map_or(0, |r| r.hits);
+    (here < run.hits).then_some(to)
+}
+
+/// The best local alignment of `heard` in `window`.
+struct Run {
+    hits: u32,
+    /// Script words of the window up to the run's end.
+    end: usize,
+}
+
+/// The best scoring run of agreeing words that ends at `min_end` words into the window or
+/// later. With `newest`, only runs that end on the newest heard word or the one before it
+/// count, which is what the reader says now.
+fn best_run(window: &[String], heard: &[String], newest: bool, min_end: usize) -> Option<Run> {
     if heard.is_empty() || window.is_empty() {
         return None;
     }
@@ -31,6 +78,7 @@ pub fn advance(script: &[String], from: usize, heard: &[String]) -> Option<usize
     let mut score = vec![(0i32, 0u32); (heard.len() + 1) * cols];
     let mut best: Option<(i32, u32, usize)> = None;
     for i in 1..=heard.len() {
+        let counts = !newest || i + 1 >= heard.len();
         for j in 1..=window.len() {
             let hit = same(&heard[i - 1], &window[j - 1]);
             let (diag, diag_hits) = score[(i - 1) * cols + j - 1];
@@ -52,15 +100,12 @@ pub fn advance(script: &[String], from: usize, heard: &[String]) -> Option<usize
                 .unwrap_or((0, 0));
             score[i * cols + j] = cell;
             // On a tie the nearer run wins, so a repeated phrase is not skipped.
-            if hit && best.is_none_or(|(s, _, _)| cell.0 > s) {
+            if counts && hit && j >= min_end && best.is_none_or(|(s, _, _)| cell.0 > s) {
                 best = Some((cell.0, cell.1, j));
             }
         }
     }
-    let (_, hits, end) = best?;
-    let to = lo + end;
-    let next_word = to == from + 1 && script[from].chars().count() >= 4;
-    (to > from && (hits >= 2 || next_word)).then_some(to)
+    best.map(|(_, hits, end)| Run { hits, end })
 }
 
 /// Whether a heard word is the script word: equal, cut off at the end of the audio (at least
@@ -130,5 +175,26 @@ mod tests {
         assert_eq!(advance(&script, 2, &words("um the")), None);
         assert_eq!(advance(&script, 3, &words("file")), Some(4));
         assert_eq!(advance(&script, 3, &words("settings")), None);
+    }
+
+    #[test]
+    fn starting_a_sentence_over_jumps_back_to_it() {
+        let script =
+            words("we ship every single week on friday afternoon and nothing burns at all");
+        // Read up to "nothing", then started over.
+        assert_eq!(
+            rewind(&script, 10, 0, &words("and nothing we ship every single")),
+            Some(4)
+        );
+        // The last decode still ends a word behind the position: no restart.
+        assert_eq!(
+            rewind(&script, 10, 0, &words("on friday afternoon and nothing")),
+            None
+        );
+        // A phrase the script repeats where the reader is now is no restart.
+        let repeated = words("we ship it and we ship it again today");
+        assert_eq!(rewind(&repeated, 8, 0, &words("and we ship it")), None);
+        // Not before the floor.
+        assert_eq!(rewind(&script, 10, 6, &words("we ship every single")), None);
     }
 }

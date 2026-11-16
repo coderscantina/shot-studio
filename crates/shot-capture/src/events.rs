@@ -129,6 +129,8 @@ pub fn read_markers(path: &Path) -> std::io::Result<Vec<Marker>> {
     for line in std::io::BufReader::new(file).lines() {
         markers.extend(marker(&line?));
     }
+    // A marker voice follow writes after the fact lands behind later lines.
+    markers.sort_by_key(|m| m.t);
     Ok(markers)
 }
 

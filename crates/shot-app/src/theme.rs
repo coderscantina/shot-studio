@@ -120,6 +120,7 @@ embedded!(
     "copy",
     "cursor",
     "cut",
+    "delete",
     "display",
     "download",
     "edit",

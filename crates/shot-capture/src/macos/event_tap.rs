@@ -20,6 +20,7 @@ use objc2_core_media::CMClock;
 use crate::clock::{MediaClock, nanos};
 use crate::events::{Button, DisplayGeometry, Event, EventKind, Hotkey, Mark, key_name, modifiers};
 use crate::{CaptureError, Permission};
+use shot_core::Micros;
 
 /// Whether the app may read cursor and key events.
 pub fn allowed() -> bool {
@@ -52,14 +53,16 @@ struct Log {
 }
 
 impl Log {
-    fn write(&mut self, host: &CMClock, kind: EventKind) {
+    /// Writes `kind` at the media time `ago` before now, or at zero when that is before it.
+    fn write(&mut self, host: &CMClock, kind: EventKind, ago: std::time::Duration) {
         if self.error.is_some() {
             return;
         }
         let now = unsafe { host.time() };
-        let Some(t) = self.clock.media_time(nanos(now.value, now.timescale)) else {
+        let Some(now) = self.clock.media_time(nanos(now.value, now.timescale)) else {
             return;
         };
+        let t = Micros(now.0.saturating_sub(ago.as_micros() as u64));
         let mut line = Event::new(t, kind).to_line();
         line.push('\n');
         match self.file.write_all(line.as_bytes()) {
@@ -84,11 +87,17 @@ pub struct Marks {
 
 impl Marks {
     pub fn write(&self, mark: Mark) {
+        self.write_ago(mark, std::time::Duration::ZERO);
+    }
+
+    /// Writes `mark` at the media time `ago` before now: for a beat that voice follow noticed
+    /// only after its first words were said.
+    pub fn write_ago(&self, mark: Mark, ago: std::time::Duration) {
         let cursor = CGEvent::new(None).map(|e| CGEvent::location(Some(&e)));
         let mut log = self.log.lock().expect("event log");
         let (x, y) = cursor.map_or((0, 0), |at| log.geometry.to_pixels(at.x, at.y));
         let host = unsafe { CMClock::host_time_clock() };
-        log.write(&host, EventKind::Marker { x, y, mark });
+        log.write(&host, EventKind::Marker { x, y, mark }, ago);
     }
 }
 
@@ -237,7 +246,7 @@ unsafe extern "C-unwind" fn callback(
         let hotkey = matches!(&kind, EventKind::Key { key, mods }
             if log.hotkeys.iter().any(|h| &h.key == key && &h.mods == mods));
         if !hotkey {
-            log.write(&state.host, kind);
+            log.write(&state.host, kind, std::time::Duration::ZERO);
         }
     }
     event.as_ptr()

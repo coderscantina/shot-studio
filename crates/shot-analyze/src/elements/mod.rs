@@ -341,8 +341,9 @@ fn typing(keys: &[Micros]) -> Vec<Element> {
     out
 }
 
-/// Beats, chapters and tags where the prompter showed them: beat 1 from the start and each beat
-/// an `again` or `next` press moved to. A take without those presses was recorded without the
+/// Beats, chapters and tags where the prompter showed them: beat 1 from the start, or the beat
+/// a press at zero names, and each beat an `again` or `next` press moved to (by hotkey or by
+/// voice follow). A take without those presses was recorded without the
 /// prompter and has none. A beat's tags span until the next beat shows.
 fn script_elements(script: &Script, markers: &[Marker], duration: Micros) -> Vec<Element> {
     let beats: Vec<(usize, usize)> = script
@@ -361,7 +362,13 @@ fn script_elements(script: &Script, markers: &[Marker], duration: Micros) -> Vec
     if presses.is_empty() {
         return Vec::new();
     }
-    let shown: Vec<(Micros, u32)> = std::iter::once((Micros(0), 1)).chain(presses).collect();
+    // A take started on a later beat says so with a press at zero, which takes beat 1's place.
+    let starts_later = presses.first().is_some_and(|(t, _)| *t == Micros(0));
+    let shown: Vec<(Micros, u32)> = (!starts_later)
+        .then_some((Micros(0), 1))
+        .into_iter()
+        .chain(presses)
+        .collect();
     let mut out = Vec::new();
     for (i, &(t, index)) in shown.iter().enumerate() {
         let Some(&(c, b)) = (index as usize).checked_sub(1).and_then(|i| beats.get(i)) else {

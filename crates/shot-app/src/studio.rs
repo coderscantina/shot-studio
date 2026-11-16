@@ -18,7 +18,7 @@ use crate::board::{self, BoardScreen, ShowCurrent, channel};
 use crate::cut::{CutScreen, GoTo};
 use crate::edit::EditScreen;
 use crate::folder::VideoFolder;
-use crate::record::{RecordScreen, Recorded};
+use crate::record::{RecordScreen, Recorded, ReviewTakes};
 use crate::script::{ReadyToRecord, ScriptScreen};
 use crate::ship::ShipScreen;
 use crate::theme::*;
@@ -227,9 +227,16 @@ impl Studio {
         let cut = cx.new(|cx| CutScreen::new(folder.clone(), cx));
         let edit = cx.new(|cx| EditScreen::new(folder.clone(), cx));
         let ship = cx.new(|cx| ShipScreen::new(folder.clone(), cx));
-        let recorded = cx.subscribe_in(&record, window, |this, _, _: &Recorded, window, cx| {
+        // A finished take stays on Record, so the next part records right away; Review opens
+        // the takes.
+        let recorded = cx.subscribe(&record, |this, _, _: &Recorded, cx| {
             this.edit.update(cx, |edit, cx| edit.show_last_chapter(cx));
             this.cut.update(cx, |cut, cx| cut.recorded(cx));
+            this.refresh_status();
+            cx.notify();
+        });
+        let review = cx.subscribe_in(&record, window, |this, _, _: &ReviewTakes, window, cx| {
+            this.cut.update(cx, |cut, cx| cut.show_takes(cx));
             this.show(Screen::Cut, window, cx);
         });
         let continue_to_edit =
@@ -243,11 +250,21 @@ impl Studio {
         // Focus that drops out of the window, as when the focused element stops rendering,
         // goes back to the shown screen instead of leaving its shortcuts dead.
         let focus_lost = cx.on_focus_lost(window, |this, window, cx| this.focus_screen(window, cx));
-        let mut subscriptions = vec![recorded, continue_to_edit, edit_to_record, focus_lost];
+        let mut subscriptions = vec![
+            recorded,
+            review,
+            continue_to_edit,
+            edit_to_record,
+            focus_lost,
+        ];
         // Cards move on the board and in other windows: the nav catches up when this comes back.
+        // A script saved elsewhere reaches the prompter the same way.
         subscriptions.push(cx.observe_window_activation(window, |this, window, cx| {
             if window.is_window_active() {
                 this.refresh_status();
+                if this.screen == Screen::Record {
+                    this.take_script(cx);
+                }
                 cx.notify();
             }
         }));
@@ -294,24 +311,33 @@ impl Studio {
         studio
     }
 
-    /// Puts the script as the board has it into the folder, so Record prompts what the Script
-    /// screen showed. Script accepts its changes on the video's branch only.
+    /// Puts the latest script into the folder, so Record prompts what the Script screen or an
+    /// editor saved last: the board's copy on the video's branch for a video of a channel,
+    /// where Script accepts its changes, else the folder's `script.md`. The prompter starts
+    /// over only when the script changed, and never while a take records.
     fn take_script(&mut self, cx: &mut Context<Self>) {
-        let Some(planning) = &self.planning else {
+        if self.record.read(cx).is_recording() {
             return;
+        }
+        let path = self.folder.read(cx).dir.join("script.md");
+        let text = match &self.planning {
+            Some(planning) => shot_board::Board::open(&planning.repo)
+                .ok()
+                .and_then(|board| board.read_file(&planning.slug, "script.md").ok().flatten()),
+            None => std::fs::read_to_string(&path).ok(),
         };
-        let Some(text) = shot_board::Board::open(&planning.repo)
-            .ok()
-            .and_then(|board| board.read_file(&planning.slug, "script.md").ok().flatten())
-        else {
+        let Some(text) = text else {
             return;
         };
         let Ok(script) = shot_core::Script::parse(&text) else {
             return;
         };
-        let path = self.folder.read(cx).dir.join("script.md");
+        if script == self.folder.read(cx).project.script {
+            return;
+        }
         // A folder that cannot be written keeps prompting its own copy.
-        if std::fs::read_to_string(&path).ok().as_deref() != Some(text.as_str())
+        if self.planning.is_some()
+            && std::fs::read_to_string(&path).ok().as_deref() != Some(text.as_str())
             && shot_fs::write(&path, &text).is_err()
         {
             return;
@@ -377,7 +403,8 @@ impl Studio {
                     script.update(cx, |script, _| script.reload());
                 }
             }
-            Screen::Record | Screen::Cut => {}
+            Screen::Record => self.take_script(cx),
+            Screen::Cut => {}
             Screen::Edit => self.edit.update(cx, |edit, cx| edit.reload_proposals(cx)),
             Screen::Ship => self.ship.update(cx, |ship, cx| ship.reload(cx)),
         }

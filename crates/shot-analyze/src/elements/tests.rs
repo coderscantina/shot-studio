@@ -144,6 +144,21 @@ fn the_event_log_and_the_prompter_give_clicks_typing_markers_beats_chapters_and_
     );
     let without_prompter = local(&facts(&t, &speech, &markers[1..2], &input, Some(&script)));
     assert_eq!(without_prompter.of_kind(Beat).count(), 0);
+    let started_later = local(&facts(
+        &t,
+        &speech,
+        &[marker(0, Mark::Next { beat: 2 })],
+        &input,
+        Some(&script),
+    ));
+    assert_eq!(
+        lines(&started_later, &[Beat, Chapter]),
+        [
+            r#"{"kind":"chapter","t":0,"by":"script","text":"Demo"}"#,
+            r#"{"kind":"beat","t":0,"by":"script","index":2}"#,
+        ],
+        "a press at zero takes beat 1's place"
+    );
 }
 
 #[test]

@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use shot_core::{
-    Brand, CustomLayout, Cut, Decision, Elements, Format, FormatLayer, Id, Layout, Lock, Micros,
-    Project, TakeAt, TimeRange, Transcript,
+    Brand, CustomLayout, Cut, Decision, Elements, Format, FormatLayer, Id, Layout, Lineup, Lock,
+    Micros, Project, TakeAt, TakeWords, TimeRange, Transcript,
 };
 use shot_mcp::style::{self, Disk};
 use shot_render::theme::Theme;
@@ -411,11 +411,86 @@ impl VideoFolder {
 
     /// Appends a chapter that keeps all of a new take, with its layout and zoom hotkey markers
     /// as nodes, and writes `cut.kdl`.
-    pub fn append_take(&mut self, take: Id, duration: Micros) -> Result<(), String> {
+    /// Puts a finished take into the cut as one change: as a chapter of its own, and where it
+    /// repeats beats an earlier take holds in the cut, in their place. The earlier attempts
+    /// stay in the Takes view to put back. Returns how many beats it took over.
+    pub fn append_take(&mut self, take: Id, duration: Micros) -> Result<usize, String> {
         let Some(range) = TimeRange::new(Micros(0), duration) else {
             return Err(format!("take {take} is empty"));
         };
-        self.writing(|folder| folder.store_take(take, range))
+        self.as_one_change(|folder| {
+            folder.store_take(take.clone(), range)?;
+            folder.replace_retaken(&take)
+        })
+    }
+
+    /// Every take of the cut lined up against the script, see [`Lineup`].
+    pub fn lineup(&self) -> Lineup {
+        let words: Vec<TakeWords<'_>> = self
+            .transcripts
+            .iter()
+            .map(|(id, transcript)| TakeWords {
+                transcript,
+                elements: self.elements.get(id),
+            })
+            .collect();
+        Lineup::new(&self.project.script, &self.project.cut, &words)
+    }
+
+    /// Lets `take`'s last attempt at each beat take the place of an earlier take's attempt the
+    /// cut plays there.
+    fn replace_retaken(&mut self, take: &Id) -> Result<usize, String> {
+        let lineup = self.lineup();
+        let mut cut = self.project.cut.clone();
+        let mut replaced = 0;
+        for (at, row) in lineup.rows() {
+            let Some(new) = row.attempts.iter().rfind(|a| a.take == *take) else {
+                continue;
+            };
+            let earlier = row
+                .attempts
+                .iter()
+                .any(|a| a.take != *take && cut.kept_of(&a.take, a.range).0 > 0);
+            if earlier {
+                cut = cut
+                    .use_attempt(&lineup, at, new)
+                    .map_err(|e| e.to_string())?;
+                replaced += 1;
+            }
+        }
+        if replaced > 0 {
+            self.write_cut(cut)?;
+        }
+        Ok(replaced)
+    }
+
+    /// Takes `take` out of the video: out of the cut, its ratings, overrides and Shorts, and
+    /// moves its media and elements to the Trash, where Finder can put them back. Undo cannot
+    /// bring the media back, so the history before this change is dropped.
+    pub fn remove_take(&mut self, take: &Id) -> Result<(), String> {
+        self.writing(|folder| {
+            let mut cut = folder.project.cut.clone();
+            for chapter in &mut cut.chapters {
+                chapter.takes.retain(|edit| edit.take != *take);
+            }
+            cut.chapters.retain(|chapter| !chapter.takes.is_empty());
+            cut.ratings.retain(|r| r.take != *take);
+            cut.overrides.retain(|o| o.take != *take);
+            cut.caption_breaks.retain(|b| b.take != *take);
+            for derived in &mut cut.derived {
+                derived.clips.retain(|clip| clip.take != *take);
+            }
+            folder.store(cut)?;
+            crate::trash::trash(&folder.dir.join("media").join(take.as_str()))?;
+            let elements = folder.dir.join(format!("elements/{take}.jsonl"));
+            if elements.exists() {
+                crate::trash::trash(&elements)?;
+            }
+            folder.transcripts.remove(take);
+            folder.history.clear();
+            folder.undone.clear();
+            folder.rebuild_lock()
+        })
     }
 
     fn store_take(&mut self, take: Id, range: TimeRange) -> Result<(), String> {
@@ -767,6 +842,69 @@ mod tests {
             checked += 1;
         }
         assert!(checked >= 7, "checked {checked} videos");
+    }
+
+    #[test]
+    fn a_retake_of_a_beat_plays_in_place_of_the_earlier_attempt() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = |name: &str, text: &str| fs::write(dir.path().join(name), text).unwrap();
+        file(
+            "video.kdl",
+            "title \"A\"\nstatus recorded\nformat opinion\n",
+        );
+        file(
+            "script.md",
+            "# A\n\n## Hook\n\n- Hello there world.\n\n## Rule\n\n- Ship on fridays now.\n",
+        );
+        file(
+            "format.kdl",
+            &shot_core::FormatKind::Opinion.preset().to_kdl(),
+        );
+        file(
+            "cut.kdl",
+            "chapter \"Take t01\" {\n    take t01 {\n        keep from=0 to=8_000_000\n    }\n}\n",
+        );
+        let words = |take: &str, text: &str| {
+            let mut transcript = Transcript::new(Id::new(take).unwrap());
+            for (i, word) in text.split(' ').enumerate() {
+                let from = i as u64 * 1_000_000;
+                let range = TimeRange::new(Micros(from), Micros(from + 800_000)).unwrap();
+                transcript
+                    .push(shot_core::Word {
+                        text: word.into(),
+                        range,
+                        confidence: 90,
+                    })
+                    .unwrap();
+            }
+            shot_analyze::cache::write_cached(dir.path(), &transcript).unwrap();
+        };
+        words("t01", "Hello there world. Ship on fridays now.");
+        words("t02", "Hello there world.");
+        let mut folder = VideoFolder::open(dir.path()).unwrap();
+        let replaced = folder
+            .append_take(Id::new("t02").unwrap(), Micros(3_000_000))
+            .unwrap();
+        assert_eq!(replaced, 1);
+        let blocks: Vec<&str> = folder
+            .project
+            .cut
+            .chapters
+            .iter()
+            .flat_map(|c| &c.takes)
+            .map(|edit| edit.take.as_str())
+            .collect();
+        assert_eq!(
+            blocks,
+            ["t02", "t01"],
+            "the retake opens the cut, t01 keeps the rest"
+        );
+        assert_eq!(folder.project.cut.chapters.len(), 1);
+        assert!(
+            folder.undo().unwrap(),
+            "one undo takes the whole take back out"
+        );
+        assert_eq!(folder.project.cut.chapters[0].takes.len(), 1);
     }
 
     #[test]

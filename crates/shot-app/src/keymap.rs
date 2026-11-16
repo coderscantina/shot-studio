@@ -102,6 +102,12 @@ fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("escape", edit::switch::CloseSwitch, switch),
         // Record screen
         KeyBinding::new("space", record::ToggleRecording, record),
+        KeyBinding::new("up", record::PreviousPart, record),
+        KeyBinding::new("down", record::NextPart, record),
+        KeyBinding::new("1", record::Scene1, record),
+        KeyBinding::new("2", record::Scene2, record),
+        KeyBinding::new("3", record::Scene3, record),
+        KeyBinding::new("4", record::Scene4, record),
         // Cut screen
         KeyBinding::new("k", cut::KeepItem, cut),
         KeyBinding::new("c", cut::CutItem, cut),

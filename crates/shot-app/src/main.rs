@@ -50,6 +50,7 @@ mod studio;
 mod takes;
 mod theme;
 mod transcribe;
+mod trash;
 mod ui;
 mod welcome;
 mod zoom;

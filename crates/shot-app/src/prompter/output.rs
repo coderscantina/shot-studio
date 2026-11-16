@@ -6,14 +6,14 @@
 //! prompter display goes away, so it never ends up covering the main display.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::{
     App, Bounds, Context, DisplayId, Div, FocusHandle, FontWeight, HighlightStyle, Hsla, Render,
     StyledText, Subscription, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle,
-    WindowKind, WindowOptions, div, prelude::*, px, relative, rgb,
+    WindowKind, WindowOptions, div, prelude::*, px, rgb,
 };
-use shot_prompter::View;
+use shot_prompter::{Line, View};
 
 use super::settings::Settings;
 use super::{Live, OUTPUT_CONTEXT, native};
@@ -26,6 +26,7 @@ pub const ELGATO: (f32, f32) = (1024., 600.);
 pub struct PrompterOutput {
     live: Arc<Live>,
     pub settings: Settings,
+    flow: Flow,
     focus: FocusHandle,
     _display: Subscription,
 }
@@ -98,6 +99,7 @@ impl PrompterOutput {
         Self {
             live,
             settings,
+            flow: Flow::default(),
             focus,
             _display: watch,
         }
@@ -105,15 +107,26 @@ impl PrompterOutput {
 }
 
 impl Render for PrompterOutput {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let prompter = self.live.lock();
+    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let live = self.live.clone();
+        let prompter = live.lock();
         let view = prompter.view();
+        let viewport = window.viewport_size();
+        let size = (f32::from(viewport.width), f32::from(viewport.height));
         div()
             .key_context(OUTPUT_CONTEXT)
             .track_focus(&self.focus)
             .size_full()
             .relative()
-            .child(page(&view, &self.settings, 1.))
+            .child(page(
+                &view,
+                prompter.lines(),
+                &self.settings,
+                1.,
+                size,
+                &mut self.flow,
+                window,
+            ))
             // Centered, so it stays in place and under the pointer when the output is mirrored.
             .child(
                 div()
@@ -144,77 +157,269 @@ impl Render for PrompterOutput {
     }
 }
 
+/// How long the text takes to glide to a new reading position.
+const GLIDE: Duration = Duration::from_millis(320);
+/// Lines drawn before and after the current one; the rest is off the page.
+const BEFORE: usize = 3;
+const AFTER: usize = 8;
+
+/// The text as one column that scrolls, so the row being read always sits on the reading line.
+/// Keeps where each line starts for the look it was measured with, and the glide between two
+/// reading positions.
+#[derive(Default)]
+pub struct Flow {
+    /// What the tops were measured for, and the top of each line and of the end.
+    measured: Option<(FlowKey, Vec<f32>)>,
+    glide: Option<Glide>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct FlowKey {
+    lines: usize,
+    chars: usize,
+    size: f32,
+    width: f32,
+    line_height: f32,
+}
+
+#[derive(Clone, Copy)]
+struct Glide {
+    from: f32,
+    to: f32,
+    since: Instant,
+}
+
+impl Glide {
+    fn at(&self, now: Instant) -> f32 {
+        let t = (now.duration_since(self.since).as_secs_f32() / GLIDE.as_secs_f32()).min(1.);
+        let eased = 1. - (1. - t).powi(3);
+        self.from + (self.to - self.from) * eased
+    }
+}
+
+/// The look of one page: sizes in points at the page's scale.
+struct Look {
+    size: f32,
+    row: f32,
+    /// Space above a beat, and above a chapter's label.
+    beat_gap: f32,
+    sentence_gap: f32,
+    label: f32,
+    width: f32,
+}
+
+impl Look {
+    fn font() -> gpui::Font {
+        gpui::Font {
+            weight: FontWeight::SEMIBOLD,
+            ..gpui::font(SANS)
+        }
+    }
+
+    /// Space above line `line`: a chapter's label, a beat's gap or a sentence's.
+    fn above(&self, line: &Line, first: bool) -> f32 {
+        if first {
+            return if line.section.is_some() {
+                self.label
+            } else {
+                0.
+            };
+        }
+        match (&line.section, line.opens_beat) {
+            (Some(_), _) => self.beat_gap + self.label,
+            (None, true) => self.beat_gap,
+            (None, false) => self.sentence_gap,
+        }
+    }
+
+    fn shape(&self, text: &str, window: &Window) -> Option<gpui::WrappedLine> {
+        let run = gpui::TextRun {
+            len: text.len(),
+            font: Self::font(),
+            color: Hsla::default(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        window
+            .text_system()
+            .shape_text(
+                text.to_owned().into(),
+                px(self.size),
+                &[run],
+                Some(px(self.width)),
+                None,
+            )
+            .ok()?
+            .into_iter()
+            .next()
+    }
+}
+
+impl Flow {
+    /// The top of every line and of the end, measured again when the lines or the look change.
+    fn tops(&mut self, lines: &[Line], look: &Look, window: &Window) -> &[f32] {
+        let key = FlowKey {
+            lines: lines.len(),
+            chars: lines
+                .iter()
+                .map(|l| l.words.iter().map(String::len).sum::<usize>())
+                .sum(),
+            size: look.size,
+            width: look.width,
+            line_height: look.row,
+        };
+        if self.measured.as_ref().is_none_or(|(k, _)| *k != key) {
+            let mut tops = Vec::with_capacity(lines.len() + 1);
+            let mut y = 0.;
+            for (index, line) in lines.iter().enumerate() {
+                y += look.above(line, index == 0);
+                tops.push(y);
+                let rows = look
+                    .shape(&line.text(), window)
+                    .map_or(1, |shaped| shaped.wrap_boundaries.len() + 1);
+                y += rows as f32 * look.row;
+            }
+            tops.push(y);
+            self.measured = Some((key, tops));
+        }
+        &self.measured.as_ref().expect("measured above").1
+    }
+
+    /// Glides towards `to` and returns where the text is now.
+    fn scroll(&mut self, to: f32, now: Instant) -> f32 {
+        match self.glide {
+            Some(glide) if glide.to == to => glide.at(now),
+            Some(glide) => {
+                let from = glide.at(now);
+                self.glide = Some(Glide {
+                    from,
+                    to,
+                    since: now,
+                });
+                from
+            }
+            None => {
+                self.glide = Some(Glide {
+                    from: to,
+                    to,
+                    since: now,
+                });
+                to
+            }
+        }
+    }
+}
+
 /// The whole output for `view` with the look of `settings`, at `scale` of the output's size: 1
-/// on the prompter, smaller in the pane's preview.
-pub fn page(view: &View, settings: &Settings, scale: f32) -> Div {
-    let size = settings.text_size * scale;
-    let margin = px(settings.margin * scale);
+/// on the prompter, smaller in the pane's preview. `size` is the page's size in points.
+pub fn page(
+    view: &View,
+    lines: &[Line],
+    settings: &Settings,
+    scale: f32,
+    size: (f32, f32),
+    flow: &mut Flow,
+    window: &Window,
+) -> Div {
+    let text_size = settings.text_size * scale;
+    let margin = settings.margin * scale;
     let colors = settings.colors.palette();
-    let reading = settings.reading_line / 100.;
-    let column = || {
-        div()
-            .w(relative(settings.text_width / 100.))
-            .flex()
-            .flex_col()
+    let status_size = text_size * 0.34;
+    let status_height = status_size * 1.4 + 20. * scale;
+    let area = (size.1 - status_height).max(0.);
+    let reading = area * settings.reading_line / 100.;
+    let look = Look {
+        size: text_size,
+        row: text_size * settings.line_height,
+        beat_gap: text_size * 0.6,
+        sentence_gap: text_size * 0.12,
+        label: text_size * 0.75,
+        width: ((size.0 - 2. * margin) * settings.text_width / 100.).max(1.),
     };
-    let line = |text: Option<String>, scale: f32, color: u32| {
-        div()
-            .text_size(px(size * scale))
-            .line_height(px(size * scale * settings.line_height))
-            .text_color(rgb(color))
-            .children(text)
-    };
-    let gap = px(size * 0.35);
-    let text = match view.countdown {
-        Some(seconds) => div().child(
+    let text = match (view.countdown, view.current) {
+        (Some(seconds), _) => div().child(
             div()
                 .absolute()
-                .top(relative(reading))
+                .top(px(reading))
                 .left_0()
                 .right_0()
                 .flex()
                 .justify_center()
-                .text_size(px(size * 2.))
-                .line_height(px(size * 2.))
+                .text_size(px(text_size * 2.))
+                .line_height(px(text_size * 2.))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(rgb(colors.said))
                 .child(seconds.to_string()),
         ),
-        None => div()
-            // The previous line ends just above the reading line.
-            .child(
+        (None, None) => div(),
+        (None, Some(current)) => {
+            let tops = flow.tops(lines, &look, window).to_vec();
+            // The row holding the next word to read sits on the reading line.
+            let said = said_bytes(current, view.said);
+            let row = look
+                .shape(&current.text(), window)
+                .and_then(|shaped| shaped.position_for_index(said, px(look.row)))
+                .map_or(0., |at| f32::from(at.y));
+            let target = tops[view.index] + row;
+            let scroll = flow.scroll(target, Instant::now());
+            let last = (view.index + 1 + view.ahead.len()).min(view.index + AFTER);
+            let first = view.index.saturating_sub(BEFORE);
+            div().children((first..last).map(|index| {
+                let line = &lines[index];
+                let top = reading + tops[index] - scroll;
+                let (color, opacity) = match index.cmp(&view.index) {
+                    std::cmp::Ordering::Less => (colors.previous, 0.7),
+                    std::cmp::Ordering::Equal => (colors.ahead, 1.),
+                    std::cmp::Ordering::Greater => (colors.ahead, 0.55),
+                };
+                let body = if index == view.index {
+                    StyledText::new(line.text()).with_highlights([(
+                        0..said,
+                        HighlightStyle {
+                            color: Some(Hsla::from(rgb(colors.said))),
+                            ..Default::default()
+                        },
+                    )])
+                } else {
+                    StyledText::new(line.text())
+                };
                 div()
                     .absolute()
-                    .bottom(relative(1. - reading))
-                    .left_0()
-                    .right_0()
-                    .pb(gap)
-                    .px(margin)
-                    .flex()
-                    .justify_center()
-                    .child(column().child(
-                        line(view.previous.map(|l| l.text()), 0.5, colors.previous).truncate(),
-                    )),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .top(relative(reading))
-                    .left_0()
-                    .right_0()
-                    .px(margin)
-                    .flex()
-                    .justify_center()
+                    .top(px(top))
+                    .left(px(margin + (size.0 - 2. * margin - look.width) / 2.))
+                    .w(px(look.width))
+                    .opacity(opacity)
+                    .children(line.section.as_ref().map(|title| {
+                        div()
+                            .absolute()
+                            .bottom_full()
+                            .left_0()
+                            .pb(px(text_size * 0.2))
+                            .text_size(px(text_size * 0.36))
+                            .line_height(px(text_size * 0.5))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(colors.next))
+                            .child(title.clone())
+                    }))
                     .child(
-                        column()
-                            .gap(gap)
-                            .child(current(view, size, settings.line_height, &colors))
-                            .child(
-                                line(view.next.map(|l| l.text()), 0.62, colors.next)
-                                    .font_weight(FontWeight::MEDIUM),
-                            ),
-                    ),
-            ),
+                        div()
+                            .text_size(px(text_size))
+                            .line_height(px(look.row))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(color))
+                            .child(body),
+                    )
+            }))
+        }
+    };
+    // Text fades out towards the edges, so lines enter and leave softly as it scrolls.
+    let fade = |angle: f32| {
+        gpui::linear_gradient(
+            angle,
+            gpui::linear_color_stop(gpui::black(), 0.),
+            gpui::linear_color_stop(gpui::black().opacity(0.), 1.),
+        )
     };
     div()
         .size_full()
@@ -223,36 +428,44 @@ pub fn page(view: &View, settings: &Settings, scale: f32) -> Div {
         .flex()
         .flex_col()
         .overflow_hidden()
-        .child(text.relative().flex_1().min_h_0().overflow_hidden())
         .child(
-            status(view, size * 0.34, colors.next, colors.ahead)
-                .px(margin)
+            text.relative()
+                .flex_1()
+                .min_h_0()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .h(px(reading * 0.6))
+                        .bg(fade(180.)),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .bottom_0()
+                        .left_0()
+                        .right_0()
+                        .h(px(look.row))
+                        .bg(fade(0.)),
+                ),
+        )
+        .child(
+            status(view, status_size, colors.next, colors.ahead)
+                .px(px(margin))
                 .pb(px(20. * scale)),
         )
 }
 
-/// The current line, its said words in the said color.
-fn current(view: &View, size: f32, line_height: f32, colors: &super::settings::Palette) -> Div {
-    let text = view.current.map(|line| {
-        let said: usize = line.words[..view.said]
-            .iter()
-            .map(|w| w.len() + 1)
-            .sum::<usize>()
-            .min(line.text().len());
-        StyledText::new(line.text()).with_highlights([(
-            0..said,
-            HighlightStyle {
-                color: Some(Hsla::from(rgb(colors.said))),
-                ..Default::default()
-            },
-        )])
-    });
-    div()
-        .text_size(px(size))
-        .line_height(px(size * line_height))
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(rgb(colors.ahead))
-        .children(text)
+/// Bytes of the current line's text up to the next word to read.
+fn said_bytes(line: &Line, said: usize) -> usize {
+    line.words[..said.min(line.words.len())]
+        .iter()
+        .map(|w| w.len() + 1)
+        .sum::<usize>()
+        .min(line.text().len())
 }
 
 /// Chapter and beat, retakes and time left along the bottom.
@@ -267,7 +480,7 @@ fn status(view: &View, size: f32, color: u32, strong: u32) -> Div {
         .text_color(rgb(color))
         .child(div().flex_1().truncate().child(format!(
             "{} · beat {} of {}",
-            view.chapter, view.beat, view.beats
+            view.chapter, view.part_beat, view.part_beats
         )))
         .child(format!(
             "{} {}",

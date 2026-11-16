@@ -21,12 +21,13 @@ mod pane;
 mod settings;
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use gpui::{App, Menu, MenuItem, actions};
 use shot_capture::Marks;
 use shot_capture::events::{Hotkey, Mark, Modifier};
 use shot_core::{Layout, Project};
-use shot_prompter::{Pace, Prompter};
+use shot_prompter::{Moved, Pace, Prompter};
 
 pub use native::display_names;
 pub use output::PrompterOutput;
@@ -95,7 +96,13 @@ pub struct Live {
     marks: Mutex<Option<Marks>>,
     /// The format's layouts, for 1 to 4.
     layouts: Mutex<Vec<Layout>>,
+    /// The scene the take shows: picked on the Record screen or with 1 to 4. `None` is the
+    /// format's default layout. Shared with the monitor that rehearses it.
+    pub scene: Scene,
 }
+
+/// The scene picked for the take, shared between threads.
+pub type Scene = Arc<Mutex<Option<Layout>>>;
 
 impl Live {
     pub fn new(project: &Project, pace: Pace) -> Arc<Self> {
@@ -103,6 +110,7 @@ impl Live {
             prompter: Mutex::new(Prompter::new(&project.script, project.format.prompter)),
             marks: Mutex::new(None),
             layouts: Mutex::new(Vec::new()),
+            scene: Scene::default(),
         });
         live.reset(project);
         live.lock().set_pace(pace);
@@ -123,6 +131,67 @@ impl Live {
         *self.layouts.lock().expect("layouts") = std::iter::once(format.default_layout)
             .chain(format.other_layouts.iter().copied())
             .collect();
+    }
+
+    /// Voice follow heard `words`: moves the prompter, and when that took it to another beat or
+    /// started one over, writes the marker a hotkey would, so the take knows its beats. A beat
+    /// reached a few words in is dated back by the time those words took.
+    pub fn hear(&self, words: &[String]) {
+        let (moved, words_per_minute) = {
+            let mut prompter = self.lock();
+            (prompter.hear(words), prompter.pace().words_per_minute)
+        };
+        let Some(moved) = moved else {
+            return;
+        };
+        let Some(marks) = &*self.marks.lock().expect("marks") else {
+            return;
+        };
+        match moved {
+            Moved::Next { beat, words } => marks.write_ago(
+                Mark::Next { beat },
+                Duration::from_secs_f32(words as f32 * 60.0 / words_per_minute.max(1.0)),
+            ),
+            Moved::Again { beat } => marks.write(Mark::Again { beat }),
+        }
+    }
+
+    /// Records only `beats` of the script, by index from 0, from the next start on.
+    pub fn select(&self, beats: std::ops::RangeInclusive<usize>) {
+        self.lock().select(beats);
+    }
+
+    /// The take started: writes at its zero the beat it starts on when that is not the first,
+    /// so its beats count from there, and the scene when it is not the default.
+    pub fn mark_start(&self) {
+        let Some(marks) = &*self.marks.lock().expect("marks") else {
+            return;
+        };
+        // Long enough to reach back past the start: the marks land at zero.
+        let start = Duration::from_secs(60);
+        let beat = self.lock().beat();
+        if beat > 1 {
+            marks.write_ago(Mark::Next { beat }, start);
+        }
+        let default = self.layouts.lock().expect("layouts").first().copied();
+        if let Some(layout) = *self.scene.lock().expect("scene")
+            && Some(layout) != default
+        {
+            marks.write_ago(Mark::Layout { layout }, start);
+        }
+    }
+
+    /// Picks the scene: before a take, the one it starts in; while recording, a switch.
+    pub fn set_scene(&self, layout: Layout) {
+        *self.scene.lock().expect("scene") = Some(layout);
+        if let Some(marks) = &*self.marks.lock().expect("marks") {
+            marks.write(Mark::Layout { layout });
+        }
+    }
+
+    /// The scene the take shows now.
+    pub fn scene(&self) -> Option<Layout> {
+        *self.scene.lock().expect("scene")
     }
 
     /// Where markers go while a take records.
@@ -147,6 +216,7 @@ impl Live {
                 else {
                     return;
                 };
+                *self.scene.lock().expect("scene") = Some(layout);
                 Mark::Layout { layout }
             }
         };

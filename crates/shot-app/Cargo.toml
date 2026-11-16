@@ -28,6 +28,7 @@ shot-fs = { path = "../shot-fs" }
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { workspace = true }
 objc2-core-foundation = { workspace = true }
+objc2-foundation = { workspace = true }
 objc2-core-video = { workspace = true, features = ["objc2-io-surface"] }
 objc2-io-surface = { workspace = true }
 objc2-metal = { workspace = true, features = ["objc2-io-surface"] }

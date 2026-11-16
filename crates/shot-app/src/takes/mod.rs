@@ -127,6 +127,32 @@ pub fn take_name(take: &Id) -> String {
     }
 }
 
+/// The takes in the video's media folder.
+pub fn media_takes(dir: &std::path::Path) -> Vec<Id> {
+    std::fs::read_dir(dir.join("media"))
+        .map(|entries| {
+            entries
+                .filter_map(|e| Id::new(e.ok()?.file_name().into_string().ok()?))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A take's words and elements: the folder's when it has them loaded, else from the cache
+/// and the elements file. `None` while the take has no transcript yet.
+pub fn read_take(folder: &VideoFolder, id: &Id) -> Option<(Transcript, Option<Elements>)> {
+    let transcript = folder.transcripts.get(id).cloned().or_else(|| {
+        shot_analyze::cache::read_cached(&folder.dir, id)
+            .ok()
+            .flatten()
+    })?;
+    let elements = folder.elements.get(id).cloned().or_else(|| {
+        let text = std::fs::read_to_string(folder.dir.join(format!("elements/{id}.jsonl"))).ok()?;
+        Elements::parse(id.clone(), &text).ok()
+    });
+    Some((transcript, elements))
+}
+
 /// How long `attempt` plays in the cut: its media without what the take's blocks remove.
 fn played(cut: &Cut, attempt: &Attempt) -> Micros {
     let kept = cut
@@ -182,13 +208,7 @@ impl TakesView {
     /// Reads the words and elements of every take in the media folder, and lines them up.
     fn reload(&mut self, cx: &App) {
         let folder = self.folder.read(cx);
-        let ids: Vec<Id> = std::fs::read_dir(folder.dir.join("media"))
-            .map(|entries| {
-                entries
-                    .filter_map(|e| Id::new(e.ok()?.file_name().into_string().ok()?))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let ids = media_takes(&folder.dir);
         self.takes.retain(|id, _| ids.contains(id));
         self.newest = ids
             .iter()
@@ -285,8 +305,8 @@ impl TakesView {
             n => format!("{n} beats"),
         };
         self.note = Some(format!(
-            "{} repeats {beats} of earlier takes, and the cut plays both for now. Pick the \
-             better attempt per beat, or assemble the cut from your picks.",
+            "{} repeats {beats} of earlier takes and plays in their place now. Compare them \
+             per beat: Enter puts the focused attempt back into the cut.",
             take_name(take)
         ));
         cx.notify();

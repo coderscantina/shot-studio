@@ -94,7 +94,7 @@ fn layouts(this: &EditScreen, cx: &mut Context<EditScreen>) -> Stateful<Div> {
 }
 
 /// A small drawing of where screen and face sit in a layout.
-fn thumbnail(layout: Layout, custom: &[shot_core::CustomLayout]) -> Div {
+pub(crate) fn thumbnail(layout: Layout, custom: &[shot_core::CustomLayout]) -> Div {
     let page = gpui::rgb(0xe9eae5);
     let face = gpui::rgb(0x596170);
     let frame = div()

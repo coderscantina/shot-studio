@@ -422,6 +422,8 @@ An `attempt` has `stars`, `pick` or both. It binds to the attempt of its take th
 
 "Use this" puts an attempt, or a marked part of one, into the main cut in place of every attempt at that beat, with the removes, layouts, zooms and overlays its take blocks have there. "Assemble picks" writes the chapters again from the script: per beat the circled attempt, else the best rated, else the one the cut keeps most of, else the newest take's, under the script's chapter titles. Consecutive beats from one take stay one block with the pause between them. Overrides of a take that left the cut go with it, and an edit that would take a take out of the cut that a derived cut uses is refused.
 
+A finished take enters the cut as a chapter of its own. Where it repeats beats an earlier take holds in the cut, its last attempt at each of them takes their place, as "Use this" would, in the same change, so one undo takes the whole take out again. Removing a take on the Record screen takes it out of the video: out of the cut with its ratings, overrides, caption breaks and Shorts clips, and its media folder and elements file go to the Trash. Undo stops before a removal.
+
 The second take's opening is circled whole, and of its second attempt only the part from 14.1 s to 18.2 s:
 
 ```kdl
@@ -986,6 +988,8 @@ The file is [JSON Lines](https://jsonlines.org): one JSON object per line, UTF-8
 | `mark` | string | the record hotkey pressed: `again` (A), `next` (N), `marker` (M), `zoom` (Z), `b-roll` (B) or `layout` (1 to 4). On `marker` |
 | `beat` | integer | the beat the prompter shows after the press, numbered from 1 across the script. On `again` and `next` |
 | `layout` | string | the layout chosen, one of the format's `layouts`. On `layout` |
+
+Voice follow writes `next` and `again` too: `next` when the reader reaches a beat, dated back by the time its first words took, and `again` when the reader starts a beat over. A take recorded from a later beat has a `next` at 0 naming it, which takes beat 1's place, and a take that starts in another scene than the default layout has a `layout` marker at 0.
 
 Readers ignore fields they don't know, so capture can add fields without breaking them. A new `kind` is a change to this contract.
 
