@@ -1155,9 +1155,6 @@ impl Render for RecordScreen {
         if let Phase::Failed(error) = &phase {
             self.error.get_or_insert_with(|| error.clone());
         }
-        if let Some(error) = &self.folder.read(cx).not_composed {
-            self.error.get_or_insert_with(|| error.clone().into());
-        }
         let busy = busy_stage(&phase);
         self.follow_inputs(busy, cx);
         if self.outline_stale && !busy {
@@ -1298,9 +1295,11 @@ impl RecordScreen {
         ))
     }
 
-    /// The error of the last take, with a way to the setting that fixes a missing permission.
-    fn failure(&self) -> Option<Div> {
-        let failure = self.error.as_ref()?;
+    /// The error of the last take, with a way to the setting that fixes a missing permission,
+    /// else why the cut was not composed, for as long as the folder says so.
+    fn failure(&self, cx: &App) -> Option<Div> {
+        let not_composed = || self.folder.read(cx).not_composed.clone().map(Failure::from);
+        let failure = self.error.clone().or_else(not_composed)?;
         Some(
             alert(failure.message.clone()).children(failure.permission.map(|permission| {
                 let url = settings_url(permission);

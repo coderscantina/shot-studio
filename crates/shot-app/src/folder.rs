@@ -56,8 +56,9 @@ pub struct VideoFolder {
     batching: bool,
     /// Inside [`VideoFolder::writing`]: this folder holds the video's writer lock.
     writing: bool,
-    /// Why the cut could not be composed when [`VideoFolder::propose`] last tried, until the
-    /// cut is written again. The screens show it.
+    /// Why the cut could not be composed when [`VideoFolder::propose`] last tried, until it
+    /// composes. The screens show it, a change of the cut tries again while it is set
+    /// ([`VideoFolder::write_cut`]), and undo and redo step through it with the files.
     pub not_composed: Option<String>,
 }
 
@@ -76,6 +77,8 @@ struct Snapshot {
     brand: Option<Brand>,
     /// The channel's `brand/brand.kdl` as written, for channel layouts; `None` without one.
     channel_brand: Option<String>,
+    /// [`VideoFolder::not_composed`] with these files.
+    not_composed: Option<String>,
 }
 
 /// How many writes undo can step back through.
@@ -225,10 +228,11 @@ impl VideoFolder {
 
     /// Writes `cut` as canonical `cut.kdl` and makes it the project's cut. A change can be
     /// undone. A change that takes clips out of a Short composes the cut in the same step: the
-    /// Short may have kept it from composing ([`VideoFolder::propose`]).
+    /// Short may have kept it from composing ([`VideoFolder::propose`]). So does every change
+    /// while the cut is not composed, which may be what lets it compose.
     pub fn write_cut(&mut self, cut: Cut) -> Result<(), String> {
         let clips = |cut: &Cut| cut.derived.iter().map(|d| d.clips.len()).sum::<usize>();
-        let freed = clips(&cut) < clips(&self.project.cut)
+        let freed = (clips(&cut) < clips(&self.project.cut) || self.not_composed.is_some())
             && self.project.video.status != shot_core::Status::Shipped;
         self.as_one_change(|folder| {
             folder.store(cut)?;
@@ -253,7 +257,12 @@ impl VideoFolder {
             let result = change(folder);
             folder.batching = false;
             let recorded = std::mem::take(&mut folder.recorded);
-            if folder.snapshot() != before {
+            // A change is a change of the files: why the cut is not composed alone is none.
+            let after = Snapshot {
+                not_composed: before.not_composed.clone(),
+                ..folder.snapshot()
+            };
+            if after != before {
                 // Stepping back before a recording leaves its media in the folder: the mark
                 // keeps the take out of the lineup, so composing never brings it back.
                 before.cut.mark_undone(recorded);
@@ -313,7 +322,8 @@ impl VideoFolder {
 
     /// Writes the files the last undo stepped back from. False when there is nothing to redo.
     /// Redoing a recording takes its take's mark away and composes the cut as a change of its
-    /// own: the take's transcript or analysis may have landed while it was undone.
+    /// own: the take's transcript or analysis may have landed while it was undone. The steps
+    /// still to redo stay, less the one that composed the cut the same way.
     pub fn redo(&mut self) -> Result<bool, String> {
         let Some(snapshot) = self.undone.pop() else {
             return Ok(false);
@@ -324,7 +334,13 @@ impl VideoFolder {
         let recorded = current.cut.undone.iter().any(back);
         self.history.push(current);
         if recorded {
-            self.as_one_change(|folder| folder.propose(None).map(drop))?;
+            let redo = std::mem::take(&mut self.undone);
+            let composed = self.as_one_change(|folder| folder.propose(None).map(drop));
+            self.undone = redo;
+            composed?;
+            if self.undone.last() == Some(&self.snapshot()) {
+                self.undone.pop();
+            }
         }
         Ok(true)
     }
@@ -337,6 +353,7 @@ impl VideoFolder {
             channel_brand: self
                 .brand_path()
                 .and_then(|path| fs::read_to_string(path).ok()),
+            not_composed: self.not_composed.clone(),
         }
     }
 
@@ -357,13 +374,14 @@ impl VideoFolder {
         if snapshot.brand != self.layer_brand() {
             self.store_brand(snapshot.brand)?;
         }
-        self.store(snapshot.cut)
+        self.store(snapshot.cut)?;
+        self.not_composed = snapshot.not_composed;
+        Ok(())
     }
 
     fn store(&mut self, cut: Cut) -> Result<(), String> {
         write(&self.dir.join("cut.kdl"), &cut.to_kdl())?;
         self.project.cut = cut;
-        self.not_composed = None;
         self.load_transcripts()?;
         self.rebuild_lock()
     }
@@ -545,8 +563,10 @@ impl VideoFolder {
     }
 
     /// Takes `take` out of the video: out of the cut, its picks, overrides and Shorts, and
-    /// moves its media and elements to the Trash, where Finder can put them back. Undo cannot
-    /// bring the media back, so the history before this change is dropped.
+    /// moves its media and elements to the Trash, where Finder can put them back. A video that
+    /// has not shipped is composed again from the takes that stay, so a beat only the removed
+    /// take played goes back to another attempt at it. Undo cannot bring the media back, so
+    /// the history before this change is dropped.
     pub fn remove_take(&mut self, take: &Id) -> Result<(), String> {
         self.writing(|folder| {
             let mut cut = folder.project.cut.clone();
@@ -573,6 +593,9 @@ impl VideoFolder {
             }
             folder.transcripts.remove(take);
             folder.on_disk.get_mut().remove(take);
+            if folder.project.video.status != shot_core::Status::Shipped {
+                folder.propose(None)?;
+            }
             folder.history.clear();
             folder.undone.clear();
             folder.rebuild_lock()
@@ -589,7 +612,8 @@ impl VideoFolder {
             &markers,
             &self.project.format,
         );
-        self.write_cut(cut)
+        // Not through `write_cut`: the caller composes, with the take as the new one.
+        self.store(cut)
     }
 
     /// The channel repo the video is in, `None` for a channel of one.
@@ -1021,11 +1045,7 @@ mod tests {
     fn an_undone_take_stays_out_until_redo_which_composes_it() {
         let dir = tempfile::tempdir().unwrap();
         retake(dir.path());
-        for take in ["t01", "t02"] {
-            let media = dir.path().join("media").join(take);
-            fs::create_dir_all(&media).unwrap();
-            fs::write(media.join("mic.mp4"), b"").unwrap();
-        }
+        recorded(dir.path());
         // The second take is recorded and undone before its transcript lands.
         let take = Id::new("t02").unwrap();
         fs::remove_file(shot_analyze::cache::cache_path(dir.path(), &take)).unwrap();
@@ -1093,14 +1113,89 @@ mod tests {
         assert_eq!(blocks(&folder), ["t01", "t02"], "the take is in, stacked");
         let why = folder.not_composed.clone().unwrap();
         assert!(why.contains("`hello` uses a part of take t01"), "{why}");
+        // Another change of the cut tries again, and the line stays while it cannot compose.
+        let at = TakeAt {
+            chapter: 0,
+            take: 0,
+        };
+        let range = TimeRange::new(Micros(0), Micros(1_000_000)).unwrap();
+        let zoomed = folder.project.cut.add_zoom(at, range, 150).unwrap();
+        folder.write_cut(zoomed).unwrap();
+        assert_eq!(blocks(&folder), ["t01", "t02"]);
+        assert_eq!(folder.not_composed.as_ref(), Some(&why));
         // Without the Short the cut composes, in the change that removes it.
         let mut freed = folder.project.cut.clone();
         freed.derived.clear();
         folder.write_cut(freed).unwrap();
         assert_eq!(blocks(&folder), ["t02"]);
         assert_eq!(folder.not_composed, None);
+        // Undoing that compose brings the Short and the line back.
         assert!(folder.undo().unwrap());
         assert_eq!(folder.project.cut.derived.len(), 1);
+        assert_eq!(folder.not_composed, Some(why));
+    }
+
+    /// The media folders of the two takes of [`retake`], each recorded with a mic.
+    fn recorded(dir: &Path) {
+        for take in ["t01", "t02"] {
+            let media = dir.join("media").join(take);
+            fs::create_dir_all(&media).unwrap();
+            fs::write(media.join("mic.mp4"), b"").unwrap();
+        }
+    }
+
+    #[test]
+    fn redo_past_a_recording_keeps_the_edits_made_after_it() {
+        let dir = tempfile::tempdir().unwrap();
+        retake(dir.path());
+        recorded(dir.path());
+        // The take is recorded, its transcript lands and composes it, then a person edits.
+        let take = Id::new("t02").unwrap();
+        fs::remove_file(shot_analyze::cache::cache_path(dir.path(), &take)).unwrap();
+        let mut folder = VideoFolder::open(dir.path()).unwrap();
+        folder.append_take(take.clone(), Micros(3_000_000)).unwrap();
+        heard(dir.path(), "t02", "Hello there world.");
+        assert!(folder.propose_analyzed(&take).unwrap());
+        assert_eq!(blocks(&folder), ["t02", "t01"]);
+        let at = TakeAt {
+            chapter: 0,
+            take: 0,
+        };
+        let word = TimeRange::new(Micros(1_000_000), Micros(1_800_000)).unwrap();
+        let cut = &folder.project.cut;
+        let shorter = cut
+            .delete_words(at, &folder.transcripts[&take], word, folder.lock())
+            .unwrap();
+        folder.write_cut(shorter.clone()).unwrap();
+        for _ in 0..3 {
+            assert!(folder.undo().unwrap());
+        }
+        assert_eq!(blocks(&folder), ["t01"]);
+        // Redo brings the take back composed, and the next redo the word cut.
+        assert!(folder.redo().unwrap());
+        assert_eq!(blocks(&folder), ["t02", "t01"]);
+        assert!(folder.redo().unwrap());
+        assert_eq!(folder.project.cut, shorter);
+        assert!(!folder.redo().unwrap());
+    }
+
+    #[test]
+    fn removing_a_retake_gives_its_beat_back_to_the_earlier_attempt() {
+        let dir = tempfile::tempdir().unwrap();
+        retake(dir.path());
+        recorded(dir.path());
+        let take = Id::new("t02").unwrap();
+        let mut folder = VideoFolder::open(dir.path()).unwrap();
+        folder.append_take(take.clone(), Micros(3_000_000)).unwrap();
+        assert_eq!(blocks(&folder), ["t02", "t01"]);
+        folder.remove_take(&take).unwrap();
+        let titles = |folder: &VideoFolder| -> Vec<String> {
+            let chapters = folder.project.cut.chapters.iter();
+            chapters.map(|c| c.title.clone()).collect()
+        };
+        assert_eq!(titles(&folder), ["Hook", "Rule"]);
+        assert_eq!(blocks(&folder), ["t01", "t01"]);
+        assert!(!folder.undo().unwrap(), "undo stops before a removal");
     }
 
     #[test]
