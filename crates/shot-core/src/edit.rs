@@ -884,7 +884,7 @@ impl Cut {
     /// What a person may want to look at before the video ships, in no order: findings the
     /// rules were not sure of, restarts and misspoken passages the rules cut and nobody
     /// answered, and beats whose proposal is worth a look ([`Row::look`]) and that a person
-    /// neither picked, edited nor looked at.
+    /// neither picked, edited nor looked at. In a row with one attempt only a cut is an edit.
     pub fn looks(&self, lineup: &Lineup, lock: &Lock) -> Vec<Look> {
         let mut looks: Vec<Look> = self
             .review_queue(lock)
@@ -919,9 +919,18 @@ impl Cut {
             lineup
                 .rows()
                 .filter(|(_, row)| {
+                    // A row with one attempt asks whether another row says it again: a cut in
+                    // it answers that, an answered finding does not.
+                    let by_hand = match row.attempts.as_slice() {
+                        [only] => {
+                            let mut blocks = self.chapters.iter().flat_map(|c| &c.takes);
+                            blocks.any(|edit| edit.take == only.take && cut_in(edit, only))
+                        }
+                        _ => self.held_by_hand(lineup, row, None).is_some(),
+                    };
                     row.look
                         && self.picked(row).is_empty()
-                        && self.held_by_hand(lineup, row, None).is_none()
+                        && !by_hand
                         && !self.looked(&row.proposal)
                 })
                 .map(|(at, _)| Look::Beat(at)),
@@ -952,12 +961,11 @@ impl Cut {
                     continue;
                 };
                 let last = inside.next_back().unwrap_or(first);
-                by_hand |= edit.ranges.iter().any(|r| {
-                    matches!(r, RangeEdit::Remove(_)) && r.range().overlaps(attempt.range)
-                }) || self
-                    .overrides
-                    .iter()
-                    .any(|o| o.take == edit.take && holds(attempt.range, o.at));
+                by_hand |= cut_in(edit, attempt)
+                    || self
+                        .overrides
+                        .iter()
+                        .any(|o| o.take == edit.take && holds(attempt.range, o.at));
                 held.extend(
                     TimeRange::new(first.from(), last.to()).map(|range| Attempt {
                         take: edit.take.clone(),
@@ -1461,6 +1469,13 @@ fn merge_layouts(layouts: &mut Vec<LayoutChange>) {
         }
     }
     *layouts = out;
+}
+
+/// Whether a person cut words of `attempt` in `edit`, a block of its take.
+fn cut_in(edit: &TakeEdit, attempt: &Attempt) -> bool {
+    let cuts =
+        |r: &RangeEdit| matches!(r, RangeEdit::Remove(_)) && r.range().overlaps(attempt.range);
+    edit.ranges.iter().any(cuts)
 }
 
 #[cfg(test)]
@@ -2440,6 +2455,34 @@ mod tests {
                 .to_kdl()
                 .contains("override t02 retake at=2_000_000 {\n    cut\n}")
         );
+    }
+
+    #[test]
+    fn a_row_said_twice_stays_to_look_at_until_a_word_in_it_is_cut() {
+        let lock = Lock::parse("lock 1\n").unwrap();
+        let mut lineup = lineup();
+        lineup.scripted = false;
+        let row = &mut lineup.groups[1].rows[0];
+        row.attempts.truncate(1);
+        row.proposal = row.attempts.clone();
+        row.look = true;
+        let cut = Cut::parse(
+            "chapter \"Demo\" {\n    take t01 {\n        keep from=0 to=30_000_000\n    }\n}\n",
+        )
+        .unwrap();
+        let beat = [Look::Beat(row_at(1, 0))];
+        assert_eq!(cut.looks(&lineup, &lock), beat);
+        // Keeping a filler in the row does not say which of the two versions plays.
+        let take = Id::new("t01").unwrap();
+        let kept = cut.answer(&take, ElementKind::Filler, s(22.), Decision::Keep);
+        assert_eq!(kept.looks(&lineup, &lock), beat);
+        let mut edited = kept;
+        edited.chapters[0].takes[0].ranges = vec![
+            keep(0, 22_000_000),
+            removed(22_000_000, 23_000_000),
+            keep(23_000_000, 30_000_000),
+        ];
+        assert_eq!(edited.looks(&lineup, &lock), []);
     }
 
     #[test]
