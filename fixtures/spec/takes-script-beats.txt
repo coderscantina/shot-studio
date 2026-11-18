@@ -1,0 +1,1 @@
+Then we add the clap crate to parse the arguments. [[slnc 1200]] Clap gives us help text and validation for free, so we write no parsing code at all.
