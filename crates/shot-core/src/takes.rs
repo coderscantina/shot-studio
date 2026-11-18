@@ -173,9 +173,10 @@ impl Lineup {
     }
 
     /// A take of a video without beats: each sentence that says a row again is an attempt at
-    /// it, and the rest are new rows, sentence groups: after the rows there are, or right
-    /// after a row when the take said them between two sentences of that row, so a sentence
-    /// added in a retake is never lost. The rows wait in one group for [`under_chapters`].
+    /// it, and the rest are new rows, sentence groups: right after the row the take said just
+    /// before them, or after the rows there are when it said none before them, so a sentence
+    /// added in a retake is never lost and plays where it was said. The rows wait in one group
+    /// for [`under_chapters`].
     fn add_unscripted(&mut self, transcript: &Transcript) {
         let take = transcript.take();
         let words = transcript.words();
@@ -205,10 +206,9 @@ impl Lineup {
             match row {
                 Some(row) => self.push(places[row], take, span(stretch)),
                 None => {
-                    // New between two sentences of one row: its place is after that row.
+                    // New after a row the take said again: its place is after that row.
                     let before = i.checked_sub(1).and_then(|b| said_again[b]);
-                    let between = before.filter(|b| said_again.get(i + run) == Some(&Some(*b)));
-                    let mut index = between.map(|row| places[row].row + 1);
+                    let mut index = before.map(|row| places[row].row + 1);
                     for group in groups(stretch) {
                         let at = self.new_row(group, index);
                         for place in places.iter_mut().filter(|p| p.row >= at.row) {
@@ -1440,6 +1440,22 @@ mod tests {
             ]
         );
         assert_eq!(proposals(&lineup)[1], [("t02".into(), 23, 35)]);
+        // Added between two paragraphs said again, it is a row between theirs, not the last.
+        let third = fluent(
+            "t03",
+            "Nightly backups copy the database offsite. Restores are tested every single week. | Always encrypt them first. | Caching comes last.",
+        );
+        let lineup = Lineup::new(
+            &script,
+            &Cut::default(),
+            &[with(&first, None), with(&third, None)],
+        );
+        let rows: Vec<&str> = lineup.rows().map(|(_, r)| r.text.as_str()).collect();
+        assert_eq!(
+            rows[1..],
+            ["Always encrypt them first.", "Caching comes last."]
+        );
+        assert_eq!(lineup.rows().nth(2).unwrap().1.attempts.len(), 2);
     }
 
     #[test]
