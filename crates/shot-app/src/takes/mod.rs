@@ -129,16 +129,17 @@ pub fn take_name(take: &Id) -> String {
 pub use shot_mcp::takes::media_takes;
 
 /// A take's words and elements: the folder's when it has them loaded, else from the cache
-/// and the elements file. `None` while the take has no transcript yet.
+/// and the elements file, which the folder reads once for each time they are written. `None`
+/// while the take has no transcript yet.
 pub fn read_take(folder: &VideoFolder, id: &Id) -> Option<(Transcript, Option<Elements>)> {
     let Some(transcript) = folder.transcripts.get(id) else {
-        return shot_mcp::takes::read_take(&folder.dir, id);
+        return folder.take_on_disk(id);
     };
     let elements = folder
         .elements
         .get(id)
         .cloned()
-        .or_else(|| shot_mcp::takes::read_take(&folder.dir, id)?.1);
+        .or_else(|| folder.take_on_disk(id)?.1);
     Some((transcript.clone(), elements))
 }
 

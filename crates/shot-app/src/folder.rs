@@ -6,10 +6,12 @@
 //! written before the lock; its `format.kdl` is a layer over the channel's format, and every
 //! write rebuilds its lock from the files, unless it shipped and the lock is frozen.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use shot_core::{
     Brand, CustomLayout, Cut, Elements, Format, FormatLayer, Id, Layout, Lineup, Lock, Micros,
@@ -30,6 +32,9 @@ pub struct VideoFolder {
     pub transcripts: HashMap<Id, Transcript>,
     /// The committed elements of each take that has an elements file.
     pub elements: HashMap<Id, Elements>,
+    /// The takes [`VideoFolder::take_on_disk`] read, each with the modification times of its
+    /// transcript and elements files at that read.
+    on_disk: RefCell<HashMap<Id, (FileTimes, Option<TakeFiles>)>>,
     /// What the brand gives the templates, read again on every write like export reads it:
     /// the preview draws with it and the screens check overlays against it.
     pub theme: Result<Arc<Theme>, String>,
@@ -50,6 +55,12 @@ pub struct VideoFolder {
     /// Inside [`VideoFolder::writing`]: this folder holds the video's writer lock.
     writing: bool,
 }
+
+/// A take's words and elements as its files hold them.
+pub type TakeFiles = (shot_core::Transcript, Option<Elements>);
+/// When a take's cached transcript and its elements file were last written, `None` for a
+/// missing file.
+type FileTimes = [Option<SystemTime>; 2];
 
 /// The files undo and redo step through.
 #[derive(Clone, PartialEq)]
@@ -94,6 +105,7 @@ impl VideoFolder {
             project: opened.project,
             transcripts: HashMap::new(),
             elements: HashMap::new(),
+            on_disk: RefCell::default(),
             theme: Ok(Arc::default()),
             layer: opened.layer,
             base: opened.base,
@@ -404,6 +416,25 @@ impl VideoFolder {
         })
     }
 
+    /// The cached transcript and the elements file of `take`, read again only when one of the
+    /// two files was written since the last read. `None` while the take has no transcript.
+    pub fn take_on_disk(&self, take: &Id) -> Option<TakeFiles> {
+        let written = |path: PathBuf| fs::metadata(path).and_then(|m| m.modified()).ok();
+        let times = [
+            written(shot_analyze::cache::cache_path(&self.dir, take)),
+            written(self.dir.join(format!("elements/{take}.jsonl"))),
+        ];
+        let mut on_disk = self.on_disk.borrow_mut();
+        if let Some((read_at, files)) = on_disk.get(take)
+            && *read_at == times
+        {
+            return files.clone();
+        }
+        let files = shot_mcp::takes::read_take(&self.dir, take);
+        on_disk.insert(take.clone(), (times, files.clone()));
+        files
+    }
+
     /// Every take of the video lined up against the script, see [`Lineup`]: the takes the cut
     /// uses and the ones in the media folder that left it, which a beat can go back to.
     pub fn lineup(&self) -> Lineup {
@@ -464,6 +495,7 @@ impl VideoFolder {
                 crate::trash::trash(&elements)?;
             }
             folder.transcripts.remove(take);
+            folder.on_disk.get_mut().remove(take);
             folder.history.clear();
             folder.undone.clear();
             folder.rebuild_lock()
@@ -618,6 +650,42 @@ mod tests {
             VideoFolder::open(dir.path()).unwrap().project.format,
             format
         );
+    }
+
+    #[test]
+    fn a_take_outside_the_cut_is_read_again_once_its_files_are_written_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = |name: &str, text: &str| fs::write(dir.path().join(name), text).unwrap();
+        file("video.kdl", "title \"A\"\nstatus editing\nformat opinion\n");
+        file("script.md", "# A\n");
+        file(
+            "format.kdl",
+            &shot_core::FormatKind::Opinion.preset().to_kdl(),
+        );
+        file("cut.kdl", "");
+        let folder = VideoFolder::open(dir.path()).unwrap();
+        let take = Id::new("t01").unwrap();
+        assert_eq!(folder.take_on_disk(&take), None);
+        let said = |text: &str| {
+            let mut transcript = shot_core::Transcript::new(take.clone());
+            transcript
+                .push(shot_core::Word {
+                    text: text.to_owned(),
+                    range: TimeRange::new(Micros(0), Micros(400_000)).unwrap(),
+                    confidence: 90,
+                })
+                .unwrap();
+            shot_analyze::cache::write_cached(dir.path(), &transcript).unwrap();
+            transcript
+        };
+        let first = said("ship");
+        assert_eq!(folder.take_on_disk(&take), Some((first, None)));
+        let second = said("shipped");
+        fs::create_dir_all(dir.path().join("elements")).unwrap();
+        file("elements/t01.jsonl", "");
+        let read = folder.take_on_disk(&take).unwrap();
+        assert_eq!(read.0, second);
+        assert!(read.1.is_some());
     }
 
     #[test]
