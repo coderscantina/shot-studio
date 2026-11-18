@@ -4,7 +4,13 @@ Updated 2026-11-18. Read by agents at the start of a thread; rewrite it before h
 
 ## Branches
 
-`main` is the branch of record and is public at https://github.com/coderscantina/shot-studio. Local `main` holds milestones 01 to 16 and the record rework, and is ahead of `origin/main`, not pushed.
+`main` is the branch of record and is public at https://github.com/coderscantina/shot-studio. Local `main` holds milestones 01 to 16, the record rework and the Cut and Edit pass, and is ahead of `origin/main`, not pushed.
+
+`m17/integration` holds [milestone 17](milestones/17-the-cut-proposes-itself.md), built 2026-11-18 and not merged into `main`: its worktree is `.claude/worktrees/m17-integration`. [Evidence](evidence/m17-the-cut-proposes-itself.md), decision [0040](decisions/0040-the-cut-proposes-itself.md).
+- The best scored attempt plays every beat, sentence by sentence, under the script's chapters (`Lineup` scores and proposals, `Cut::compose`). The app composes after a take and after its analysis, `shot ingest` after analysis. A person's pick and a beat a person edited stay. Stars are gone.
+- The restart detector aligns words: restarts without a full stop, reworded ones, ones after a short sentence and spoken cues are cut, a doubled word such as "very, very" asks, a number is no link, kept fillers lower a filler's confidence.
+- Text counts what is worth a look (N, K, C), shows which attempt plays a beat ("2 of 3") and switches it in place (A). The Cut step is gone: Record, Edit, Ship. The takes side by side open from a beat (shift-A).
+- The text cutting faults of the review are fixed except one, see the known gaps.
 
 `main` holds precise cuts by text, transcript menus and record changes (2026-11-17), commits from `4ca5097` up to the take Remove fix, not pushed:
 - Word edges grow into the gaps where the audio still sounds (`word_bounds`), since Whisper starts a word after a pause up to 200 ms late and a cut there left its first syllable. `shot analyze` measures cached transcripts again against `mic.mp4` (stable, about 1 s a take).
@@ -41,24 +47,14 @@ Mike's own app icon work: `README.md`, `packaging/macos/AppIcon.icns`, `AppIcon.
 
 The Cut and Edit council pass (word cursor in Text, picked cut chips, the loose video's next step) is on `main` as `235f136` since 2026-11-18, not pushed.
 
-## Review of cutting and takes, 2026-11-18
-
-Two reviewers read the core and the app, and two spoken test videos went through `shot ingest` and the bundled app (one unscripted take with restarts, three takes of a seven beat script). Nothing is fixed yet. What it found, most important first:
-- Assemble picks without ratings takes the longest attempt per beat (`Cut::choice` falls back to `kept_of`), which was the flubbed one in both beats that had a clean retake. Its banner says "from your picks" with none made.
-- The restart detector missed three of three sentence restarts: an 8 word restart without a full stop (`repeats` stops at 6 words, `restarts` needs sentence ends from Whisper), a restart after a short sentence in between (`break` at `findings.rs:369`), and "Sorry, let me say that again" with a reworded sentence (words compared by position). "very, very good" is cut at 85 without asking.
-- A number said as "13.53" becomes a link card to `https://13.53` (`mentions.rs`).
-- `shot ingest` stacks every take as its own chapter, the app's Import and Record replace repeated beats (`VideoFolder::replace_retaken`). A retake that opens with unscripted words can replace beat 1, and a retake of part of a beat drops the rest of it (`takes::align`, `Cut::use_attempt`).
-- Joins between takes sit on bare word edges with no pause; a finding that starts just before a block's first word is neither cut nor queued (`engine.rs` `is_kept(e.t)`).
-- Restore from a word selection leaves the pause removed; Backspace next to a mixed chip turns a rule's cut into a person's (`model::cut_words_before`); a stale selection or picked chip survives Use this and undo.
-- Kept fillers never lower a filler's confidence: `analyze` passes `Voice::default()`.
-
 ## Running
 
 No app is running. Generated media is in `$HOME/.cache/shot-studio-fixtures`. The shared build cache is in `$HOME/.cache/shot-studio-target`; clear its `debug/` when disk runs low (cleared 2026-11-17, 52 GB freed). Screenshots in `docs/evidence/` are git-ignored.
 
 ## Waiting on Mike
 
-- Decide what to build from the review above: a proposal that picks attempts by quality, and the restart detector fixes come first.
+- Merge `m17/integration` into `main`, after a look at milestone 17 with a real recording.
+- Milestone 17's open item: a pacing switch and rule switches in Text, which would write the video's `format.kdl` layer. The app never had them.
 - Decide on a slimmer floating word toolbar in Text (Sol: Cut, Restore and one effects menu, keys unchanged).
 - Adopt or change 0038 and 0039, and the retake rule above.
 - Push `main`.
@@ -70,5 +66,5 @@ No app is running. Generated media is in `$HOME/.cache/shot-studio-fixtures`. Th
 1. Milestone 16 checks only a person can do: Import clip and drop in the app, HDR tone mapping on a real iPhone clip, IME in the editor.
 2. Milestone 15 follow-ups (in the known gaps): `shot style scope` and the MCP propose and reach tools on worktrees, callout labels and the code-diff panel in Shorts, Remove for a rule's sound, a decode thread for the transition prefetch, the app's changed-on-disk check.
 3. Milestone 13 and council follow-ups: credits for the Library and Noto emoji in Ship's description, takes commands in the CLI and MCP, a track switch for `shot record`, cut points at take rates other than 60 fps, Text and Picture empty states, the 1280x800 inspector hints.
-4. Council follow-ups for Cut and Edit: one continuous transcript across chapters (the members' next pick), a selection across take blocks, reopening an answered Cut row (needs `Cut::decide` to take a decided item), rule findings inline in Text, recheck a picked cut after undo.
+4. Milestone 17 follow-ups: an `#[ignore]`d test for the script fixtures' picks, `README.md` and its review queue screenshot, the gaps in the milestone index. Council follow-ups for Edit: one continuous transcript across chapters, a selection across take blocks.
 5. [Milestone 09](milestones/09-release-gate.md) items 4 and 5: measure every target on the idle reference machine, then one full video from board to a private upload.

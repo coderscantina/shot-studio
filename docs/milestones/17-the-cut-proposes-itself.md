@@ -39,7 +39,7 @@ Slice 2, the transcript:
 Slice 3, the nav:
 
 14. **No Cut step.** Record, Edit, Ship. A Recorded card opens Edit.
-15. **Pacing and rule switches** in a panel of Text, with the counts.
+15. **What the rules cut** by kind in Text. A pacing switch and rule switches are left open: the Cut screen had none, they are the format's style rules.
 16. **Docs.** AGENTS.md, the briefing and the design document say what the app does now.
 
 ## Acceptance criteria
