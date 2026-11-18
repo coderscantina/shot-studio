@@ -98,11 +98,13 @@ const SAME_SENTENCE: f64 = 0.5;
 /// An attempt says a row whole when it says this share of the content words that the attempt
 /// with the most says: four fifths.
 const WHOLE: (usize, usize) = (4, 5);
-/// Words that acknowledge or fill and instruct nothing. A sentence whose one content word is
-/// one of them, "Okay." or "Right.", is none an attempt must say to say the row whole.
+/// Words that acknowledge, fill or exclaim and instruct nothing. A sentence whose one content
+/// word is one of them, "Okay.", "Right." or "Oops.", is none an attempt must say to say the
+/// row whole. The short ones are sentences of one word, see [`Said::substantive`].
 const ACKNOWLEDGING: &[&str] = &[
     "okay", "alright", "right", "yes", "yeah", "yep", "well", "good", "great", "cool", "nice",
-    "sure", "fine", "hmm", "uhm", "anyway",
+    "sure", "fine", "hmm", "uhm", "anyway", "oops", "damn", "shoot", "wait", "perfect", "done",
+    "ok", "oh", "ah", "um", "uh", "so", "hm", "mm",
 ];
 
 impl Lineup {
@@ -532,10 +534,26 @@ impl<'a> Facts<'a> {
                 let meant = words
                     .iter()
                     .filter(|w| !self.stumbles.iter().any(|s| holds(*s, middle(w.range))));
+                // A sentence of one word says it also when it is too short for a content
+                // word: "No."
+                let set = |said: Vec<&str>| {
+                    let mut set = content_set(said.iter().copied());
+                    if let ([_], [only]) = (words, said.as_slice()) {
+                        let word: String = only
+                            .chars()
+                            .filter(|c| c.is_alphanumeric())
+                            .flat_map(char::to_lowercase)
+                            .collect();
+                        if (1..3).contains(&word.chars().count()) {
+                            set.insert(word);
+                        }
+                    }
+                    set
+                };
                 Said {
                     range: span(words),
-                    content: content_set(words.iter().map(|w| w.text.as_str())),
-                    meant: content_set(meant.map(|w| w.text.as_str())),
+                    content: set(words.iter().map(|w| w.text.as_str()).collect()),
+                    meant: set(meant.map(|w| w.text.as_str()).collect()),
                     clean: (100.0 * self.clean(words, &self.stumbles)).round() as u8,
                 }
             })
@@ -556,11 +574,15 @@ struct Said {
 
 impl Said {
     /// Whether an attempt that says the row whole must not leave this sentence out: it means
-    /// two content words or more, or one that is not [`ACKNOWLEDGING`], such as "Twice."
+    /// two content words or more, or one that is not [`ACKNOWLEDGING`], such as "Twice.", or
+    /// it is one word too short for a content word, such as "No."
     fn substantive(&self) -> bool {
         let mut meant = self.meant.iter();
         match (meant.next(), meant.next()) {
-            (Some(only), None) => !ACKNOWLEDGING.contains(&only.as_str()),
+            // A content word has lost its plural `s`: "oops" is "oop".
+            (Some(only), None) => !ACKNOWLEDGING
+                .iter()
+                .any(|word| only == word || word.strip_suffix('s') == Some(only)),
             (first, _) => first.is_some(),
         }
     }
@@ -2135,6 +2157,36 @@ mod tests {
         // An acknowledgement is nothing a retake leaves out.
         assert_eq!(played("Okay."), (line.to_owned(), false));
         assert_eq!(played("Right."), (line.to_owned(), false));
+    }
+
+    #[test]
+    fn a_retake_keeps_a_one_word_answer_too_short_for_a_content_word() {
+        let question = "Would I run this migration in production?";
+        let script = Script::parse(&format!("# A\n\n## Setup\n\n- {question} No.\n")).unwrap();
+        let second = said("t02", 0, question);
+        let played = |last: &str| {
+            let first = said("t01", 0, &format!("{question} {last}"));
+            let takes = [(&first, None, "Take t01"), (&second, None, "Take t02")];
+            let cut = composed(&script, &takes);
+            let lineup = Lineup::new(&script, &cut, &[with(&first, None), with(&second, None)]);
+            let row = &lineup.groups[0].rows[0];
+            (spoken(&cut, &[&first, &second]), row.look)
+        };
+        // The answer stays, from the take that says it, and the beat is worth a look.
+        assert_eq!(played("No."), (format!("{question} No."), true));
+        // A short acknowledgement is nothing a retake leaves out.
+        assert_eq!(played("Ok."), (question.to_owned(), false));
+    }
+
+    #[test]
+    fn a_closing_exclamation_does_not_make_the_first_take_win() {
+        let line = "Run the benchmark with the release profile.";
+        let script = Script::parse(&format!("# A\n\n## Setup\n\n- {line}\n")).unwrap();
+        let first = said("t01", 0, "Run the benchmark with the debug profile. Oops.");
+        let second = said("t02", 0, line);
+        let takes = [(&first, None, "Take t01"), (&second, None, "Take t02")];
+        let cut = composed(&script, &takes);
+        assert_eq!(spoken(&cut, &[&first, &second]), line);
     }
 
     #[test]
