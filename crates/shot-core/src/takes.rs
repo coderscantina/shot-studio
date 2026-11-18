@@ -629,15 +629,23 @@ fn proposal(
     (pieces, true)
 }
 
-/// The rows of a video without beats under the cut's chapters: a row goes under the chapter
-/// that keeps the start of one of its attempts. A row the cut plays nothing of stays with the
-/// row before it when the same take said both, or when the next row the cut plays, after the
-/// rows of its take that the cut places nowhere either, is in that row's chapter, so a chapter
-/// is not split by the passage a later take replaced or by the sentences it added, renamed or
-/// not. Such a row at the very start opens the chapter of the next row the cut plays, so a
-/// retake's new opening is no chapter of its own. Else it goes under its take's name. A take
-/// that was just appended whole plays under its own name, `Take <take>`: that chapter holds the
-/// take until it is composed and places none of its rows.
+/// The rows of a video without beats under the cut's chapters, by the first of these that
+/// holds for a row:
+///
+/// | the row                                                              | goes under          |
+/// |----------------------------------------------------------------------|---------------------|
+/// | has an attempt whose start the cut plays                             | that chapter        |
+/// | follows a row its take said first, or also said when it is marked    | that row's chapter  |
+/// | lies before a row the cut holds in the chapter of the row before it  | that chapter        |
+/// | lies before a row the cut holds that its take says too               | that row's chapter  |
+/// | none of these                                                        | `Take <take>`       |
+///
+/// The row the cut holds next is looked for after the rows of the same take that follow and
+/// that the cut plays nowhere either. So a chapter is not split by the passage a later take
+/// replaced or by the sentences it added, renamed or not, a retake's closing remark stays in
+/// the chapter it retook, and what a retake says before a row leads into that row's chapter. A
+/// take that was just appended whole plays under its own name, `Take <take>`: that chapter
+/// holds the take until it is composed and places none of its rows.
 fn under_chapters(rows: Vec<Row>, cut: &Cut) -> Vec<Group> {
     // The chapter that plays a row, by its title, `placed` without the take's own chapter.
     let chapter = |row: &Row, placed: bool| -> Option<&str> {
@@ -652,32 +660,33 @@ fn under_chapters(rows: Vec<Row>, cut: &Cut) -> Vec<Group> {
     };
     let playing: Vec<Option<&str>> = rows.iter().map(|row| chapter(row, true)).collect();
     let holding: Vec<Option<&str>> = rows.iter().map(|row| chapter(row, false)).collect();
-    let said: Vec<Option<Id>> = rows
-        .iter()
-        .map(|row| row.attempts.first().map(|a| a.take.clone()))
-        .collect();
-    let mut groups: Vec<Group> = Vec::new();
-    for (i, row) in rows.into_iter().enumerate() {
-        let (before, said) = (i.checked_sub(1).and_then(|b| said[b].as_ref()), &said[i..]);
-        // The rows of this take that follow and that the cut places nowhere go where this goes.
-        let same = |j: &usize| playing[i + j].is_none() && said[*j] == said[0];
-        let follow = (1..said.len()).take_while(same).count();
-        let next = (i + 1 + follow..holding.len()).find_map(|j| Some((holding[j]?, j - i)));
-        let inside = |group: &Group| {
-            before == said[0].as_ref() || next.is_some_and(|(title, _)| title == group.title)
+    let first = |i: usize| rows[i].attempts.first().map(|a| &a.take);
+    let says = |i: usize, take: &Id| rows[i].attempts.iter().any(|a| a.take == *take);
+    let mut titles: Vec<String> = Vec::with_capacity(rows.len());
+    for (i, row) in rows.iter().enumerate() {
+        let take = first(i);
+        let unplaced = |j: &usize| playing[*j].is_none() && first(*j) == take;
+        let follow = (i + 1..rows.len()).take_while(unplaced).count();
+        let next = (i + 1 + follow..rows.len()).find_map(|j| Some((holding[j]?, j)));
+        let stays = |(before, title): &(usize, &String)| {
+            first(*before) == take
+                || row.look && take.is_some_and(|take| says(*before, take))
+                || next.is_some_and(|(next, _)| next == title.as_str())
         };
-        // A row at the very start that a later take said than the row that follows it.
-        let opens = |take: &Id, next: usize| {
-            let first = said[next].as_ref();
-            first.is_some_and(|first| take_order(first) < take_order(take))
-        };
-        let title = match (playing[i], groups.last(), next, &said[0]) {
+        let before = i.checked_sub(1).zip(titles.last()).filter(stays);
+        let title = match (playing[i], before, take) {
             (Some(title), ..) => title.to_owned(),
-            (None, Some(group), ..) if inside(group) => group.title.clone(),
-            (None, None, Some((title, next)), Some(take)) if opens(take, next) => title.to_owned(),
-            (None, _, _, Some(take)) => format!("Take {take}"),
-            (None, _, _, None) => String::new(),
+            (None, Some((_, title)), _) => title.clone(),
+            (None, None, Some(take)) => match next.filter(|(_, next)| says(*next, take)) {
+                Some((title, _)) => title.to_owned(),
+                None => format!("Take {take}"),
+            },
+            (None, None, None) => String::new(),
         };
+        titles.push(title);
+    }
+    let mut groups: Vec<Group> = Vec::new();
+    for (row, title) in rows.into_iter().zip(titles) {
         match groups.last_mut() {
             Some(group) if group.title == title => group.rows.push(row),
             _ => groups.push(Group {
@@ -2218,6 +2227,62 @@ mod tests {
             spoken(&cut, &[&first, &second]),
             format!("{PARSER} {LEXER} {RENDERER} {added} {caching}")
         );
+    }
+
+    /// Three takes as renamed chapters and a retake of the last, `retake`, which says `remark`
+    /// at its start or end: the remark plays in the chapter that was retaken, and deleting it,
+    /// as the inspector asks, leaves no chapter behind.
+    fn a_retakes_remark_is_in_the_chapter_it_retook(retake: &str, remark: &str) {
+        let script = Script::parse("# A\n").unwrap();
+        let first = said("t01", 0, "Welcome to the channel. Caching comes last.");
+        let second = said("t02", 0, "Nightly backups copy the database offsite.");
+        let third = said("t03", 0, &format!("{PARSER} {LEXER}"));
+        let fourth = said("t04", 0, retake);
+        let takes = [
+            (&first, None, "Hello"),
+            (&second, None, "Backups"),
+            (&third, None, "Parsing"),
+            (&fourth, None, "Take t04"),
+        ];
+        let all = [&first, &second, &third, &fourth];
+        let chapters =
+            |cut: &Cut| -> Vec<String> { cut.chapters.iter().map(|c| c.title.clone()).collect() };
+        let cut = composed(&script, &takes);
+        assert_eq!(chapters(&cut), ["Hello", "Backups", "Parsing"]);
+        assert!(spoken(&cut, &all).contains(remark));
+
+        let (words, len) = (fourth.words(), remark.split(' ').count());
+        let range = if retake.starts_with(remark) {
+            span(&words[..len])
+        } else {
+            span(&words[words.len() - len..])
+        };
+        let plays = |edit: &crate::TakeEdit| edit.take == id("t04") && edit.keeps(range);
+        let at = crate::TakeAt {
+            chapter: 2,
+            take: cut.chapters[2].takes.iter().position(plays).unwrap(),
+        };
+        let cut = cut
+            .delete_words(at, &fourth, range, &crate::Lock::default())
+            .unwrap();
+        let words: Vec<TakeWords<'_>> = takes.iter().map(|t| with(t.0, t.1)).collect();
+        let cut = cut
+            .compose(&Lineup::new(&script, &cut, &words), None)
+            .unwrap();
+        assert_eq!(chapters(&cut), ["Hello", "Backups", "Parsing"]);
+        assert!(!spoken(&cut, &all).contains(remark));
+    }
+
+    #[test]
+    fn without_beats_a_retakes_closing_remark_stays_in_the_chapter_it_retook() {
+        let remark = "Was that okay for you?";
+        a_retakes_remark_is_in_the_chapter_it_retook(&format!("{PARSER} {LEXER} {remark}"), remark);
+    }
+
+    #[test]
+    fn without_beats_a_retakes_opening_remark_leads_into_the_chapter_it_retakes() {
+        let remark = "Okay again from the parser part.";
+        a_retakes_remark_is_in_the_chapter_it_retook(&format!("{remark} {PARSER} {LEXER}"), remark);
     }
 
     #[test]
