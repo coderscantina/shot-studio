@@ -12,6 +12,7 @@ Updated 2026-11-18. Read by agents at the start of a thread; rewrite it before h
 - Text counts what is worth a look (N, K, C), shows which attempt plays a beat ("2 of 3") and switches it in place (A). The Cut step is gone: Record, Edit, Ship. The takes side by side open from a beat (shift-A).
 - The text cutting faults of the review are fixed. Six faults found while building were fixed after the report, see the evidence: among them a person's cuts in an attempt that left the cut now wait in `cut.kdl` as `remove <take>` nodes of the `takes` block, a contract addition for Mike to confirm.
 - The 19 faults of the three reviews of `1f3cb45` are fixed (2026-11-18), see "Fixes after the review" in the evidence. A retake of one sentence is spliced into the fullest attempt and never replaces the beat, a person's effects and answers come back with material that left the cut, the app composes after transcription and on open, K and C on a beat are no pick, and Ship plans again when a run starts. Two more `takes` nodes wait for Mike below.
+- The 13 faults of the three reviews of `5a3ec49` are fixed (2026-11-18), see "Fixes after the second review" in the evidence. An overlay such as a blur plays in every block whose media it overlaps, a retake that would empty a Short is refused, an undone recording is marked `undone <take>` and stays out until redo, redo and removing a Short compose, a ship run uses one lock, and A goes back to the proposal after a word cut. One more `takes` node waits for Mike below.
 
 `main` holds precise cuts by text, transcript menus and record changes (2026-11-17), commits from `4ca5097` up to the take Remove fix, not pushed:
 - Word edges grow into the gaps where the audio still sounds (`word_bounds`), since Whisper starts a word after a pause up to 200 ms late and a cut there left its first syllable. `shot analyze` measures cached transcripts again against `mic.mp4` (stable, about 1 s a take).
@@ -50,7 +51,7 @@ The Cut and Edit council pass (word cursor in Text, picked cut chips, the loose 
 
 ## Running
 
-No app is running. Generated media is in `$HOME/.cache/shot-studio-fixtures`. The shared build cache is in `$HOME/.cache/shot-studio-target`; clear its `debug/` when disk runs low (cleared 2026-11-17, 52 GB freed). Screenshots in `docs/evidence/` are git-ignored.
+No app is running. Generated media is in `$HOME/.cache/shot-studio-fixtures`. The shared build cache is in `$HOME/.cache/shot-studio-target`; clear its `debug/` when disk runs low (cleared 2026-11-17, 52 GB freed; its `release/` cleared 2026-11-18, 16 GB freed, so the next release build starts cold). Screenshots in `docs/evidence/` are git-ignored.
 
 ## Waiting on Mike
 
@@ -58,7 +59,8 @@ No app is running. Generated media is in `$HOME/.cache/shot-studio-fixtures`. Th
 - Confirm the `remove <take> from=<time> to=<time>` node in the `takes` block of `cut.kdl`, which keeps a person's cuts of an attempt that left the cut (contract, Takes).
 - Confirm the `looked <take> from=<time> to=<time>` node in the `takes` block of `cut.kdl`, which K and C on a beat write instead of a pick, so a later, better take still wins the beat (contract, Takes).
 - Confirm the `take <take> { layout, zoom, overlay }` blocks and `override` nodes in the `takes` block of `cut.kdl`, which keep a person's layouts, zooms, overlays and K and C answers in material that left the cut and give them back when it plays again (contract, Takes).
-- Decide whether the main cut may drop a take a Short still uses. Today composing is refused and Edit, Record and `shot ingest` say why. Letting it go means a Short no longer derives from the main cut alone: `Timeline::evaluate`, the lock's kept ranges and three contract rules change.
+- Confirm the `undone <take>` node in the `takes` block of `cut.kdl`, which undo of a recording writes and redo removes, so a take whose recording was undone stays out of every lineup while its media stays in the folder (contract, Takes).
+- Decide whether the main cut may drop a take a Short still uses. Today composing is refused, also when it would leave one clip of the Short with nothing, and Edit, Record, `shot ingest` and `shot derived remove` say why. Letting it go means a Short no longer derives from the main cut alone: `Timeline::evaluate`, the lock's kept ranges and three contract rules change.
 - Milestone 17's open item: a pacing switch and rule switches in Text, which would write the video's `format.kdl` layer. The app never had them.
 - Decide on a slimmer floating word toolbar in Text (Sol: Cut, Restore and one effects menu, keys unchanged).
 - Adopt or change 0038 and 0039, and the retake rule above.
@@ -71,5 +73,5 @@ No app is running. Generated media is in `$HOME/.cache/shot-studio-fixtures`. Th
 1. Milestone 16 checks only a person can do: Import clip and drop in the app, HDR tone mapping on a real iPhone clip, IME in the editor.
 2. Milestone 15 follow-ups (in the known gaps): `shot style scope` and the MCP propose and reach tools on worktrees, callout labels and the code-diff panel in Shorts, Remove for a rule's sound, a decode thread for the transition prefetch, the app's changed-on-disk check.
 3. Milestone 13 and council follow-ups: credits for the Library and Noto emoji in Ship's description, takes commands in the CLI and MCP, a track switch for `shot record`, cut points at take rates other than 60 fps, Text and Picture empty states, the 1280x800 inspector hints.
-4. Milestone 17 follow-ups: composing again when the Short clips that kept a cut from composing are removed, and after redo of a take whose analysis landed while it was undone; a take whose recording was undone still competes at the next compose, because its media stays; a fixture clip that retakes half a beat; `README.md` and its review queue screenshot, the gaps in the milestone index. Council follow-ups for Edit: one continuous transcript across chapters, a selection across take blocks.
+4. Milestone 17 follow-ups: a way to bring back a take marked `undone` once redo is gone (today only Remove on Record takes it out for good); a sentence a retake adds between two repeated ones plays after their row, since a row is not split; Record's error line for a cut that was not composed stays after it composes, as Edit's did; the flaky `metrics` watchdog test; a fixture clip that retakes half a beat; `README.md` and its review queue screenshot, the gaps in the milestone index. Council follow-ups for Edit: one continuous transcript across chapters, a selection across take blocks.
 5. [Milestone 09](milestones/09-release-gate.md) items 4 and 5: measure every target on the idle reference machine, then one full video from board to a private upload.

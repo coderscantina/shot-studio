@@ -45,7 +45,7 @@ chapter "Arguments" {
 
 chapter "Colors" {
     take t01 {
-        keep from=27_240_000 to=34_360_000
+        keep from=27_240_000 to=34_270_000
     }
 }
 ```
@@ -87,7 +87,24 @@ Three reviews of `1f3cb45` found 19 faults. All are fixed on `m17/integration`, 
 
 Seen in the debug app on the three ingested takes, at 1600x1000: `m17/review-beat-keys.png` shows "Clap gives us help text" with three attempts and K, A and ⇧A above them, and `m17/review-beat-answered.png` the same video after K, which wrote `looked t03 from=3_690_000 to=9_090_000`, no pick, and took the count away.
 
-A Short still keeps the main cut from dropping a take it uses. A Short is cut from the main cut's segments and the lock, which the rules build only for material the main cut keeps, so letting the take go needs the engine and three contract rules to change. That is left to Mike.
+A Short still keeps the main cut from dropping a take it uses, and since the second review also from dropping everything one of its clips plays. A Short is cut from the main cut's segments and the lock, which the rules build only for material the main cut keeps, so letting the take go needs the engine and three contract rules to change. That is left to Mike.
+
+## Fixes after the second review
+
+Three reviews of `5a3ec49` scored it 9.0, 8.5 and 8.5 and found 13 faults. All are fixed on `m17/integration`, checked 2026-11-18 with fmt, workspace clippy, `cargo test --workspace --no-fail-fast` (640 passed) and the three ignored fixture tests of `shot-cli --test takes` and `shot-analyze --test findings`.
+
+- Privacy: an overlay keeps its range and plays in every block of its take whose media it overlaps, so a blur from 2 to 8 s still covers 5 to 8 s when a retake plays up to 5 s. The part that left the cut waits in the `takes` block, and changing or removing the overlay changes every copy (`edit::tests::a_blur_that_starts_before_a_splice_covers_what_plays_after_it`).
+- A retake that would leave a Short's clip with nothing is refused like one that drops its take (`a_retake_that_would_empty_a_short_is_refused`).
+- Undo of a recording writes `undone <take>` in the `takes` block, redo removes it, and a marked take is in no lineup: not in the app after a relaunch, not in `shot ingest`. Redo composes as a change of its own (`folder::tests::an_undone_take_stays_out_until_redo_which_composes_it`). This adds a node to `cut.kdl`.
+- Removing a Short composes: in the app in the change that removes its clips, in `shot derived remove` after the write (`folder::tests::a_cut_a_short_keeps_from_composing_says_why`, `shot-cli --test derived`).
+- A ship run plans, renders and checks with the one lock it read with the project (`shot_ship::lock::tests::a_plan_follows_the_lock_read_with_the_project`).
+- The pick: a sentence replaces another only when it says the needed words outside its own stumbles, a sentence as much like two of the frame's says the cleaner one again, and without a script a sentence added between two repeated ones is a row of its own right after theirs (`takes::tests`). It plays after that row's sentences, not between them: a row is not split.
+- A after the last attempt plays the proposal also when a word was cut in the attempt that played, and the cut stays with that attempt (`going_back_to_the_proposal_wins_over_a_cut_made_in_the_attempt_that_played`).
+- The detector keeps the word that opens a restart after "say that again," with a comma (`a_comma_after_a_cue_keeps_the_word_that_opens_the_restart`).
+- Edit shows why a cut was not composed for as long as the folder says so. The "At 00:13" card is hidden while a beat's attempts show.
+- The demo's last block ends at 34.27 s, not 34.36 s: the last word ends at 34.19 s and the edge pad is 80 ms.
+
+Seen in the debug app on the three ingested takes, at 1600x1000: `m17/review2-beat-attempts.png` shows "Clap gives us help text" after N with its three attempts, the third lit, and no card under them, and `m17/review2-no-beat.png` the card back on the intro.
 
 ## Not verified
 
@@ -97,6 +114,8 @@ A Short still keeps the main cut from dropping a take it uses. A Short is cut fr
 - A real voice. `say` speaks more evenly than a person.
 - Release build and bench: not run.
 - Of the fixes after the review, by reading only: K and C leaving an item after a seek, the keys doing nothing outside Text, A's steps on a real splice (its order has a unit test), the error line for a cut that was not composed, composing after Transcribe in Edit, and Ship planning again. The control socket cannot seek or click, and no fixture retakes half a beat.
+- Of the fixes after the second review, by reading and unit tests only: A going back to the proposal after a word cut in the running app, the error line going away once the cut composes, the overlay editor changing an overlay's copies, and a ship run that has `cut.lock` written under it. The control socket cannot click or seek.
+- `metrics::tests::the_watchdog_names_where_a_stalled_thread_waits_or_runs` failed in one of five runs, also alone. It is a timing test in a file this work did not touch.
 
 ## Left open
 
