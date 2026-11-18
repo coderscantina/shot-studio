@@ -62,7 +62,7 @@ Each format is a `format.kdl` you can edit: pacing, layouts, caption style, auto
 | Pair programming | The script agent drafts and edits `script.md` with you |
 | Running tests | A recording session, with retakes and markers |
 | Linter with auto-fix | Auto cut: confident cuts applied, unsure ones queued |
-| PR review | The review queue, plus agent proposals merged like PRs |
+| PR review | What the transcript marks as worth a look, plus agent proposals merged like PRs |
 | Source code | `cut.kdl`, readable in a diff and by an agent |
 | Stylesheet and lockfile | The brand, format and video style cascade, and `cut.lock` listing what each rule produced |
 | Branches | Derived cuts: main video, Shorts, X clip |
@@ -105,7 +105,8 @@ The first release is the whole concept, built in the order of the [milestone ind
 
 - Rules, each with a switch and a count: silences, inline retakes, misspoken words and self-corrections, pauses mid-sentence, filler words (learning which ones are part of your voice), idle screen.
 - Pacing: Loose, Natural (0.25 s of breath around cuts), Tight (jump-cut style).
-- Confident cuts apply right away. Unsure ones go to a review queue with Keep (K) and Cut (C).
+- Confident cuts apply right away. Unsure ones play until answered, and the transcript counts them as worth a look, with Keep (K) and Cut (C).
+- With several takes, the best scored attempt plays each beat, sentence by sentence, and a person's pick wins ([0040](decisions/0040-the-cut-proposes-itself.md)).
 - An Edited/Untrimmed preview toggle shows what the rules removed.
 
 **Auto edit**
