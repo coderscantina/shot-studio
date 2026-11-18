@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use shot_core::{
-    Brand, CustomLayout, Cut, Decision, Elements, Format, FormatLayer, Id, Layout, Lineup, Lock,
-    Micros, Project, TakeAt, TakeWords, TimeRange, Transcript,
+    Brand, CustomLayout, Cut, Elements, Format, FormatLayer, Id, Layout, Lineup, Lock, Micros,
+    Project, TakeAt, TakeWords, TimeRange, Transcript,
 };
 use shot_mcp::style::{self, Disk};
 use shot_render::theme::Theme;
@@ -360,17 +360,6 @@ impl VideoFolder {
         self.rebuild_lock()
     }
 
-    /// Answers the review item at `range` of the block at `at` with an override of its element.
-    pub fn decide(
-        &mut self,
-        at: TakeAt,
-        range: TimeRange,
-        decision: Decision,
-    ) -> Result<(), String> {
-        let cut = self.project.cut.decide(at, range, decision, &self.lock);
-        self.write_cut(cut.map_err(|e| e.to_string())?)
-    }
-
     /// Removes the lock's overlay or sound `instance` of `take` through its element's override,
     /// see [`Cut::remove_instance`]. A change can be undone.
     pub fn remove_instance(
@@ -704,7 +693,12 @@ mod tests {
         );
 
         let (at, review) = queue[0];
-        folder.decide(at, review.range, Decision::Keep).unwrap();
+        let kept = folder
+            .project
+            .cut
+            .decide(at, review.range, shot_core::Decision::Keep, folder.lock())
+            .unwrap();
+        folder.write_cut(kept).unwrap();
         let decided = folder.project.cut.clone();
         assert!(folder.undo().unwrap());
         assert_eq!(

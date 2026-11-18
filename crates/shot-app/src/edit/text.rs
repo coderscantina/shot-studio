@@ -1554,21 +1554,24 @@ fn inspector(this: &EditScreen, cx: &mut Context<EditScreen>) -> Stateful<Div> {
                 .children(zoom.map(|zoom| zoom_section(this, zoom, false, cx))),
             // Nothing recorded: the document says what to do, so no word keys here.
             None if this.map.chapters.is_empty() => pane,
-            None => pane.child(chapter_summary(this, cx)).child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.))
-                    .child(label("Click a word, or ←→ from the playhead, ⇧ to extend"))
-                    .child(hint(super::DELETE_KEYS, "Cut the selected words"))
-                    .child(hint("⇧Space", "Hear the cut"))
-                    .child(hint("R", "Restore cut words or a picked cut"))
-                    .child(hint("Z", "Zoom in on them"))
-                    .child(hint("H", "Highlight them on the screen"))
-                    .child(hint("S", "Place a sound"))
-                    .child(hint("P", "Pop an emoji or sticker"))
-                    .child(hint("L", "Switch the layout, or 1–4")),
-            ),
+            None => pane
+                .child(chapter_summary(this, cx))
+                .child(rules_summary(this, cx))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.))
+                        .child(label("Click a word, or ←→ from the playhead, ⇧ to extend"))
+                        .child(hint(super::DELETE_KEYS, "Cut the selected words"))
+                        .child(hint("⇧Space", "Hear the cut"))
+                        .child(hint("R", "Restore cut words or a picked cut"))
+                        .child(hint("Z", "Zoom in on them"))
+                        .child(hint("H", "Highlight them on the screen"))
+                        .child(hint("S", "Place a sound"))
+                        .child(hint("P", "Pop an emoji or sticker"))
+                        .child(hint("L", "Switch the layout, or 1–4")),
+                ),
         });
     // What is on screen stays in view under the rest, which scrolls when the pane is short.
     ui::pane()
@@ -1794,6 +1797,13 @@ const QUOTE_WORDS: usize = 40;
 
 /// The chapter on show: its length and what the cuts took out of it. Counts from the cut list,
 /// so takes without a transcript count too; back-to-back removals are one cut.
+/// What the style rules cut of the whole video, see [`super::rules::summary`].
+fn rules_summary(this: &EditScreen, cx: &App) -> Div {
+    let folder = this.folder.read(cx);
+    let format = crate::board::format_name(folder.project.video.format);
+    super::rules::summary(&folder.project.cut, folder.lock(), format)
+}
+
 fn chapter_summary(this: &EditScreen, cx: &App) -> Div {
     let Some(chapter) = this.map.chapters.get(this.chapter) else {
         return div();

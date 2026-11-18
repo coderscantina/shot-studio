@@ -4,8 +4,8 @@
 //! Recording works part by part. The outline picks what the next take records: the whole
 //! script, a chapter, or a chapter from one of its beats. The prompter starts there and stops at
 //! the part's end, and a finished take stays on this screen: it joins the outline, the part
-//! moves on to the next chapter nobody recorded yet, and Review opens the take in the Cut
-//! screen's takes. A take that repeats beats plays in place of the earlier attempts (see
+//! moves on to the next chapter nobody recorded yet, and Review shows the takes side by side.
+//! After each take the cut is composed again, so the best attempt plays every beat (see
 //! [`VideoFolder::append_take`]). A take can be removed from the outline, its media to the Trash.
 //!
 //! The inputs sit in a bar over the stage: each chip says whether its track records, and opens
@@ -86,7 +86,7 @@ actions!(
 /// A finished take, emitted once it is in `cut.kdl`.
 pub struct Recorded;
 
-/// Review the takes, the newest focused, in the Cut screen.
+/// Show the takes side by side.
 pub struct ReviewTakes;
 
 /// The take that just finished, as the stage reports it.

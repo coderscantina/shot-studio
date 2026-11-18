@@ -17,6 +17,7 @@ pub(crate) mod picture;
 mod place;
 mod product;
 mod proposals;
+mod rules;
 pub(crate) mod switch;
 
 pub use parts::layout_name;
@@ -112,8 +113,12 @@ actions!(
         KeepLook,
         CutLook,
         NextAttempt,
+        CompareAttempts,
     ]
 );
+
+/// Asks the studio for the takes side by side, on the beat at this row.
+pub struct CompareBeat(pub shot_core::RowAt);
 
 /// A cut run by its block and media start.
 type RunKey = (usize, usize, Micros);
@@ -423,15 +428,6 @@ impl EditScreen {
             .ok();
         })
         .detach();
-    }
-
-    /// Shows the last chapter, after a recording appended it.
-    pub fn show_last_chapter(&mut self, cx: &mut Context<Self>) {
-        self.chapter = self.map.chapters.len().saturating_sub(1);
-        if let Some(chapter) = self.map.chapters.get(self.chapter) {
-            self.seek(chapter.frames.start);
-        }
-        cx.notify();
     }
 
     fn block(&self, at: TakeAt) -> Option<&BlockDoc> {
@@ -880,7 +876,7 @@ impl EditScreen {
     fn go_record(&mut self, cx: &mut Context<Self>) {
         if self.map.chapters.is_empty() {
             self.set_playing(false);
-            cx.emit(crate::cut::GoTo(crate::studio::Screen::Record));
+            cx.emit(crate::studio::GoTo(crate::studio::Screen::Record));
         }
     }
 
@@ -968,7 +964,8 @@ impl EditScreen {
     }
 }
 
-impl gpui::EventEmitter<crate::cut::GoTo> for EditScreen {}
+impl gpui::EventEmitter<crate::studio::GoTo> for EditScreen {}
+impl gpui::EventEmitter<CompareBeat> for EditScreen {}
 
 impl Focusable for EditScreen {
     fn focus_handle(&self, _: &App) -> FocusHandle {
@@ -1013,6 +1010,7 @@ impl Render for EditScreen {
             .on_action(cx.listener(Self::keep_look))
             .on_action(cx.listener(Self::cut_look))
             .on_action(cx.listener(Self::next_attempt))
+            .on_action(cx.listener(Self::compare_attempts))
             .on_action(cx.listener(|this, _: &ClearSelection, _, cx| {
                 if this.lanes.switch.take().is_none()
                     && !this.close_picker()

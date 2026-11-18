@@ -7,8 +7,8 @@
 use gpui::{App, KeyBinding};
 
 use crate::{
-    about, board, brand, cut, edit, layouts::builder, library, prompter, record, script, ship,
-    studio, takes, welcome,
+    about, board, brand, edit, layouts::builder, library, prompter, record, script, ship, studio,
+    takes, welcome,
 };
 
 /// Binds the list. Call once at startup, before the menus are set, so they show the shortcuts.
@@ -23,7 +23,6 @@ fn bindings() -> Vec<KeyBinding> {
     let knob = Some(edit::zoom::KNOB_CONTEXT);
     let switch = Some(edit::switch::CONTEXT);
     let record = Some(record::CONTEXT);
-    let cut = Some(cut::CONTEXT);
     let takes = Some(takes::CONTEXT);
     let script = Some(script::CONTEXT);
     let ship = Some(ship::CONTEXT);
@@ -86,6 +85,7 @@ fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("k", edit::KeepLook, edit),
         KeyBinding::new("c", edit::CutLook, edit),
         KeyBinding::new("a", edit::NextAttempt, edit),
+        KeyBinding::new("shift-a", edit::CompareAttempts, edit),
         // Edit screen, a focused knob
         KeyBinding::new("left", edit::zoom::StepDown, knob),
         KeyBinding::new("right", edit::zoom::StepUp, knob),
@@ -116,19 +116,7 @@ fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("3", record::Scene3, record),
         KeyBinding::new("4", record::Scene4, record),
         // Cut screen
-        KeyBinding::new("k", cut::KeepItem, cut),
-        KeyBinding::new("c", cut::CutItem, cut),
-        KeyBinding::new("down", cut::NextItem, cut),
-        KeyBinding::new("up", cut::PreviousItem, cut),
-        KeyBinding::new("space", cut::PlayAround, cut),
-        KeyBinding::new("shift-space", cut::PlayCut, cut),
-        KeyBinding::new("cmd-enter", cut::Continue, cut),
-        KeyBinding::new("r", cut::ReviewApplied, cut),
-        KeyBinding::new("alt-1", cut::ShowReview, cut),
-        KeyBinding::new("alt-2", cut::ShowTakes, cut),
         // Cut screen, takes view
-        KeyBinding::new("alt-1", cut::ShowReview, takes),
-        KeyBinding::new("alt-2", cut::ShowTakes, takes),
         KeyBinding::new("down", takes::NextBeat, takes),
         KeyBinding::new("up", takes::PreviousBeat, takes),
         KeyBinding::new("right", takes::NextAttempt, takes),
@@ -137,7 +125,6 @@ fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("a", takes::Compare, takes),
         KeyBinding::new("p", takes::Pick, takes),
         KeyBinding::new("enter", takes::UseThis, takes),
-        KeyBinding::new("shift-enter", takes::Assemble, takes),
         KeyBinding::new("shift-right", takes::MarkMore, takes),
         KeyBinding::new("shift-left", takes::MarkLess, takes),
         KeyBinding::new("escape", takes::ClearMark, takes),

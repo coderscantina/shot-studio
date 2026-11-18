@@ -1,4 +1,4 @@
-//! The app window for one video folder: the title bar with the Record, Cut and Edit screens, and
+//! The app window for one video folder: the title bar with the Record, Edit and Ship screens, and
 //! the Board and Script screens when the folder is a video of a channel repo. A video outside a
 //! channel keeps a quiet Board entry that says why there is no board and offers to move the
 //! video into a channel or open one.
@@ -12,15 +12,15 @@ use gpui::{
 };
 use gpui_component::Root;
 use gpui_component::tooltip::Tooltip;
-use shot_core::{Cut, Lock, Status};
+use shot_core::{Cut, Status};
 
 use crate::board::{self, BoardScreen, ShowCurrent, channel};
-use crate::cut::{CutScreen, GoTo};
 use crate::edit::EditScreen;
 use crate::folder::VideoFolder;
 use crate::record::{RecordScreen, Recorded, ReviewTakes};
 use crate::script::{ReadyToRecord, ScriptScreen};
 use crate::ship::ShipScreen;
+use crate::takes::TakesView;
 use crate::takes::import::Import;
 use crate::theme::*;
 use crate::ui::{ActionLook, alert, icon, mono, pane, proposal_action};
@@ -31,10 +31,15 @@ pub enum Screen {
     Board,
     Script,
     Record,
-    Cut,
     Edit,
+    /// The takes side by side, opened from a beat in Edit or a take on Record. No step of its
+    /// own: the nav shows it under Edit.
+    Takes,
     Ship,
 }
+
+/// Asks the studio to show a screen.
+pub struct GoTo(pub Screen);
 
 impl Screen {
     /// The screen of the next step of a video in `status`.
@@ -42,8 +47,7 @@ impl Screen {
         match status {
             Status::Ideas | Status::Scripting => Self::Script,
             Status::Ready => Self::Record,
-            Status::Recorded => Self::Cut,
-            Status::Editing => Self::Edit,
+            Status::Recorded | Status::Editing => Self::Edit,
             Status::Shipped => Self::Ship,
         }
     }
@@ -54,12 +58,10 @@ impl Screen {
     }
 
     /// The step of a video outside a channel, from its folder: Record until it has takes, then
-    /// Cut while cuts wait for review, then Edit.
-    fn step_of_loose(cut: &Cut, lock: &Lock) -> Self {
+    /// Edit.
+    fn step_of_loose(cut: &Cut) -> Self {
         if cut.chapters.iter().all(|chapter| chapter.takes.is_empty()) {
             Self::Record
-        } else if cut.review_queue(lock).next().is_some() {
-            Self::Cut
         } else {
             Self::Edit
         }
@@ -68,13 +70,7 @@ impl Screen {
     /// How the nav marks this screen for a video on step `next`: steps before it are done.
     /// Board is no step.
     fn mark(self, next: Option<Self>) -> Option<Mark> {
-        const STEPS: [Screen; 5] = [
-            Screen::Script,
-            Screen::Record,
-            Screen::Cut,
-            Screen::Edit,
-            Screen::Ship,
-        ];
+        const STEPS: [Screen; 4] = [Screen::Script, Screen::Record, Screen::Edit, Screen::Ship];
         let at = STEPS.iter().position(|&s| s == self)?;
         let next = next.map_or(STEPS.len(), |next| {
             STEPS.iter().position(|&s| s == next).unwrap_or(0)
@@ -98,7 +94,7 @@ pub struct Studio {
     folder: Entity<VideoFolder>,
     screen: Screen,
     record: Entity<RecordScreen>,
-    cut: Entity<CutScreen>,
+    takes: Entity<TakesView>,
     edit: Entity<EditScreen>,
     ship: Entity<ShipScreen>,
     /// Present when the video folder sits in a channel repo, `<repo>/videos/<slug>`.
@@ -137,17 +133,6 @@ pub fn key(dir: &Path) -> PathBuf {
 }
 
 actions!(studio, [Undo, Redo, OpenLibrary]);
-
-/// Whether a take of the cut has no transcript yet.
-fn untranscribed(folder: &VideoFolder) -> bool {
-    folder
-        .project
-        .cut
-        .chapters
-        .iter()
-        .flat_map(|chapter| &chapter.takes)
-        .any(|edit| !folder.transcripts.contains_key(&edit.take))
-}
 
 /// Opens a window on the video folder at `dir` and adds it to the recent videos. Needs
 /// [`crate::theme::init`] and [`crate::keymap::bind`].
@@ -229,42 +214,41 @@ impl Studio {
     fn new(folder: Entity<VideoFolder>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let import = cx.new(|_| Import::new(folder.clone()));
         let record = cx.new(|cx| RecordScreen::new(folder.clone(), import.clone(), cx));
-        let cut = cx.new(|cx| CutScreen::new(folder.clone(), import.clone(), cx));
+        let takes = cx.new(|cx| TakesView::new(folder.clone(), import.clone(), cx));
         let edit = cx.new(|cx| EditScreen::new(folder.clone(), cx));
         let ship = cx.new(|cx| ShipScreen::new(folder.clone(), cx));
         // A finished take stays on Record, so the next part records right away; Review opens
-        // the takes. An imported clip shows in Cut.
+        // the takes. An imported clip shows in Edit.
         let recorded = cx.subscribe(&record, |this, _, _: &Recorded, cx| {
-            this.edit.update(cx, |edit, cx| edit.show_last_chapter(cx));
-            this.cut.update(cx, |cut, cx| cut.recorded(cx));
             this.refresh_status();
             cx.notify();
         });
         let review = cx.subscribe_in(&record, window, |this, _, _: &ReviewTakes, window, cx| {
-            this.cut.update(cx, |cut, cx| cut.show_takes(cx));
-            this.show(Screen::Cut, window, cx);
+            this.show(Screen::Takes, window, cx);
         });
         let imported = cx.subscribe_in(&import, window, |this, _, _: &Recorded, window, cx| {
-            this.recorded(window, cx);
+            this.show(Screen::Edit, window, cx);
         });
-        let continue_to_edit =
-            cx.subscribe_in(&cut, window, |this, _, GoTo(screen), window, cx| {
-                this.show(*screen, window, cx);
-            });
-        let edit_to_record = cx.subscribe_in(&edit, window, |this, _, GoTo(screen), window, cx| {
+        let from_takes = cx.subscribe_in(&takes, window, |this, _, GoTo(screen), window, cx| {
             this.show(*screen, window, cx);
         });
+        let from_edit = cx.subscribe_in(&edit, window, |this, _, GoTo(screen), window, cx| {
+            this.show(*screen, window, cx);
+        });
+        let compare = cx.subscribe_in(
+            &edit,
+            window,
+            |this, _, crate::edit::CompareBeat(row), window, cx| {
+                this.takes.update(cx, |takes, cx| takes.show_row(*row, cx));
+                this.show(Screen::Takes, window, cx);
+            },
+        );
         window.focus(&edit.focus_handle(cx), cx);
         // Focus that drops out of the window, as when the focused element stops rendering,
         // goes back to the shown screen instead of leaving its shortcuts dead.
         let focus_lost = cx.on_focus_lost(window, |this, window, cx| this.focus_screen(window, cx));
         let mut subscriptions = vec![
-            recorded,
-            review,
-            imported,
-            continue_to_edit,
-            edit_to_record,
-            focus_lost,
+            recorded, review, imported, from_takes, from_edit, compare, focus_lost,
         ];
         // Cards move on the board and in other windows: the nav catches up when this comes back.
         // A script saved elsewhere reaches the prompter the same way.
@@ -304,7 +288,7 @@ impl Studio {
             folder,
             screen: Screen::Edit,
             record,
-            cut,
+            takes,
             edit,
             ship,
             planning,
@@ -315,13 +299,6 @@ impl Studio {
         };
         studio.refresh_status();
         studio
-    }
-
-    /// A new take is in the cut, imported: the Cut screen shows it.
-    fn recorded(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.edit.update(cx, |edit, cx| edit.show_last_chapter(cx));
-        self.cut.update(cx, |cut, cx| cut.recorded(cx));
-        self.show(Screen::Cut, window, cx);
     }
 
     /// Puts the latest script into the folder, so Record prompts what the Script screen or an
@@ -370,24 +347,18 @@ impl Studio {
     }
 
     /// The step this video is on, `None` once it shipped: from its card for a video of a
-    /// channel, else from what its folder holds. Edit and Ship work on words, so a take of the
-    /// cut without a transcript keeps the video on Cut, where it is transcribed.
+    /// channel, else from what its folder holds.
     fn step(&self, cx: &App) -> Option<Screen> {
-        let folder = self.folder.read(cx);
-        let project = &folder.project;
-        let step = match &self.planning {
+        let project = &self.folder.read(cx).project;
+        match &self.planning {
             Some(_) => Screen::step_of(self.status.unwrap_or(project.video.status)),
-            None => Some(Screen::step_of_loose(&project.cut, folder.lock())),
-        };
-        match step {
-            Some(Screen::Edit | Screen::Ship) if untranscribed(folder) => Some(Screen::Cut),
-            step => step,
+            None => Some(Screen::step_of_loose(&project.cut)),
         }
     }
 
     /// The screen a new window opens on: the video's next step, the one the nav marks. A video
-    /// outside a channel has no status, so it opens on Record until it has takes, on Cut while a
-    /// take waits for its transcript or a rule's finding waits for an answer, and on Edit after.
+    /// outside a channel has no status, so it opens on Record until it has takes, and on Edit
+    /// after.
     fn first_screen(&self, cx: &App) -> Screen {
         self.step(cx).unwrap_or(Screen::Ship)
     }
@@ -411,7 +382,7 @@ impl Studio {
                 }
             }
             Screen::Record => self.take_script(cx),
-            Screen::Cut => {}
+            Screen::Takes => {}
             Screen::Edit => self.edit.update(cx, |edit, cx| edit.reload_proposals(cx)),
             Screen::Ship => self.ship.update(cx, |ship, cx| ship.reload(cx)),
         }
@@ -426,7 +397,7 @@ impl Studio {
             (Screen::Script, Some(planning)) => planning.script.focus_handle(cx),
             (Screen::Board | Screen::Script, None) => return,
             (Screen::Record, _) => self.record.focus_handle(cx),
-            (Screen::Cut, _) => self.cut.focus_handle(cx),
+            (Screen::Takes, _) => self.takes.focus_handle(cx),
             (Screen::Edit, _) => self.edit.focus_handle(cx),
             (Screen::Ship, _) => self.ship.focus_handle(cx),
         };
@@ -662,15 +633,16 @@ impl Studio {
                         .child("Recording")
                 })
                 .into_any_element(),
-            Screen::Cut => self
-                .cut
-                .update(cx, |cut, cx| cut.title_controls(cx).into_any_element()),
-            Screen::Board | Screen::Script | Screen::Ship => div().into_any_element(),
+            Screen::Board | Screen::Script | Screen::Takes | Screen::Ship => {
+                div().into_any_element()
+            }
         };
         let step = self.step(cx);
         let nav =
             |id: &'static str, name: &'static str, icon_name: &'static str, screen: Screen| {
-                let on = self.screen == screen;
+                // The takes are a view of Edit.
+                let on = self.screen == screen
+                    || (screen == Screen::Edit && self.screen == Screen::Takes);
                 let mark = screen.mark(step);
                 // Without a channel the Board entry stays quiet: it only explains.
                 let quiet = screen == Screen::Board && self.planning.is_none();
@@ -693,7 +665,9 @@ impl Studio {
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(color)
                     .when(on, |this| this.bg(RAISED))
-                    .when(!on && !recording, |this| this.cursor_pointer())
+                    .when(self.screen != screen && !recording, |this| {
+                        this.cursor_pointer()
+                    })
                     .when(!on && recording, |this| {
                         this.tooltip(|window, cx| {
                             Tooltip::new("Stop recording first").build(window, cx)
@@ -761,7 +735,6 @@ impl Studio {
                         this.child(nav("nav-script", "Script", "script", Screen::Script))
                     })
                     .child(nav("nav-record", "Record", "record", Screen::Record))
-                    .child(nav("nav-cut", "Cut", "cut", Screen::Cut))
                     .child(nav("nav-edit", "Edit", "edit", Screen::Edit))
                     .child(nav("nav-ship", "Ship", "export", Screen::Ship)),
             )
@@ -785,7 +758,7 @@ impl Render for Studio {
             (Screen::Script, Some(planning)) => planning.script.clone().into_any_element(),
             (Screen::Board | Screen::Script, None) => self.no_channel(cx).into_any_element(),
             (Screen::Record, _) => self.record.clone().into_any_element(),
-            (Screen::Cut, _) => self.cut.clone().into_any_element(),
+            (Screen::Takes, _) => self.takes.clone().into_any_element(),
             (Screen::Edit, _) => self.edit.clone().into_any_element(),
             (Screen::Ship, _) => self.ship.clone().into_any_element(),
         };
@@ -848,12 +821,13 @@ mod tests {
 
     #[test]
     fn the_nav_marks_steps_before_the_next_one_done() {
-        let next = Some(Screen::Cut);
+        let next = Some(Screen::for_status(Status::Recorded));
         assert_eq!(Screen::Script.mark(next), Some(Mark::Done));
         assert_eq!(Screen::Record.mark(next), Some(Mark::Done));
-        assert_eq!(Screen::Cut.mark(next), Some(Mark::Next));
-        assert_eq!(Screen::Edit.mark(next), None);
+        assert_eq!(Screen::Edit.mark(next), Some(Mark::Next));
+        assert_eq!(Screen::Ship.mark(next), None);
         assert_eq!(Screen::Board.mark(next), None);
+        assert_eq!(Screen::Takes.mark(next), None);
         assert_eq!(
             Screen::Ship.mark(Screen::step_of(Status::Shipped)),
             Some(Mark::Done)
@@ -862,9 +836,6 @@ mod tests {
 
     #[test]
     fn a_loose_video_is_on_record_until_it_has_takes() {
-        assert_eq!(
-            Screen::step_of_loose(&Cut::default(), &Lock::default()),
-            Screen::Record
-        );
+        assert_eq!(Screen::step_of_loose(&Cut::default()), Screen::Record);
     }
 }

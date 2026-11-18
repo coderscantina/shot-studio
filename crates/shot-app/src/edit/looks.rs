@@ -10,7 +10,9 @@ use gpui::{App, Context, Div, FontWeight, Stateful, Window, div, prelude::*, px}
 use shot_core::{Decision, ElementKind, Lineup, Look, Row, RowAt, TakeAt, TimeRange};
 
 use super::timeline::Pick;
-use super::{AROUND, CutLook, EditScreen, KeepLook, NextAttempt, NextLook};
+use super::{
+    AROUND, CompareAttempts, CompareBeat, CutLook, EditScreen, KeepLook, NextAttempt, NextLook,
+};
 use crate::model::{FPS, Item, Selection};
 use crate::takes::take_name;
 use crate::theme::*;
@@ -329,6 +331,19 @@ impl EditScreen {
             self.looks.play = Some(beat.row);
         }
     }
+
+    /// ⇧A: the takes side by side, on the beat at the playhead.
+    pub(super) fn compare_attempts(
+        &mut self,
+        _: &CompareAttempts,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(row) = self.looks.beat_playing(self.playhead).map(|b| b.row) {
+            self.set_playing(false);
+            cx.emit(CompareBeat(row));
+        }
+    }
 }
 
 /// "3 to look at" beside the chapter title. A click goes to the next one, as N does.
@@ -467,6 +482,7 @@ pub fn section(this: &EditScreen, cx: &App) -> Option<Div> {
                 (false, _) => "Sentences of more than one attempt play. Hear the joins.",
             }))
             .child(hint("A", "Play the next attempt and use it"))
+            .child(hint("⇧A", "Compare the attempts side by side"))
             .when(open, |section| section.child(hint("K", "Keep what plays")));
     }
     Some(section.when(!this.looks.items.is_empty(), |section| {
