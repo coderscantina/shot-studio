@@ -728,8 +728,10 @@ impl EditScreen {
             _ => None,
         };
         let Some((at, range)) = picked.or_else(|| {
-            self.selected()
-                .and_then(|(at, range, _, removed)| removed.then_some((at, range)))
+            let selection = self.selection?;
+            let (at, _, _, removed) = self.selected()?;
+            let range = model::restore_range(self.block(at)?, &selection)?;
+            removed.then_some((at, range))
         }) else {
             return;
         };

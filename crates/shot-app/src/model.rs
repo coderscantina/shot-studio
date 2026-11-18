@@ -872,6 +872,33 @@ pub fn cut_range(block: &BlockDoc, selection: &Selection) -> Option<TimeRange> {
     joined.range(&block.words)
 }
 
+/// The media a restore of `selection` brings back: its words and every removal that holds one of
+/// them, whole, so no pause or edge of the cut stays behind. Other words of a person's removal
+/// stay cut, each with the edge a cut of its own would have.
+pub fn restore_range(block: &BlockDoc, selection: &Selection) -> Option<TimeRange> {
+    let words = &block.words;
+    let selected = selection.words();
+    let mut from = words.get(*selected.start())?.range.from();
+    let mut to = words.get(*selected.end())?.range.to();
+    for (cut, _) in &block.removals {
+        let mut inside = selected.clone().filter(|&i| holds(*cut, &words[i]));
+        let Some(first) = inside.next() else {
+            continue;
+        };
+        let last = inside.next_back().unwrap_or(first);
+        let before = first.checked_sub(1).map(|i| &words[i]);
+        from = from.min(match before.filter(|w| holds(*cut, w)) {
+            Some(w) => shot_core::cut_after(w.range, Some(words[first].range)),
+            None => cut.from(),
+        });
+        to = to.max(match words.get(last + 1).filter(|w| holds(*cut, w)) {
+            Some(w) => shot_core::cut_before(Some(words[last].range), w.range),
+            None => cut.to(),
+        });
+    }
+    TimeRange::new(from, to)
+}
+
 /// Where the caret goes after a cut of `words` of block `at`: the next shown word going `forward`,
 /// else the one on the other side. It stays in the chapter, so a cut never changes the page.
 pub fn caret_after_cut(
@@ -1460,6 +1487,55 @@ mod tests {
         // Delete goes on to the next word, Backspace back to the one before.
         assert_eq!(caret_after_cut(&doc, AT, 2..=2, true), Some((AT, 3)));
         assert_eq!(caret_after_cut(&doc, AT, 2..=2, false), Some((AT, 0)));
+    }
+
+    #[test]
+    fn restoring_words_brings_back_what_their_cut_took() {
+        // The cut of "uh" took its pause as well.
+        let (_, doc) = one_block(
+            vec![
+                keep(0, 1_000_000),
+                remove(1_000_000, 2_000_000),
+                keep(2_000_000, 4_000_000),
+            ],
+            &Lock::default(),
+            &SPOKEN,
+        );
+        assert_eq!(
+            restore_range(&doc[0], &Selection::word(AT, 1)),
+            Some(range(1_000_000, 2_000_000))
+        );
+
+        // The middle of a longer cut splits it at the gaps to the words that stay cut.
+        let (_, doc) = one_block(
+            vec![keep(0, 1_000_000), remove(1_000_000, 3_500_000)],
+            &Lock::default(),
+            &SPOKEN,
+        );
+        assert_eq!(
+            restore_range(&doc[0], &Selection::word(AT, 2)),
+            Some(range(1_480_000, 2_450_000))
+        );
+        // The last word of the cut takes the end of the cut with it.
+        assert_eq!(
+            restore_range(&doc[0], &Selection::word(AT, 4)),
+            Some(range(2_950_000, 3_500_000))
+        );
+
+        // A rule's cut comes back whole, the person's removal next to it stays.
+        let (_, doc) = one_block(
+            vec![
+                keep(0, 1_000_000),
+                remove(1_000_000, 1_500_000),
+                keep(1_500_000, 4_000_000),
+            ],
+            &silences(&[(2_000_000, 2_450_000)]),
+            &SPOKEN,
+        );
+        assert_eq!(
+            restore_range(&doc[0], &Selection::word(AT, 2)),
+            Some(range(2_000_000, 2_450_000))
+        );
     }
 
     #[test]
