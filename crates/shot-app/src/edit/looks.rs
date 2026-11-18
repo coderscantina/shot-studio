@@ -87,6 +87,13 @@ impl Looks {
         self.lineup.row(at)
     }
 
+    /// A click on the chip of the beat at `row`: K, C and A act on it, not on the item N went
+    /// to or the beat that played before and ends where this one starts.
+    fn choose(&mut self, row: RowAt) {
+        self.current = None;
+        self.played = Some(row);
+    }
+
     /// The one item the inspector shows and K and C answer with the playhead at `frame`:
     /// `current`, the item N went to, else the beat that plays there while it is one to look
     /// at, else the first finding within a second.
@@ -362,7 +369,9 @@ impl EditScreen {
 
     /// A: the beat at the playhead plays its next attempt, as the person's pick, and is played.
     /// From sentences of several attempts it goes to the first attempt whole, and after the
-    /// last attempt back to those sentences, the proposal, so the spliced sentence is not lost.
+    /// last attempt, picked, back to the proposal, so a spliced sentence is not lost and a later
+    /// take that scores better can win the beat again. From a proposal that plays the last
+    /// attempt it goes to the first.
     /// Going back to the proposal holds also after a word was cut in the attempt that played:
     /// the cut stays with that attempt ([`shot_core::Cut::propose_row`]).
     pub(super) fn next_attempt(&mut self, _: &NextAttempt, _: &mut Window, cx: &mut Context<Self>) {
@@ -375,8 +384,8 @@ impl EditScreen {
         let Some(row) = self.looks.row(beat.row) else {
             return;
         };
-        let spliced = playing(&self.looks.lineup, row, &row.proposal).len() > 1;
-        let chosen: Vec<Attempt> = next_attempt(&beat.playing, row.attempts.len(), spliced)
+        let picked = !self.folder.read(cx).project.cut.picked(row).is_empty();
+        let chosen: Vec<Attempt> = next_attempt(&beat.playing, row.attempts.len(), picked)
             .map(|i| row.attempts[i].clone())
             .into_iter()
             .collect();
@@ -423,11 +432,12 @@ impl EditScreen {
 
 /// What A plays after the attempts at `playing`, of a row with `attempts`: the next attempt
 /// whole, from sentences of several attempts the first one, and `None`, the proposal again,
-/// after the last attempt of a row whose proposal is `spliced` from several.
-fn next_attempt(playing: &[usize], attempts: usize, spliced: bool) -> Option<usize> {
+/// after the last attempt when it is `picked`. A proposal that plays the last attempt is no
+/// pick, so it goes on to the first.
+fn next_attempt(playing: &[usize], attempts: usize, picked: bool) -> Option<usize> {
     match *playing {
         [last] if last + 1 < attempts => Some(last + 1),
-        [_] if spliced => None,
+        [_] if picked => None,
         _ => Some(0),
     }
 }
@@ -466,7 +476,7 @@ pub fn beat_chip(this: &EditScreen, beat: &Beat, cx: &mut Context<EditScreen>) -
         .items
         .iter()
         .any(|(look, _)| *look == Look::Beat(beat.row));
-    let frames = beat.frames.clone();
+    let (row, frames) = (beat.row, beat.frames.clone());
     div()
         .id(("beat", beat.row.group * 10_000 + beat.row.row))
         .flex()
@@ -489,8 +499,7 @@ pub fn beat_chip(this: &EditScreen, beat: &Beat, cx: &mut Context<EditScreen>) -
         .on_click(cx.listener(move |this, _, _, cx| {
             this.selection = None;
             this.lanes.picked = None;
-            // K and C answer this beat now, not the item N went to before.
-            this.looks.current = None;
+            this.looks.choose(row);
             this.seek(frames.start);
             cx.notify();
         }))
@@ -625,12 +634,38 @@ mod tests {
     }
 
     #[test]
-    fn a_steps_through_the_whole_attempts_and_back_to_the_spliced_proposal() {
+    fn a_steps_through_the_whole_attempts_and_back_to_the_proposal() {
         // Sentences of both attempts play: the first attempt whole, the second, the splice.
-        assert_eq!(next_attempt(&[0, 1], 2, true), Some(0));
+        assert_eq!(next_attempt(&[0, 1], 2, false), Some(0));
         assert_eq!(next_attempt(&[0], 2, true), Some(1));
         assert_eq!(next_attempt(&[1], 2, true), None);
-        // Without a splice the last attempt goes on to the first.
+        // The last attempt as a pick goes back to a whole proposal too, so a later take can
+        // win. As the proposal it goes on to the first attempt.
+        assert_eq!(next_attempt(&[2], 3, true), None);
         assert_eq!(next_attempt(&[2], 3, false), Some(0));
+    }
+
+    #[test]
+    fn a_clicked_chips_beat_wins_over_the_beat_played_before_it() {
+        let at = TakeAt {
+            chapter: 0,
+            take: 0,
+        };
+        let beat = |row: usize, frames| Beat {
+            row: RowAt { group: 0, row },
+            at,
+            word: 0,
+            frames,
+            playing: vec![0],
+        };
+        // N played the first beat, and the playhead sits where it ends and the next begins.
+        let mut looks = Looks {
+            beats: vec![beat(0, 300..600), beat(1, 600..900)],
+            played: Some(RowAt { group: 0, row: 0 }),
+            ..Looks::default()
+        };
+        assert_eq!(looks.beat_playing(600).map(|b| b.row.row), Some(0));
+        looks.choose(RowAt { group: 0, row: 1 });
+        assert_eq!(looks.beat_playing(600).map(|b| b.row.row), Some(1));
     }
 }
