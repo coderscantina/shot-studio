@@ -615,7 +615,12 @@ fn cues(words: &[&W]) -> Vec<Finding> {
             .max_by_key(|&(_, _, same)| same);
         let finding = match repeat {
             Some((i, b, _)) => {
-                let kept = passage_start(words, b, end);
+                // The cue's end opens the restart as a sentence end does, so the words of a
+                // short lead-in stay: "say that again, the parser reads" keeps "the".
+                let kept = (end.max(b.saturating_sub(MAX_LEADING))..=b)
+                    .rev()
+                    .find(|&k| k == end || words[k - 1].ends_sentence())
+                    .unwrap_or(b);
                 span(words, passage_start(words, i, 0), kept).map(|r| (r, 90))
             }
             None => span(words, c, end).map(|r| (r, 70)),
@@ -1089,6 +1094,20 @@ mod tests {
                 90
             )),
             "{found:?}"
+        );
+    }
+
+    #[test]
+    fn a_comma_after_a_cue_keeps_the_word_that_opens_the_restart() {
+        assert_eq!(
+            retakes_of(
+                "This parser reads local project files quickly. Sorry, let me say that again, the parser reads local project files quickly."
+            ),
+            [(
+                "This parser reads local project files quickly. Sorry, let me say that again,"
+                    .into(),
+                90
+            )]
         );
     }
 
