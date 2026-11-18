@@ -171,6 +171,8 @@ pub struct ShipScreen {
     /// Why the chosen client file was not taken.
     client_note: Option<String>,
     cuts: Vec<PlannedCut>,
+    /// The folder changed since the cuts were planned: the next frame plans them again.
+    stale: bool,
     /// Why the cuts could not be planned.
     plan_error: Option<String>,
     states: HashMap<String, CutState>,
@@ -219,12 +221,19 @@ impl ShipScreen {
             ShipError::NoChannel(_) => "This video is not in a channel.".to_owned(),
             e => capitalized(&e.to_string()),
         });
+        // A take's analysis may compose the cut while this screen shows.
+        cx.observe(&folder, |this, _, cx| {
+            this.stale = true;
+            cx.notify();
+        })
+        .detach();
         Self {
             folder,
             channel,
             client: Client::load(&oauth::client_path()),
             client_note: None,
             cuts: Vec::new(),
+            stale: false,
             plan_error: None,
             states: HashMap::new(),
             selected: 0,
@@ -520,6 +529,22 @@ impl ShipScreen {
         if self.run.is_some() || cuts.is_empty() {
             return;
         }
+        // The plan and the export read one state of the project. The cuts planned when the
+        // screen opened may describe an older one, as when a take's analysis composed the cut.
+        let folder = self.folder.read(cx);
+        let (dir, project) = (folder.dir.clone(), folder.project.clone());
+        let planned = ship::plan(&dir, &project, &folder.transcripts, self.options());
+        self.cuts = match planned {
+            Ok(planned) => planned,
+            Err(e) => {
+                self.plan_error = Some(e.to_string());
+                cx.notify();
+                return;
+            }
+        };
+        self.plan_error = None;
+        let wanted = |planned: &&PlannedCut| cuts.iter().any(|c| c.name == planned.name);
+        let cuts: Vec<PlannedCut> = self.cuts.iter().filter(wanted).cloned().collect();
         // Problems already shown count as seen: shipping with them is the person's call.
         let force = self.problems() > 0;
         for cut in &cuts {
@@ -538,8 +563,6 @@ impl ShipScreen {
             cancel: cancel.clone(),
             notes: Vec::new(),
         });
-        let folder = self.folder.read(cx);
-        let (dir, project) = (folder.dir.clone(), folder.project.clone());
         let send = self.send.clone();
         std::thread::spawn(move || {
             let outcome = run(&dir, &project, &cuts, ship_to, force, &cancel, &send);
@@ -1959,6 +1982,9 @@ impl CutState {
 
 impl Render for ShipScreen {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if std::mem::take(&mut self.stale) {
+            self.reload(cx);
+        }
         // The studio takes the whole screen, outside its keys, so typing a headline stays text.
         if let Some((studio, _)) = &self.studio {
             return div().size_full().child(studio.clone()).into_any_element();
