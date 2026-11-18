@@ -50,6 +50,10 @@ pub struct VideoFolder {
     history: Vec<Snapshot>,
     /// Files that undo stepped back from, newest last, for redo.
     undone: Vec<Snapshot>,
+    /// How many of the first steps in `undone` were saved before a recording that redo then
+    /// brought back and composed: they may hold the cut from before the take's analysis, so
+    /// redo composes after each of them too.
+    stale_redos: usize,
     /// The takes the change that runs appended: undoing it marks them undone in `cut.kdl`.
     recorded: Vec<Id>,
     /// Inside [`VideoFolder::as_one_change`]: writes join the change instead of each being one.
@@ -122,6 +126,7 @@ impl VideoFolder {
             slug: opened.slug,
             history: Vec::new(),
             undone: Vec::new(),
+            stale_redos: 0,
             recorded: Vec::new(),
             batching: false,
             writing: false,
@@ -271,6 +276,7 @@ impl VideoFolder {
                 }
                 folder.history.push(before);
                 folder.undone.clear();
+                folder.stale_redos = 0;
             }
             result
         })
@@ -323,24 +329,32 @@ impl VideoFolder {
     /// Writes the files the last undo stepped back from. False when there is nothing to redo.
     /// Redoing a recording takes its take's mark away and composes the cut as a change of its
     /// own: the take's transcript or analysis may have landed while it was undone. The steps
-    /// still to redo stay, less the one that composed the cut the same way.
+    /// still to redo stay, less the one that composed the cut the same way. They were saved
+    /// before that analysis too, so each of them is composed the same way when it is redone:
+    /// an edit made while the take was still stacked comes back in the composed cut.
     pub fn redo(&mut self) -> Result<bool, String> {
         let Some(snapshot) = self.undone.pop() else {
             return Ok(false);
         };
+        let stale = self.undone.len() < self.stale_redos;
+        self.stale_redos = self.stale_redos.min(self.undone.len());
         let current = self.snapshot();
         self.writing(|folder| folder.restore_snapshot(snapshot))?;
         let back = |take: &Id| !self.project.cut.undone.contains(take);
         let recorded = current.cut.undone.iter().any(back);
         self.history.push(current);
-        if recorded {
-            let redo = std::mem::take(&mut self.undone);
+        if recorded || stale {
+            let (redo, stale_redos) = (std::mem::take(&mut self.undone), self.stale_redos);
             let composed = self.as_one_change(|folder| folder.propose(None).map(drop));
-            self.undone = redo;
+            (self.undone, self.stale_redos) = (redo, stale_redos);
             composed?;
             if self.undone.last() == Some(&self.snapshot()) {
                 self.undone.pop();
             }
+            if recorded {
+                self.stale_redos = self.undone.len();
+            }
+            self.stale_redos = self.stale_redos.min(self.undone.len());
         }
         Ok(true)
     }
@@ -630,6 +644,7 @@ impl VideoFolder {
             }
             folder.history.clear();
             folder.undone.clear();
+            folder.stale_redos = 0;
             folder.rebuild_lock()
         })
     }
@@ -1258,6 +1273,41 @@ mod tests {
         assert!(folder.redo().unwrap());
         assert_eq!(folder.project.cut, shorter);
         assert!(!folder.redo().unwrap());
+    }
+
+    #[test]
+    fn redoing_an_edit_made_before_a_takes_analysis_composes_the_cut_again() {
+        let dir = tempfile::tempdir().unwrap();
+        retake(dir.path());
+        recorded(dir.path());
+        // The take is recorded, and a person zooms before its transcript lands.
+        let take = Id::new("t02").unwrap();
+        fs::remove_file(shot_analyze::cache::cache_path(dir.path(), &take)).unwrap();
+        let mut folder = VideoFolder::open(dir.path()).unwrap();
+        folder.append_take(take.clone(), Micros(3_000_000)).unwrap();
+        assert_eq!(blocks(&folder), ["t01", "t01", "t02"]);
+        let rule = TakeAt {
+            chapter: 1,
+            take: 0,
+        };
+        let range = TimeRange::new(Micros(4_000_000), Micros(5_000_000)).unwrap();
+        let zoomed = folder.project.cut.add_zoom(rule, range, 150).unwrap();
+        folder.write_cut(zoomed).unwrap();
+        // Both are undone, the transcript lands, and both are redone.
+        assert!(folder.undo().unwrap());
+        assert!(folder.undo().unwrap());
+        heard(dir.path(), "t02", "Hello there world.");
+        assert!(!folder.propose_analyzed(&take).unwrap());
+        assert!(folder.redo().unwrap());
+        assert_eq!(blocks(&folder), ["t02", "t01"]);
+        // The zoom comes back in the composed cut, not with the stacked cut it was made in.
+        assert!(folder.redo().unwrap());
+        assert_eq!(blocks(&folder), ["t02", "t01"]);
+        assert_eq!(folder.project.cut.chapters[1].takes[0].zooms.len(), 1);
+        assert!(!folder.redo().unwrap());
+        // That compose is a step of its own: undo shows the cut as the zoom was made in it.
+        assert!(folder.undo().unwrap());
+        assert_eq!(blocks(&folder), ["t01", "t01", "t02"]);
     }
 
     #[test]
