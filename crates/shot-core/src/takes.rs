@@ -225,12 +225,17 @@ impl Lineup {
         let mut put_after = vec![0; places.len()];
         let sentences = sentences(words);
         // Per sentence the row it says again, or the row it says with other numbers.
+        let mut last = None;
         let (said_again, renumbered): (Vec<Option<usize>>, Vec<Option<usize>>) = sentences
             .iter()
-            .map(|s| match said_again(&words[s.clone()], &texts) {
-                Some((row, true)) => (Some(row), None),
-                Some((row, false)) => (None, Some(row)),
-                None => (None, None),
+            .map(|s| {
+                let found = match said_again(&words[s.clone()], &texts, last) {
+                    Some((row, true)) => (Some(row), None),
+                    Some((row, false)) => (None, Some(row)),
+                    None => (None, None),
+                };
+                last = found.0;
+                found
             })
             .unzip();
         // The rows of `rows` that the take says nowhere.
@@ -534,19 +539,10 @@ impl<'a> Facts<'a> {
                 let meant = words
                     .iter()
                     .filter(|w| !self.stumbles.iter().any(|s| holds(*s, middle(w.range))));
-                // A sentence of one word says it also when it is too short for a content
-                // word: "No."
                 let set = |said: Vec<&str>| {
                     let mut set = content_set(said.iter().copied());
-                    if let ([_], [only]) = (words, said.as_slice()) {
-                        let word: String = only
-                            .chars()
-                            .filter(|c| c.is_alphanumeric())
-                            .flat_map(char::to_lowercase)
-                            .collect();
-                        if (1..3).contains(&word.chars().count()) {
-                            set.insert(word);
-                        }
+                    if words.len() == 1 {
+                        set.extend(short_answer(&said));
                     }
                     set
                 };
@@ -765,11 +761,21 @@ fn alike(a: &HashSet<String>, b: &HashSet<String>) -> f64 {
 /// like it ([`alike`]), at least [`SAME_SENTENCE`]. `rows` are each row's sentences. A new
 /// sentence that shares words with a long row is therefore no retake of it. With whether the
 /// two say the same numbers in the same order: a sentence with another number, or with two
-/// numbers swapped, is not the same sentence, and one with the same numbers is found first.
-fn said_again(words: &[Word], rows: &[Vec<Numbered>]) -> Option<(usize, bool)> {
-    let (said, numbers) = numbered(words.iter().map(|w| w.text.as_str()));
+/// numbers swapped, is not the same sentence, and one with the same numbers is found first. A
+/// [`short_answer`] answers the sentence before it, so it says a row again only in `last`, the
+/// row that sentence said again, or in the row right after it.
+fn said_again(
+    words: &[Word],
+    rows: &[Vec<Numbered>],
+    last: Option<usize>,
+) -> Option<(usize, bool)> {
+    let text: Vec<&str> = words.iter().map(|w| w.text.as_str()).collect();
+    let (said, numbers) = numbered(text.iter().copied());
+    let answer = short_answer(&text).is_some();
+    let may_say = |row: usize| !answer || last.is_some_and(|last| row == last || row == last + 1);
     rows.iter()
         .enumerate()
+        .filter(|(i, _)| may_say(*i))
         .flat_map(|(i, row)| row.iter().map(move |s| (i, s)))
         .map(|(i, (s, n))| (*n == numbers, alike(s, &said), i))
         .filter(|(_, alike, _)| *alike >= SAME_SENTENCE)
@@ -785,7 +791,22 @@ fn numbered<'a>(words: impl Iterator<Item = &'a str>) -> Numbered {
     let text: Vec<&str> = words.collect();
     let content = content_words(&text.join(" "));
     let numbers = content.iter().filter(|w| is_number(w)).cloned().collect();
-    (content.into_iter().collect(), numbers)
+    let mut said: HashSet<String> = content.into_iter().collect();
+    said.extend(short_answer(&text));
+    (said, numbers)
+}
+
+/// The word of a sentence that is one word too short for a content word, such as "No."
+fn short_answer(sentence: &[&str]) -> Option<String> {
+    let [only] = sentence else {
+        return None;
+    };
+    let word: String = only
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect();
+    (1..3).contains(&word.chars().count()).then_some(word)
 }
 
 /// Whether a content word is a number as the transcript writes it: any word with a digit,
@@ -2253,6 +2274,28 @@ mod tests {
         assert_eq!(
             played_unscripted(cold, cold),
             (cold.to_owned(), vec![false])
+        );
+    }
+
+    #[test]
+    fn without_beats_a_retake_says_a_one_word_answer_once() {
+        let once = "Would I run this migration in production? No.";
+        assert_eq!(
+            played_unscripted(once, once),
+            (once.to_owned(), vec![false])
+        );
+        let twice =
+            "Would I run this migration in production? No. Would I ship the release on Friday? No.";
+        assert_eq!(played_unscripted(twice, twice).0, twice);
+    }
+
+    #[test]
+    fn without_beats_a_new_question_keeps_its_own_one_word_answer() {
+        let first = "Would I run this migration in production? No.";
+        let second = "Would I ship the release on Friday? No.";
+        assert_eq!(
+            played_unscripted(first, second).0,
+            format!("{first} {second}")
         );
     }
 
