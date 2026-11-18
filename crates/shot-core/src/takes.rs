@@ -133,9 +133,14 @@ impl Lineup {
                 }
             }
         } else {
+            lineup.groups.push(Group {
+                title: String::new(),
+                rows: Vec::new(),
+            });
             for take in &takes {
-                lineup.add_unscripted(take.transcript, cut);
+                lineup.add_unscripted(take.transcript);
             }
+            lineup.groups = under_chapters(std::mem::take(&mut lineup.groups[0].rows), cut);
         }
         lineup.propose(&takes);
         lineup
@@ -161,9 +166,9 @@ impl Lineup {
     }
 
     /// A take of a video without beats: each sentence that says a row again is an attempt at
-    /// it, and the rest are new rows, sentence groups under the title of the cut's chapter that
-    /// keeps the group's start, or the take's name.
-    fn add_unscripted(&mut self, transcript: &Transcript, cut: &Cut) {
+    /// it, and the rest are new rows, sentence groups. The rows wait in one group for
+    /// [`under_chapters`].
+    fn add_unscripted(&mut self, transcript: &Transcript) {
         let take = transcript.take();
         let words = transcript.words();
         let texts: Vec<HashSet<String>> = self
@@ -191,7 +196,7 @@ impl Lineup {
                 Some(row) => self.push(places[row], take, span(stretch)),
                 None => {
                     for group in groups(stretch) {
-                        let at = self.new_row(group, take, cut);
+                        let at = self.new_row(group);
                         self.push(at, take, span(group));
                     }
                 }
@@ -200,31 +205,12 @@ impl Lineup {
         }
     }
 
-    fn new_row(&mut self, words: &[Word], take: &Id, cut: &Cut) -> RowAt {
-        let start = words[0].range.from();
-        let title = cut
-            .chapters
-            .iter()
-            .find(|c| {
-                c.takes.iter().any(|edit| {
-                    edit.take == *take
-                        && TimeRange::new(start, Micros(start.0 + 1)).is_some_and(|t| edit.keeps(t))
-                })
-            })
-            .map_or_else(|| format!("Take {take}"), |c| c.title.clone());
+    fn new_row(&mut self, words: &[Word]) -> RowAt {
         let text: Vec<&str> = words.iter().map(|w| w.text.as_str()).collect();
-        let row = Row::new(text.join(" "));
-        match self.groups.last_mut() {
-            Some(group) if group.title == title => group.rows.push(row),
-            _ => self.groups.push(Group {
-                title,
-                rows: vec![row],
-            }),
-        }
-        let group = self.groups.len() - 1;
+        self.groups[0].rows.push(Row::new(text.join(" ")));
         RowAt {
-            group,
-            row: self.groups[group].rows.len() - 1,
+            group: 0,
+            row: self.groups[0].rows.len() - 1,
         }
     }
 
@@ -541,6 +527,38 @@ fn proposal(
     }
     pieces.extend(of_base(cursor, attempts[base].range.to()));
     (pieces, true)
+}
+
+/// The rows of a video without beats under the cut's chapters: a row goes under the chapter
+/// that keeps the start of one of its attempts. A row the cut plays nothing of stays with the
+/// row before it when the same take said both, so a chapter a person renamed is not split by
+/// the passage a later take replaced, and else goes under its take's name.
+fn under_chapters(rows: Vec<Row>, cut: &Cut) -> Vec<Group> {
+    let mut groups: Vec<Group> = Vec::new();
+    let mut before: Option<Id> = None;
+    for row in rows {
+        let said = row.attempts.first().map(|a| a.take.clone());
+        let playing = row.attempts.iter().find_map(|a| {
+            let start = TimeRange::new(a.range.from(), Micros(a.range.from().0 + 1))?;
+            let plays = |edit: &crate::TakeEdit| edit.take == a.take && edit.keeps(start);
+            cut.chapters.iter().find(|c| c.takes.iter().any(plays))
+        });
+        let title = match (playing, groups.last(), &said) {
+            (Some(chapter), _, _) => chapter.title.clone(),
+            (None, Some(group), _) if before == said => group.title.clone(),
+            (None, _, Some(take)) => format!("Take {take}"),
+            (None, _, None) => String::new(),
+        };
+        match groups.last_mut() {
+            Some(group) if group.title == title => group.rows.push(row),
+            _ => groups.push(Group {
+                title,
+                rows: vec![row],
+            }),
+        }
+        before = said;
+    }
+    groups
 }
 
 /// How alike two sets of content words are, 0 to 1: the share of all their words both have.
@@ -1151,6 +1169,29 @@ mod tests {
         );
         assert!(lineup.contested());
         assert_eq!(proposals(&lineup)[1][0].0, "t02");
+    }
+
+    #[test]
+    fn without_beats_a_renamed_chapter_stays_whole_around_a_later_takes_passage() {
+        let script = Script::parse("# A\n").unwrap();
+        let first = said(
+            "t01",
+            0,
+            "The router keeps routes next to pages. The loader runs on the server. Caching comes last.",
+        );
+        let second = said("t02", 0, "The loader always runs on the server.");
+        // The chapter a person renamed, with the second take's sentence composed into it.
+        let cut = Cut::parse(
+            "chapter \"Intro\" {\n    take t01 {\n        keep from=0 to=3_500_000\n    }\n    take t02 {\n        keep from=0 to=3_000_000\n    }\n    take t01 {\n        keep from=8_000_000 to=10_000_000\n    }\n}\n",
+        )
+        .unwrap();
+        let lineup = Lineup::new(&script, &cut, &[with(&first, None), with(&second, None)]);
+        let groups: Vec<(&str, usize)> = lineup
+            .groups
+            .iter()
+            .map(|g| (g.title.as_str(), g.rows.len()))
+            .collect();
+        assert_eq!(groups, [("Intro", 3)]);
     }
 
     #[test]
