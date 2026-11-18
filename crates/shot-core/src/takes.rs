@@ -69,10 +69,9 @@ pub struct Row {
     pub proposal: Vec<Attempt>,
     /// Whether the proposal is worth a person's look: it plays more than one attempt, an
     /// older attempt over a newer one, or an attempt that leads by [`CLOSE`] points or less.
-    /// Without beats also a row a later take left out between two rows it says again, and a
-    /// row that take added there: it may say the row in other words, and both play until a
-    /// person cuts one. What a retake says before, between and after the rows it says again is
-    /// worth a look too: it may say rows in other words or be a remark that does not belong.
+    /// Without beats also every row a retake adds, which may say a row in other words or be a
+    /// remark that does not belong, and the rows it leaves unsaid there, since both play until
+    /// a person cuts one. So is one row a take left out between two rows it says again.
     pub look: bool,
 }
 
@@ -181,16 +180,21 @@ impl Lineup {
     }
 
     /// A take of a video without beats: each sentence that says a row again is an attempt at
-    /// it, and the rest are new rows, sentence groups: after the rows there are, so a take that
-    /// carries on is appended, or right after the row the take said just before them when it
-    /// then says that row again or one of the next, at most one row on for each new sentence and
-    /// one more, so a sentence added or reworded in a retake plays where it was said. The rows
-    /// the take skips there, and with them the rows it added there, are worth a look
-    /// ([`Row::look`]), as is one row it skips between two it says again with nothing new. A
-    /// take that says again half of its sentences or more is a retake: what it says before the
-    /// first row it says again goes before that row, what it says between two rows it says
-    /// again goes after the first, and those and what it says after the last are worth a look,
-    /// with the rows it leaves unsaid there when they are at most one for each new sentence. The
+    /// it, and the rest are new rows, sentence groups. A take that says again half of its
+    /// sentences or more is a retake of what is there, any other take carries on:
+    ///
+    /// | take       | new rows said               | go                         | worth a look |
+    /// |------------|-----------------------------|----------------------------|--------------|
+    /// | carries on | anywhere                    | after the rows there are   | no           |
+    /// | retake     | before the first said again | right before that row      | yes          |
+    /// | retake     | between two said again      | right after the first      | yes          |
+    /// | retake     | after the last said again   | after the rows there are   | yes          |
+    ///
+    /// So what a retake adds or says in other words plays where it was said, and a remark is
+    /// marked. A retake may say in other words the rows it leaves unsaid where it put new
+    /// ones: before the row it went before, up to the row said again next, or after the last.
+    /// They are worth a look too ([`Row::look`]) when they are at most one for each new
+    /// sentence. So is one row any take skips between two it says again with nothing new. The
     /// rows wait in one group for [`under_chapters`].
     fn add_unscripted(&mut self, transcript: &Transcript) {
         let take = transcript.take();
@@ -220,18 +224,17 @@ impl Lineup {
             rows.filter(|row| !said_again.contains(&Some(*row)))
                 .collect()
         };
-        // A take that says again half of its sentences or more is a retake of what is there.
         let retake = 2 * said_again.iter().flatten().count() >= sentences.len();
         let mut i = 0;
         while i < sentences.len() {
             let row = said_again[i];
             let run = said_again[i..].iter().take_while(|r| **r == row).count();
             let stretch = &words[sentences[i].start..sentences[i + run - 1].end];
+            let before = i.checked_sub(1).and_then(|b| said_again[b]);
             match row {
                 Some(row) => {
                     self.push(places[row], take, span(stretch));
-                    // One row left out right before this one: a sentence the retake dropped.
-                    let before = i.checked_sub(1).and_then(|b| said_again[b]);
+                    // One row left out right before this one: a sentence the take dropped.
                     if let Some(before) = before.filter(|before| before + 2 == row) {
                         for row in unsaid(before + 1..row) {
                             self.groups[0].rows[places[row].row].look = true;
@@ -239,59 +242,35 @@ impl Lineup {
                     }
                 }
                 None => {
-                    // New between two sentences said again, of one row or of a row and one
-                    // that follows it: its place is after the first. The second may be a row on
-                    // for each new sentence, which then says a row between them in other words.
-                    // What a retake says before the first row it says again goes before that
-                    // row, what it says between two rows that are further apart goes after the
-                    // first, and what it says after the last stays at the end: each is worth a
-                    // look, as a remark or as other words for the rows the retake leaves unsaid
-                    // there, when those are at most a row for each new sentence. Anything else
-                    // carries on, at the end.
-                    let before = i.checked_sub(1).and_then(|b| said_again[b]);
                     let next = said_again.get(i + run).copied().flatten();
-                    let between =
-                        before.filter(|b| next.is_some_and(|n| n >= *b && n <= *b + 1 + run));
-                    // The row the new rows go right after.
-                    let after = between.or(before.filter(|_| retake && next.is_some()));
-                    let (mut index, skipped, look) = match (between, before, next) {
-                        (Some(row), _, Some(next)) => {
-                            let skipped = unsaid(row + 1..next);
-                            let look = !skipped.is_empty();
-                            (Some(places[row].row + 1 + put_after[row]), skipped, look)
-                        }
-                        (None, None, Some(next)) if retake => {
-                            let skipped = if next <= run {
-                                unsaid(0..next)
-                            } else {
-                                Vec::new()
-                            };
-                            (Some(places[next].row), skipped, true)
-                        }
-                        (None, Some(before), None) if retake => {
-                            let skipped = unsaid(before + 1..texts.len());
-                            let reworded = skipped.len() <= run;
-                            (None, if reworded { skipped } else { Vec::new() }, true)
-                        }
-                        (None, Some(before), Some(_)) if retake => {
+                    // Where the new rows go, the end when `None`, and the rows around them
+                    // that the take may say in other words.
+                    let (mut index, around) = match (before, next) {
+                        _ if !retake => (None, 0..0),
+                        (None, Some(next)) => (Some(places[next].row), 0..next),
+                        (Some(before), Some(next)) => {
                             let index = places[before].row + 1 + put_after[before];
-                            (Some(index), Vec::new(), true)
+                            (Some(index), before + 1..next)
                         }
-                        _ => (None, Vec::new(), false),
+                        (Some(before), None) => (None, before + 1..texts.len()),
+                        (None, None) => (None, 0..0),
                     };
-                    for row in &skipped {
-                        self.groups[0].rows[places[*row].row].look = true;
+                    let reworded = unsaid(around);
+                    if reworded.len() <= run {
+                        for row in reworded {
+                            self.groups[0].rows[places[row].row].look = true;
+                        }
                     }
                     for group in groups(stretch) {
                         let at = self.new_row(group, index);
-                        self.groups[0].rows[at.row].look = look;
+                        self.groups[0].rows[at.row].look = retake;
                         for place in places.iter_mut().filter(|p| p.row >= at.row) {
                             place.row += 1;
                         }
-                        index = index.map(|index| index + 1);
-                        if let Some(row) = after {
-                            put_after[row] += 1;
+                        if let Some(before) = before.filter(|_| index.is_some()) {
+                            put_after[before] += 1;
                         }
+                        index = index.map(|index| index + 1);
                         self.push(at, take, span(group));
                     }
                 }
@@ -2125,20 +2104,26 @@ mod tests {
                 "The parser reads every token."
             ]
         );
-        // Three in a row.
+        // Two in a row.
+        assert_eq!(
+            looks(&format!(
+                "{intro} Tokens come from our tokenizer. We chop text up first. \
+                 The renderer draws every frame. {outro}"
+            )),
+            [
+                "Tokens come from our tokenizer.",
+                "We chop text up first.",
+                "The parser reads every token.",
+                "The lexer splits the input."
+            ]
+        );
+        // Three in a row are more than half of the take: it carries on, and nothing is marked.
         assert_eq!(
             looks(&format!(
                 "{intro} Tokens come from our tokenizer. We chop text up first. \
                  Pixels get drawn last. {outro}"
             )),
-            [
-                "Tokens come from our tokenizer.",
-                "We chop text up first.",
-                "Pixels get drawn last.",
-                "The parser reads every token.",
-                "The lexer splits the input.",
-                "The renderer draws every frame."
-            ]
+            [""; 0]
         );
         // A sentence the retake left out, with nothing new in its place.
         assert_eq!(
@@ -2147,15 +2132,16 @@ mod tests {
             )),
             ["The lexer splits the input."]
         );
-        // A sentence added between two rows that follow each other skips nothing.
+        // A sentence added between two rows that follow each other skips nothing: it alone is
+        // marked, since it may be a remark.
         assert_eq!(
             looks(&format!(
                 "{intro} Sessions live in the cookie store. The parser reads every token. \
                  The lexer splits the input. The renderer draws every frame. {outro}"
             )),
-            [""; 0]
+            ["Sessions live in the cookie store."]
         );
-        // A take that carries on and lands between two stock lines.
+        // A take that says again only two stock lines, two of its three sentences.
         let short = said(
             "t01",
             0,
@@ -2170,6 +2156,68 @@ mod tests {
         let lineup = Lineup::new(&script, &Cut::default(), &takes);
         let looks: Vec<bool> = lineup.rows().map(|(_, row)| row.look).collect();
         assert_eq!(looks, [false, true, true, false]);
+    }
+
+    const PARSER: &str = "The parser reads every token.";
+    const LEXER: &str = "The lexer splits the input.";
+    const RENDERER: &str = "The renderer draws every frame.";
+
+    /// The rows of `lineup` with whether each is worth a look.
+    fn marks(lineup: &Lineup) -> Vec<(&str, bool)> {
+        let rows = lineup.rows();
+        rows.map(|(_, row)| (row.text.as_str(), row.look)).collect()
+    }
+
+    #[test]
+    fn without_beats_chatter_between_two_rows_a_retake_says_again_is_worth_a_look() {
+        let script = Script::parse("# A\n").unwrap();
+        let first = said("t01", 0, &format!("{PARSER} {LEXER} {RENDERER}"));
+        let aside = "Hang on, let me close Slack.";
+        let second = said("t02", 0, &format!("{PARSER} {aside} {LEXER}"));
+        let takes = [(&first, None, "Intro"), (&second, None, "Take t02")];
+        let cut = composed(&script, &takes);
+        let lineup = Lineup::new(&script, &cut, &[with(&first, None), with(&second, None)]);
+        assert_eq!(
+            marks(&lineup),
+            [
+                (PARSER, false),
+                (aside, true),
+                (LEXER, false),
+                (RENDERER, false)
+            ]
+        );
+        assert_eq!(
+            spoken(&cut, &[&first, &second]),
+            format!("{PARSER} {aside} {LEXER} {RENDERER}")
+        );
+    }
+
+    #[test]
+    fn without_beats_a_take_that_carries_on_moves_nothing_into_the_rows_there_are() {
+        let script = Script::parse("# A\n").unwrap();
+        let first = said("t01", 0, &format!("{PARSER} {LEXER} {RENDERER}"));
+        // Two of its five sentences say a row again.
+        let added = "These tokens have a unique identifier.";
+        let caching = "Caching comes last. Sessions live in the cookie store.";
+        let second = said("t02", 0, &format!("{PARSER} {added} {LEXER} {caching}"));
+        let takes = [(&first, None, "Intro"), (&second, None, "Take t02")];
+        let cut = composed(&script, &takes);
+        let lineup = Lineup::new(&script, &cut, &[with(&first, None), with(&second, None)]);
+        assert_eq!(
+            marks(&lineup),
+            [
+                (PARSER, false),
+                (LEXER, false),
+                (RENDERER, false),
+                (added, false),
+                ("Caching comes last.", false),
+                ("Sessions live in the cookie store.", false),
+            ]
+        );
+        assert_eq!(
+            spoken(&cut, &[&first, &second]),
+            format!("{PARSER} {LEXER} {RENDERER} {added} {caching}")
+        );
     }
 
     #[test]
