@@ -13,7 +13,7 @@ mod words;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -62,6 +62,9 @@ const CANDIDATES: usize = 4;
 const DIFF_CONTEXT: usize = 2;
 /// Encoder sessions of an export, as `shot export` runs them.
 const JOBS: usize = 3;
+/// Why a run uploaded nothing, when the cut or the lock changed while it rendered.
+const CHANGED: &str =
+    "The cut changed while it rendered, so nothing was uploaded. Export again, then ship.";
 /// Where a Desktop app OAuth client is created.
 const CREDENTIALS_URL: &str = "https://console.cloud.google.com/apis/credentials";
 
@@ -145,6 +148,9 @@ struct Run {
     /// When the cut being rendered started, for the time left.
     since: Instant,
     cancel: Arc<AtomicBool>,
+    /// The [`render_stamp`] of the video as it is now, kept up while the run goes: the run
+    /// uploads only what still is the video.
+    current: Arc<AtomicU64>,
     /// Things the person has to do by hand afterwards.
     notes: Vec<String>,
 }
@@ -229,8 +235,13 @@ impl ShipScreen {
             e => capitalized(&e.to_string()),
         });
         // A take's analysis may compose the cut while this screen shows.
-        cx.observe(&folder, |this, _, cx| {
+        cx.observe(&folder, |this, folder, cx| {
             this.stale = true;
+            if let Some(run) = &this.run {
+                let folder = folder.read(cx);
+                let now = render_stamp(&folder.project.cut.to_kdl(), folder.lock());
+                run.current.store(now, Ordering::Relaxed);
+            }
             cx.notify();
         })
         .detach();
@@ -586,6 +597,7 @@ impl ShipScreen {
             state.checks = Checks::Running;
         }
         let cancel = Arc::new(AtomicBool::new(false));
+        let current = Arc::new(AtomicU64::new(render_stamp(&project.cut.to_kdl(), &lock)));
         self.finished = None;
         self.run = Some(Run {
             ship: ship_to.is_some(),
@@ -594,6 +606,7 @@ impl ShipScreen {
             signing_in: false,
             since: Instant::now(),
             cancel: cancel.clone(),
+            current: current.clone(),
             notes: Vec::new(),
         });
         let send = self.send.clone();
@@ -604,7 +617,7 @@ impl ShipScreen {
                 &cuts,
                 ship_to,
                 force,
-                &cancel,
+                (&cancel, &current),
                 &send,
             );
             let _ = send.send(Event::Finished(outcome));
@@ -2080,14 +2093,15 @@ impl Render for ShipScreen {
 }
 
 /// Exports `cuts` and checks each with the project and the lock they were planned with, then
-/// uploads and tags when `ship_to` is given. Runs on its own thread and reports to `send`.
+/// uploads and tags when `ship_to` is given, unless the video is no longer what was rendered:
+/// `current` is its [`render_stamp`] now. Runs on its own thread and reports to `send`.
 fn run(
     dir: &Path,
     (project, lock): (&shot_core::Project, &shot_core::Lock),
     cuts: &[PlannedCut],
     ship_to: Option<(Channel, Client)>,
     force: bool,
-    cancel: &Arc<AtomicBool>,
+    (cancel, current): (&Arc<AtomicBool>, &AtomicU64),
     send: &Sender<Event>,
 ) -> Outcome {
     let cancelled = || cancel.load(Ordering::Relaxed);
@@ -2153,6 +2167,11 @@ fn run(
     let mut on_step = |s: Step| {
         let _ = send.send(Event::Step(s));
     };
+    // Analysis may have composed another cut or rebuilt the lock while this run rendered:
+    // the export and its chapters are then an older video's.
+    if current.load(Ordering::Relaxed) != rendered {
+        return Outcome::Failed(CHANGED.to_owned());
+    }
     let mut result = ship::publish(
         dir,
         &channel,
