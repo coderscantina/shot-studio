@@ -36,6 +36,9 @@ pub enum EditError {
     /// The edit would take media out of the main cut that a derived cut still uses: a whole
     /// take, or everything one of its clips plays.
     TakeInDerived { derived: Id, take: Id },
+    /// The composed cut still holds media of a derived cut's clip, but the rules cut all of
+    /// it, so the clip would play nothing.
+    ClipCutByRules { derived: Id, take: Id },
     /// No `layout` range starts or ends at this media time in the addressed take block.
     NoLayoutEdge(Micros),
     /// The main cut keeps nothing of this take at this media time.
@@ -90,6 +93,10 @@ impl fmt::Display for EditError {
             Self::TakeInDerived { derived, take } => write!(
                 f,
                 "`{derived}` uses a part of take {take} that would leave the cut: remove its clips first"
+            ),
+            Self::ClipCutByRules { derived, take } => write!(
+                f,
+                "a clip of `{derived}` from take {take} would play nothing after the rules' cuts: remove its clips first"
             ),
             Self::NotKept { take, at } => write!(
                 f,
@@ -835,7 +842,7 @@ impl Cut {
                     && before.played_of(&clip.take, clip.range, before_lock) > Micros(0)
             };
             if let Some(clip) = derived.clips.iter().find(emptied) {
-                return Err(EditError::TakeInDerived {
+                return Err(EditError::ClipCutByRules {
                     derived: derived.name.clone(),
                     take: clip.take.clone(),
                 });
@@ -970,7 +977,16 @@ impl Cut {
     /// two attempts there is nothing to choose, and the cut stays as it is. `new` is the take
     /// that was just appended, see [`Cut::plays`].
     pub fn compose(&self, lineup: &Lineup, new: Option<&Id>) -> Result<Cut, EditError> {
-        self.composed(lineup, new, None)
+        self.composed(lineup, new, None, false)
+    }
+
+    /// [`Cut::compose`] of a cut a take was just removed from, with the lineup of the takes
+    /// that stay. It composes also when no attempts compete any more: a row the removed take
+    /// played then has no block, and goes back to the attempt that stays. Call it only when
+    /// the removed take competed, so the cut was composed before and its other blocks are
+    /// what composing writes again.
+    pub fn compose_vacated(&self, lineup: &Lineup) -> Result<Cut, EditError> {
+        self.composed(lineup, None, None, true)
     }
 
     /// Marks `takes` as takes whose recording was undone, each once and in canonical order,
@@ -990,19 +1006,21 @@ impl Cut {
     /// the proposal. Those cuts stay with their media, see [`Cut::material`].
     pub fn propose_row(&self, lineup: &Lineup, at: RowAt) -> Result<Cut, EditError> {
         let row = lineup.row(at).ok_or(EditError::UnknownRow(at))?;
-        self.set_pick(row, &[]).composed(lineup, None, Some(at))
+        self.set_pick(row, &[])
+            .composed(lineup, None, Some(at), false)
     }
 
     /// [`Cut::compose`], with the row at `proposed` played by its proposal whatever the cut
-    /// holds of it.
+    /// holds of it, and with `always` also when there is nothing to choose.
     fn composed(
         &self,
         lineup: &Lineup,
         new: Option<&Id>,
         proposed: Option<RowAt>,
+        always: bool,
     ) -> Result<Cut, EditError> {
         let everything: Vec<&Attempt> = lineup.rows().flat_map(|(_, r)| &r.attempts).collect();
-        if everything.is_empty() || !(lineup.scripted || lineup.contested()) {
+        if everything.is_empty() || !(always || lineup.scripted || lineup.contested()) {
             return Ok(self.clone());
         }
         let mut chapters = Vec::new();
@@ -2277,7 +2295,7 @@ mod tests {
         assert_eq!(composed.kept_of(&clip.take, clip.range), Micros(2_000_000));
         assert_eq!(
             composed.check_derived(&lock, &cut, &lock),
-            Err(EditError::TakeInDerived {
+            Err(EditError::ClipCutByRules {
                 derived: Id::new("hello").unwrap(),
                 take: Id::new("t01").unwrap(),
             })

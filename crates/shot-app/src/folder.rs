@@ -14,8 +14,8 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use shot_core::{
-    Brand, CustomLayout, Cut, Elements, Format, FormatLayer, Id, Layout, Lineup, Lock, Micros,
-    Project, TakeAt, TakeWords, TimeRange, Transcript,
+    Brand, CustomLayout, Cut, EditError, Elements, Format, FormatLayer, Id, Layout, Lineup, Lock,
+    Micros, Project, TakeAt, TakeWords, TimeRange, Transcript,
 };
 use shot_mcp::style::{self, Disk};
 use shot_render::theme::Theme;
@@ -538,6 +538,12 @@ impl VideoFolder {
     /// the cut changed.
     pub fn propose(&mut self, new: Option<&Id>) -> Result<bool, String> {
         let composed = self.project.cut.compose(&self.lineup(), new);
+        self.write_proposed(composed)
+    }
+
+    /// Writes `composed`, the project's cut composed, when it keeps the Shorts playing and
+    /// changed anything, see [`VideoFolder::propose`].
+    fn write_proposed(&mut self, composed: Result<Cut, EditError>) -> Result<bool, String> {
         let checked = composed
             .map_err(|e| e.to_string())
             .and_then(|cut| self.keeps_shorts(&cut).map(|()| cut));
@@ -583,10 +589,12 @@ impl VideoFolder {
     /// Takes `take` out of the video: out of the cut, its picks, overrides and Shorts, and
     /// moves its media and elements to the Trash, where Finder can put them back. A video that
     /// has not shipped is composed again from the takes that stay, so a beat only the removed
-    /// take played goes back to another attempt at it. Undo cannot bring the media back, so
-    /// the history before this change is dropped.
+    /// take played goes back to another attempt at it, also when the takes that stay no
+    /// longer compete. Undo cannot bring the media back, so the history before this change is
+    /// dropped.
     pub fn remove_take(&mut self, take: &Id) -> Result<(), String> {
         self.writing(|folder| {
+            let competed = folder.lineup().contested();
             let mut cut = folder.project.cut.clone();
             for chapter in &mut cut.chapters {
                 chapter.takes.retain(|edit| edit.take != *take);
@@ -612,7 +620,13 @@ impl VideoFolder {
             folder.transcripts.remove(take);
             folder.on_disk.get_mut().remove(take);
             if folder.project.video.status != shot_core::Status::Shipped {
-                folder.propose(None)?;
+                let lineup = folder.lineup();
+                let composed = if competed {
+                    folder.project.cut.compose_vacated(&lineup)
+                } else {
+                    folder.project.cut.compose(&lineup, None)
+                };
+                folder.write_proposed(composed)?;
             }
             folder.history.clear();
             folder.undone.clear();
@@ -948,7 +962,9 @@ mod tests {
         assert!(spliced.kept_of(&clip.take, clip.range) > Micros(0));
         let refused = folder.write_composed(spliced).unwrap_err();
         assert!(
-            refused.contains("`clip` uses a part of take t01"),
+            refused.contains(
+                "a clip of `clip` from take t01 would play nothing after the rules' cuts"
+            ),
             "{refused}"
         );
         assert_eq!(folder.project.cut, before);
@@ -1261,6 +1277,27 @@ mod tests {
         assert_eq!(titles(&folder), ["Hook", "Rule"]);
         assert_eq!(blocks(&folder), ["t01", "t01"]);
         assert!(!folder.undo().unwrap(), "undo stops before a removal");
+    }
+
+    #[test]
+    fn removing_the_only_retake_without_a_script_plays_the_earlier_take_again() {
+        let dir = tempfile::tempdir().unwrap();
+        retake(dir.path());
+        recorded(dir.path());
+        fs::write(dir.path().join("script.md"), "# A\n").unwrap();
+        // The first take says one passage, the second says its first sentence again.
+        let take = Id::new("t02").unwrap();
+        let mut folder = VideoFolder::open(dir.path()).unwrap();
+        folder.append_take(take.clone(), Micros(3_000_000)).unwrap();
+        assert_eq!(blocks(&folder), ["t02", "t01"]);
+        let rest = folder.project.cut.chapters[0].takes[1].ranges.clone();
+        folder.remove_take(&take).unwrap();
+        // The sentence the retake played is back, and what it left alone ends as it did.
+        assert_eq!(blocks(&folder), ["t01"]);
+        let ranges = &folder.project.cut.chapters[0].takes[0].ranges;
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].range().from(), Micros(0));
+        assert_eq!(ranges[0].range().to(), rest[0].range().to());
     }
 
     #[test]
