@@ -120,6 +120,19 @@ Three reviews of `610d33c` scored it 9.0, 8.8 and 9.0 and found nine faults. All
 - Ship stamps an export with the cut and the lock its run rendered and compares that with the video's now, so an export is stale when a rule change rebuilt `cut.lock` while it rendered, although the export file is the newer one (`ship::tests::an_export_rendered_from_an_older_lock_is_stale_though_the_file_is_newer`). The stamp lives in the Ship screen: after a relaunch the file times decide again.
 - The contract says what undo of a recording does once analysis has composed: the first undo reverts that compose, the second takes the take out.
 
+## Fixes after the fourth review
+
+Three reviews of `30df3de` scored it 8.9, 8.9 and 9.2 and found eight faults. All are fixed on `m17/integration`, checked 2026-11-18 with fmt, workspace clippy, `cargo test --workspace --no-fail-fast` (651 passed) and the three ignored fixture tests of `shot-cli --test takes` and `shot-analyze --test findings`.
+
+- Privacy: a Timeline drag of a blur or bleep moves the overlay and not the copy the lane shows clipped to its block. With `t01` playing 0 to 4 s and 8 to 12 s around a retake and blurred from 3 s to 11 s, dragging the end of the last block's copy to 10 s writes 3 s to 10 s in both blocks, where it wrote 8 s to 10 s and the first block lost its copy. A trim moves an edge only when it is the overlay's own and not the block's, a body drag shifts both ends, and the range may reach past the block (`edit::timeline::tests::dragging_a_blurs_copy_after_a_splice_keeps_its_copy_before_it`). Zoom drags are as they were.
+- Without a script, a take that carries on is appended, also after a stock sentence it repeats: only what it says between two sentences it says again, of one row or of a row and the next, goes right after the first. Before, everything after the repeated sentence moved into the middle of the first take (`takes::tests::without_beats_a_take_that_carries_on_is_appended_after_a_sentence_it_repeats`).
+- A ship run stops before the upload when the cut or the lock is no longer what it rendered, and asks for a new export. The Ship screen keeps the video's stamp up while a run goes, and the worker compares it with what it rendered right before it publishes.
+- Removing the only retake of an unscripted video plays the earlier take again where the retake played. With one take left nothing competes, so composing changed nothing and the cut lost that passage, or everything. Remove now composes the rows back when the removed take competed (`Cut::compose_vacated`, `folder::tests::removing_the_only_retake_without_a_script_plays_the_earlier_take_again`).
+- Redo past a recording composes after each later redo too, as a step of its own, when that step was saved before the recording came back: a zoom made while the take was still stacked comes back in the composed cut (`folder::tests::redoing_an_edit_made_before_a_takes_analysis_composes_the_cut_again`).
+- Clicking a "2 of 3" chip clears the item N went to, as clicking a word does, so K and C answer that beat.
+- Record shows a take's error and the "not composed" line together.
+- A compose refused because the rules cut everything a Short's clip would play says so (`EditError::ClipCutByRules`), where it said the part would leave the cut.
+
 ## Not verified
 
 - Recording through the app with the prompter: the takes came in through `shot ingest`. The app's append and its second compose after analysis are covered by `folder::tests::a_retake_of_a_beat_plays_in_place_of_the_earlier_attempt` and by reading, not by a recording.
@@ -130,6 +143,7 @@ Three reviews of `610d33c` scored it 9.0, 8.8 and 9.0 and found nine faults. All
 - Of the fixes after the review, by reading only: K and C leaving an item after a seek, the keys doing nothing outside Text, A's steps on a real splice (its order has a unit test), the error line for a cut that was not composed, composing after Transcribe in Edit, and Ship planning again. The control socket cannot seek or click, and no fixture retakes half a beat.
 - Of the fixes after the second review, by reading and unit tests only: A going back to the proposal after a word cut in the running app, the error line going away once the cut composes, the overlay editor changing an overlay's copies, and a ship run that has `cut.lock` written under it. The control socket cannot click or seek.
 - Of the fixes after the third review, by unit tests and reading only, since the control socket cannot click, seek or record: the inspector and K on a click near a restart in the running app, Record's live "not composed" line, redo past a real recording, Remove on Record with the real Trash, and Ship's stale notice after a rule change during a real export.
+- Of the fixes after the fourth review, by reading only, since the control socket cannot drag, click or ship: the drag in the running Timeline (its arithmetic has a unit test), the ship run stopping before a real upload, the chip click and Record's two lines.
 - `metrics::tests::the_watchdog_names_where_a_stalled_thread_waits_or_runs` failed in one of five runs, also alone. It is a timing test in a file this work did not touch.
 
 ## Left open
