@@ -28,6 +28,13 @@ pub struct Cut {
     /// None of them lies in a block of the cut: composing gives them back to the attempt when
     /// it plays again.
     pub left_cuts: Vec<LeftCut>,
+    /// A person's layouts, zooms and overlays in attempts that left the main cut: one block
+    /// per take without `ranges`, by take like the picks. Composing gives them back like the
+    /// cuts.
+    pub left_effects: Vec<TakeEdit>,
+    /// The overrides of takes that left the main cut, by take like the picks, then `at`, then
+    /// kind. Composing gives them back when the take plays again.
+    pub left_overrides: Vec<Override>,
     /// The main cut, in output order.
     pub chapters: Vec<Chapter>,
     /// Changes to what the style rules gave single elements, in canonical order: by take in
@@ -409,7 +416,12 @@ impl Cut {
         cut.caption_fixes = fixes.unwrap_or_default();
         cut.caption_breaks = breaks;
         cut.music = music;
-        (cut.picks, cut.left_cuts) = picks.unwrap_or_default();
+        if let Some(takes) = picks {
+            cut.picks = takes.picks;
+            cut.left_cuts = takes.left_cuts;
+            cut.left_effects = takes.left_effects;
+            cut.left_overrides = takes.left_overrides;
+        }
         let takes: HashSet<&Id> = cut
             .chapters
             .iter()
@@ -488,7 +500,8 @@ impl Cut {
                 .prop("duck", &music.duck)
                 .end();
         }
-        if !self.picks.is_empty() || !self.left_cuts.is_empty() {
+        let left = !self.left_effects.is_empty() || !self.left_overrides.is_empty();
+        if !self.picks.is_empty() || !self.left_cuts.is_empty() || left {
             separate(&mut w);
             w.node("takes").open();
             for pick in &self.picks {
@@ -498,6 +511,12 @@ impl Cut {
             }
             for left in &self.left_cuts {
                 write_range(w.node("remove").arg(&left.take), left.range).end();
+            }
+            for left in &self.left_effects {
+                left.write(&mut w);
+            }
+            for left in &self.left_overrides {
+                left.write(&mut w);
             }
             w.close();
         }
@@ -753,20 +772,65 @@ impl CaptionFix {
     }
 }
 
+/// What a `takes` block holds, each list in canonical order.
+struct TakesBlock {
+    picks: Vec<Pick>,
+    left_cuts: Vec<LeftCut>,
+    left_effects: Vec<TakeEdit>,
+    left_overrides: Vec<Override>,
+}
+
+/// The canonical order of the `takes` block's nodes of one take, see [`Pick::order`].
+pub(crate) fn takes_order(take: &Id) -> (usize, &str) {
+    (take.as_str().len(), take.as_str())
+}
+
 impl Pick {
-    /// The picks and the cuts of attempts that left the cut, each in canonical order.
-    fn read_all(node: Node<'_>) -> Result<(Vec<Self>, Vec<LeftCut>), ParseError> {
+    /// The picks and what a person made in attempts that left the cut.
+    fn read_all(node: Node<'_>) -> Result<TakesBlock, ParseError> {
         node.expect_block(0, &[])?;
         let mut picks: Vec<(Self, Node<'_>)> = Vec::new();
         let mut left_cuts = Vec::new();
+        let mut left_effects: Vec<TakeEdit> = Vec::new();
+        let mut left_overrides: Vec<Override> = Vec::new();
         for child in node.children() {
-            if child.name() == "remove" {
-                child.expect(1, &["from", "to"])?;
-                left_cuts.push(LeftCut {
-                    take: child.arg(0)?,
-                    range: TimeRange::read(child)?,
-                });
-                continue;
+            match child.name() {
+                "remove" => {
+                    child.expect(1, &["from", "to"])?;
+                    left_cuts.push(LeftCut {
+                        take: child.arg(0)?,
+                        range: TimeRange::read(child)?,
+                    });
+                    continue;
+                }
+                "take" => {
+                    let left = TakeEdit::read(child, None)?;
+                    if !left.ranges.is_empty() {
+                        return Err(child.error(
+                            "a `take` of the `takes` block holds layouts, zooms and overlays",
+                        ));
+                    }
+                    if left_effects.iter().any(|o| o.take == left.take) {
+                        return Err(child.error(format!("duplicate `take {}`", left.take)));
+                    }
+                    left_effects.push(left);
+                    continue;
+                }
+                "override" => {
+                    let left = Override::read(child)?;
+                    let same = |o: &Override| {
+                        o.take == left.take && o.kind == left.kind && o.at == left.at
+                    };
+                    if left_overrides.iter().any(same) {
+                        return Err(child.error(format!(
+                            "duplicate override of `{}` at {} in {}",
+                            left.kind, left.at.0, left.take
+                        )));
+                    }
+                    left_overrides.push(left);
+                    continue;
+                }
+                _ => {}
             }
             if child.name() != "attempt" {
                 return Err(child.unknown());
@@ -800,7 +864,16 @@ impl Pick {
             }
         }
         left_cuts.sort_by(|a, b| a.order().cmp(&b.order()));
-        Ok((picks.into_iter().map(|(r, _)| r).collect(), left_cuts))
+        left_effects.sort_by(|a, b| takes_order(&a.take).cmp(&takes_order(&b.take)));
+        left_overrides.sort_by(|a, b| {
+            (takes_order(&a.take), a.at, a.kind).cmp(&(takes_order(&b.take), b.at, b.kind))
+        });
+        Ok(TakesBlock {
+            picks: picks.into_iter().map(|(r, _)| r).collect(),
+            left_cuts,
+            left_effects,
+            left_overrides,
+        })
     }
 }
 

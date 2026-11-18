@@ -8,7 +8,7 @@ use crate::{
     Applied, Attempt, Chapter, Cut, EffectKey, ElementKind, Id, Instance, Layer, Layout,
     LayoutChange, LeftCut, Lineup, Lock, Micros, Music, Overlay, Override, OverrideEffect, Pick,
     RangeEdit, Row, RowAt, TakeEdit, Target, TimeRange, Transcript, Word, Zoom, ZoomShape,
-    word_cut,
+    cut::takes_order, word_cut,
 };
 
 /// One take block of the main cut: the chapter and the take's position in that chapter. A take
@@ -846,14 +846,14 @@ impl Cut {
             chapters,
             ..self.clone()
         }
-        .settle_left_cuts(self)
+        .settle_left(self)
         .settle_takes()
     }
 
-    /// Sets aside a person's cuts that no block holds any more, those of the blocks of
-    /// `before` and its left cuts, and drops the left cuts a block took back, see
-    /// [`Cut::material`].
-    fn settle_left_cuts(mut self, before: &Cut) -> Cut {
+    /// Sets aside a person's cuts, layouts, zooms and overlays that no block holds any more,
+    /// those of the blocks of `before` and the ones it had set aside, and drops what a block
+    /// took back, see [`Cut::material`].
+    fn settle_left(mut self, before: &Cut) -> Cut {
         let spans = |take: &Id| {
             let blocks = self.chapters.iter().flat_map(|c| &c.takes);
             let mut spans: Vec<TimeRange> = blocks
@@ -893,13 +893,47 @@ impl Cut {
             }
         }
         left_cuts.sort_by(|a, b| a.order().cmp(&b.order()));
+        let mut left_effects: Vec<TakeEdit> = Vec::new();
+        let blocks = before.chapters.iter().flat_map(|c| &c.takes);
+        for source in blocks.chain(&before.left_effects) {
+            let index = left_effects
+                .iter()
+                .position(|l| l.take == source.take)
+                .unwrap_or_else(|| {
+                    left_effects.push(TakeEdit {
+                        take: source.take.clone(),
+                        ranges: Vec::new(),
+                        layouts: Vec::new(),
+                        zooms: Vec::new(),
+                        overlays: Vec::new(),
+                    });
+                    left_effects.len() - 1
+                });
+            // The take's media that no block holds.
+            let mut cursor = Micros(0);
+            for span in spans(&source.take) {
+                if let Some(gap) = window(cursor, span.from()) {
+                    add_effects(&mut left_effects[index], effects_in(source, gap));
+                }
+                cursor = cursor.max(span.to());
+            }
+            if let Some(rest) = window(cursor, Micros(u64::MAX)) {
+                add_effects(&mut left_effects[index], effects_in(source, rest));
+            }
+        }
+        left_effects
+            .retain(|l| !(l.layouts.is_empty() && l.zooms.is_empty() && l.overlays.is_empty()));
+        left_effects.iter_mut().for_each(order_effects);
+        left_effects.sort_by(|a, b| takes_order(&a.take).cmp(&takes_order(&b.take)));
         self.left_cuts = left_cuts;
+        self.left_effects = left_effects;
         self
     }
 
     /// A block of `take` over `range` with what the cut's blocks of that take have there: their
     /// keeps and removes, layouts, zooms and overlays. Where no block covers the take's
-    /// media, the block keeps it, less the cuts a person made there before it left the cut.
+    /// media, the block keeps it, less the cuts a person made there before it left the cut,
+    /// and with the layouts, zooms and overlays they made there.
     pub fn material(&self, take: &Id, range: TimeRange) -> TakeEdit {
         let mut out = TakeEdit {
             take: take.clone(),
@@ -909,33 +943,20 @@ impl Cut {
             overlays: Vec::new(),
         };
         // A take that appears twice gives what its first block has.
-        for piece in self
-            .chapters
-            .iter()
-            .flat_map(|c| &c.takes)
+        let blocks = self.chapters.iter().flat_map(|c| &c.takes);
+        for piece in blocks
             .filter(|edit| edit.take == *take)
             .filter_map(|edit| restrict(edit, range))
         {
-            for r in piece.ranges {
+            for r in &piece.ranges {
                 if free(r.range(), out.ranges.iter().map(|o| o.range())) {
-                    out.ranges.push(r);
+                    out.ranges.push(*r);
                 }
             }
-            for l in piece.layouts {
-                if free(l.range, out.layouts.iter().map(|o| o.range)) {
-                    out.layouts.push(l);
-                }
-            }
-            for z in piece.zooms {
-                if free(z.range, out.zooms.iter().map(|o| o.range)) {
-                    out.zooms.push(z);
-                }
-            }
-            for o in piece.overlays {
-                if !out.overlays.contains(&o) {
-                    out.overlays.push(o);
-                }
-            }
+            add_effects(&mut out, piece);
+        }
+        for left in self.left_effects.iter().filter(|l| l.take == *take) {
+            add_effects(&mut out, effects_in(left, range));
         }
         for left in self.left_cuts.iter().filter(|l| l.take == *take) {
             if let Some(inside) = left.range.intersect(range)
@@ -954,13 +975,13 @@ impl Cut {
         }
         filled.extend(window(cursor, range.to()).map(RangeEdit::Keep));
         out.ranges = merge_adjacent(filled);
-        out.layouts.sort_by_key(|l| l.range.from());
-        out.zooms.sort_by_key(|z| z.range.from());
+        order_effects(&mut out);
         out
     }
 
-    /// Drops the overrides of takes that left the main cut and puts the rest in canonical order;
-    /// refuses when a derived cut still uses a take that left.
+    /// Sets the overrides of takes that left the main cut aside, gives the set-aside ones of
+    /// takes that play again back, and puts both in canonical order; refuses when a derived
+    /// cut still uses a take that left.
     fn settle_takes(mut self) -> Result<Cut, EditError> {
         let mut order: Vec<Id> = Vec::new();
         for edit in self.chapters.iter().flat_map(|c| &c.takes) {
@@ -976,9 +997,15 @@ impl Cut {
                 });
             }
         }
-        self.overrides.retain(|o| order.contains(&o.take));
+        let all = std::mem::take(&mut self.overrides)
+            .into_iter()
+            .chain(std::mem::take(&mut self.left_overrides));
+        (self.overrides, self.left_overrides) = all.partition(|o| order.contains(&o.take));
         self.overrides
             .sort_by_key(|o| (order.iter().position(|t| *t == o.take), o.at, o.kind));
+        self.left_overrides.sort_by(|a, b| {
+            (takes_order(&a.take), a.at, a.kind).cmp(&(takes_order(&b.take), b.at, b.kind))
+        });
         Ok(self)
     }
 }
@@ -991,6 +1018,52 @@ fn free(range: TimeRange, mut taken: impl Iterator<Item = TimeRange>) -> bool {
 /// `[from, to)`, or `None` when it is empty.
 fn window(from: Micros, to: Micros) -> Option<TimeRange> {
     TimeRange::new(from, to)
+}
+
+/// Adds the layouts and zooms of `piece` that overlap none of `out`, and its overlays that
+/// `out` does not have.
+fn add_effects(out: &mut TakeEdit, piece: TakeEdit) {
+    for l in piece.layouts {
+        if free(l.range, out.layouts.iter().map(|o| o.range)) {
+            out.layouts.push(l);
+        }
+    }
+    for z in piece.zooms {
+        if free(z.range, out.zooms.iter().map(|o| o.range)) {
+            out.zooms.push(z);
+        }
+    }
+    for o in piece.overlays {
+        if !out.overlays.contains(&o) {
+            out.overlays.push(o);
+        }
+    }
+}
+
+/// Puts the layouts and zooms of `edit` in order and joins the pieces of one that a block's
+/// edge had cut in two.
+fn order_effects(edit: &mut TakeEdit) {
+    edit.layouts.sort_by_key(|l| l.range.from());
+    merge_layouts(&mut edit.layouts);
+    edit.zooms.sort_by_key(|z| z.range.from());
+    let mut zooms: Vec<Zoom> = Vec::with_capacity(edit.zooms.len());
+    for zoom in edit.zooms.drain(..) {
+        match zooms.last_mut() {
+            Some(last)
+                if last.range.to() == zoom.range.from()
+                    && *last
+                        == (Zoom {
+                            range: last.range,
+                            ..zoom
+                        }) =>
+            {
+                last.range = TimeRange::new(last.range.from(), zoom.range.to())
+                    .expect("adjacent ranges join into a non-empty range");
+            }
+            _ => zooms.push(zoom),
+        }
+    }
+    edit.zooms = zooms;
 }
 
 /// What of `edit` lies inside `window`: ranges, layouts and zooms cut to it, and the
@@ -1008,8 +1081,17 @@ fn restrict(edit: &TakeEdit, window: TimeRange) -> Option<TakeEdit> {
         return None;
     }
     Some(TakeEdit {
-        take: edit.take.clone(),
         ranges,
+        ..effects_in(edit, window)
+    })
+}
+
+/// The layouts and zooms of `edit` cut to `window` and the overlays that start in it, in a
+/// block without ranges.
+fn effects_in(edit: &TakeEdit, window: TimeRange) -> TakeEdit {
+    TakeEdit {
+        take: edit.take.clone(),
+        ranges: Vec::new(),
         layouts: edit
             .layouts
             .iter()
@@ -1040,7 +1122,7 @@ fn restrict(edit: &TakeEdit, window: TimeRange) -> Option<TakeEdit> {
             .filter(|o| holds(window, o.range.from()))
             .cloned()
             .collect(),
-    })
+    }
 }
 
 fn same_kind(a: RangeEdit, b: RangeEdit) -> bool {
@@ -1755,6 +1837,58 @@ mod tests {
             .unwrap();
         assert_eq!(back.chapters, composed.chapters);
         assert!(back.left_cuts.is_empty());
+    }
+
+    #[test]
+    fn a_take_that_left_the_cut_comes_back_with_a_persons_effects_and_answers() {
+        let lineup = lineup();
+        let row = lineup.row(row_at(0, 1)).unwrap();
+        let new = Id::new("t02").unwrap();
+        // A layout, a zoom and an overlay in the beat a person cut in, and an answer there.
+        let mut recorded = recorded();
+        let block = &mut recorded.chapters[0].takes[0];
+        block
+            .layouts
+            .push(LayoutChange::new(Layout::Face, secs(13., 15.)));
+        block.zooms.push(Zoom {
+            scale: 130,
+            range: secs(15., 17.),
+            center: None,
+            shape: ZoomShape::default(),
+        });
+        block.overlays.push(Overlay {
+            template: Id::new("link-card").unwrap(),
+            range: secs(16., 18.),
+            params: Vec::new(),
+        });
+        let recorded = recorded.answer(
+            &Id::new("t01").unwrap(),
+            ElementKind::Filler,
+            s(14.),
+            Decision::Keep,
+        );
+        let composed = recorded.compose(&lineup, Some(&new)).unwrap();
+        let away = composed
+            .set_pick(row, &[attempt("t02", 11., 19.)])
+            .compose(&lineup, None)
+            .unwrap();
+        assert!(!blocks(&away).iter().any(|b| b.1 == "t01"));
+        assert!(away.overrides.is_empty());
+        let kdl = away.to_kdl();
+        assert!(
+            kdl.contains(
+                "    take t01 {\n        layout face from=13_000_000 to=15_000_000\n        zoom 130 from=15_000_000 to=17_000_000\n        overlay link-card from=16_000_000 to=18_000_000\n    }\n    override t01 filler at=14_000_000 {\n        keep\n    }\n}"
+            ),
+            "{kdl}"
+        );
+        assert_eq!(Cut::parse(&kdl).unwrap(), away);
+        let back = away
+            .set_pick(row, &[attempt("t01", 11., 19.)])
+            .compose(&lineup, None)
+            .unwrap();
+        assert_eq!(back.chapters, composed.chapters);
+        assert_eq!(back.overrides, composed.overrides);
+        assert!(back.left_effects.is_empty() && back.left_overrides.is_empty());
     }
 
     #[test]
