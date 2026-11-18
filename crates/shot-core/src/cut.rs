@@ -39,6 +39,10 @@ pub struct Cut {
     /// The overrides of takes that left the main cut, by take like the picks, then `at`, then
     /// kind. Composing gives them back when the take plays again.
     pub left_overrides: Vec<Override>,
+    /// The takes whose recording a person undid, by take like the picks, each once. Their
+    /// media stays in the folder, and they stay out of the lineup, so composing never brings
+    /// one back ([`crate::Lineup::new`]). Redo takes the mark away.
+    pub undone: Vec<Id>,
     /// The main cut, in output order.
     pub chapters: Vec<Chapter>,
     /// Changes to what the style rules gave single elements, in canonical order: by take in
@@ -426,6 +430,7 @@ impl Cut {
             cut.left_cuts = takes.left_cuts;
             cut.left_effects = takes.left_effects;
             cut.left_overrides = takes.left_overrides;
+            cut.undone = takes.undone;
         }
         let takes: HashSet<&Id> = cut
             .chapters
@@ -505,7 +510,9 @@ impl Cut {
                 .prop("duck", &music.duck)
                 .end();
         }
-        let left = !self.left_effects.is_empty() || !self.left_overrides.is_empty();
+        let left = !self.left_effects.is_empty()
+            || !self.left_overrides.is_empty()
+            || !self.undone.is_empty();
         if !self.picks.is_empty() || !self.looked.is_empty() || !self.left_cuts.is_empty() || left {
             separate(&mut w);
             w.node("takes").open();
@@ -525,6 +532,9 @@ impl Cut {
             }
             for left in &self.left_overrides {
                 left.write(&mut w);
+            }
+            for take in &self.undone {
+                w.node("undone").arg(take).end();
             }
             w.close();
         }
@@ -787,6 +797,7 @@ struct TakesBlock {
     left_cuts: Vec<LeftCut>,
     left_effects: Vec<TakeEdit>,
     left_overrides: Vec<Override>,
+    undone: Vec<Id>,
 }
 
 /// The canonical order of the `takes` block's nodes of one take, see [`Pick::order`].
@@ -803,8 +814,18 @@ impl Pick {
         let mut left_cuts = Vec::new();
         let mut left_effects: Vec<TakeEdit> = Vec::new();
         let mut left_overrides: Vec<Override> = Vec::new();
+        let mut undone: Vec<Id> = Vec::new();
         for child in node.children() {
             match child.name() {
+                "undone" => {
+                    child.expect(1, &[])?;
+                    let take: Id = child.arg(0)?;
+                    if undone.contains(&take) {
+                        return Err(child.error(format!("duplicate `undone {take}`")));
+                    }
+                    undone.push(take);
+                    continue;
+                }
                 "looked" => {
                     child.expect(1, &["from", "to"])?;
                     looked.push(Attempt {
@@ -889,12 +910,14 @@ impl Pick {
         looked.sort_by(|a, b| {
             (takes_order(&a.take), a.range.from()).cmp(&(takes_order(&b.take), b.range.from()))
         });
+        undone.sort_by(|a, b| takes_order(a).cmp(&takes_order(b)));
         Ok(TakesBlock {
             picks: picks.into_iter().map(|(r, _)| r).collect(),
             looked,
             left_cuts,
             left_effects,
             left_overrides,
+            undone,
         })
     }
 }

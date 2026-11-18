@@ -197,25 +197,25 @@ impl EditScreen {
         self.wrote(result, cx);
     }
 
-    /// Changes the overlay at `index` of the block at `at`.
+    /// Puts what `change` makes of the overlay at `index` of the block at `at` in its place,
+    /// or with `None` removes it. Through the core, so the overlay's copies across a splice
+    /// change with it ([`Cut::set_overlay`]).
     fn change_overlay(
         &mut self,
         at: TakeAt,
         index: usize,
-        change: impl FnOnce(&mut Vec<Overlay>, usize),
+        change: impl FnOnce(Overlay) -> Option<Overlay>,
         cx: &mut Context<Self>,
     ) {
         self.edit(cx, |cut| {
-            let mut cut: Cut = cut.clone();
-            if let Some(block) = cut
+            let block = cut
                 .chapters
-                .get_mut(at.chapter)
-                .and_then(|c| c.takes.get_mut(at.take))
-                && index < block.overlays.len()
-            {
-                change(&mut block.overlays, index);
-            }
-            Ok(cut)
+                .get(at.chapter)
+                .and_then(|c| c.takes.get(at.take));
+            Ok(match block.and_then(|block| block.overlays.get(index)) {
+                Some(overlay) => cut.set_overlay(at, index, change(overlay.clone())),
+                None => cut.clone(),
+            })
         });
     }
 
@@ -224,10 +224,11 @@ impl EditScreen {
         self.change_overlay(
             at,
             index,
-            |overlays, i| {
+            |mut overlay| {
                 let id = shot_core::Id::new("file").expect("an id");
-                overlays[i].params.retain(|(n, _)| *n != id);
-                overlays[i].params.insert(0, (id, ParamValue::Text(file)));
+                overlay.params.retain(|(n, _)| *n != id);
+                overlay.params.insert(0, (id, ParamValue::Text(file)));
+                Some(overlay)
             },
             cx,
         );
@@ -245,10 +246,11 @@ impl EditScreen {
         self.change_overlay(
             at,
             index,
-            |overlays, i| {
-                if let Some((_, v)) = overlays[i].params.iter_mut().find(|(n, _)| *n == name) {
+            |mut overlay| {
+                if let Some((_, v)) = overlay.params.iter_mut().find(|(n, _)| *n == name) {
                     *v = ParamValue::Bool(!on);
                 }
+                Some(overlay)
             },
             cx,
         );
@@ -701,14 +703,7 @@ fn overlay_row(
                             .text_color(MUTED)
                             .child("Remove")
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.change_overlay(
-                                    at,
-                                    index,
-                                    |overlays, i| {
-                                        overlays.remove(i);
-                                    },
-                                    cx,
-                                );
+                                this.change_overlay(at, index, |_| None, cx);
                             })),
                     )
                 })

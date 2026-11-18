@@ -33,7 +33,8 @@ pub enum EditError {
     UnknownPlaced(TakeAt, Placed),
     /// No row at this place in the lineup.
     UnknownRow(RowAt),
-    /// The edit would take a take out of the main cut that a derived cut still uses.
+    /// The edit would take media out of the main cut that a derived cut still uses: a whole
+    /// take, or everything one of its clips plays.
     TakeInDerived { derived: Id, take: Id },
     /// No `layout` range starts or ends at this media time in the addressed take block.
     NoLayoutEdge(Micros),
@@ -88,7 +89,7 @@ impl fmt::Display for EditError {
             }
             Self::TakeInDerived { derived, take } => write!(
                 f,
-                "`{derived}` uses take {take}, which would leave the cut: remove its clips first"
+                "`{derived}` uses a part of take {take} that would leave the cut: remove its clips first"
             ),
             Self::NotKept { take, at } => write!(
                 f,
@@ -415,8 +416,8 @@ impl Cut {
         range: TimeRange,
     ) -> Result<Cut, EditError> {
         self.placed(at, placed)?;
-        Ok(self.with_take(at, |edit| match placed {
-            Placed::Zoom(index) => {
+        Ok(match placed {
+            Placed::Zoom(index) => self.with_take(at, |edit| {
                 let mut zoom = edit.zooms.remove(index);
                 zoom.range = range;
                 edit.zooms.retain(|z| !z.range.overlaps(range));
@@ -424,9 +425,43 @@ impl Cut {
                     .zooms
                     .partition_point(|z| z.range.from() < range.from());
                 edit.zooms.insert(index, zoom);
+            }),
+            Placed::Overlay(index) => {
+                let moved = Overlay {
+                    range,
+                    ..self.chapters[at.chapter].takes[at.take].overlays[index].clone()
+                };
+                self.set_overlay(at, index, Some(moved))
             }
-            Placed::Overlay(index) => edit.overlays[index].range = range,
-        }))
+        })
+    }
+
+    /// Puts `overlay` in place of the overlay `index` of the block at `at`, or with `None`
+    /// removes it, and does the same to its copies: an overlay that reaches across a splice is
+    /// in every block of its take whose media it overlaps and with the material that left the
+    /// cut ([`Cut::material`]), and a person changes it once. The address is checked by the
+    /// caller.
+    pub fn set_overlay(&self, at: TakeAt, index: usize, overlay: Option<Overlay>) -> Cut {
+        let mut cut = self.clone();
+        let block = &cut.chapters[at.chapter].takes[at.take];
+        let (take, old) = (block.take.clone(), block.overlays[index].clone());
+        let blocks = cut.chapters.iter_mut().flat_map(|c| &mut c.takes);
+        for edit in blocks
+            .chain(&mut cut.left_effects)
+            .filter(|e| e.take == take)
+        {
+            match &overlay {
+                Some(new) => edit
+                    .overlays
+                    .iter_mut()
+                    .filter(|o| **o == old)
+                    .for_each(|o| o.clone_from(new)),
+                None => edit.overlays.retain(|o| *o != old),
+            }
+        }
+        cut.left_effects
+            .retain(|l| !(l.layouts.is_empty() && l.zooms.is_empty() && l.overlays.is_empty()));
+        cut
     }
 
     /// Sets the zoom `index` of the block at `at` to `scale` percent, at least 100.
@@ -469,14 +504,12 @@ impl Cut {
     /// Removes the zoom or overlay `placed` of the block at `at`.
     pub fn remove_placed(&self, at: TakeAt, placed: Placed) -> Result<Cut, EditError> {
         self.placed(at, placed)?;
-        Ok(self.with_take(at, |edit| match placed {
-            Placed::Zoom(index) => {
+        Ok(match placed {
+            Placed::Zoom(index) => self.with_take(at, |edit| {
                 edit.zooms.remove(index);
-            }
-            Placed::Overlay(index) => {
-                edit.overlays.remove(index);
-            }
-        }))
+            }),
+            Placed::Overlay(index) => self.set_overlay(at, index, None),
+        })
     }
 
     /// Removes the lock's zoom, overlay or sound `instance` of `take` through the override of
@@ -838,18 +871,52 @@ impl Cut {
     /// two attempts there is nothing to choose, and the cut stays as it is. `new` is the take
     /// that was just appended, see [`Cut::plays`].
     pub fn compose(&self, lineup: &Lineup, new: Option<&Id>) -> Result<Cut, EditError> {
+        self.composed(lineup, new, None)
+    }
+
+    /// Marks `takes` as takes whose recording was undone, each once and in canonical order,
+    /// see [`Cut::undone`].
+    pub fn mark_undone(&mut self, takes: impl IntoIterator<Item = Id>) {
+        for take in takes {
+            if !self.undone.contains(&take) {
+                self.undone.push(take);
+            }
+        }
+        self.undone
+            .sort_by(|a, b| takes_order(a).cmp(&takes_order(b)));
+    }
+
+    /// Composes the cut with the row at `at` played as proposed, without its picks and though
+    /// a person cut words or answered a finding in what played it: their explicit return to
+    /// the proposal. Those cuts stay with their media, see [`Cut::material`].
+    pub fn propose_row(&self, lineup: &Lineup, at: RowAt) -> Result<Cut, EditError> {
+        let row = lineup.row(at).ok_or(EditError::UnknownRow(at))?;
+        self.set_pick(row, &[]).composed(lineup, None, Some(at))
+    }
+
+    /// [`Cut::compose`], with the row at `proposed` played by its proposal whatever the cut
+    /// holds of it.
+    fn composed(
+        &self,
+        lineup: &Lineup,
+        new: Option<&Id>,
+        proposed: Option<RowAt>,
+    ) -> Result<Cut, EditError> {
         let everything: Vec<&Attempt> = lineup.rows().flat_map(|(_, r)| &r.attempts).collect();
         if everything.is_empty() || !(lineup.scripted || lineup.contested()) {
             return Ok(self.clone());
         }
         let mut chapters = Vec::new();
-        for group in &lineup.groups {
+        for (g, group) in lineup.groups.iter().enumerate() {
             let mut spans: Vec<Attempt> = Vec::new();
-            for piece in group
-                .rows
-                .iter()
-                .flat_map(|row| self.plays(lineup, row, new))
-            {
+            let pieces = group.rows.iter().enumerate().flat_map(|(r, row)| {
+                if proposed == Some(RowAt { group: g, row: r }) {
+                    row.proposal.clone()
+                } else {
+                    self.plays(lineup, row, new)
+                }
+            });
+            for piece in pieces {
                 if let Some(last) = spans.last_mut()
                     && last.take == piece.take
                     && last.range.to() <= piece.range.from()
@@ -896,12 +963,13 @@ impl Cut {
             ..self.clone()
         }
         .settle_left(self)
-        .settle_takes()
+        .settle_takes(self)
     }
 
     /// Sets aside a person's cuts, layouts, zooms and overlays that no block holds any more,
     /// those of the blocks of `before` and the ones it had set aside, and drops what a block
-    /// took back, see [`Cut::material`].
+    /// took back, see [`Cut::material`]. An overlay that reaches from a block into media that
+    /// left is in both, whole, until a block holds all of its media again.
     fn settle_left(mut self, before: &Cut) -> Cut {
         let spans = |take: &Id| {
             let blocks = self.chapters.iter().flat_map(|c| &c.takes);
@@ -980,9 +1048,10 @@ impl Cut {
     }
 
     /// A block of `take` over `range` with what the cut's blocks of that take have there: their
-    /// keeps and removes, layouts, zooms and overlays. Where no block covers the take's
-    /// media, the block keeps it, less the cuts a person made there before it left the cut,
-    /// and with the layouts, zooms and overlays they made there.
+    /// keeps and removes, layouts and zooms, and every overlay of the take that overlaps
+    /// `range`, with its own timing. Where no block covers the take's media, the block keeps
+    /// it, less the cuts a person made there before it left the cut, and with the layouts,
+    /// zooms and overlays they made there.
     pub fn material(&self, take: &Id, range: TimeRange) -> TakeEdit {
         let mut out = TakeEdit {
             take: take.clone(),
@@ -1003,6 +1072,19 @@ impl Cut {
                 }
             }
             add_effects(&mut out, piece);
+        }
+        // An overlay plays in every block whose media it overlaps, also one that holds none
+        // of the media of the block it was placed in.
+        let blocks = self.chapters.iter().flat_map(|c| &c.takes);
+        for placed in blocks.filter(|edit| edit.take == *take) {
+            add_effects(
+                &mut out,
+                TakeEdit {
+                    layouts: Vec::new(),
+                    zooms: Vec::new(),
+                    ..effects_in(placed, range)
+                },
+            );
         }
         for left in self.left_effects.iter().filter(|l| l.take == *take) {
             add_effects(&mut out, effects_in(left, range));
@@ -1030,8 +1112,10 @@ impl Cut {
 
     /// Sets the overrides of takes that left the main cut aside, gives the set-aside ones of
     /// takes that play again back, and puts both in canonical order; refuses when a derived
-    /// cut still uses a take that left.
-    fn settle_takes(mut self) -> Result<Cut, EditError> {
+    /// cut still uses a take that left, or when one of its clips would lose all that `before`
+    /// kept of it, as when the one beat a Short plays is retaken and its take plays on
+    /// elsewhere: the Short would have nothing to export.
+    fn settle_takes(mut self, before: &Cut) -> Result<Cut, EditError> {
         let mut order: Vec<Id> = Vec::new();
         for edit in self.chapters.iter().flat_map(|c| &c.takes) {
             if !order.contains(&edit.take) {
@@ -1039,7 +1123,12 @@ impl Cut {
             }
         }
         for derived in &self.derived {
-            if let Some(clip) = derived.clips.iter().find(|c| !order.contains(&c.take)) {
+            let emptied = |clip: &crate::Clip| {
+                self.kept_of(&clip.take, clip.range) == Micros(0)
+                    && before.kept_of(&clip.take, clip.range) > Micros(0)
+            };
+            let lost = |clip: &&crate::Clip| !order.contains(&clip.take) || emptied(clip);
+            if let Some(clip) = derived.clips.iter().find(lost) {
                 return Err(EditError::TakeInDerived {
                     derived: derived.name.clone(),
                     take: clip.take.clone(),
@@ -1116,7 +1205,7 @@ fn order_effects(edit: &mut TakeEdit) {
 }
 
 /// What of `edit` lies inside `window`: ranges, layouts and zooms cut to it, and the
-/// overlays that start in it. `None` when no kept or removed media is left.
+/// overlays that overlap it. `None` when no kept or removed media is left.
 fn restrict(edit: &TakeEdit, window: TimeRange) -> Option<TakeEdit> {
     let ranges: Vec<RangeEdit> = edit
         .ranges
@@ -1135,8 +1224,9 @@ fn restrict(edit: &TakeEdit, window: TimeRange) -> Option<TakeEdit> {
     })
 }
 
-/// The layouts and zooms of `edit` cut to `window` and the overlays that start in it, in a
-/// block without ranges.
+/// The layouts and zooms of `edit` cut to `window` and the overlays that overlap it, whole: an
+/// overlay keeps its timing, so a blur that starts before a splice still covers what plays
+/// after it. In a block without ranges.
 fn effects_in(edit: &TakeEdit, window: TimeRange) -> TakeEdit {
     TakeEdit {
         take: edit.take.clone(),
@@ -1168,7 +1258,7 @@ fn effects_in(edit: &TakeEdit, window: TimeRange) -> TakeEdit {
         overlays: edit
             .overlays
             .iter()
-            .filter(|o| holds(window, o.range.from()))
+            .filter(|o| o.range.overlaps(window))
             .cloned()
             .collect(),
     }
@@ -1956,6 +2046,135 @@ mod tests {
         assert_eq!(back.chapters, composed.chapters);
         assert_eq!(back.overrides, composed.overrides);
         assert!(back.left_effects.is_empty() && back.left_overrides.is_empty());
+    }
+
+    /// Both takes whole, as recording leaves them.
+    fn stacked() -> Cut {
+        Cut::parse(
+            "chapter \"Take t01\" {\n    take t01 {\n        keep from=0 to=30_000_000\n    }\n}\n\nchapter \"Take t02\" {\n    take t02 {\n        keep from=0 to=30_000_000\n    }\n}\n",
+        )
+        .unwrap()
+    }
+
+    /// The first beat spliced: the second take to 5 s, then the first.
+    fn spliced() -> Lineup {
+        let mut lineup = lineup();
+        lineup.groups[0].rows[0].proposal = vec![attempt("t02", 1., 5.), attempt("t01", 5., 9.)];
+        lineup
+    }
+
+    fn overlays(cut: &Cut, take: &str) -> Vec<Vec<(u64, u64)>> {
+        let blocks = cut.chapters.iter().flat_map(|c| &c.takes);
+        blocks
+            .filter(|edit| edit.take.as_str() == take)
+            .map(|edit| {
+                let seconds =
+                    |o: &Overlay| (o.range.from().0 / 1_000_000, o.range.to().0 / 1_000_000);
+                edit.overlays.iter().map(seconds).collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_blur_that_starts_before_a_splice_covers_what_plays_after_it() {
+        let lineup = spliced();
+        let row = lineup.row(row_at(0, 0)).unwrap();
+        let mut cut = stacked();
+        cut.chapters[0].takes[0].overlays.push(Overlay {
+            template: Id::new("blur").unwrap(),
+            range: secs(2., 8.),
+            params: Vec::new(),
+        });
+        let new = Id::new("t02").unwrap();
+        let composed = cut.compose(&lineup, Some(&new)).unwrap();
+        // The first take plays from 5 s: its block has the blur whole, and so has the part
+        // from 2 s that left the cut.
+        assert_eq!(blocks(&composed)[1], ("Intro".into(), "t01".into(), 5, 9));
+        assert_eq!(overlays(&composed, "t01"), [[(2, 8)]]);
+        assert_eq!(composed.left_effects.len(), 1);
+        assert_eq!(
+            composed.left_effects[0].overlays,
+            cut.chapters[0].takes[0].overlays
+        );
+        assert_eq!(Cut::parse(&composed.to_kdl()).unwrap(), composed);
+        // Back on the first take whole, the blur is there once and nothing waits.
+        let back = composed
+            .set_pick(row, &[attempt("t01", 1., 9.)])
+            .compose(&lineup, None)
+            .unwrap();
+        assert_eq!(overlays(&back, "t01"), [[(2, 8)]]);
+        assert!(back.left_effects.is_empty());
+        // Removing it in the block removes the part that waits too.
+        let at = TakeAt {
+            chapter: 0,
+            take: 1,
+        };
+        let removed = composed.remove_placed(at, Placed::Overlay(0)).unwrap();
+        assert!(removed.left_effects.is_empty());
+        assert_eq!(overlays(&removed, "t01"), [[]]);
+    }
+
+    #[test]
+    fn a_retake_that_would_empty_a_short_is_refused() {
+        // The Short plays the first beat of the first take, which also plays the second beat.
+        let mut lineup = lineup();
+        lineup.groups[0].rows[1].proposal = vec![attempt("t01", 11., 19.)];
+        let cut = Cut::parse(&format!(
+            "{}\nshort hello {{\n    clip t01 from=1_000_000 to=9_000_000\n}}\n",
+            stacked().to_kdl()
+        ))
+        .unwrap();
+        let new = Id::new("t02").unwrap();
+        assert_eq!(
+            cut.compose(&lineup, Some(&new)),
+            Err(EditError::TakeInDerived {
+                derived: Id::new("hello").unwrap(),
+                take: Id::new("t01").unwrap(),
+            })
+        );
+        // A Short that already plays nothing keeps no cut from composing.
+        let mut empty = cut.clone();
+        empty.chapters[0].takes[0].ranges = vec![keep(10_000_000, 30_000_000)];
+        assert!(empty.compose(&lineup, Some(&new)).is_ok());
+    }
+
+    #[test]
+    fn going_back_to_the_proposal_wins_over_a_cut_made_in_the_attempt_that_played() {
+        let lineup = spliced();
+        let row = lineup.row(row_at(0, 0)).unwrap();
+        let new = Id::new("t02").unwrap();
+        // The second take whole, picked, with a word cut where the proposal plays the first.
+        let whole = stacked()
+            .compose(&lineup, Some(&new))
+            .unwrap()
+            .set_pick(row, &[attempt("t02", 1., 9.)])
+            .compose(&lineup, None)
+            .unwrap();
+        let mut edited = whole.clone();
+        edited.chapters[0].takes[0].ranges = vec![
+            keep(1_000_000, 2_000_000),
+            removed(2_000_000, 3_000_000),
+            keep(3_000_000, 9_000_000),
+        ];
+        // Without the pick, composing holds the attempt a person cut in.
+        let held = edited.set_pick(row, &[]).compose(&lineup, None).unwrap();
+        assert_eq!(held.plays(&lineup, row, None), [attempt("t02", 1., 9.)]);
+        let proposed = edited.propose_row(&lineup, row_at(0, 0)).unwrap();
+        assert!(proposed.picks.is_empty());
+        assert_eq!(
+            blocks(&proposed)[..2],
+            [
+                ("Intro".into(), "t02".into(), 1, 5),
+                ("Intro".into(), "t01".into(), 5, 9),
+            ]
+        );
+        assert!(
+            proposed
+                .to_kdl()
+                .contains("remove from=2_000_000 to=3_000_000")
+        );
+        // The proposal plays on the next compose too.
+        assert_eq!(proposed.compose(&lineup, None).unwrap(), proposed);
     }
 
     #[test]

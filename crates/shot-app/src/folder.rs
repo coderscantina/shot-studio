@@ -1038,7 +1038,7 @@ mod tests {
             .unwrap();
         assert_eq!(blocks(&folder), ["t01", "t02"], "the take is in, stacked");
         let why = folder.not_composed.clone().unwrap();
-        assert!(why.contains("`hello` uses take t01"), "{why}");
+        assert!(why.contains("`hello` uses a part of take t01"), "{why}");
     }
 
     #[test]
