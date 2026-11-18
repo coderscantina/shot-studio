@@ -424,6 +424,33 @@ fn in_view(this: &EditScreen, row: usize) -> bool {
         })
 }
 
+/// Scrolls the transcript just far enough to show the caret word, once a frame has measured it.
+fn reveal_caret(this: &mut EditScreen) {
+    let Some(selection) = this.selection else {
+        this.reveal_caret = false;
+        return;
+    };
+    let key = word_key(selection.at, selection.head);
+    let measured = [&this.selection_start, &this.selection_anchor]
+        .into_iter()
+        .find_map(|anchor| anchor.get().filter(|(k, _)| *k == key));
+    let Some((_, word)) = measured else {
+        return;
+    };
+    this.reveal_caret = false;
+    // The anchor's bounds are in the scrolled content, the offset is zero or negative.
+    let height = this.scroll.bounds().size.height;
+    let mut offset = this.scroll.offset();
+    if word.top() + offset.y < px(0.) {
+        offset.y = px(CLEAR) - word.top();
+    } else if word.bottom() + offset.y > height {
+        offset.y = height - word.bottom() - px(CLEAR);
+    } else {
+        return;
+    }
+    this.scroll.set_offset(offset);
+}
+
 fn document(this: &mut EditScreen, cx: &mut Context<EditScreen>) -> Div {
     if this.map.chapters.is_empty() {
         return ui::pane().flex_1().flex().flex_col().child(
@@ -537,6 +564,9 @@ fn document(this: &mut EditScreen, cx: &mut Context<EditScreen>) -> Div {
     }
     this.scroll_to_card = false;
     this.revealed = playing_in;
+    if this.reveal_caret {
+        reveal_caret(this);
+    }
     ui::pane()
         .relative()
         .flex_1()

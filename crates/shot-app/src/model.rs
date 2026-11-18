@@ -943,6 +943,23 @@ pub fn shown_word_at(doc: &[BlockDoc], frame: u64) -> Option<(TakeAt, usize)> {
         .map(|(_, at, index)| (at, index))
 }
 
+/// The word the first arrow press takes from output frame `frame`: going `forward` the first shown
+/// word that starts at or after it, else the last one that starts before it. Past the last word
+/// in that direction, the word at `frame`.
+pub fn shown_word_from(doc: &[BlockDoc], frame: u64, forward: bool) -> Option<(TakeAt, usize)> {
+    let starts = |&(n, _, index): &(usize, TakeAt, usize)| doc[n].words[index].output;
+    let found = if forward {
+        shown_words(doc).find(|w| starts(w).is_some_and(|start| start >= frame))
+    } else {
+        shown_words(doc)
+            .filter(|w| starts(w).is_some_and(|start| start < frame))
+            .last()
+    };
+    found
+        .map(|(_, at, index)| (at, index))
+        .or_else(|| shown_word_at(doc, frame))
+}
+
 /// Whether the block at `at` holds the same take in both documents.
 pub fn same_take(before: &[BlockDoc], doc: &[BlockDoc], at: TakeAt) -> bool {
     let take = |doc: &'_ [BlockDoc]| doc.iter().find(|b| b.at == at).map(|b| b.take.clone());
@@ -1600,6 +1617,27 @@ mod tests {
         swapped[0].take = id("t02");
         assert!(same_take(&doc, &doc, AT));
         assert!(!same_take(&doc, &swapped, AT));
+    }
+
+    #[test]
+    fn the_first_arrow_goes_the_way_it_points() {
+        let ranges = vec![
+            keep(0, 1_000_000),
+            remove(1_000_000, 2_000_000),
+            keep(2_000_000, 4_000_000),
+        ];
+        let (map, doc) = one_block(ranges, &Lock::default(), &SPOKEN);
+        // On the seam of the cut of "uh", where a click on its chip leaves the playhead.
+        let seam = map.seam(AT, range(1_000_000, 2_000_000)).unwrap();
+        assert_eq!(shown_word_from(&doc, seam, true), Some((AT, 2)));
+        assert_eq!(shown_word_from(&doc, seam, false), Some((AT, 0)));
+        // A word that starts on the playhead is the next one, not the one before.
+        let it = doc[0].words[2].output.unwrap();
+        assert_eq!(shown_word_from(&doc, it, true), Some((AT, 2)));
+        assert_eq!(shown_word_from(&doc, it, false), Some((AT, 0)));
+        // Past the ends the arrows still find a word.
+        assert_eq!(shown_word_from(&doc, 0, false), Some((AT, 0)));
+        assert_eq!(shown_word_from(&doc, map.frames, true), Some((AT, 4)));
     }
 
     #[test]

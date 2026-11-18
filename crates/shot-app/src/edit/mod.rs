@@ -222,6 +222,8 @@ pub struct EditScreen {
     /// The paragraph the transcript last showed the playhead in. When the playhead moves to
     /// another one, the transcript scrolls it into view.
     revealed: Option<(TakeAt, usize)>,
+    /// An arrow key moved the caret: the next render with the word measured scrolls it into view.
+    reveal_caret: bool,
     claude: Option<Claude>,
     /// Claude writing another take.
     run: Option<AgentRun>,
@@ -296,6 +298,7 @@ impl EditScreen {
             previewing: None,
             scroll_to_card: false,
             revealed: None,
+            reveal_caret: false,
             claude: Claude::find(),
             run: None,
             captions: captions::CaptionsState::default(),
@@ -598,8 +601,8 @@ impl EditScreen {
     }
 
     /// The arrows. In Text, they step through the shown words, across takes and chapters, and
-    /// without a selection select the word at the playhead. Shift extends inside one take
-    /// block. In the other workspaces, without a selection they step the playhead by a frame,
+    /// without a selection take the next or previous word from the playhead. Shift extends inside
+    /// one take block. In the other workspaces, without a selection they step the playhead by a frame,
     /// or a second with Shift.
     fn move_selection(&mut self, forward: bool, extend: bool, cx: &mut Context<Self>) {
         // A key that moves the caret stops playback, so the caret stays where the cut goes.
@@ -608,8 +611,10 @@ impl EditScreen {
         }
         let Some(selection) = self.selection else {
             if self.workspace == Workspace::Text {
-                if let Some((at, index)) = model::shown_word_at(&self.doc, self.playhead) {
+                if let Some((at, index)) = model::shown_word_from(&self.doc, self.playhead, forward)
+                {
                     self.select_word(at, index, false, cx);
+                    self.reveal_caret = true;
                 }
                 return;
             }
@@ -625,8 +630,10 @@ impl EditScreen {
         };
         if !extend {
             self.select_word(at, head, false, cx);
+            self.reveal_caret = true;
         } else if at == selection.at {
             self.selection = Some(Selection { head, ..selection });
+            self.reveal_caret = true;
             cx.notify();
         }
     }
