@@ -80,6 +80,8 @@ enum Event {
     Exported {
         cut: String,
         stamp: Option<u64>,
+        /// The [`render_stamp`] of the cut and the lock the run rendered.
+        rendered: u64,
         result: Result<Vec<Problem>, String>,
     },
     Preview {
@@ -111,7 +113,8 @@ struct Measured {
 struct Exported {
     size: u64,
     modified: SystemTime,
-    /// A project file changed after the export.
+    /// A project file changed after the export, or the export was rendered from another cut
+    /// or lock than the video has now.
     stale: bool,
 }
 
@@ -122,6 +125,10 @@ struct CutState {
     stamp: Option<u64>,
     measured: Option<Measured>,
     export: Option<Exported>,
+    /// The export a run of this screen wrote, by its modification time, with the
+    /// [`render_stamp`] it rendered: a lock rebuilt while the run rendered is older than the
+    /// export file, and still not what the export shows.
+    rendered: Option<(SystemTime, u64)>,
     /// A run is exporting this cut, so the check worker's results for it are old.
     exporting: bool,
     preview: Option<PathBuf>,
@@ -323,14 +330,15 @@ impl ShipScreen {
         let names: Vec<&String> = self.cuts.iter().map(|c| &c.name).collect();
         self.states.retain(|name, _| names.contains(&name));
         let mut queue = Vec::new();
+        let current = render_stamp(&working, &lock);
         for cut in &self.cuts {
             let state = self.states.entry(cut.name.clone()).or_default();
-            state.export = exported(&dir, &cut.export);
+            state.export = exported(&dir, &cut.export, state.rendered, current);
             let Some(export) = &state.export else {
                 *state = CutState::default();
                 continue;
             };
-            let stamp = check_stamp(&dir, cut, &working);
+            let stamp = check_stamp(&dir, cut, current);
             if state.stamp != stamp || matches!(state.checks, Checks::NotExported | Checks::Running)
             {
                 state.checks = Checks::Running;
@@ -491,13 +499,24 @@ impl ShipScreen {
                     state.set_checks(result);
                 }
             }
-            Event::Exported { cut, stamp, result } => {
-                let dir = self.folder.read(cx).dir.clone();
+            Event::Exported {
+                cut,
+                stamp,
+                rendered,
+                result,
+            } => {
+                let folder = self.folder.read(cx);
+                let dir = folder.dir.clone();
+                let current = render_stamp(&folder.project.cut.to_kdl(), folder.lock());
                 let export = self.cuts.iter().find(|c| c.name == cut);
                 let state = self.states.entry(cut.clone()).or_default();
                 state.exporting = false;
                 state.stamp = stamp;
-                state.export = export.and_then(|c| exported(&dir, &c.export));
+                let written = export.and_then(|c| std::fs::metadata(&c.export).ok());
+                let written = written.and_then(|m| m.modified().ok());
+                state.rendered = written.map(|at| (at, rendered));
+                state.export =
+                    export.and_then(|c| exported(&dir, &c.export, state.rendered, current));
                 state.set_checks(result);
             }
             Event::Preview { cut, path } => {
@@ -2075,7 +2094,7 @@ fn run(
     let step = |step: Step| {
         let _ = send.send(Event::Step(step));
     };
-    let cut_kdl = project.cut.to_kdl();
+    let rendered = render_stamp(&project.cut.to_kdl(), lock);
     let mut problems = 0;
     for cut in cuts {
         step(Step::Rendering {
@@ -2094,7 +2113,8 @@ fn run(
         problems += result.as_ref().map_or(0, Vec::len);
         let _ = send.send(Event::Exported {
             cut: cut.name.clone(),
-            stamp: check_stamp(dir, cut, &cut_kdl),
+            stamp: check_stamp(dir, cut, rendered),
+            rendered,
             result,
         });
         if let Some(e) = failed {
@@ -2170,8 +2190,14 @@ fn measured_from_export(kind: CheckKind) -> bool {
     matches!(kind, CheckKind::Loudness | CheckKind::Frames)
 }
 
-/// The export of a cut, when there is one.
-fn exported(dir: &Path, export: &Path) -> Option<Exported> {
+/// The export of a cut, when there is one. `rendered` is the [`render_stamp`] a run of this
+/// screen rendered the file written at that time from, `current` the one of the video now.
+fn exported(
+    dir: &Path,
+    export: &Path,
+    rendered: Option<(SystemTime, u64)>,
+    current: u64,
+) -> Option<Exported> {
     let meta = std::fs::metadata(export).ok()?;
     let modified = meta.modified().ok()?;
     let edited = ["cut.kdl", "format.kdl", shot_ship::lock::LOCK_FILE]
@@ -2185,12 +2211,23 @@ fn exported(dir: &Path, export: &Path) -> Option<Exported> {
     Some(Exported {
         size: meta.len(),
         modified,
-        stale: edited.is_some_and(|e| e > modified),
+        stale: edited.is_some_and(|e| e > modified)
+            || rendered.is_some_and(|(at, stamp)| at == modified && stamp != current),
     })
 }
 
-/// A hash of what a cut's checks read: its export, the thumbnail and `cut.kdl`.
-fn check_stamp(dir: &Path, cut: &PlannedCut, cut_kdl: &str) -> Option<u64> {
+/// A hash of what a cut renders from: `cut.kdl` and the lock, as the run or the screen holds
+/// them, not as the files are when it is asked.
+fn render_stamp(cut_kdl: &str, lock: &shot_core::Lock) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (cut_kdl, lock.to_kdl()).hash(&mut hasher);
+    hasher.finish()
+}
+
+/// A hash of what a cut's checks read: its export, the thumbnail, and the cut and the lock
+/// by their [`render_stamp`].
+fn check_stamp(dir: &Path, cut: &PlannedCut, rendered: u64) -> Option<u64> {
     use std::hash::{Hash, Hasher};
     let modified = |path: &Path| std::fs::metadata(path).and_then(|m| m.modified()).ok();
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -2198,11 +2235,8 @@ fn check_stamp(dir: &Path, cut: &PlannedCut, cut_kdl: &str) -> Option<u64> {
     ship::thumbnail(dir)
         .and_then(|p| modified(&p))
         .hash(&mut hasher);
-    cut_kdl.hash(&mut hasher);
     // A video's frames follow its lock too, which a rule change rebuilds.
-    std::fs::read(dir.join(shot_ship::lock::LOCK_FILE))
-        .ok()
-        .hash(&mut hasher);
+    rendered.hash(&mut hasher);
     Some(hasher.finish())
 }
 
@@ -2344,4 +2378,38 @@ fn note(text: impl Into<SharedString>) -> Div {
         .text_size(TEXT_SM)
         .text_color(WARN)
         .child(text.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_export_rendered_from_an_older_lock_is_stale_though_the_file_is_newer() {
+        let dir = tempfile::tempdir().unwrap();
+        // A rule change rebuilt the lock while the run rendered: the export is the newer file.
+        std::fs::write(dir.path().join(shot_ship::lock::LOCK_FILE), "lock 1\n").unwrap();
+        let export = dir.path().join("main.mp4");
+        std::fs::write(&export, b"").unwrap();
+        let later = SystemTime::now() + std::time::Duration::from_secs(60);
+        let file = std::fs::File::options().write(true).open(&export).unwrap();
+        file.set_modified(later).unwrap();
+        let lock = |text: &str| shot_core::Lock::parse(text).unwrap();
+        let rendered = render_stamp("", &lock("lock 1\n"));
+        let rebuilt = render_stamp(
+            "",
+            &lock(
+                "lock 1\n\ntake t01 {\n    cut from=1_000_000 to=2_000_000 on=silence t=1_000_000 layer=format rule=\"silence\"\n}\n",
+            ),
+        );
+        let stale = |stamp, current| {
+            let found = exported(dir.path(), &export, stamp, current).unwrap();
+            found.stale
+        };
+        assert!(!stale(None, rebuilt), "by the files alone it looks current");
+        assert!(stale(Some((later, rendered)), rebuilt));
+        assert!(!stale(Some((later, rendered)), rendered));
+        // A stamp of an export that was written again since says nothing about the file.
+        assert!(!stale(Some((SystemTime::UNIX_EPOCH, rendered)), rebuilt));
+    }
 }
