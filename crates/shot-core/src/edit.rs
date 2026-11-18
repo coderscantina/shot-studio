@@ -437,31 +437,84 @@ impl Cut {
     }
 
     /// Puts `overlay` in place of the overlay `index` of the block at `at`, or with `None`
-    /// removes it, and does the same to its copies: an overlay that reaches across a splice is
-    /// in every block of its take whose media it overlaps and with the material that left the
-    /// cut ([`Cut::material`]), and a person changes it once. The address is checked by the
-    /// caller.
+    /// removes it, in every block of its take and with the material that left the cut, see
+    /// [`Cut::spread_overlay`]: a person changes an overlay once. The address is checked by
+    /// the caller.
     pub fn set_overlay(&self, at: TakeAt, index: usize, overlay: Option<Overlay>) -> Cut {
-        let mut cut = self.clone();
-        let block = &cut.chapters[at.chapter].takes[at.take];
+        let block = &self.chapters[at.chapter].takes[at.take];
         let (take, old) = (block.take.clone(), block.overlays[index].clone());
-        let blocks = cut.chapters.iter_mut().flat_map(|c| &mut c.takes);
-        for edit in blocks
-            .chain(&mut cut.left_effects)
-            .filter(|e| e.take == take)
-        {
-            match &overlay {
-                Some(new) => edit
-                    .overlays
-                    .iter_mut()
-                    .filter(|o| **o == old)
-                    .for_each(|o| o.clone_from(new)),
-                None => edit.overlays.retain(|o| *o != old),
+        let mut cut = self.clone();
+        cut.spread_overlay(&take, Some(&old), overlay);
+        cut
+    }
+
+    /// Draws `overlay` on top of the overlays of the block at `at`, and of every other block
+    /// of its take whose media it overlaps ([`Cut::spread_overlay`]).
+    pub fn add_overlay(&self, at: TakeAt, overlay: Overlay) -> Result<Cut, EditError> {
+        let take = self.take(at)?.take.clone();
+        let mut cut = self.clone();
+        cut.spread_overlay(&take, None, Some(overlay));
+        Ok(cut)
+    }
+
+    /// The one place an overlay of `take` is placed, changed or removed: takes `old` out of
+    /// every block of the take and of the material that left the cut ([`Cut::material`]), and
+    /// puts `new` in every block of the take whose media it overlaps, where `old` was or on
+    /// top, and with the material that left while part of its range is in no block. So a blur
+    /// that is placed or lengthened across a splice covers what plays on both sides of it, as
+    /// one that composing carried across does.
+    fn spread_overlay(&mut self, take: &Id, old: Option<&Overlay>, new: Option<Overlay>) {
+        let spans = self.spans(take);
+        let waits = new.as_ref().is_some_and(|new| {
+            let mut cursor = Micros(0);
+            let mut outside = false;
+            for span in &spans {
+                outside |= window(cursor, span.from()).is_some_and(|gap| gap.overlaps(new.range));
+                cursor = cursor.max(span.to());
+            }
+            outside || window(cursor, Micros(u64::MAX)).is_some_and(|gap| gap.overlaps(new.range))
+        });
+        if waits && !self.left_effects.iter().any(|l| l.take == *take) {
+            self.left_effects.push(TakeEdit {
+                take: take.clone(),
+                ranges: Vec::new(),
+                layouts: Vec::new(),
+                zooms: Vec::new(),
+                overlays: Vec::new(),
+            });
+            self.left_effects
+                .sort_by(|a, b| takes_order(&a.take).cmp(&takes_order(&b.take)));
+        }
+        let blocks = self.chapters.iter_mut().flat_map(|c| &mut c.takes);
+        let blocks = blocks.filter(|e| e.take == *take).map(|e| (e, false));
+        let left = self.left_effects.iter_mut().filter(|l| l.take == *take);
+        for (edit, left) in blocks.chain(left.map(|l| (l, true))) {
+            let was = old.and_then(|old| edit.overlays.iter().position(|o| o == old));
+            edit.overlays.retain(|o| Some(o) != old);
+            let Some(new) = &new else { continue };
+            let plays = if left {
+                waits
+            } else {
+                span_of(edit).is_some_and(|span| span.overlaps(new.range))
+            };
+            if plays && !edit.overlays.contains(new) {
+                let index = was.unwrap_or(edit.overlays.len());
+                edit.overlays.insert(index, new.clone());
             }
         }
-        cut.left_effects
+        self.left_effects
             .retain(|l| !(l.layouts.is_empty() && l.zooms.is_empty() && l.overlays.is_empty()));
-        cut
+    }
+
+    /// The media each block of `take` spans, from its first range to its last, in take order.
+    fn spans(&self, take: &Id) -> Vec<TimeRange> {
+        let blocks = self.chapters.iter().flat_map(|c| &c.takes);
+        let mut spans: Vec<TimeRange> = blocks
+            .filter(|edit| edit.take == *take)
+            .filter_map(span_of)
+            .collect();
+        spans.sort_by_key(|span| span.from());
+        spans
     }
 
     /// Sets the zoom `index` of the block at `at` to `scale` percent, at least 100.
@@ -599,23 +652,25 @@ impl Cut {
             .collect())
     }
 
-    /// Places `overlay`, a written node, in the block of the main cut that keeps `take` at the
-    /// overlay's start, over the block's other overlays: how a person or a tool places an
-    /// overlay preset ([`crate::OverlayPreset::place`]).
+    /// Places `overlay`, a written node, in the main cut, which must keep `take` at the
+    /// overlay's start: over the other overlays of every block of the take whose media it
+    /// overlaps ([`Cut::spread_overlay`]). How a person or a tool places an overlay preset
+    /// ([`crate::OverlayPreset::place`]), a bleep or a blur.
     pub fn place_overlay(&self, take: &Id, overlay: Overlay) -> Result<Cut, EditError> {
         let at = overlay.range.from();
         let kept = TimeRange::new(at, Micros(at.0 + 1)).expect("a microsecond");
-        let mut cut = self.clone();
-        let block = cut
-            .chapters
-            .iter_mut()
-            .flat_map(|c| &mut c.takes)
-            .find(|edit| edit.take == *take && edit.keeps(kept))
-            .ok_or_else(|| EditError::NotKept {
+        let blocks = self.chapters.iter().flat_map(|c| &c.takes);
+        if !blocks
+            .into_iter()
+            .any(|edit| edit.take == *take && edit.keeps(kept))
+        {
+            return Err(EditError::NotKept {
                 take: take.clone(),
                 at,
-            })?;
-        block.overlays.push(overlay);
+            });
+        }
+        let mut cut = self.clone();
+        cut.spread_overlay(take, None, Some(overlay));
         Ok(cut)
     }
 
@@ -971,18 +1026,7 @@ impl Cut {
     /// took back, see [`Cut::material`]. An overlay that reaches from a block into media that
     /// left is in both, whole, until a block holds all of its media again.
     fn settle_left(mut self, before: &Cut) -> Cut {
-        let spans = |take: &Id| {
-            let blocks = self.chapters.iter().flat_map(|c| &c.takes);
-            let mut spans: Vec<TimeRange> = blocks
-                .filter(|edit| edit.take == *take)
-                .filter_map(|edit| {
-                    let (first, last) = (edit.ranges.first()?, edit.ranges.last()?);
-                    TimeRange::new(first.range().from(), last.range().to())
-                })
-                .collect();
-            spans.sort_by_key(|span| span.from());
-            spans
-        };
+        let spans = |take: &Id| self.spans(take);
         let blocks = before.chapters.iter().flat_map(|c| &c.takes);
         let cuts = blocks.flat_map(|edit| {
             edit.ranges.iter().filter_map(|r| match *r {
@@ -1146,6 +1190,12 @@ impl Cut {
         });
         Ok(self)
     }
+}
+
+/// The media a block spans, from its first range to its last.
+fn span_of(edit: &TakeEdit) -> Option<TimeRange> {
+    let (first, last) = (edit.ranges.first()?, edit.ranges.last()?);
+    TimeRange::new(first.range().from(), last.range().to())
 }
 
 /// Whether `range` overlaps none of `taken`.
@@ -2112,6 +2162,44 @@ mod tests {
         let removed = composed.remove_placed(at, Placed::Overlay(0)).unwrap();
         assert!(removed.left_effects.is_empty());
         assert_eq!(overlays(&removed, "t01"), [[]]);
+    }
+
+    #[test]
+    fn a_blur_placed_or_lengthened_after_a_splice_covers_every_block_it_overlaps() {
+        // The first take plays to 4 s, the second says a sentence, the first plays from 8 s.
+        let cut = Cut::parse(
+            "chapter \"Intro\" {\n    take t01 {\n        keep from=0 to=4_000_000\n    }\n    take t02 {\n        keep from=4_000_000 to=8_000_000\n    }\n    take t01 {\n        keep from=8_000_000 to=12_000_000\n    }\n}\n",
+        )
+        .unwrap();
+        let blur = |from: f64, to: f64| Overlay {
+            template: Id::new("blur").unwrap(),
+            range: secs(from, to),
+            params: Vec::new(),
+        };
+        let take = Id::new("t01").unwrap();
+        let first = TakeAt {
+            chapter: 0,
+            take: 0,
+        };
+        let placed = cut.add_overlay(first, blur(3., 3.5)).unwrap();
+        assert_eq!(overlays(&placed, "t01"), [vec![(3, 3)], vec![]]);
+        assert!(placed.left_effects.is_empty());
+        // Lengthened to 11 s it is in both blocks, and waits for the media between them.
+        let long = placed
+            .set_range(first, Placed::Overlay(0), secs(3., 11.))
+            .unwrap();
+        assert_eq!(overlays(&long, "t01"), [[(3, 11)], [(3, 11)]]);
+        assert_eq!(long.left_effects[0].overlays, [blur(3., 11.)]);
+        assert_eq!(Cut::parse(&long.to_kdl()).unwrap(), long);
+        // Placed that long by a tool, or drawn in the first block, it is the same cut.
+        assert_eq!(cut.place_overlay(&take, blur(3., 11.)).unwrap(), long);
+        assert_eq!(cut.add_overlay(first, blur(3., 11.)).unwrap(), long);
+        // Moved into the second block, the first loses its copy and nothing waits.
+        let moved = long
+            .set_range(first, Placed::Overlay(0), secs(9., 11.))
+            .unwrap();
+        assert_eq!(overlays(&moved, "t01"), [vec![], vec![(9, 11)]]);
+        assert!(moved.left_effects.is_empty());
     }
 
     #[test]

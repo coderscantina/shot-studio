@@ -264,7 +264,7 @@ impl EditScreen {
             return;
         };
         let overlay = draft.overlay(t);
-        self.edit(cx, |cut| crate::place::with_overlay(cut, at, overlay));
+        self.edit(cx, |cut| cut.add_overlay(at, overlay));
         let index = self
             .folder
             .read(cx)

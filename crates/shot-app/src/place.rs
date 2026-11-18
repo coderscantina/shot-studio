@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 
 use shot_audio::sound::Library;
 use shot_core::{
-    Brand, Cut, EditError, Effect, ElementKind, Elements, Id, Layer, LottieTemplate, Micros,
-    Overlay, OverrideEffect, ParamValue, Point, Provenance, Slot, SlotType, TakeAt, TimeRange,
+    Brand, Cut, Effect, ElementKind, Elements, Id, Layer, LottieTemplate, Micros, Overlay,
+    OverrideEffect, ParamValue, Point, Provenance, Slot, SlotType, TimeRange,
 };
 use shot_render::lottie::{self, Finding, SlotKind};
 use shot_render::overlay::{self, callout};
@@ -123,18 +123,6 @@ pub fn with_sound(
         o.effects.sort_by_key(OverrideEffect::key);
     });
     Ok((cut, text))
-}
-
-/// `cut` with `overlay` drawn on top of the overlays of the block at `at`.
-pub fn with_overlay(cut: &Cut, at: TakeAt, overlay: Overlay) -> Result<Cut, EditError> {
-    let mut cut = cut.clone();
-    cut.chapters
-        .get_mut(at.chapter)
-        .and_then(|c| c.takes.get_mut(at.take))
-        .ok_or(EditError::UnknownTake(at))?
-        .overlays
-        .push(overlay);
-    Ok(cut)
 }
 
 fn param(name: &str, value: ParamValue) -> (Id, ParamValue) {

@@ -197,7 +197,7 @@ impl EditScreen {
                     Ok(overlay) => {
                         this.text.note = None;
                         this.selection = None;
-                        this.edit(cx, |cut| crate::place::with_overlay(cut, at, overlay));
+                        this.edit(cx, |cut| cut.add_overlay(at, overlay));
                     }
                     Err(error) => {
                         this.text.note = Some(format!(
