@@ -2665,11 +2665,13 @@ fn playhead_line(this: &EditScreen, window: &Range<u64>) -> Option<Div> {
 
 /// The range of an overlay after a drag of the copy one block of its take shows. `stored` is the
 /// overlay's range, `block` the media that block spans, and the drag moved what the lane showed
-/// from `was` to `now`, all media time of the take. The copy is clipped to its block, so the
-/// overlay gets the drag's change and not the copy's range: a trim moves the edge only when it
-/// is the overlay's own edge and not the block's, and a body drag shifts both ends. The range
-/// may reach past the block, where the take's other blocks have their copies. `None` when the
-/// drag changes nothing.
+/// from `was` to `now`, all media time of the take. The copy is clipped to its block and to the
+/// block's cuts. An edge the overlay has in the block goes where the drag put it, so an edge
+/// that sat in a cut is stored where it was dropped. An edge outside the block, where the take's
+/// other blocks have their copies, moves by as much as the copy's edge did, with a body drag
+/// only: a trim of the block's edge changes nothing. Each edge gets its own change, since a cut
+/// between the two makes them differ and everything the lane showed covered must be. `None`
+/// when the drag changes nothing.
 fn dragged_overlay(
     stored: TimeRange,
     block: TimeRange,
@@ -2677,18 +2679,22 @@ fn dragged_overlay(
     now: TimeRange,
     grip: Grip,
 ) -> Option<TimeRange> {
-    let by = |now: Micros, was: Micros| now.0 as i64 - was.0 as i64;
-    let (start, end) = (by(now.from(), was.from()), by(now.to(), was.to()));
-    let (start, end) = match grip {
-        Grip::Start if stored.from() >= block.from() => (start, 0),
-        Grip::End if stored.to() <= block.to() => (0, end),
-        Grip::Body => (start, start),
-        Grip::Start | Grip::End => return None,
+    let by = |stored: Micros, now: Micros, was: Micros| {
+        Micros(stored.0.saturating_add_signed(now.0 as i64 - was.0 as i64))
     };
-    let moved = TimeRange::new(
-        Micros(stored.from().0.saturating_add_signed(start)),
-        Micros(stored.to().0.saturating_add_signed(end)),
-    )?;
+    let from = match (grip, stored.from() >= block.from()) {
+        (Grip::End, _) => stored.from(),
+        (_, true) => now.from(),
+        (Grip::Body, false) => by(stored.from(), now.from(), was.from()),
+        (Grip::Start, false) => return None,
+    };
+    let to = match (grip, stored.to() <= block.to()) {
+        (Grip::Start, _) => stored.to(),
+        (_, true) => now.to(),
+        (Grip::Body, false) => by(stored.to(), now.to(), was.to()),
+        (Grip::End, false) => return None,
+    };
+    let moved = TimeRange::new(from, to)?;
     (moved != stored).then_some(moved)
 }
 
@@ -2768,6 +2774,25 @@ mod tests {
             Grip::Start,
         );
         assert_eq!(first, Some(secs(2., 11.)));
+    }
+
+    #[test]
+    fn a_blur_dragged_over_a_cut_covers_what_plays_and_an_edge_in_a_cut_goes_where_dropped() {
+        let secs = |from: f64, to: f64| {
+            TimeRange::new(Micros((from * 1e6) as u64), Micros((to * 1e6) as u64)).unwrap()
+        };
+        let block = secs(0., 12.);
+        // The block cuts 4 to 8 s. A blur over output 1 to 3 s is dragged to 3 to 5 s, which
+        // shows media 3 to 4 s and 8 to 9 s: all of it is blurred.
+        let moved = dragged_overlay(secs(1., 3.), block, secs(1., 3.), secs(3., 9.), Grip::Body);
+        assert_eq!(moved, Some(secs(3., 9.)));
+        // The block cuts 4 to 6 s, so a blur from 5 s shows from 6 s. Its start dragged to 7 s
+        // is at 7 s, not a second after where it was stored.
+        let stored = secs(5., 9.);
+        let trimmed = dragged_overlay(stored, block, secs(6., 9.), secs(7., 9.), Grip::Start);
+        assert_eq!(trimmed, Some(secs(7., 9.)));
+        let shifted = dragged_overlay(stored, block, secs(6., 9.), secs(7., 10.), Grip::Body);
+        assert_eq!(shifted, Some(secs(7., 10.)));
     }
 
     #[test]
