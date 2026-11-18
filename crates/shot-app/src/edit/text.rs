@@ -12,7 +12,7 @@ use gpui_component::Sizable;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_component::tooltip::Tooltip;
-use shot_core::{Layout, Micros, Placed, RangeEdit, TakeAt, WordState, Zoom};
+use shot_core::{Layout, Micros, Placed, TakeAt, WordState, Zoom};
 
 use super::EditScreen;
 use super::lane_menu::{self, Place};
@@ -1844,8 +1844,6 @@ fn zoom_section(
 /// Words of a long selection the inspector quotes.
 const QUOTE_WORDS: usize = 40;
 
-/// The chapter on show: its length and what the cuts took out of it. Counts from the cut list,
-/// so takes without a transcript count too; back-to-back removals are one cut.
 /// What the style rules cut of the whole video, see [`super::rules::summary`].
 fn rules_summary(this: &EditScreen, cx: &App) -> Div {
     let folder = this.folder.read(cx);
@@ -1853,29 +1851,19 @@ fn rules_summary(this: &EditScreen, cx: &App) -> Div {
     super::rules::summary(&folder.project.cut, folder.lock(), format)
 }
 
+/// The chapter on show: its length and what a person's and the rules' cuts took out of it.
+/// Counts from the cut list and the lock, so takes without a transcript count too.
 fn chapter_summary(this: &EditScreen, cx: &App) -> Div {
     let Some(chapter) = this.map.chapters.get(this.chapter) else {
         return div();
     };
-    let cut = &this.folder.read(cx).project.cut;
-    let (mut cuts, mut removed) = (0, 0);
-    for take in cut
+    let folder = this.folder.read(cx);
+    let (cuts, removed) = folder
+        .project
+        .cut
         .chapters
         .get(this.chapter)
-        .into_iter()
-        .flat_map(|c| &c.takes)
-    {
-        let mut previous_removed = false;
-        for edit in &take.ranges {
-            let is_removed = matches!(edit, RangeEdit::Remove { .. });
-            if is_removed {
-                cuts += usize::from(!previous_removed);
-                removed += edit.range().duration().0;
-            }
-            previous_removed = is_removed;
-        }
-    }
-    let removed = shot_core::Micros(removed);
+        .map_or((0, Micros(0)), |c| crate::model::cut_out(c, folder.lock()));
     div()
         .flex()
         .flex_col()

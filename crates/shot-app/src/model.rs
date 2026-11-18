@@ -620,6 +620,21 @@ pub struct BlockDoc {
     pub removals: Vec<(TimeRange, RemovedBy)>,
 }
 
+/// How many cuts `chapter` has and how much they take out of it, a person's and the rules'
+/// together ([`removals`]). Removals back to back are one cut.
+pub fn cut_out(chapter: &shot_core::Chapter, lock: &Lock) -> (usize, Micros) {
+    let (mut cuts, mut removed) = (0, 0);
+    for edit in &chapter.takes {
+        let mut end = None;
+        for (range, _) in removals(edit, lock) {
+            cuts += usize::from(end != Some(range.from()));
+            removed += range.duration().0;
+            end = Some(range.to());
+        }
+    }
+    (cuts, Micros(removed))
+}
+
 /// The transcript of every block of `cut` styled by `lock` as `view` shows it.
 pub fn document(
     cut: &Cut,
@@ -1503,6 +1518,30 @@ mod tests {
         ("right", 2_500_000, 2_900_000),
         ("now", 3_000_000, 3_400_000),
     ];
+
+    #[test]
+    fn a_chapters_cut_out_counts_the_rules_cuts_with_a_persons() {
+        let chapter = Chapter {
+            title: "A".into(),
+            takes: vec![block(
+                "t01",
+                vec![
+                    keep(0, 1_000_000),
+                    remove(1_000_000, 1_500_000),
+                    keep(1_500_000, 4_000_000),
+                ],
+            )],
+        };
+        // A rule's silence right after the person's cut is the same cut, a later one its own.
+        let lock = silences(&[(1_500_000, 2_000_000), (3_000_000, 3_200_000)]);
+        assert_eq!(cut_out(&chapter, &lock), (2, Micros(1_200_000)));
+        let rules_only = Chapter {
+            title: "A".into(),
+            takes: vec![block("t01", vec![keep(0, 4_000_000)])],
+        };
+        assert_eq!(cut_out(&rules_only, &lock), (2, Micros(700_000)));
+        assert_eq!(cut_out(&rules_only, &Lock::default()), (0, Micros(0)));
+    }
 
     #[test]
     fn a_cut_joins_a_persons_removal_but_never_a_rules_cut() {
