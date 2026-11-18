@@ -61,9 +61,10 @@ pub struct Row {
     pub attempts: Vec<Attempt>,
     /// Each attempt's score from 0 to 100, in the order of `attempts`, see [`score`].
     pub scores: Vec<u8>,
-    /// What plays the row when no person chose, in order: the best scored attempt, the newest
-    /// of equals, with each of its sentences that another attempt says cleaner, or as clean
-    /// and later, taken from that attempt. Padded into the gaps, see [`Lineup::padded`].
+    /// What plays the row when no person chose, in order: the best scored of the attempts that
+    /// say the row whole, the newest of equals, with each of its sentences that another attempt
+    /// says cleaner, or as clean and later, taken from that attempt. Padded into the gaps, see
+    /// [`Lineup::padded`].
     pub proposal: Vec<Attempt>,
     /// Whether the proposal is worth a person's look: it plays more than one attempt, an
     /// older attempt over a newer one, or an attempt that leads by [`CLOSE`] points or less.
@@ -88,6 +89,9 @@ const JOIN_PAD: Micros = Micros(300_000);
 const CLOSE: u8 = 5;
 /// Sentences this alike ([`alike`]) say the same thing.
 const SAME_SENTENCE: f64 = 0.5;
+/// An attempt says a row whole when it says this share of the content words that the attempt
+/// with the most says: four fifths.
+const WHOLE: (usize, usize) = (4, 5);
 
 impl Lineup {
     /// Lines up `takes` against the beats of `script`. `cut` names the groups when the script
@@ -132,6 +136,7 @@ impl Lineup {
                     lineup.push(places[row], take.transcript.take(), range);
                 }
             }
+            lineup.propose(&takes, texts);
         } else {
             lineup.groups.push(Group {
                 title: String::new(),
@@ -141,8 +146,9 @@ impl Lineup {
                 lineup.add_unscripted(take.transcript);
             }
             lineup.groups = under_chapters(std::mem::take(&mut lineup.groups[0].rows), cut);
+            let texts = lineup.rows().map(|(_, r)| content_words(&r.text)).collect();
+            lineup.propose(&takes, texts);
         }
-        lineup.propose(&takes);
         lineup
     }
 
@@ -171,9 +177,16 @@ impl Lineup {
     fn add_unscripted(&mut self, transcript: &Transcript) {
         let take = transcript.take();
         let words = transcript.words();
-        let texts: Vec<HashSet<String>> = self
+        let texts: Vec<Vec<HashSet<String>>> = self
             .rows()
-            .map(|(_, row)| content_words(&row.text).into_iter().collect())
+            .map(|(_, row)| {
+                let said: Vec<&str> = row.text.split_whitespace().collect();
+                let ends = |i: usize| said[i].ends_with(['.', '?', '!']);
+                sentence_ranges(said.len(), ends)
+                    .into_iter()
+                    .map(|s| content_set(said[s].iter().copied()))
+                    .collect()
+            })
             .collect();
         let places: Vec<RowAt> = self.rows().map(|(at, _)| at).collect();
         let sentences = sentences(words);
@@ -214,15 +227,16 @@ impl Lineup {
         }
     }
 
-    /// Scores every attempt and writes each row's proposal.
-    fn propose(&mut self, takes: &[&TakeWords<'_>]) {
+    /// Scores every attempt and writes each row's proposal. `texts` are the content words of
+    /// each row in order: for a beat the ones the takes were aligned to, its bullet and script.
+    fn propose(&mut self, takes: &[&TakeWords<'_>], texts: Vec<Vec<String>>) {
         let facts: BTreeMap<&Id, Facts<'_>> = takes
             .iter()
             .map(|t| (t.transcript.take(), Facts::of(t)))
             .collect();
         let mut proposals = Vec::new();
-        for (at, row) in self.rows() {
-            let beat: HashSet<String> = content_words(&row.text).into_iter().collect();
+        for ((at, row), text) in self.rows().zip(texts) {
+            let beat: HashSet<String> = text.into_iter().collect();
             let scores: Vec<u8> = row
                 .attempts
                 .iter()
@@ -359,8 +373,6 @@ struct Facts<'a> {
     words: &'a [Word],
     /// Fillers, retakes and misspoken words.
     stumbles: Vec<TimeRange>,
-    /// Retakes and misspoken words alone: what makes a sentence a flub.
-    flubs: Vec<TimeRange>,
     /// Pauses mid-sentence.
     pauses: Vec<TimeRange>,
 }
@@ -382,7 +394,6 @@ impl<'a> Facts<'a> {
                 ElementKind::Retake,
                 ElementKind::Misspoken,
             ]),
-            flubs: of(&[ElementKind::Retake, ElementKind::Misspoken]),
             pauses: of(&[ElementKind::Pause]),
         }
     }
@@ -416,8 +427,7 @@ impl<'a> Facts<'a> {
         let Some(last) = words.last() else {
             return 0;
         };
-        let text: Vec<&str> = words.iter().map(|w| w.text.as_str()).collect();
-        let said: HashSet<String> = content_words(&text.join(" ")).into_iter().collect();
+        let said = content_set(words.iter().map(|w| w.text.as_str()));
         let close = if beat.is_empty() {
             1.0
         } else {
@@ -428,24 +438,23 @@ impl<'a> Facts<'a> {
         score.round() as u8
     }
 
-    /// The sentences of an attempt that are no flub: less than half of each is a retake or a
-    /// misspoken word. Each with its content words and how clean it is, 0 to 100.
+    /// The sentences of an attempt, each with its content words and how clean it is, 0 to
+    /// 100. A flubbed sentence is one too, so another attempt's saying of it can win.
     fn sentences(&self, range: TimeRange) -> Vec<Said> {
         let words = words_in(self.words, range);
         sentences(words)
             .into_iter()
-            .filter_map(|s| {
+            .map(|s| {
                 let words = &words[s];
-                let flubbed = Self::hit(words, &self.flubs);
-                if 2 * flubbed >= words.len() {
-                    return None;
-                }
-                let text: Vec<&str> = words.iter().map(|w| w.text.as_str()).collect();
-                Some(Said {
+                let meant = words
+                    .iter()
+                    .filter(|w| !self.stumbles.iter().any(|s| holds(*s, middle(w.range))));
+                Said {
                     range: span(words),
-                    content: content_words(&text.join(" ")).into_iter().collect(),
-                    clean: (100.0 * self.clean(words, &self.flubs)).round() as u8,
-                })
+                    content: content_set(words.iter().map(|w| w.text.as_str())),
+                    meant: content_set(meant.map(|w| w.text.as_str())),
+                    clean: (100.0 * self.clean(words, &self.stumbles)).round() as u8,
+                }
             })
             .collect()
     }
@@ -454,47 +463,65 @@ impl<'a> Facts<'a> {
 /// A sentence of an attempt.
 struct Said {
     range: TimeRange,
+    /// Its content words, by which sentences are matched.
     content: HashSet<String>,
+    /// The content words outside its stumbles: what a sentence that replaces it must say.
+    meant: HashSet<String>,
+    /// The share of its words that is no stumble, 0 to 100.
     clean: u8,
 }
 
-/// The pieces that play a row, see [`Row::proposal`]: the best scored attempt, the newest of
-/// equals, and for each of its sentences the cleanest saying of it among the attempts, the
-/// newest of equals. Unpadded, with whether it is worth a look, see [`Row::look`].
+/// The pieces that play a row, see [`Row::proposal`]. The frame is the best scored attempt,
+/// the newest of equals, among those that say the row whole ([`WHOLE`]), so a retake of one
+/// sentence never stands for the beat. Each sentence of the frame then comes from the attempt
+/// that says it cleanest, the newest of equals, where that attempt's sentence says every
+/// content word the frame's means. Unpadded, with whether it is worth a look, see
+/// [`Row::look`].
 fn proposal(
     attempts: &[Attempt],
     scores: &[u8],
     facts: &BTreeMap<&Id, Facts<'_>>,
 ) -> (Vec<Attempt>, bool) {
-    let Some(base) = (0..attempts.len()).max_by_key(|&i| (scores[i], i)) else {
+    let said: Vec<Vec<Said>> = attempts
+        .iter()
+        .map(|a| {
+            facts
+                .get(&a.take)
+                .map_or_else(Vec::new, |f| f.sentences(a.range))
+        })
+        .collect();
+    let says = |i: usize| {
+        let meant: HashSet<&String> = said[i].iter().flat_map(|s| &s.meant).collect();
+        meant.len()
+    };
+    let most = (0..attempts.len()).map(says).max().unwrap_or(0);
+    let Some(base) = (0..attempts.len())
+        .filter(|&i| WHOLE.1 * says(i) >= WHOLE.0 * most)
+        .max_by_key(|&i| (scores[i], i))
+    else {
         return (Vec::new(), false);
     };
     let lead = (0..attempts.len())
         .filter(|&i| i != base)
-        .map(|i| scores[base] - scores[i])
+        .map(|i| scores[base].saturating_sub(scores[i]))
         .min();
     let look = base + 1 < attempts.len() || lead.is_some_and(|lead| (1..=CLOSE).contains(&lead));
-    let said = |i: usize| {
-        facts
-            .get(&attempts[i].take)
-            .map_or_else(Vec::new, |f| f.sentences(attempts[i].range))
-    };
-    let slots = said(base);
+    let slots = &said[base];
     // Per slot of the base: the attempt that wins it and its sentence there.
     let mut winners: Vec<(u8, usize, TimeRange)> =
         slots.iter().map(|s| (s.clean, base, s.range)).collect();
     for other in (0..attempts.len()).filter(|&i| i != base) {
-        for sentence in said(other) {
+        for sentence in &said[other] {
             let slot = slots
                 .iter()
                 .enumerate()
+                .filter(|(_, slot)| slot.meant.is_subset(&sentence.content))
                 .map(|(i, slot)| (alike(&slot.content, &sentence.content), i))
                 .filter(|(alike, _)| *alike >= SAME_SENTENCE)
                 .max_by(|a, b| a.0.total_cmp(&b.0).then(b.1.cmp(&a.1)));
             if let Some((_, slot)) = slot {
                 let (clean, by, _) = winners[slot];
-                // A later sentence of the same attempt is its newer try at the slot.
-                if (sentence.clean, other) >= (clean, by) || by == other {
+                if (sentence.clean, other) >= (clean, by) {
                     winners[slot] = (sentence.clean, other, sentence.range);
                 }
             }
@@ -570,16 +597,18 @@ fn alike(a: &HashSet<String>, b: &HashSet<String>) -> f64 {
     a.intersection(b).count() as f64 / all as f64
 }
 
-/// The row a sentence of `words` says again: the one it shares the most content words with, at
-/// least three and half of its own.
-fn said_again(words: &[Word], rows: &[HashSet<String>]) -> Option<usize> {
-    let text: Vec<&str> = words.iter().map(|w| w.text.as_str()).collect();
-    let said: HashSet<String> = content_words(&text.join(" ")).into_iter().collect();
+/// The row a sentence of `words` says again: the earliest of those with the sentence most
+/// like it ([`alike`]), at least [`SAME_SENTENCE`]. `rows` are each row's sentences. A new
+/// sentence that shares words with a long row is therefore no retake of it.
+fn said_again(words: &[Word], rows: &[Vec<HashSet<String>>]) -> Option<usize> {
+    let said = content_set(words.iter().map(|w| w.text.as_str()));
     rows.iter()
         .enumerate()
-        .map(|(i, row)| (said.intersection(row).count(), i))
-        .filter(|(shared, _)| *shared >= 3 && 2 * shared >= said.len())
-        .max_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)))
+        .filter_map(|(i, row)| {
+            let most = row.iter().map(|s| alike(s, &said)).max_by(f64::total_cmp)?;
+            (most >= SAME_SENTENCE).then_some((most, i))
+        })
+        .max_by(|a, b| a.0.total_cmp(&b.0).then(b.1.cmp(&a.1)))
         .map(|(_, i)| i)
 }
 
@@ -642,10 +671,15 @@ fn ends_sentence(word: &Word) -> bool {
 
 /// The words of each sentence, as indexes: up to a word that ends with `.`, `?` or `!`.
 fn sentences(words: &[Word]) -> Vec<Range<usize>> {
+    sentence_ranges(words.len(), |i| ends_sentence(&words[i]))
+}
+
+/// `len` words as sentences, each up to a word that `ends` one.
+fn sentence_ranges(len: usize, ends: impl Fn(usize) -> bool) -> Vec<Range<usize>> {
     let mut out = Vec::new();
     let mut start = 0;
-    for (i, word) in words.iter().enumerate() {
-        if ends_sentence(word) || i + 1 == words.len() {
+    for i in 0..len {
+        if ends(i) || i + 1 == len {
             out.push(start..i + 1);
             start = i + 1;
         }
@@ -700,13 +734,7 @@ fn align(
         .collect();
     let said: Vec<HashSet<String>> = sentences
         .iter()
-        .map(|sentence| {
-            let text: Vec<&str> = words[sentence.clone()]
-                .iter()
-                .map(|w| w.text.as_str())
-                .collect();
-            content_words(&text.join(" ")).into_iter().collect()
-        })
+        .map(|sentence| content_set(words[sentence.clone()].iter().map(|w| w.text.as_str())))
         .collect();
     let score =
         |j: usize, row: &HashSet<&str>| said[j].iter().filter(|w| row.contains(w.as_str())).count();
@@ -796,6 +824,12 @@ fn content_words(text: &str) -> Vec<String> {
             _ => w,
         })
         .collect()
+}
+
+/// The [`content_words`] of `words` as a set.
+fn content_set<'a>(words: impl Iterator<Item = &'a str>) -> HashSet<String> {
+    let text: Vec<&str> = words.collect();
+    content_words(&text.join(" ")).into_iter().collect()
 }
 
 /// Which words of `a` and of `b` the other does not have in the same order, compared ignoring
@@ -1169,6 +1203,129 @@ mod tests {
         );
         assert!(lineup.contested());
         assert_eq!(proposals(&lineup)[1][0].0, "t02");
+    }
+
+    #[test]
+    fn a_retake_of_one_sentence_never_stands_for_the_whole_beat() {
+        // Both score 100 against the bullet, and the second take says a third of the beat.
+        let first = said(
+            "t01",
+            1,
+            "We install the speech model. It verifies a checksum on disk. Then we go on.",
+        );
+        let second = said("t02", 1, "We install the speech model.");
+        let script = Script::parse("# A\n\n## Setup\n\n- Install the speech model\n").unwrap();
+        let lineup = Lineup::new(
+            &script,
+            &Cut::default(),
+            &[with(&first, None), with(&second, None)],
+        );
+        assert_eq!(lineup.groups[0].rows[0].scores, [100, 100]);
+        assert_eq!(
+            proposals(&lineup)[0],
+            [("t02".into(), 9, 29), ("t01".into(), 43, 101)]
+        );
+    }
+
+    #[test]
+    fn an_attempt_that_skips_the_beats_script_scores_lower() {
+        let script = Script::parse(
+            "# A\n\n## Setup\n\n- Install the speech model\n\n  It verifies a checksum on disk.\n",
+        )
+        .unwrap();
+        let first = said(
+            "t01",
+            0,
+            "Install the speech model. It verifies a checksum on disk.",
+        );
+        let second = said("t02", 0, "Install the speech model.");
+        let lineup = Lineup::new(
+            &script,
+            &Cut::default(),
+            &[with(&first, None), with(&second, None)],
+        );
+        let row = &lineup.groups[0].rows[0];
+        assert_eq!(row.scores[0], 100);
+        assert!(row.scores[1] < 85, "{:?}", row.scores);
+    }
+
+    #[test]
+    fn a_later_sentence_that_says_less_or_holds_a_filler_does_not_replace() {
+        let script = Script::parse("# A\n\n## Setup\n\n- The loader and the router\n").unwrap();
+        let first = said(
+            "t01",
+            0,
+            "The loader runs on the server before the page renders. The router keeps routes next to pages.",
+        );
+        // The first sentence drops "before the page renders", the second holds a filler.
+        let second = said(
+            "t02",
+            0,
+            "The loader runs on the server. The router basically keeps routes next to pages.",
+        );
+        let mut filler = Elements::new(id("t02"));
+        filler
+            .push(Element::over(
+                ElementKind::Filler,
+                TimeRange::new(Micros(5_200_000), Micros(5_500_000)).unwrap(),
+                "whisper",
+            ))
+            .unwrap();
+        let lineup = Lineup::new(
+            &script,
+            &Cut::default(),
+            &[with(&first, None), with(&second, Some(&filler))],
+        );
+        assert_eq!(proposals(&lineup)[0], [("t01".into(), 0, 83)]);
+    }
+
+    #[test]
+    fn a_flubbed_sentence_is_replaced_by_another_attempts_clean_one() {
+        let first = said(
+            "t01",
+            1,
+            "Install the speech model, install the speech model. It verifies a checksum on disk.",
+        );
+        let second = said("t02", 1, "Install the speech model.");
+        // Half of the first sentence is a restart.
+        let mut restart = Elements::new(id("t01"));
+        restart
+            .push(Element::over(
+                ElementKind::Retake,
+                TimeRange::new(Micros(1_000_000), Micros(2_500_000)).unwrap(),
+                "whisper",
+            ))
+            .unwrap();
+        let script = Script::parse("# A\n\n## Setup\n\n- Install the speech model\n").unwrap();
+        let lineup = Lineup::new(
+            &script,
+            &Cut::default(),
+            &[with(&first, Some(&restart)), with(&second, None)],
+        );
+        assert_eq!(
+            proposals(&lineup)[0],
+            [("t02".into(), 9, 25), ("t01".into(), 55, 81)]
+        );
+    }
+
+    #[test]
+    fn without_beats_a_new_sentence_that_shares_words_with_a_long_row_is_appended() {
+        let script = Script::parse("# A\n").unwrap();
+        let first = said(
+            "t01",
+            0,
+            "The router keeps routes next to pages, the loader runs on the server and the cache stores every rendered page.",
+        );
+        let second = said("t02", 0, "Our loader cache stores sessions too.");
+        let lineup = Lineup::new(
+            &script,
+            &Cut::default(),
+            &[with(&first, None), with(&second, None)],
+        );
+        assert_eq!(
+            texts(&lineup),
+            [vec![("t01".into(), 0)], vec![("t02".into(), 0)]]
+        );
     }
 
     #[test]
