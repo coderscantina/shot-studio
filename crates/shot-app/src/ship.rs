@@ -290,7 +290,15 @@ impl ShipScreen {
         }
         let folder = self.folder.read(cx);
         let dir = folder.dir.clone();
-        match ship::plan(&dir, &folder.project, &folder.transcripts, self.options()) {
+        let lock = folder.lock().clone();
+        let planned = ship::plan(
+            &dir,
+            &folder.project,
+            &lock,
+            &folder.transcripts,
+            self.options(),
+        );
+        match planned {
             Ok(cuts) => {
                 self.cuts = cuts;
                 self.plan_error = None;
@@ -347,15 +355,18 @@ impl ShipScreen {
                     preview(&dir, &cut, &send);
                     let result = match known {
                         Some(mut measured) => {
-                            media::check_files(&dir, &project, &cut.name, &cut.export).map(|p| {
-                                measured.extend(p);
-                                measured.sort_by_key(|p| p.check);
-                                measured
-                            })
+                            media::check_files(&dir, &project, &lock, &cut.name, &cut.export).map(
+                                |p| {
+                                    measured.extend(p);
+                                    measured.sort_by_key(|p| p.check);
+                                    measured
+                                },
+                            )
                         }
-                        None => media::check_cut_until(
+                        None => media::check_cut_with(
                             &dir,
                             &project,
+                            &lock,
                             &cut.name,
                             &cut.export,
                             &cancelled,
@@ -529,11 +540,14 @@ impl ShipScreen {
         if self.run.is_some() || cuts.is_empty() {
             return;
         }
-        // The plan and the export read one state of the project. The cuts planned when the
-        // screen opened may describe an older one, as when a take's analysis composed the cut.
+        // The plan, the export and its checks read one state of the project and one lock,
+        // the folder's as it is now. The cuts planned when the screen opened may describe an
+        // older one, as when a take's analysis composed the cut, and `cut.lock` may be
+        // written again while the run renders.
         let folder = self.folder.read(cx);
         let (dir, project) = (folder.dir.clone(), folder.project.clone());
-        let planned = ship::plan(&dir, &project, &folder.transcripts, self.options());
+        let lock = folder.lock().clone();
+        let planned = ship::plan(&dir, &project, &lock, &folder.transcripts, self.options());
         self.cuts = match planned {
             Ok(planned) => planned,
             Err(e) => {
@@ -565,7 +579,15 @@ impl ShipScreen {
         });
         let send = self.send.clone();
         std::thread::spawn(move || {
-            let outcome = run(&dir, &project, &cuts, ship_to, force, &cancel, &send);
+            let outcome = run(
+                &dir,
+                (&project, &lock),
+                &cuts,
+                ship_to,
+                force,
+                &cancel,
+                &send,
+            );
             let _ = send.send(Event::Finished(outcome));
         });
         self.poll(cx);
@@ -2038,11 +2060,11 @@ impl Render for ShipScreen {
     }
 }
 
-/// Exports `cuts` and checks each, then uploads and tags when `ship_to` is given. Runs on its
-/// own thread and reports to `send`.
+/// Exports `cuts` and checks each with the project and the lock they were planned with, then
+/// uploads and tags when `ship_to` is given. Runs on its own thread and reports to `send`.
 fn run(
     dir: &Path,
-    project: &shot_core::Project,
+    (project, lock): (&shot_core::Project, &shot_core::Lock),
     cuts: &[PlannedCut],
     ship_to: Option<(Channel, Client)>,
     force: bool,
@@ -2061,7 +2083,7 @@ fn run(
             rendered: 0,
             to_render: 0,
         });
-        let result = match ship::export_cut(dir, project, cut, JOBS, &step, &cancelled) {
+        let result = match ship::export_cut(dir, project, lock, cut, JOBS, &step, &cancelled) {
             Err(ShipError::Cancelled) => return Outcome::Stopped,
             result => result.map_err(|e| e.to_string()),
         };

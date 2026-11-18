@@ -277,8 +277,22 @@ pub fn check_cut_until(
     export: &Path,
     cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<Vec<Problem>, MediaError> {
-    let mut problems = measure_until(video_dir, project, cut, export, cancelled)?;
-    problems.extend(check_files(video_dir, project, cut, export)?);
+    let lock = shot_render::lock::read(video_dir).map_err(|e| MediaError::Video(e.to_string()))?;
+    check_cut_with(video_dir, project, &lock, cut, export, cancelled)
+}
+
+/// [`check_cut_until`] of the cut styled by `lock`, the lock its export was rendered with,
+/// instead of the folder's `cut.lock` as it is now.
+pub fn check_cut_with(
+    video_dir: &Path,
+    project: &Project,
+    lock: &Lock,
+    cut: &str,
+    export: &Path,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<Vec<Problem>, MediaError> {
+    let mut problems = measure_until(project, lock, cut, export, cancelled)?;
+    problems.extend(check_files(video_dir, project, lock, cut, export)?);
     problems.sort_by_key(|p| p.check);
     Ok(problems)
 }
@@ -286,8 +300,8 @@ pub fn check_cut_until(
 /// The checks that read the export itself: loudness and black or frozen frames. They depend on
 /// the file alone, so a caller can keep their result while the file is unchanged.
 pub fn measure_until(
-    video_dir: &Path,
     project: &Project,
+    lock: &Lock,
     cut: &str,
     export: &Path,
     cancelled: &(dyn Fn() -> bool + Sync),
@@ -301,7 +315,7 @@ pub fn measure_until(
             ),
         }]);
     }
-    let (timeline, _) = timeline(video_dir, project)?;
+    let timeline = Timeline::evaluate(project, lock);
     let length = duration(output(&timeline, cut)?);
     // The audio and the frames are read side by side.
     let (loudness, frames) = std::thread::scope(|scope| {
@@ -315,15 +329,16 @@ pub fn measure_until(
     Ok(problems)
 }
 
-/// The checks over the files next to the export and the project: captions, links, chapters,
-/// the thumbnail and, on the main cut, overrides whose element is gone.
+/// The checks over the files next to the export and the project styled by `lock`: captions,
+/// links, chapters, the thumbnail and, on the main cut, overrides whose element is gone.
 pub fn check_files(
     video_dir: &Path,
     project: &Project,
+    lock: &Lock,
     cut: &str,
     export: &Path,
 ) -> Result<Vec<Problem>, MediaError> {
-    let (timeline, lock) = timeline(video_dir, project)?;
+    let timeline = Timeline::evaluate(project, lock);
     let output = output(&timeline, cut)?;
     let mut transcripts = HashMap::new();
     for segment in output.chapters.iter().flat_map(|c| &c.segments) {
@@ -361,16 +376,10 @@ pub fn check_files(
         .any(|ext| export.with_extension(ext).exists());
     problems.extend(check::thumbnail(output.kind, thumbnail));
     if output.kind == OutputKind::Main {
-        problems.extend(check::orphans(&lock));
+        problems.extend(check::orphans(lock));
     }
     problems.sort_by_key(|p| p.check);
     Ok(problems)
-}
-
-/// The timeline export renders, from the video's lock, and that lock.
-fn timeline(video_dir: &Path, project: &Project) -> Result<(Timeline, Lock), MediaError> {
-    let lock = shot_render::lock::read(video_dir).map_err(|e| MediaError::Video(e.to_string()))?;
-    Ok((Timeline::evaluate(project, &lock), lock))
 }
 
 fn output<'a>(timeline: &'a Timeline, cut: &str) -> Result<&'a Output, MediaError> {

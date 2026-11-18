@@ -205,11 +205,29 @@ pub fn export_until(
     cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<ExportReport, ExportError> {
     let lock = crate::lock::read(video_dir)?;
+    export_with(
+        video_dir, project, &lock, cut, out, options, progress, cancelled,
+    )
+}
+
+/// [`export_until`] styled by `lock` instead of the folder's `cut.lock` as it is now: a ship
+/// run plans, renders and checks with the one lock it read with the project.
+#[allow(clippy::too_many_arguments)]
+pub fn export_with(
+    video_dir: &Path,
+    project: &Project,
+    lock: &Lock,
+    cut: &str,
+    out: &Path,
+    options: ExportOptions,
+    progress: &(dyn Fn(Progress) + Sync),
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<ExportReport, ExportError> {
     let cache = |plan: &ExportPlan| Cache::new(video_dir, plan);
     render(
         video_dir,
         project,
-        &lock,
+        lock,
         &cache,
         cut,
         Some(out),
