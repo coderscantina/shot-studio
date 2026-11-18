@@ -2,7 +2,9 @@
 //! elements: each turns a take's transcript, speech, screen and markers into findings with a
 //! confidence. Nothing here knows the cut.
 
+use std::cmp::Reverse;
 use std::collections::HashMap;
+use std::ops::Range;
 
 use shot_core::{ElementKind, Micros, TimeRange, Transcript, Word, cut_before};
 
@@ -31,8 +33,18 @@ pub struct Finding {
 const SPEECH_PAD: u64 = 200_000;
 /// Repeats further apart than this are not a stumble.
 const REPEAT_GAP: Micros = Micros(2_000_000);
-/// A sentence restarted within this is a retake.
+/// A passage said again within this is a retake.
 const RESTART_WITHIN: Micros = Micros(20_000_000);
+/// How many words a first attempt and what follows it may run before the second one starts.
+const MAX_ATTEMPT: usize = 80;
+/// The most added, dropped or changed words an alignment holds, see [`allowed_changes`].
+const MAX_CHANGES: usize = 3;
+/// A sentence this short between two attempts goes with the first one ("It is, hmm, wait.").
+const MAX_ASIDE: usize = 6;
+/// Words before a repeated passage that open its sentence go with it ("Now the second change").
+const MAX_LEADING: usize = 2;
+/// Words after a cue that may come before the repeated passage starts ("Okay, the second").
+const MAX_CUE_LEAD_IN: usize = 2;
 /// Words at least this alike ([`similarity`]) count as the same word said again.
 const SOUNDS_ALIKE: f64 = 0.6;
 /// How far back an `again` marker looks for the start of the attempt it repeats.
@@ -71,8 +83,28 @@ const CORRECTIONS: &[&[&str]] = &[
     &["correction"],
 ];
 
+/// Phrases that announce the speaker starts over, wherever they are said.
+const SAY_AGAIN: &[&[&str]] = &[
+    &["let", "me", "say", "that", "again"],
+    &["let", "me", "redo", "that"],
+    &["let", "me", "try", "that", "again"],
+];
+
+/// Phrases that announce a new attempt only as a sentence of their own, next to [`CORRECTIONS`].
+const ALONE: &[&[&str]] = &[&["one", "more", "time"], &["again"]];
+
 /// Words that double in correct speech ("I know that that works").
 const DOUBLES: &[&str] = &["that", "had"];
+
+/// Words nobody doubles on purpose: articles, prepositions, pronouns, conjunctions and
+/// auxiliaries. Any other doubled word may be emphasis ("very, very good"), and "so so" is one.
+const FUNCTION_WORDS: &[&str] = &[
+    "a", "an", "the", "to", "of", "in", "on", "at", "by", "for", "with", "from", "into", "as", "i",
+    "you", "he", "she", "it", "we", "they", "me", "him", "us", "them", "my", "your", "his", "her",
+    "its", "our", "their", "this", "these", "those", "and", "or", "but", "if", "because", "than",
+    "is", "are", "was", "were", "be", "been", "am", "do", "does", "did", "has", "have", "will",
+    "would", "can", "could", "should", "shall", "may", "might", "must",
+];
 
 /// Fillers that belong to the speaker's voice: kept counts by phrase.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -137,8 +169,7 @@ pub fn find(facts: &TakeFacts, voice: &Voice, sure: u8, idle_min: Micros) -> Vec
                 .any(|f| f.confidence >= sure && f.range.overlaps(w.word.range))
         })
         .collect();
-    found.extend(repeats(&fluent));
-    found.extend(restarts(&words));
+    found.extend(retakes(&fluent));
     found.extend(again(&words, facts.again));
     for still in facts.still.iter().filter(|s| s.duration() >= idle_min) {
         // Dead air on a still screen is sure; a still screen under the voice only asks.
@@ -284,16 +315,18 @@ impl Finding {
 }
 
 /// From word `from` to word `to`: the words in between go, and the cut lands just before the
-/// kept word begins, see [`cut_before`].
+/// kept word begins, see [`cut_before`]. With no word left at `to` it ends with the last one.
 fn span(words: &[&W], from: usize, to: usize) -> Option<TimeRange> {
     let before = |i: usize| i.checked_sub(1).map(|i| words[i].word.range);
-    TimeRange::new(
-        cut_before(before(from), words[from].word.range),
-        cut_before(before(to), words.get(to)?.word.range),
-    )
+    let end = match words.get(to) {
+        Some(word) => cut_before(before(to), word.word.range),
+        None => words.last()?.to(),
+    };
+    TimeRange::new(cut_before(before(from), words[from].word.range), end)
 }
 
-fn fillers(words: &[W], voice: &Voice) -> Vec<Finding> {
+/// Every filler phrase said in `words` with its base confidence and where it is.
+fn said_fillers(words: &[W]) -> Vec<(&'static [&'static str], u8, TimeRange)> {
     let mut found = Vec::new();
     let mut i = 0;
     while i < words.len() {
@@ -306,35 +339,74 @@ fn fillers(words: &[W], voice: &Voice) -> Vec<Finding> {
             continue;
         };
         let last = &words[i + phrase.len() - 1];
-        let key = phrase.join(" ");
-        if let Some(confidence) = voice.confidence(&key, *base)
-            && let Some(range) = TimeRange::new(words[i].from(), last.to())
-        {
-            found.push(Finding::new(ElementKind::Filler, range, confidence));
+        if let Some(range) = TimeRange::new(words[i].from(), last.to()) {
+            found.push((*phrase, *base, range));
         }
         i += phrase.len();
     }
     found
 }
 
-/// A run of one to six words said twice in a row ("the the", "the first thing, the first
-/// thing"): the first copy goes.
+fn fillers(words: &[W], voice: &Voice) -> Vec<Finding> {
+    said_fillers(words)
+        .into_iter()
+        .filter_map(|(phrase, base, range)| {
+            let confidence = voice.confidence(&phrase.join(" "), base)?;
+            Some(Finding::new(ElementKind::Filler, range, confidence))
+        })
+        .collect()
+}
+
+/// The filler phrase of `transcript` that starts nearest to `at`, at most `within` away.
+pub(crate) fn filler_at(transcript: &Transcript, at: Micros, within: Micros) -> Option<String> {
+    let words: Vec<W> = transcript
+        .words()
+        .iter()
+        .map(|word| W {
+            word,
+            text: normalize(&word.text),
+        })
+        .filter(|w| !w.text.is_empty())
+        .collect();
+    said_fillers(&words)
+        .into_iter()
+        .map(|(phrase, _, range)| (range.from().0.abs_diff(at.0), phrase))
+        .filter(|(off, _)| *off <= within.0)
+        .min_by_key(|(off, _)| *off)
+        .map(|(_, phrase)| phrase.join(" "))
+}
+
+/// The retakes in `fluent`, the words without the fillers that will go.
+fn retakes(fluent: &[&W]) -> Vec<Finding> {
+    let cued = cues(fluent);
+    let mut found = repeats(fluent);
+    found.extend(restarts(fluent, &cued));
+    found.extend(cued);
+    found
+}
+
+/// One or two words said twice in a row ("the the", "the first, the first thing"): the first
+/// copy goes. Longer runs are [`restarts`]. Across a sentence end the words belong to two
+/// thoughts ("in the cut. Cut the silence").
 fn repeats(words: &[&W]) -> Vec<Finding> {
     let mut found = Vec::new();
     let mut i = 0;
     while i < words.len() {
-        let hit = (1..=6).rev().find(|&k| {
+        let hit = (1..=2).rev().find(|&k| {
             i + 2 * k <= words.len()
                 && (0..k).all(|j| words[i + j].text == words[i + k + j].text)
+                && !words[i..i + k].iter().any(|w| w.ends_sentence())
                 && words[i + k].from().0 < words[i + k - 1].to().0 + REPEAT_GAP.0
         });
         let Some(k) = hit else {
             i += 1;
             continue;
         };
+        let text = words[i].text.as_str();
         let confidence = match k {
-            1 if DOUBLES.contains(&words[i].text.as_str()) => 50,
-            1 => 85,
+            1 if DOUBLES.contains(&text) => 50,
+            1 if FUNCTION_WORDS.contains(&text) => 85,
+            1 => 60,
             _ => 92,
         };
         if let Some(range) = span(words, i, i + k) {
@@ -345,50 +417,207 @@ fn repeats(words: &[&W]) -> Vec<Finding> {
     found
 }
 
-/// A sentence said again from its start, within the next two sentences: the earlier attempt
-/// goes, the later one is usually the clean version. Words that sound alike ("failing",
-/// "falling") match, so a corrected word does not hide the restart; one changed word after a
-/// shared opening of three is still sure, two after an opening of four ask.
-fn restarts(words: &[W]) -> Vec<Finding> {
-    let all: Vec<&W> = words.iter().collect();
-    let mut sentences = Vec::new();
-    let mut start = 0;
-    for (i, w) in all.iter().enumerate() {
-        if w.ends_sentence() || i + 1 == all.len() {
-            sentences.push(start..i + 1);
-            start = i + 1;
-        }
+/// How the words from one position say a passage again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Alignment {
+    /// Words said in both, the same or sounding alike.
+    same: usize,
+    /// Words added, dropped or changed between them.
+    changed: usize,
+    /// Where the aligned part of the first passage ends.
+    a_end: usize,
+    /// Where the aligned part of the second passage ends.
+    b_end: usize,
+}
+
+/// How many changes an alignment of `same` shared words may hold.
+fn allowed_changes(same: usize) -> usize {
+    match same {
+        0..=4 => 0,
+        5..=7 => 1,
+        8..=11 => 2,
+        _ => MAX_CHANGES,
     }
-    let mut found = Vec::new();
-    let mut skip_to = 0;
-    for (n, a) in sentences.iter().enumerate() {
-        if a.start < skip_to || a.len() < 3 {
-            continue;
-        }
-        for b in sentences.iter().skip(n + 1).take(2) {
-            if all[b.start].from().0 > all[a.end - 1].to().0 + RESTART_WITHIN.0 || b.len() < a.len()
+}
+
+/// Lines up the passage `a` with the words from `b`, both from their first word, and returns the
+/// longest alignment that ends on a shared word and holds no more changes than its length
+/// allows. Words compare by sound, so an added, dropped or changed word does not hide a repeat.
+fn align(words: &[&W], a: Range<usize>, b: usize) -> Option<Alignment> {
+    let first = &words[a.clone()];
+    let second = &words[b..words.len().min(b + first.len() + MAX_CHANGES)];
+    let change = |cell: Option<(usize, usize)>| {
+        cell.map(|(changed, same)| (changed + 1, same))
+            .filter(|(changed, _)| *changed <= MAX_CHANGES)
+    };
+    // Per word of `second`: the fewest changes so far, then the most shared words.
+    let mut row: Vec<Option<(usize, usize)>> = (0..=second.len())
+        .map(|y| (y <= MAX_CHANGES).then_some((y, 0)))
+        .collect();
+    let mut best: Option<Alignment> = None;
+    for (x, word) in first.iter().enumerate() {
+        let mut diagonal = row[0];
+        row[0] = (x < MAX_CHANGES).then_some((x + 1, 0));
+        for y in 1..=second.len() {
+            let above = row[y];
+            let shared = diagonal
+                .filter(|_| x.abs_diff(y - 1) <= MAX_CHANGES)
+                .filter(|_| similarity(&word.text, &second[y - 1].text) >= SOUNDS_ALIKE)
+                .map(|(changed, same)| (changed, same + 1));
+            if let Some((changed, same)) = shared
+                && changed <= allowed_changes(same)
+                && best.is_none_or(|b| (same, Reverse(changed)) > (b.same, Reverse(b.changed)))
             {
-                break;
+                best = Some(Alignment {
+                    same,
+                    changed,
+                    a_end: a.start + x + 1,
+                    b_end: b + y,
+                });
             }
-            let pair = |j: usize| (&all[a.start + j].text, &all[b.start + j].text);
-            let opening = (0..a.len()).take_while(|&j| pair(j).0 == pair(j).1).count();
-            let mismatches = (0..a.len())
-                .filter(|&j| similarity(pair(j).0, pair(j).1) < SOUNDS_ALIKE)
-                .count();
-            let confidence = match mismatches {
-                0 if b.len() > a.len() => 92,
-                0 => 85,
-                1 if a.len() >= 6 && opening >= 3 => 85,
-                1 if a.len() >= 6 => 70,
-                2 if a.len() >= 8 && opening >= 4 => 70,
-                _ => continue,
-            };
-            if let Some(range) = span(&all, a.start, b.start) {
-                found.push(Finding::new(ElementKind::Retake, range, confidence));
-                skip_to = b.start;
-            }
+            row[y] = [shared, change(diagonal), change(above), change(row[y - 1])]
+                .into_iter()
+                .flatten()
+                .min_by_key(|&(changed, same)| (changed, Reverse(same)));
+            diagonal = above;
+        }
+        if row.iter().all(Option::is_none) {
             break;
         }
+    }
+    best
+}
+
+/// Where a passage repeated from word `i` starts: the one or two words before it go along when
+/// they open its sentence ("Now the second change"), but never reach back past `floor`.
+fn passage_start(words: &[&W], i: usize, floor: usize) -> usize {
+    (floor.max(i.saturating_sub(MAX_LEADING))..=i)
+        .rev()
+        .find(|&k| k == 0 || words[k - 1].ends_sentence())
+        .unwrap_or(i)
+}
+
+/// How sure it is that the words from `b` start over what `aligned` matched, `None` when they
+/// do not. The words between the two attempts go with the first: the rest of its sentence and
+/// at most one short sentence. A long shared run with no or one changed word is sure, and the
+/// different ending of an abandoned attempt counts as that one change.
+fn restart_confidence(words: &[&W], aligned: Alignment, b: usize) -> Option<u8> {
+    let Alignment {
+        same,
+        changed,
+        a_end,
+        b_end,
+    } = aligned;
+    let between = &words[a_end..b];
+    // Whisper may break one short sentence up ("It is. Hmm. Wait."), so the aside is counted whole.
+    let rest = between
+        .iter()
+        .position(|w| w.ends_sentence())
+        .map_or(between.len(), |end| end + 1);
+    if rest > MAX_ASIDE || between.len() - rest > MAX_ASIDE {
+        return None;
+    }
+    if words[b].from().0 > words[a_end - 1].to().0 + RESTART_WITHIN.0 {
+        return None;
+    }
+    let directly = between.is_empty();
+    if same < if directly { 3 } else { 5 } {
+        return None;
+    }
+    let changes = changed + usize::from(!directly);
+    let goes_on = b_end < words.len() && !words[b_end - 1].ends_sentence();
+    Some(match changes {
+        0 if goes_on => 92,
+        0 => 85,
+        1 if same >= 6 => 85,
+        2 if same >= 10 => 85,
+        _ => 70,
+    })
+}
+
+/// A passage said again within [`RESTART_WITHIN`]: the earlier attempt goes, the later one is
+/// usually the clean version. Passages a cue already answers are left to [`cues`].
+fn restarts(words: &[&W], cued: &[Finding]) -> Vec<Finding> {
+    let mut found = Vec::new();
+    let mut floor = 0;
+    let mut i = 0;
+    while i < words.len() {
+        let hit = (i + 1..words.len().min(i + MAX_ATTEMPT))
+            .rev()
+            .filter(|&b| words[b].text == words[i].text)
+            .filter_map(|b| {
+                let aligned = align(words, i..b, b)?;
+                let confidence = restart_confidence(words, aligned, b)?;
+                let range = span(words, passage_start(words, i, floor), b)?;
+                let free = !cued.iter().any(|c| c.range.overlaps(range));
+                free.then_some((aligned.same, b, range, confidence))
+            })
+            .max_by_key(|(same, ..)| *same);
+        match hit {
+            Some((_, b, range, confidence)) => {
+                found.push(Finding::new(ElementKind::Retake, range, confidence));
+                floor = b;
+                i = b;
+            }
+            None => i += 1,
+        }
+    }
+    found
+}
+
+/// Where a cue that starts at word `c` ends: a phrase of [`SAY_AGAIN`], maybe after a correction
+/// ("Sorry, let me say that again"), or a correction or [`ALONE`] phrase as its own sentence
+/// after a full sentence.
+fn cue_end(words: &[&W], c: usize) -> Option<usize> {
+    let says = |phrase: &[&str], at: usize| {
+        words.len() >= at + phrase.len()
+            && phrase.iter().zip(&words[at..]).all(|(p, w)| *p == w.text)
+    };
+    let lead = CORRECTIONS
+        .iter()
+        .find(|p| says(p, c))
+        .map_or(0, |p| p.len());
+    if let Some(phrase) = SAY_AGAIN.iter().find(|p| says(p, c + lead)) {
+        return Some(c + lead + phrase.len());
+    }
+    let after_sentence = c > 0 && words[c - 1].ends_sentence();
+    ALONE
+        .iter()
+        .chain(CORRECTIONS)
+        .find(|p| after_sentence && says(p, c) && words[c + p.len() - 1].ends_sentence())
+        .map(|p| c + p.len())
+}
+
+/// A spoken cue to start over: the cue goes, with the passage before it that the words after it
+/// say again. When nothing after the cue repeats what came before, only the cue goes, and that
+/// asks.
+fn cues(words: &[&W]) -> Vec<Finding> {
+    let mut found = Vec::new();
+    let mut c = 0;
+    while c < words.len() {
+        let Some(end) = cue_end(words, c) else {
+            c += 1;
+            continue;
+        };
+        let starts: Vec<usize> = (0..c)
+            .rev()
+            .take_while(|&i| words[c].from().0 <= words[i].to().0 + RESTART_WITHIN.0)
+            .collect();
+        let repeat = (end..words.len().min(end + MAX_CUE_LEAD_IN + 1))
+            .rev()
+            .flat_map(|b| starts.iter().map(move |&i| (i, b)))
+            .filter(|&(i, b)| words[i].text == words[b].text)
+            .filter_map(|(i, b)| Some((i, b, align(words, i..c, b)?.same)))
+            .filter(|&(_, _, same)| same >= 3)
+            .max_by_key(|&(_, _, same)| same);
+        let finding = match repeat {
+            Some((i, b, _)) => span(words, passage_start(words, i, 0), b).map(|r| (r, 90)),
+            None => span(words, c, end).map(|r| (r, 70)),
+        };
+        if let Some((range, confidence)) = finding {
+            found.push(Finding::new(ElementKind::Retake, range, confidence));
+        }
+        c = end;
     }
     found
 }
@@ -435,6 +664,9 @@ fn corrections(words: &[W]) -> Vec<Finding> {
     let all: Vec<&W> = words.iter().collect();
     let mut found = Vec::new();
     for c in 0..all.len() {
+        if cue_end(&all, c).is_some() {
+            continue;
+        }
         let Some(cue) = CORRECTIONS.iter().find(|cue| {
             all.len() > c + cue.len() && cue.iter().zip(&all[c..]).all(|(p, w)| *p == w.text)
         }) else {
@@ -519,8 +751,7 @@ pub fn heard_retakes(words: &[Word], confidence: u8) -> Vec<HeardRetake> {
         .filter(|w| !w.text.is_empty())
         .collect();
     let fluent: Vec<&W> = words.iter().collect();
-    let mut found = repeats(&fluent);
-    found.extend(restarts(&words));
+    let mut found = retakes(&fluent);
     found.retain(|f| f.confidence >= confidence);
     found.sort_by_key(|f| f.range.from());
     let said = |range: TimeRange, skip: usize, take: usize| {
@@ -752,6 +983,157 @@ mod tests {
         assert_eq!(voice.confidence("basically", 50), Some(30));
         voice.kept.insert("basically".into(), 3);
         assert_eq!(voice.confidence("basically", 50), None);
+    }
+
+    /// The review's take as Whisper wrote it.
+    const ONE_TAKE: &str = "So today we look at the new router in version 12. Um, the first thing you notice is, uh, that the config file is gone. The the roots now live next to the the pages. This makes the project a lot easier to, this makes the project a lot easier to read, because every page owns its root. Now the second change is the loader, it runs on the server and it blocks. Sorry, let me say that again. The second big change is the loader. It runs on the server before the page renders. I think, you know, this is basically the best release in years. Performance is very, very good. The build ran in 13.53. Sorry, 13.35 milliseconds. That is the whole update. See you next week.";
+
+    fn retakes_of(text: &str) -> Vec<(String, u8)> {
+        run(&transcript(text), &[])
+            .into_iter()
+            .filter(|f| f.0 == ElementKind::Retake)
+            .map(|f| (f.1, f.2))
+            .collect()
+    }
+
+    #[test]
+    fn a_restart_needs_no_full_stop_and_has_no_length_cap() {
+        let found = retakes_of(ONE_TAKE);
+        assert!(
+            found.contains(&("This makes the project a lot easier to,".into(), 92)),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn a_reworded_restart_is_found_by_aligning_its_words() {
+        assert_eq!(
+            retakes_of(
+                "Now the second change is the loader, it runs on the server and it blocks. The second big change is the loader. It runs on the server before the page renders."
+            ),
+            [(
+                "Now the second change is the loader, it runs on the server and it blocks.".into(),
+                85
+            )]
+        );
+    }
+
+    #[test]
+    fn parallel_sentences_with_two_changes_only_ask() {
+        assert_eq!(
+            retakes_of(
+                "We look at the new router in version twelve. We look at the old router in version eleven."
+            ),
+            [("We look at the new router in version twelve.".into(), 70)]
+        );
+    }
+
+    #[test]
+    fn a_short_sentence_between_two_attempts_goes_with_the_first() {
+        assert_eq!(
+            retakes_of(
+                "Clap gives us help text and validation for free. It is hmm wait. Clap gives us help text and validation for free."
+            ),
+            [(
+                "Clap gives us help text and validation for free. It is hmm wait.".into(),
+                85
+            )]
+        );
+        assert_eq!(
+            retakes_of(
+                "Clap gives us help text and validation for free. It is. Well. Wait. Clap gives us help text and validation for free."
+            ),
+            [(
+                "Clap gives us help text and validation for free. It is. Well. Wait.".into(),
+                85
+            )]
+        );
+    }
+
+    #[test]
+    fn a_sure_filler_does_not_hide_a_restart() {
+        assert_eq!(
+            retakes_of("The, um, first thing we do. The first thing we do is run it."),
+            [("The, um, first thing we do.".into(), 92)]
+        );
+    }
+
+    #[test]
+    fn a_cue_goes_with_the_passage_the_words_after_it_repeat() {
+        let found = retakes_of(ONE_TAKE);
+        assert!(
+            found.contains(&(
+                "Now the second change is the loader, it runs on the server and it blocks. Sorry, let me say that again."
+                    .into(),
+                90
+            )),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn a_cue_nothing_repeats_goes_alone_and_asks() {
+        assert_eq!(
+            retakes_of("We ship on Friday. Let me say that again. Tests are not optional here."),
+            [("Let me say that again.".into(), 70)]
+        );
+        assert_eq!(
+            retakes_of("We ship on Friday. Again. Tests are not optional here."),
+            [("Again.".into(), 70)]
+        );
+    }
+
+    #[test]
+    fn cue_words_inside_a_sentence_are_no_cue() {
+        assert_eq!(retakes_of("Click it one more time and run it again."), []);
+    }
+
+    #[test]
+    fn only_doubled_function_words_are_sure() {
+        assert_eq!(
+            retakes_of("We we ship to to the server."),
+            [("We".into(), 85), ("to".into(), 85)]
+        );
+        assert_eq!(
+            retakes_of("Performance is very, very good."),
+            [("very,".into(), 60)]
+        );
+    }
+
+    #[test]
+    fn a_repeat_across_a_sentence_end_is_no_finding() {
+        assert_eq!(
+            retakes_of("We keep it in the cut. Cut the silence next."),
+            []
+        );
+    }
+
+    #[test]
+    fn the_reviewed_take_gives_each_stumble_once() {
+        assert_eq!(
+            run(&transcript(ONE_TAKE), &[])
+                .into_iter()
+                .filter(|f| f.2 >= 60 && f.0 != ElementKind::Filler)
+                .map(|f| (f.0, f.1, f.2))
+                .collect::<Vec<_>>(),
+            [
+                (ElementKind::Misspoken, "13.53. Sorry,".to_owned(), 90),
+                (ElementKind::Retake, "The".to_owned(), 85),
+                (ElementKind::Retake, "the".to_owned(), 85),
+                (ElementKind::Retake, "very,".to_owned(), 60),
+                (
+                    ElementKind::Retake,
+                    "This makes the project a lot easier to,".to_owned(),
+                    92
+                ),
+                (
+                    ElementKind::Retake,
+                    "Now the second change is the loader, it runs on the server and it blocks. Sorry, let me say that again."
+                        .to_owned(),
+                    90
+                ),
+            ]
+        );
     }
 
     #[test]

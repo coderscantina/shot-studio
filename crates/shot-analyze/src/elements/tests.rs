@@ -52,6 +52,7 @@ fn facts<'a>(
         markers,
         input,
         script,
+        speaker: Voice::default(),
     }
 }
 
@@ -226,6 +227,27 @@ fn the_stream_writes_what_the_quick_pass_writes_for_the_same_facts_as_they_arriv
     assert_eq!(&written, stream.live());
     let quick = analyze(video, &t, &Speech::default(), Depth::Quick).unwrap();
     assert_eq!(lines(&written, &kinds), lines(&quick, &kinds));
+}
+
+#[test]
+fn a_filler_a_person_kept_in_the_cut_is_less_sure_next_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let video = dir.path();
+    let t = transcript("So, um, we ship it, um, on Fridays.");
+    let confidence = |video: &Path| -> Vec<Option<u8>> {
+        analyze(video, &t, &Speech::default(), Depth::Quick)
+            .unwrap()
+            .of_kind(ElementKind::Filler)
+            .map(|e| e.confidence)
+            .collect()
+    };
+    assert_eq!(confidence(video), [Some(92), Some(92)]);
+    fs::write(
+        video.join("cut.kdl"),
+        "chapter \"A\" {\n    take t01 {\n        keep from=0 to=9_000_000\n    }\n}\n\noverride t01 filler at=1_300_000 {\n    keep\n}\n",
+    )
+    .unwrap();
+    assert_eq!(confidence(video), [Some(72), Some(72)]);
 }
 
 #[test]
