@@ -6,9 +6,10 @@
 //! from each beat the prompter showed to the next, trimmed to the words said in it. A take
 //! without them is aligned to the script by word overlap: its sentences go to the beats whose
 //! text shares the most words with them, in order, and back to an earlier beat only when a
-//! sentence clearly says it again. Without beats in the script, the rows are the sentence groups
-//! of the first take; a later take's sentences that say a row again are attempts at it, and the
-//! rest are new rows.
+//! sentence clearly says it again. What a retake of a beat says before and after the sentences
+//! that share a word with it is no attempt. Without beats in the script, the rows are the
+//! sentence groups of the first take; a later take's sentences that say a row again are
+//! attempts at it, and the rest are new rows.
 //!
 //! [0040]: ../../../docs/decisions/0040-the-cut-proposes-itself.md
 
@@ -132,14 +133,14 @@ impl Lineup {
                 .collect();
             let places: Vec<RowAt> = lineup.rows().map(|(at, _)| at).collect();
             for take in &takes {
-                let found = beat_attempts(take, places.len()).unwrap_or_else(|| {
-                    let taken = |row: usize| {
-                        lineup
-                            .row(places[row])
-                            .is_some_and(|r| !r.attempts.is_empty())
-                    };
-                    align(take.transcript.words(), &texts, taken)
-                });
+                // Whether an earlier take has an attempt at the row.
+                let taken = |row: usize| {
+                    lineup
+                        .row(places[row])
+                        .is_some_and(|r| !r.attempts.is_empty())
+                };
+                let found = beat_attempts(take, &texts, taken)
+                    .unwrap_or_else(|| align(take.transcript.words(), &texts, taken));
                 for (row, range) in found {
                     lineup.push(places[row], take.transcript.take(), range);
                 }
@@ -754,14 +755,22 @@ pub fn words_in(words: &[Word], range: TimeRange) -> &[Word] {
 }
 
 /// Attempts from the take's `beat` elements: each beat the prompter showed, up to the next,
-/// trimmed to its words. `None` when the take has no beat elements.
-fn beat_attempts(take: &TakeWords<'_>, rows: usize) -> Option<Vec<(usize, TimeRange)>> {
+/// trimmed to its words. The last one runs until the take stops, so it ends [`before_remark`]
+/// when `taken` says an earlier take already has its row. `texts` are the content words of
+/// each row. `None` when the take has no beat elements.
+fn beat_attempts(
+    take: &TakeWords<'_>,
+    texts: &[Vec<String>],
+    taken: impl Fn(usize) -> bool,
+) -> Option<Vec<(usize, TimeRange)>> {
     let beats: Vec<(Micros, usize)> = take
         .elements?
         .of_kind(ElementKind::Beat)
         .filter_map(|e| {
             let index = usize::try_from(e.integer(Attr::Index)?).ok()?;
-            (1..=rows).contains(&index).then_some((e.t, index - 1))
+            (1..=texts.len())
+                .contains(&index)
+                .then_some((e.t, index - 1))
         })
         .collect();
     if beats.is_empty() {
@@ -774,11 +783,31 @@ fn beat_attempts(take: &TakeWords<'_>, rows: usize) -> Option<Vec<(usize, TimeRa
         .enumerate()
         .filter_map(|(i, &(t, row))| {
             let until = beats.get(i + 1).map_or(end, |&(next, _)| next);
-            let said = words_in(words, TimeRange::new(t, until)?);
+            let mut said = words_in(words, TimeRange::new(t, until)?);
+            if i + 1 == beats.len() && taken(row) {
+                said = before_remark(said, &texts[row]);
+            }
             (!said.is_empty()).then(|| (row, span(said)))
         })
         .collect();
     Some(found)
+}
+
+/// `words` up to the last of their sentences that shares a content word with `row`: what a
+/// retake says after it is a remark such as "okay, that one was better", not the row. All of
+/// them when no sentence shares one.
+fn before_remark<'a>(words: &'a [Word], row: &[String]) -> &'a [Word] {
+    let shares = |sentence: &&Range<usize>| {
+        let said = content_set(words[(*sentence).clone()].iter().map(|w| w.text.as_str()));
+        row.iter().any(|word| said.contains(word))
+    };
+    let sentences = sentences(words);
+    let end = sentences
+        .iter()
+        .rev()
+        .find(shares)
+        .map_or(words.len(), |s| s.end);
+    &words[..end]
 }
 
 fn span(words: &[Word]) -> TimeRange {
@@ -836,20 +865,21 @@ fn groups(words: &[Word]) -> Vec<&[Word]> {
 /// Assigns the take's sentences to rows so that the words they share with their row add up to
 /// the most. A sentence goes on from the row before it or stays there, and goes back to an
 /// earlier row only when that wins [`BACK`] shared words, which starts a second attempt at it.
-/// A sentence that shares nothing stays with the row before it. The sentences before the first
-/// that shares a word are a lead-in to that row, or belong to no row when `taken` says an
-/// earlier take already has the row, so a retake's "okay, once more" is no attempt. Each run
-/// of sentences on one row becomes an attempt from its first sentence to its last.
+/// A sentence that shares nothing stays with the row before it, and the sentences before the
+/// first that shares a word lead into that row. Each run of sentences on one row becomes an
+/// attempt from its first sentence to its last. Where `taken` says an earlier take already
+/// has the row, the attempt is the retake only: a lead-in belongs to no row, so "okay, once
+/// more" is no attempt, and the attempt ends [`before_remark`].
 fn align(
     words: &[Word],
-    rows: &[Vec<String>],
+    texts: &[Vec<String>],
     taken: impl Fn(usize) -> bool,
 ) -> Vec<(usize, TimeRange)> {
     let sentences = sentences(words);
-    if sentences.is_empty() || rows.is_empty() {
+    if sentences.is_empty() || texts.is_empty() {
         return Vec::new();
     }
-    let rows: Vec<HashSet<&str>> = rows
+    let rows: Vec<HashSet<&str>> = texts
         .iter()
         .map(|r| r.iter().map(String::as_str).collect())
         .collect();
@@ -910,20 +940,20 @@ fn align(
     if lead == sentences.len() {
         return Vec::new();
     }
-    let lead_in = !taken(rows_of[lead]);
     let mut out: Vec<(usize, TimeRange)> = Vec::new();
-    for (j, sentence) in sentences.iter().enumerate() {
-        if j < lead && !lead_in {
-            continue;
-        }
+    let mut j = if taken(rows_of[lead]) { lead } else { 0 };
+    while j < sentences.len() {
         let row = rows_of[j.max(lead)];
-        let range = span(&words[sentence.clone()]);
-        match out.last_mut() {
-            Some((last, span)) if *last == row => {
-                *span = TimeRange::new(span.from(), range.to()).expect("sentences are ordered");
-            }
-            _ => out.push((row, range)),
-        }
+        let on_row = |k: &usize| rows_of[(*k).max(lead)] == row;
+        let run = (j..sentences.len()).take_while(on_row).count();
+        let said = &words[sentences[j].start..sentences[j + run - 1].end];
+        let said = if taken(row) {
+            before_remark(said, &texts[row])
+        } else {
+            said
+        };
+        out.push((row, span(said)));
+        j += run;
     }
     out
 }
@@ -1182,6 +1212,81 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    /// The words `cut` plays of `takes`, in cut order.
+    fn spoken(cut: &Cut, takes: &[&Transcript]) -> String {
+        let blocks = cut.chapters.iter().flat_map(|c| &c.takes);
+        let words = blocks.flat_map(|edit| {
+            let take = takes.iter().find(|t| t.take() == &edit.take).unwrap();
+            let kept = take.words().iter().filter(|w| edit.keeps(w.range));
+            kept.map(|w| w.text.as_str())
+        });
+        words.collect::<Vec<_>>().join(" ")
+    }
+
+    /// `takes` appended to a cut, each as the chapter named with it, and composed twice. The
+    /// second compose changes nothing.
+    fn composed(script: &Script, takes: &[(&Transcript, Option<&Elements>, &str)]) -> Cut {
+        let whole = TimeRange::new(Micros(0), Micros(120_000_000)).unwrap();
+        let words: Vec<TakeWords<'_>> = takes.iter().map(|t| with(t.0, t.1)).collect();
+        let mut cut = Cut::default();
+        for (take, _, title) in takes {
+            cut = cut.append_take(take.take().clone(), *title, whole);
+        }
+        let new = takes.last().map(|t| t.0.take());
+        let once = cut
+            .compose(&Lineup::new(script, &cut, &words), new)
+            .unwrap();
+        let twice = once
+            .compose(&Lineup::new(script, &once, &words), new)
+            .unwrap();
+        assert_eq!(once, twice);
+        twice
+    }
+
+    #[test]
+    fn a_remark_after_a_retake_of_a_beat_is_no_attempt() {
+        let script = Script::parse(
+            "# A\n\n## Setup\n\n- Create the project with cargo\n\n## Arguments\n\n- Add the clap crate to parse the arguments\n- Run it with a flag\n",
+        )
+        .unwrap();
+        let full = "First we create the project with cargo. \
+                    Then we add the clap crate to parse the arguments. Now run it with a flag.";
+        let retake = "Then we add the clap crate to parse the arguments.";
+        let remark = "Okay, I think that one was much better, let us keep that.";
+        let first = said("t01", 0, full);
+        let second = said("t02", 0, &format!("{retake} {remark}"));
+        // Aligned by its words.
+        let cut = composed(
+            &script,
+            &[(&first, None, "Take t01"), (&second, None, "Take t02")],
+        );
+        assert_eq!(spoken(&cut, &[&first, &second]), full);
+        // Recorded with the prompter, which showed the beat until the take stopped.
+        let mut beats = Elements::new(id("t02"));
+        beats
+            .push(Element::at(ElementKind::Beat, Micros(0), "script").with_integer(Attr::Index, 2))
+            .unwrap();
+        let cut = composed(
+            &script,
+            &[
+                (&first, None, "Take t01"),
+                (&second, Some(&beats), "Take t02"),
+            ],
+        );
+        assert_eq!(spoken(&cut, &[&first, &second]), full);
+        let lineup = Lineup::new(
+            &script,
+            &cut,
+            &[with(&first, None), with(&second, Some(&beats))],
+        );
+        // The retake plays the beat, without its remark.
+        assert_eq!(proposals(&lineup)[1], [("t02".into(), 0, 42)]);
+        // A first take's closing words still belong to its last beat.
+        let alone = said("t01", 0, &format!("{retake} {remark}"));
+        let lineup = Lineup::new(&script, &Cut::default(), &[with(&alone, None)]);
+        assert_eq!(proposals(&lineup)[1], [("t01".into(), 0, 103)]);
     }
 
     #[test]
