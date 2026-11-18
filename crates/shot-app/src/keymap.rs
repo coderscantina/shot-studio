@@ -48,7 +48,7 @@ fn bindings() -> Vec<KeyBinding> {
         // Edit screen
         KeyBinding::new("space", edit::TogglePlay, edit),
         KeyBinding::new("shift-space", edit::PlayAround, edit),
-        KeyBinding::new("backspace", edit::DeleteSelection, edit),
+        KeyBinding::new("backspace", edit::DeleteBackward, edit),
         KeyBinding::new("delete", edit::DeleteSelection, edit),
         KeyBinding::new("r", edit::RestoreSelection, edit),
         KeyBinding::new("escape", edit::ClearSelection, edit),

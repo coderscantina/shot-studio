@@ -60,8 +60,8 @@ fn word_selection() -> gpui::Hsla {
     gpui::Hsla::from(ACCENT).opacity(0.32)
 }
 
-/// The keys that cut words or remove the picked element, as hints show them: Backspace and
-/// forward Delete do the same.
+/// The keys that cut words or remove the picked element, as hints show them. After a cut,
+/// Backspace moves the caret to the word before and forward Delete to the word after.
 pub const DELETE_KEYS: &str = "⌫ ⌦";
 
 /// How much ⇧Space plays on each side of the caret or playhead, in frames: 1.5 s.
@@ -75,6 +75,7 @@ actions!(
     [
         TogglePlay,
         DeleteSelection,
+        DeleteBackward,
         RestoreSelection,
         ClearSelection,
         Layout1,
@@ -675,12 +676,24 @@ impl EditScreen {
         cx.notify();
     }
 
+    /// Forward Delete: cuts the selection, and the caret moves on to the next word.
     fn delete_selection(&mut self, _: &DeleteSelection, _: &mut Window, cx: &mut Context<Self>) {
+        self.cut_selection(true, cx);
+    }
+
+    /// Backspace: cuts the selection, and the caret moves back to the word before.
+    fn delete_backward(&mut self, _: &DeleteBackward, _: &mut Window, cx: &mut Context<Self>) {
+        self.cut_selection(false, cx);
+    }
+
+    /// Removes the picked element, else cuts the selected words and moves the caret `forward` or
+    /// back.
+    fn cut_selection(&mut self, forward: bool, cx: &mut Context<Self>) {
         if self.remove_picked(cx) || self.remove_picked_sound(cx) || self.remove_picked_style(cx) {
             self.text.picked = None;
             return;
         }
-        let Some((at, range, true, _)) = self.selected() else {
+        let Some((at, _, true, _)) = self.selected() else {
             return;
         };
         let Some(take) = self.block(at).map(|b| b.take.clone()) else {
@@ -689,21 +702,19 @@ impl EditScreen {
         let Some(transcript) = self.folder.read(cx).transcripts.get(&take).cloned() else {
             return;
         };
-        let (first, last) = self
-            .selection
-            .map_or((0, 0), |s| (*s.words().start(), *s.words().end()));
-        // Joining the cut right before keeps no sliver of pause between two cuts in a row.
-        let range = self
-            .block(at)
-            .and_then(|b| b.words.get(model::cut_words_before(b, first)?))
-            .and_then(|w| shot_core::TimeRange::new(w.range.from(), range.to()))
-            .unwrap_or(range);
-        let caret = model::shown_word_next(&self.doc, at, last, true);
+        let Some(selection) = self.selection else {
+            return;
+        };
+        // Joining the person's cuts next to it keeps no sliver of pause between cuts in a row.
+        let Some(range) = self.block(at).and_then(|b| model::cut_range(b, &selection)) else {
+            return;
+        };
+        let caret = model::caret_after_cut(&self.doc, at, selection.words(), forward);
         if !self.edit(cx, |cut| cut.delete_words(at, &transcript, range)) {
             return;
         }
-        // The caret moves on to the next word, so the next cut needs no mouse. The rebuild after
-        // the edit keeps the playhead on that word's media, so it lands on the seam.
+        // The caret moves to the next word to cut, so the next cut needs no mouse. The rebuild
+        // after the edit keeps the playhead on that word's media, so it lands on the seam.
         self.selection = caret.map(|(at, index)| Selection::word(at, index));
         if let Some(frame) = caret.and_then(|(at, index)| self.block(at)?.words.get(index)?.output)
         {
@@ -1008,6 +1019,7 @@ impl Render for EditScreen {
             .on_action(cx.listener(Self::toggle_play))
             .on_action(cx.listener(Self::play_around))
             .on_action(cx.listener(Self::delete_selection))
+            .on_action(cx.listener(Self::delete_backward))
             .on_action(cx.listener(Self::restore_selection))
             .on_action(cx.listener(Self::next_look))
             .on_action(cx.listener(Self::keep_look))

@@ -604,6 +604,8 @@ pub struct BlockDoc {
     pub transcribed: bool,
     pub words: Vec<DocWord>,
     pub paragraphs: Vec<Paragraph>,
+    /// What the block loses, in order, see [`removals`].
+    pub removals: Vec<(TimeRange, RemovedBy)>,
 }
 
 /// The transcript of every block of `cut` styled by `lock` as `view` shows it.
@@ -624,6 +626,7 @@ pub fn document(
                     transcribed: false,
                     words: Vec::new(),
                     paragraphs: Vec::new(),
+                    removals: Vec::new(),
                 };
             };
             let words: Vec<DocWord> = cut
@@ -648,8 +651,9 @@ pub fn document(
                     .find(|c| c.range.from() <= time && time < c.range.to())
                     .map_or(default_layout, |c| c.layout)
             };
+            let removed = removals(edit, lock);
             let items = match view {
-                View::Edited => edited_items(&removals(edit, lock), &words),
+                View::Edited => edited_items(&removed, &words),
                 View::Untrimmed => (0..words.len()).map(Item::Word).collect(),
             };
             BlockDoc {
@@ -658,6 +662,7 @@ pub fn document(
                 transcribed: true,
                 paragraphs: paragraphs(items, &words, layout_at),
                 words,
+                removals: removed,
             }
         })
         .collect()
@@ -821,19 +826,68 @@ pub fn shown_word_next(
     found.map(|(_, at, index)| (at, index))
 }
 
-/// The first removed word of the person's cut right before word `index` of `block`, if that cut
-/// holds words. A cut of `index` that starts there joins it, so cutting word after word leaves
-/// one cut. A cut of the style rules stays theirs, so Cut and a restyle can still change it.
+/// Whether `range` holds the middle of `word`, which is what makes a word count as cut.
+fn holds(range: TimeRange, word: &DocWord) -> bool {
+    let middle = midpoint(word.range);
+    range.from() <= middle && middle < range.to()
+}
+
+/// The first word of the person's removal right before word `index` of `block`, if that removal
+/// holds the word before it. A cut of `index` that starts there joins it, so cutting word after
+/// word leaves one cut. A rule's cut in between stops the join, so Cut and a restyle can still
+/// change it.
 pub fn cut_words_before(block: &BlockDoc, index: usize) -> Option<usize> {
-    let items: Vec<&Item> = block.paragraphs.iter().flat_map(|p| &p.items).collect();
-    items.windows(2).find_map(|pair| match pair {
-        [Item::Cut(run), Item::Word(word)]
-            if *word == index && run.manual && !run.words.is_empty() =>
-        {
-            Some(run.words.start)
-        }
-        _ => None,
+    let start = block.words.get(index)?.range.from();
+    let (cut, by) = block.removals.iter().rfind(|(r, _)| r.from() < start)?;
+    let before = block.words.get(index.checked_sub(1)?)?;
+    (*by == RemovedBy::Manual && holds(*cut, before)).then(|| {
+        block
+            .words
+            .partition_point(|w| midpoint(w.range) < cut.from())
     })
+}
+
+/// The last word of the person's removal right after word `index` of `block`, the mirror of
+/// [`cut_words_before`].
+pub fn cut_words_after(block: &BlockDoc, index: usize) -> Option<usize> {
+    let end = block.words.get(index)?.range.to();
+    let (cut, by) = block.removals.iter().find(|(r, _)| r.to() > end)?;
+    let after = block.words.get(index + 1)?;
+    (*by == RemovedBy::Manual && holds(*cut, after)).then(|| {
+        block
+            .words
+            .partition_point(|w| midpoint(w.range) < cut.to())
+            - 1
+    })
+}
+
+/// The media to cut for `selection`: its words and the person's removals right next to them.
+pub fn cut_range(block: &BlockDoc, selection: &Selection) -> Option<TimeRange> {
+    let (first, last) = (*selection.words().start(), *selection.words().end());
+    let joined = Selection {
+        at: selection.at,
+        anchor: cut_words_before(block, first).unwrap_or(first),
+        head: cut_words_after(block, last).unwrap_or(last),
+    };
+    joined.range(&block.words)
+}
+
+/// Where the caret goes after a cut of `words` of block `at`: the next shown word going `forward`,
+/// else the one on the other side. It stays in the chapter, so a cut never changes the page.
+pub fn caret_after_cut(
+    doc: &[BlockDoc],
+    at: TakeAt,
+    words: RangeInclusive<usize>,
+    forward: bool,
+) -> Option<(TakeAt, usize)> {
+    let in_chapter = |word: &(TakeAt, usize)| word.0.chapter == at.chapter;
+    let next = shown_word_next(doc, at, *words.end(), true).filter(in_chapter);
+    let previous = shown_word_next(doc, at, *words.start(), false).filter(in_chapter);
+    if forward {
+        next.or(previous)
+    } else {
+        previous.or(next)
+    }
 }
 
 /// The last shown word that starts at or before output frame `frame`, else the first one.
@@ -1322,6 +1376,134 @@ mod tests {
         );
         assert_eq!(cut_words_before(&doc[0], 2), None);
         assert_eq!(shown_word_at(&doc, it - 1), Some((a, 0)));
+    }
+
+    const AT: TakeAt = TakeAt {
+        chapter: 0,
+        take: 0,
+    };
+
+    /// The document of one block of `t01` with `words`, each `(text, from, to)`.
+    fn one_block(
+        ranges: Vec<RangeEdit>,
+        lock: &Lock,
+        words: &[(&str, u64, u64)],
+    ) -> (EditMap, Vec<BlockDoc>) {
+        let cut = Cut {
+            chapters: vec![Chapter {
+                title: "A".into(),
+                takes: vec![block("t01", ranges)],
+            }],
+            ..Cut::default()
+        };
+        let mut transcript = Transcript::new(id("t01"));
+        for &(text, from, to) in words {
+            transcript.push(word(text, from, to)).unwrap();
+        }
+        let transcripts = HashMap::from([(id("t01"), transcript)]);
+        let p = project(cut);
+        let map = EditMap::of(&p, lock, View::Edited);
+        let doc = document(&p.cut, lock, &transcripts, &map, View::Edited, Layout::Face);
+        (map, doc)
+    }
+
+    const SPOKEN: [(&str, u64, u64); 5] = [
+        ("ship", 100_000, 600_000),
+        ("uh", 1_100_000, 1_400_000),
+        ("it", 2_100_000, 2_400_000),
+        ("right", 2_500_000, 2_900_000),
+        ("now", 3_000_000, 3_400_000),
+    ];
+
+    #[test]
+    fn a_cut_joins_a_persons_removal_but_never_a_rules_cut() {
+        // The person cut "uh", a rule cut the silence right after it: one mixed chip.
+        let ranges = vec![
+            keep(0, 1_000_000),
+            remove(1_000_000, 1_500_000),
+            keep(1_500_000, 4_000_000),
+        ];
+        let (_, doc) = one_block(
+            ranges.clone(),
+            &silences(&[(1_500_000, 2_000_000)]),
+            &SPOKEN,
+        );
+        assert_eq!(cut_words_before(&doc[0], 2), None);
+        // The silence on the far side of the person's removal does not stop the join.
+        let (_, doc) = one_block(ranges, &silences(&[(600_000, 1_000_000)]), &SPOKEN);
+        assert_eq!(cut_words_before(&doc[0], 2), Some(1));
+    }
+
+    #[test]
+    fn cutting_next_to_a_persons_cut_joins_it_on_either_side() {
+        let ranges = vec![
+            keep(0, 1_000_000),
+            remove(1_000_000, 2_000_000),
+            keep(2_000_000, 4_000_000),
+        ];
+        let (_, doc) = one_block(ranges, &Lock::default(), &SPOKEN);
+        // "ship" takes the cut of "uh" after it, "it" the one before it.
+        assert_eq!(cut_words_after(&doc[0], 0), Some(1));
+        assert_eq!(
+            cut_range(&doc[0], &Selection::word(AT, 0)),
+            Some(range(100_000, 1_400_000))
+        );
+        assert_eq!(
+            cut_range(&doc[0], &Selection::word(AT, 2)),
+            Some(range(1_100_000, 2_400_000))
+        );
+        // Without a cut next to it, a word cuts alone.
+        assert_eq!(
+            cut_range(&doc[0], &Selection::word(AT, 3)),
+            Some(range(2_500_000, 2_900_000))
+        );
+        // Delete goes on to the next word, Backspace back to the one before.
+        assert_eq!(caret_after_cut(&doc, AT, 2..=2, true), Some((AT, 3)));
+        assert_eq!(caret_after_cut(&doc, AT, 2..=2, false), Some((AT, 0)));
+    }
+
+    #[test]
+    fn the_caret_stays_in_the_chapter_after_a_cut() {
+        let cut = Cut {
+            chapters: vec![
+                Chapter {
+                    title: "A".into(),
+                    takes: vec![block("t01", vec![keep(0, 2_000_000)])],
+                },
+                Chapter {
+                    title: "B".into(),
+                    takes: vec![block("t02", vec![keep(0, 1_000_000)])],
+                },
+            ],
+            ..Cut::default()
+        };
+        let mut one = Transcript::new(id("t01"));
+        one.push(word("ship", 100_000, 600_000)).unwrap();
+        one.push(word("it", 1_000_000, 1_500_000)).unwrap();
+        let mut two = Transcript::new(id("t02"));
+        two.push(word("now", 100_000, 500_000)).unwrap();
+        let transcripts = HashMap::from([(id("t01"), one), (id("t02"), two)]);
+        let p = project(cut);
+        let lock = Lock::default();
+        let map = EditMap::of(&p, &lock, View::Edited);
+        let doc = document(
+            &p.cut,
+            &lock,
+            &transcripts,
+            &map,
+            View::Edited,
+            Layout::Face,
+        );
+        let b = TakeAt {
+            chapter: 1,
+            take: 0,
+        };
+        // The chapter's last word falls back to the word before, in either direction.
+        assert_eq!(caret_after_cut(&doc, AT, 1..=1, true), Some((AT, 0)));
+        assert_eq!(caret_after_cut(&doc, AT, 0..=0, false), Some((AT, 1)));
+        // A chapter's only word leaves no caret, rather than one in another chapter.
+        assert_eq!(caret_after_cut(&doc, b, 0..=0, true), None);
+        assert_eq!(caret_after_cut(&doc, b, 0..=0, false), None);
     }
 
     #[test]
