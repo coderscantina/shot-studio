@@ -133,6 +133,19 @@ Three reviews of `30df3de` scored it 8.9, 8.9 and 9.2 and found eight faults. Al
 - Record shows a take's error and the "not composed" line together.
 - A compose refused because the rules cut everything a Short's clip would play says so (`EditError::ClipCutByRules`), where it said the part would leave the cut.
 
+## Fixes after the fifth review
+
+Three reviews of `98232bb` scored it 9.5, 9.2 and 9.0 and found eight faults. All are fixed on `m17/integration`, checked 2026-11-18 with fmt, workspace clippy, `cargo test --workspace --no-fail-fast` (657 passed) and the three ignored fixture tests of `shot-cli --test takes` and `shot-analyze --test findings`.
+
+- Privacy: a Timeline drag of a blur over a cut inside its block covers everything the lane showed covered. With a block that plays 0 to 4 s and 8 to 12 s, a blur dragged from output 1 to 3 s to 3 to 5 s is stored as 3 to 9 s, where it was stored as 3 to 5 s and 8 to 9 s played unblurred. Each edge gets its own change, and an edge the overlay has in the block is stored where it was dropped: a blur from 5 s in a block that cuts 4 to 6 s shows from 6 s, and its start dragged to 7 s is stored at 7 s, not 6 s (`edit::timeline::tests::a_blur_dragged_over_a_cut_covers_what_plays_and_an_edge_in_a_cut_goes_where_dropped`).
+- A retake of one sentence is not the frame when it leaves out a sentence of the fullest attempt, also a short one: an attempt says the row whole only when it says at least half of the content words of each sentence of the fullest attempt that has two or more. "Verify checksums." after a long first sentence stays, and the retake's sentence is spliced in (`takes::tests::a_retake_of_the_first_sentence_keeps_the_sentence_only_the_first_take_says`).
+- Without a script, a sentence a retake says in other words plays where it was said, before the sentence it rewords, and not after the outro: what a take says between two sentences it says again goes after the first when the second is at most one row on for each new sentence and one more. A take that repeats only a stock intro and outro with fewer new sentences than the rows between them is still appended (`takes::tests::without_beats_a_reworded_sentence_plays_where_it_was_said`).
+- A second sentence a take adds after the same row plays after the first one it added there (`takes::tests::without_beats_a_second_sentence_added_after_a_row_plays_after_the_first`).
+- A row the cut does not play yet stays in the chapter of the row before it when the next row the cut plays is in that chapter, so a sentence added mid-chapter no longer splits "Intro" into "Intro", "Take t02", "Intro". A row at the end still goes under its take's name (`takes::tests::without_beats_a_sentence_added_inside_a_chapter_does_not_split_it`).
+- Clicking a beat's chip makes that beat the one K, C and A act on, also when N just played the beat before it and the playhead rests where the two meet (`edit::looks::tests::a_clicked_chips_beat_wins_over_the_beat_played_before_it`).
+- A on a pick of the last attempt goes back to the proposal also when the proposal is one whole attempt, so a later take that scores better can win the beat again. A proposal that plays the last attempt goes on to the first (`edit::looks::tests::a_steps_through_the_whole_attempts_and_back_to_the_proposal`).
+- Ship compares the video's stamp with what it rendered before each publish call, also the second one after a sign-in that had expired.
+
 ## Not verified
 
 - Recording through the app with the prompter: the takes came in through `shot ingest`. The app's append and its second compose after analysis are covered by `folder::tests::a_retake_of_a_beat_plays_in_place_of_the_earlier_attempt` and by reading, not by a recording.
@@ -144,6 +157,7 @@ Three reviews of `30df3de` scored it 8.9, 8.9 and 9.2 and found eight faults. Al
 - Of the fixes after the second review, by reading and unit tests only: A going back to the proposal after a word cut in the running app, the error line going away once the cut composes, the overlay editor changing an overlay's copies, and a ship run that has `cut.lock` written under it. The control socket cannot click or seek.
 - Of the fixes after the third review, by unit tests and reading only, since the control socket cannot click, seek or record: the inspector and K on a click near a restart in the running app, Record's live "not composed" line, redo past a real recording, Remove on Record with the real Trash, and Ship's stale notice after a rule change during a real export.
 - Of the fixes after the fourth review, by reading only, since the control socket cannot drag, click or ship: the drag in the running Timeline (its arithmetic has a unit test), the ship run stopping before a real upload, the chip click and Record's two lines.
+- Of the fixes after the fifth review, by unit tests and reading only, since the control socket cannot drag, click or ship: the drag over a cut in the running Timeline (the test gives `dragged_overlay` the ranges the lane maps, it does not run the map), the chip click and A in the running app, and Ship's check before the second publish, which has no test.
 - `metrics::tests::the_watchdog_names_where_a_stalled_thread_waits_or_runs` failed in one of five runs, also alone. It is a timing test in a file this work did not touch.
 
 ## Left open
