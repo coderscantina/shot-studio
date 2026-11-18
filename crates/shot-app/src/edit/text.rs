@@ -27,6 +27,9 @@ use crate::model::{
 use crate::theme::*;
 use crate::ui::{self, hint, icon, kbd, label, mono};
 
+/// What Backspace and Delete say on a picked cut, which they leave alone.
+pub(super) const RESTORE_NOTE: &str = "R restores this cut";
+
 /// The Text workspace's view of the effects: the one under the pointer, the one picked for the
 /// inspector, the layout picker and the last note of the selection tools.
 #[derive(Default)]
@@ -34,7 +37,7 @@ pub struct TextState {
     pub hovered: Option<MarkId>,
     pub picked: Option<MarkId>,
     pub layouts_open: bool,
-    note: Option<String>,
+    pub(super) note: Option<String>,
     /// Vision is looking for the selected words on the screen.
     finding: bool,
 }
@@ -859,6 +862,16 @@ fn paragraph_element(
                     .contains(&super::run_key(at, run.range.from()));
                 let picked = this.lanes.picked == Some(Pick::Cut(at, run.range));
                 children.push(cut(at, run, open, picked, cx).into_any_element());
+                if picked && this.text.note.as_deref() == Some(RESTORE_NOTE) {
+                    children.push(
+                        div()
+                            .mr(px(6.))
+                            .text_size(TEXT_XS)
+                            .text_color(MUTED)
+                            .child(RESTORE_NOTE)
+                            .into_any_element(),
+                    );
+                }
                 if open {
                     for i in run.words.clone() {
                         children.push(word(this, block, i, effects, cx).into_any_element());
@@ -1199,8 +1212,8 @@ fn layout_choices(this: &EditScreen, cx: &App) -> Vec<Layout> {
 }
 
 /// A cut between words: a faint seam for short auto cuts, a red length chip for the rest.
-/// Clicking picks it, so R restores it, and opens it to show the removed words; a right-click
-/// offers Restore.
+/// A click picks it, so R restores it, and moves the playhead to its seam. A click on the picked
+/// cut opens or closes it to show the removed words. A right-click offers Restore.
 fn cut(
     at: TakeAt,
     run: &CutRun,
@@ -1211,10 +1224,15 @@ fn cut(
     let key = (run.range.from().0 / 1000) as usize;
     let from = run.range.from();
     let range = run.range;
-    let toggle = cx.listener(move |this, _, _, cx| {
-        let key = super::run_key(at, from);
-        if !this.expanded.remove(&key) {
-            this.expanded.insert(key);
+    let click = cx.listener(move |this, _, _, cx| {
+        this.text.note.take_if(|note| note == RESTORE_NOTE);
+        if picked {
+            let key = super::run_key(at, from);
+            if !this.expanded.remove(&key) {
+                this.expanded.insert(key);
+            }
+            cx.notify();
+            return;
         }
         this.selection = None;
         this.text.picked = None;
@@ -1228,6 +1246,7 @@ fn cut(
     let menu = cx.listener(move |this, _: &MouseDownEvent, _, cx| {
         this.selection = None;
         this.text.picked = None;
+        this.text.note.take_if(|note| note == RESTORE_NOTE);
         this.lanes.picked = Some(Pick::Cut(at, range));
         this.lanes.menu = Some(MenuOn::Pick);
         cx.notify();
@@ -1242,7 +1261,7 @@ fn cut(
             .mr(px(8.))
             .rounded(px(1.))
             .bg(if picked { CUT } else { FAINT })
-            .on_click(toggle);
+            .on_click(click);
     }
     div()
         .id(("cut", key))
@@ -1268,7 +1287,7 @@ fn cut(
         .child(div().w(px(2.)).h(px(10.)).rounded(px(1.)).bg(CUT))
         .child(seconds(run.removed))
         .on_mouse_down(MouseButton::Right, menu)
-        .on_click(toggle)
+        .on_click(click)
 }
 
 /// The selected words' tools, wrapping inside `room` when it is too narrow for one row: cut

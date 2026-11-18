@@ -1444,6 +1444,11 @@ mod tests {
             map.seam(a, range(3_000_000, 3_200_000)),
             Some(map.chapters[0].frames.end)
         );
+        // A cut inside the block joins at the media after it.
+        assert_eq!(
+            map.seam(a, range(1_300_000, 2_000_000)),
+            map.output_frame(a, Micros(2_000_000))
+        );
 
         // The same "uh" cut by a rule is not joined.
         let mut ruled = p.cut.clone();

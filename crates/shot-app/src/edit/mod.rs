@@ -583,6 +583,7 @@ impl EditScreen {
         self.proposal = None;
         self.looks.current = None;
         self.lanes.picked = None;
+        self.text.note.take_if(|note| note == text::RESTORE_NOTE);
         self.selection = match self.selection {
             Some(selection) if extend && selection.at == at => Some(Selection {
                 head: index,
@@ -706,13 +707,18 @@ impl EditScreen {
     }
 
     /// Removes the picked element, else cuts the selected words and moves the caret `forward` or
-    /// back.
+    /// back. A picked cut stays: the look at a restart picks its cut, so the keys that confirm a
+    /// cut must not bring it back, and a note names the key that does.
     fn cut_selection(&mut self, forward: bool, cx: &mut Context<Self>) {
         if self.remove_picked(cx) || self.remove_picked_sound(cx) || self.remove_picked_style(cx) {
             self.text.picked = None;
             return;
         }
         let Some((at, _, true, _)) = self.selected() else {
+            if matches!(self.lanes.picked, Some(timeline::Pick::Cut(..))) {
+                self.text.note = Some(text::RESTORE_NOTE.into());
+                cx.notify();
+            }
             return;
         };
         let Some(take) = self.block(at).map(|b| b.take.clone()) else {
