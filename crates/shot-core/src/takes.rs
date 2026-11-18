@@ -202,20 +202,20 @@ impl Lineup {
     /// ones: before the row it went before, up to the row said again next, or after the last.
     /// They are worth a look too ([`Row::look`]) when they are at most one for each new
     /// sentence. So is one row any take skips between two it says again with nothing new. A
-    /// sentence that says a row with other numbers, "12 seconds" as "9 seconds", is a new row
-    /// like any other, and it and that row are worth a look for any take. The rows wait in one
-    /// group for [`under_chapters`].
+    /// sentence that says a row with other numbers, "12 seconds" as "9 seconds", or with the
+    /// same numbers in another order, is a new row like any other, and it and that row are
+    /// worth a look for any take. The rows wait in one group for [`under_chapters`].
     fn add_unscripted(&mut self, transcript: &Transcript) {
         let take = transcript.take();
         let words = transcript.words();
-        let texts: Vec<Vec<HashSet<String>>> = self
+        let texts: Vec<Vec<Numbered>> = self
             .rows()
             .map(|(_, row)| {
                 let said: Vec<&str> = row.text.split_whitespace().collect();
                 let ends = |i: usize| said[i].ends_with(['.', '?', '!']);
                 sentence_ranges(said.len(), ends)
                     .into_iter()
-                    .map(|s| content_set(said[s].iter().copied()))
+                    .map(|s| numbered(said[s].iter().copied()))
                     .collect()
             })
             .collect();
@@ -764,23 +764,34 @@ fn alike(a: &HashSet<String>, b: &HashSet<String>) -> f64 {
 /// The row a sentence of `words` says again: the earliest of those with the sentence most
 /// like it ([`alike`]), at least [`SAME_SENTENCE`]. `rows` are each row's sentences. A new
 /// sentence that shares words with a long row is therefore no retake of it. With whether the
-/// two say the same numbers: a sentence with another number is not the same sentence, and
-/// one with the same numbers is found first.
-fn said_again(words: &[Word], rows: &[Vec<HashSet<String>>]) -> Option<(usize, bool)> {
-    let said = content_set(words.iter().map(|w| w.text.as_str()));
-    let same_numbers = |s: &HashSet<String>| !s.symmetric_difference(&said).any(|w| is_number(w));
+/// two say the same numbers in the same order: a sentence with another number, or with two
+/// numbers swapped, is not the same sentence, and one with the same numbers is found first.
+fn said_again(words: &[Word], rows: &[Vec<Numbered>]) -> Option<(usize, bool)> {
+    let (said, numbers) = numbered(words.iter().map(|w| w.text.as_str()));
     rows.iter()
         .enumerate()
         .flat_map(|(i, row)| row.iter().map(move |s| (i, s)))
-        .map(|(i, s)| (same_numbers(s), alike(s, &said), i))
+        .map(|(i, (s, n))| (*n == numbers, alike(s, &said), i))
         .filter(|(_, alike, _)| *alike >= SAME_SENTENCE)
         .max_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)).then(b.2.cmp(&a.2)))
         .map(|(same, _, i)| (i, same))
 }
 
-/// Whether a content word is a number as the transcript writes it, in digits.
+/// A sentence's content words, and its numbers in the order it says them, repeats included.
+type Numbered = (HashSet<String>, Vec<String>);
+
+/// The [`Numbered`] sentence of `words`.
+fn numbered<'a>(words: impl Iterator<Item = &'a str>) -> Numbered {
+    let text: Vec<&str> = words.collect();
+    let content = content_words(&text.join(" "));
+    let numbers = content.iter().filter(|w| is_number(w)).cloned().collect();
+    (content.into_iter().collect(), numbers)
+}
+
+/// Whether a content word is a number as the transcript writes it: any word with a digit,
+/// so "12", "4k", "v2" and "200ms".
 fn is_number(word: &str) -> bool {
-    word.chars().all(char::is_numeric)
+    word.chars().any(char::is_numeric)
 }
 
 /// Shorter ids first, so `t9` comes before `t10`.
@@ -1012,7 +1023,8 @@ fn align(
 }
 
 /// Words that tell texts apart: lowercase letters and digits, three or more, without the most
-/// common English words and a plural `s`, and numbers of any length.
+/// common English words and a plural `s`, and numbers ([`is_number`]) of any length as they
+/// are written.
 fn content_words(text: &str) -> Vec<String> {
     const COMMON: &[&str] = &[
         "the", "and", "you", "that", "this", "with", "for", "are", "was", "but", "not", "have",
@@ -1022,10 +1034,12 @@ fn content_words(text: &str) -> Vec<String> {
     ];
     text.split(|c: char| !c.is_alphanumeric() && c != '\'')
         .map(|w| w.trim_matches('\'').to_lowercase())
-        .filter(|w| !w.is_empty() && is_number(w) || w.chars().count() >= 3)
+        .filter(|w| is_number(w) || w.chars().count() >= 3)
         .filter(|w| !COMMON.contains(&w.as_str()))
         .map(|w| match w.strip_suffix('s') {
-            Some(stem) if stem.chars().count() >= 3 && !stem.ends_with('s') => stem.to_owned(),
+            Some(stem) if stem.chars().count() >= 3 && !stem.ends_with('s') && !is_number(&w) => {
+                stem.to_owned()
+            }
             _ => w,
         })
         .collect()
@@ -2215,6 +2229,47 @@ mod tests {
         );
         // The same number again is a repeat, and the newer take plays.
         assert_eq!(played(twelve, twelve), (twelve.to_owned(), vec![false]));
+    }
+
+    /// What plays of two takes without a script, and which rows are worth a look.
+    fn played_unscripted(first: &str, second: &str) -> (String, Vec<bool>) {
+        let script = Script::parse("# A\n").unwrap();
+        let (first, second) = (said("t01", 0, first), said("t02", 0, second));
+        let takes = [(&first, None, "Take t01"), (&second, None, "Take t02")];
+        let cut = composed(&script, &takes);
+        let lineup = Lineup::new(&script, &cut, &[with(&first, None), with(&second, None)]);
+        let looks = lineup.rows().map(|(_, row)| row.look).collect();
+        (spoken(&cut, &[&first, &second]), looks)
+    }
+
+    #[test]
+    fn without_beats_the_same_numbers_in_another_order_are_no_repeat() {
+        let cold = "The cold build took 12 seconds and the warm build took 9 seconds.";
+        let warm = "The cold build took 9 seconds and the warm build took 12 seconds.";
+        assert_eq!(
+            played_unscripted(cold, warm),
+            (format!("{cold} {warm}"), vec![true, true])
+        );
+        assert_eq!(
+            played_unscripted(cold, cold),
+            (cold.to_owned(), vec![false])
+        );
+    }
+
+    #[test]
+    fn without_beats_a_word_with_a_digit_is_a_number() {
+        for (one, other) in [("4K", "8K"), ("v2", "v3"), ("200ms", "300ms")] {
+            let first = format!("The export of {one} is what we test today.");
+            let second = format!("The export of {other} is what we test today.");
+            assert_eq!(
+                played_unscripted(&first, &second),
+                (format!("{first} {second}"), vec![true, true])
+            );
+            assert_eq!(
+                played_unscripted(&first, &first),
+                (first.clone(), vec![false])
+            );
+        }
     }
 
     #[test]
