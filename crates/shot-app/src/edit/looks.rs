@@ -59,8 +59,9 @@ pub struct Looks {
     pub items: Vec<(Look, u64)>,
     /// The item N last went to.
     pub current: Option<Look>,
-    /// After an answer was written: go on to the next item once the document is rebuilt.
-    go_on: bool,
+    /// After an answer was written: go on to the item that took the answered one's place in
+    /// the queue once the document is rebuilt.
+    go_on: Option<usize>,
     /// After a beat was switched: play it once the document is rebuilt.
     play: Option<RowAt>,
     /// The beat N or A played last.
@@ -111,6 +112,18 @@ impl Looks {
             near.map(|(look, _)| *look)
         };
         current.or_else(beat).or_else(finding)
+    }
+
+    /// Where N goes in the queue: on from the item at `current` by position, around to the
+    /// first, so a second item at the same frame is not skipped. With none it enters at the
+    /// first item at or after `frame`.
+    fn next(&self, current: Option<Look>, frame: u64) -> usize {
+        let items = &self.items;
+        let on = current
+            .and_then(|current| items.iter().position(|(look, _)| *look == current))
+            .map(|at| (at + 1) % items.len());
+        on.or_else(|| items.iter().position(|(_, at)| *at >= frame))
+            .unwrap_or(0)
     }
 }
 
@@ -194,8 +207,8 @@ impl EditScreen {
         looks.lineup = lineup;
         looks.beats = beats;
         looks.items = items;
-        if std::mem::take(&mut self.looks.go_on) {
-            self.go_to_look(self.playhead, cx);
+        if let Some(at) = self.looks.go_on.take() {
+            self.go_to_look(at % self.looks.items.len().max(1), cx);
         }
         if let Some(row) = self.looks.play.take() {
             self.play_beat(row);
@@ -218,15 +231,9 @@ impl EditScreen {
         self.play_until = Some(frames.end);
     }
 
-    /// Goes to the first item at or after `frame`, or around to the first one, shows it and
-    /// plays it.
-    fn go_to_look(&mut self, frame: u64, cx: &mut Context<Self>) {
-        let items = &self.looks.items;
-        let Some(&(look, at)) = items
-            .iter()
-            .find(|(_, at)| *at >= frame)
-            .or_else(|| items.first())
-        else {
+    /// Goes to the item at `index` of the queue, shows it and plays it.
+    fn go_to_look(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(&(look, at)) = self.looks.items.get(index) else {
             self.looks.current = None;
             return;
         };
@@ -290,12 +297,8 @@ impl EditScreen {
         if !self.reviews(cx) {
             return;
         }
-        // From the item N last went to, on to the one after it.
-        let from = self
-            .current_look()
-            .and_then(|current| self.looks.items.iter().find(|(look, _)| *look == current))
-            .map_or(self.playhead, |(_, frame)| frame + 1);
-        self.go_to_look(from, cx);
+        let next = self.looks.next(self.current_look(), self.playhead);
+        self.go_to_look(next, cx);
     }
 
     /// The item N went to, while the playhead is still on what N played of it. After a seek,
@@ -333,6 +336,8 @@ impl EditScreen {
         let Some(look) = self.look_here() else {
             return;
         };
+        // The answered item leaves the queue, and the one after it takes its place.
+        let at = self.looks.items.iter().position(|(item, _)| *item == look);
         // The lineup is lent to the edit and comes back, for the rebuild to replace.
         let lineup = std::mem::take(&mut self.looks.lineup);
         let wrote = self.edit(cx, |cut| {
@@ -357,7 +362,7 @@ impl EditScreen {
             self.looks.current = None;
             self.lanes.picked = None;
             self.selection = None;
-            self.looks.go_on = true;
+            self.looks.go_on = at;
         }
     }
 
@@ -652,6 +657,31 @@ mod tests {
         assert_eq!(looks.target(Some(restart), 610), Some(restart));
         assert_eq!(looks.target(None, 590), Some(restart));
         assert_eq!(looks.target(None, 400), None);
+    }
+
+    #[test]
+    fn n_goes_on_to_a_second_item_at_the_same_frame() {
+        let at = TakeAt {
+            chapter: 0,
+            take: 0,
+        };
+        let row = RowAt { group: 0, row: 1 };
+        let restart = Look::Restart {
+            at,
+            kind: ElementKind::Retake,
+            t: Micros(9_000_000),
+            range: TimeRange::new(Micros(9_000_000), Micros(9_800_000)).unwrap(),
+        };
+        // A cut restart opens a beat worth a look: both sit at the frame the beat starts at.
+        let looks = Looks {
+            items: vec![(restart, 600), (Look::Beat(row), 600)],
+            ..Looks::default()
+        };
+        // N enters the queue by the playhead, then goes on by position and around.
+        assert_eq!(looks.next(None, 600), 0);
+        assert_eq!(looks.next(Some(restart), 600), 1);
+        assert_eq!(looks.next(Some(Look::Beat(row)), 600), 0);
+        assert_eq!(looks.next(None, 700), 0);
     }
 
     #[test]
