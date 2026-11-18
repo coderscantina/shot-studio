@@ -25,9 +25,13 @@ pub struct CheckArgs {
     out: Option<PathBuf>,
 }
 
-/// Prints only the problems; a cut that passes prints nothing and exits 0.
+/// Prints only the problems; a cut that passes exits 0. The main cut also says how much is
+/// still worth a look in the transcript, which is information and never a problem ([0040]).
+///
+/// [0040]: ../../../docs/decisions/0040-the-cut-proposes-itself.md
 pub fn check(args: CheckArgs) -> Result<(), String> {
-    let project = crate::open(&args.video)?.1.project;
+    let opened = crate::open(&args.video)?.1;
+    let project = opened.project;
     let export = args
         .out
         .unwrap_or_else(|| export_path(&args.video, &args.cut));
@@ -35,6 +39,13 @@ pub fn check(args: CheckArgs) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     for problem in &problems {
         println!("{problem}");
+    }
+    if args.cut == "main" {
+        let lineup = shot_mcp::takes::lineup(&args.video, &project);
+        let looks = project.cut.looks(&lineup, &opened.lock).len();
+        if looks > 0 {
+            println!("info: {looks} to look at in Edit (N), which does not stop a ship");
+        }
     }
     match problems.len() {
         0 => Ok(()),
