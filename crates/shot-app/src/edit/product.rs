@@ -43,7 +43,7 @@ pub fn render(this: &mut EditScreen, _: &mut Window, cx: &mut Context<EditScreen
         .gap(px(8.))
         .px(px(8.))
         .pb(px(8.))
-        .children(parts::error_strip(this))
+        .children(parts::error_strip(this, cx))
         .child(
             div()
                 .flex_1()

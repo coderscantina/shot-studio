@@ -41,7 +41,7 @@ pub fn render(this: &mut EditScreen, window: &mut Window, cx: &mut Context<EditS
         .min_h_0()
         .flex()
         .flex_col()
-        .children(parts::error_strip(this))
+        .children(parts::error_strip(this, cx))
         .child(layout_store::PICTURE.render(layouts, stage, layers, window, cx))
         .child(parts::overview_footer(this, chapter_frames, cx))
 }

@@ -250,10 +250,12 @@ pub fn row(name: impl Into<gpui::SharedString>, value: impl IntoElement) -> Div 
         .child(value)
 }
 
-/// An error from the last edit or the preview, above the workspace.
-pub fn error_strip(this: &EditScreen) -> Option<Div> {
+/// An error from the last edit or the preview, above the workspace, else why the cut was not
+/// composed, for as long as the folder says so.
+pub fn error_strip(this: &EditScreen, cx: &gpui::App) -> Option<Div> {
     this.error
         .clone()
+        .or_else(|| this.folder.read(cx).not_composed.clone())
         .map(|error| div().px(px(8.)).pb(px(8.)).child(ui::alert(error)))
 }
 

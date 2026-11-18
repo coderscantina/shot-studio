@@ -263,7 +263,7 @@ pub fn render(this: &mut EditScreen, window: &mut Window, cx: &mut Context<EditS
         .min_h_0()
         .flex()
         .flex_col()
-        .children(parts::error_strip(this))
+        .children(parts::error_strip(this, cx))
         .child(layout_store::TEXT.render(outline, document, side, window, cx))
         .child(parts::overview_footer(this, chapter_frames, cx))
 }
@@ -1634,7 +1634,8 @@ fn inspector(this: &EditScreen, cx: &mut Context<EditScreen>) -> Stateful<Div> {
             &this.inspector_scroll,
             body,
         ))
-        .child(
+        // Not under a beat's attempts: the pane is theirs, so the one that plays stays in view.
+        .children((!super::looks::shows_attempts(this)).then(|| {
             div()
                 .flex()
                 .flex_none()
@@ -1666,8 +1667,8 @@ fn inspector(this: &EditScreen, cx: &mut Context<EditScreen>) -> Stateful<Div> {
                         ))
                     },
                 )
-                .child(here("text", "Captions", super::captions::entry(this, cx))),
-        )
+                .child(here("text", "Captions", super::captions::entry(this, cx)))
+        }))
 }
 
 /// A picked effect other than a person's zoom: what it is and where it plays, where a style

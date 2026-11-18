@@ -800,7 +800,7 @@ pub fn render(this: &mut EditScreen, win: &mut Window, cx: &mut Context<EditScre
         .min_h_0()
         .flex()
         .flex_col()
-        .children(parts::error_strip(this))
+        .children(parts::error_strip(this, cx))
         .child(
             div()
                 .h(px(top))

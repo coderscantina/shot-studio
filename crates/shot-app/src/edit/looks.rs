@@ -359,6 +359,8 @@ impl EditScreen {
     /// A: the beat at the playhead plays its next attempt, as the person's pick, and is played.
     /// From sentences of several attempts it goes to the first attempt whole, and after the
     /// last attempt back to those sentences, the proposal, so the spliced sentence is not lost.
+    /// Going back to the proposal holds also after a word was cut in the attempt that played:
+    /// the cut stays with that attempt ([`shot_core::Cut::propose_row`]).
     pub(super) fn next_attempt(&mut self, _: &NextAttempt, _: &mut Window, cx: &mut Context<Self>) {
         if !self.reviews(cx) {
             return;
@@ -381,7 +383,11 @@ impl EditScreen {
             let row = lineup
                 .row(beat.row)
                 .ok_or(EditError::UnknownRow(beat.row))?;
-            cut.set_pick(row, &chosen).compose(&lineup, None)
+            if chosen.is_empty() {
+                cut.propose_row(&lineup, beat.row)
+            } else {
+                cut.set_pick(row, &chosen).compose(&lineup, None)
+            }
         });
         self.looks.lineup = lineup;
         if wrote {
@@ -476,6 +482,16 @@ pub fn beat_chip(this: &EditScreen, beat: &Beat, cx: &mut Context<EditScreen>) -
             this.seek(frames.start);
             cx.notify();
         }))
+}
+
+/// Whether [`section`] lists the attempts of the beat at the playhead: it has more than one,
+/// and N did not go to a finding.
+pub fn shows_attempts(this: &EditScreen) -> bool {
+    let finding = matches!(
+        this.current_look(),
+        Some(Look::Unsure { .. } | Look::Restart { .. })
+    );
+    !finding && this.looks.beat_playing(this.playhead).is_some()
 }
 
 /// The inspector's section for the item N went to, or for the beat at the playhead: what it is
