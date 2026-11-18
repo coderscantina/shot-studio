@@ -68,6 +68,9 @@ pub struct Row {
     pub proposal: Vec<Attempt>,
     /// Whether the proposal is worth a person's look: it plays more than one attempt, an
     /// older attempt over a newer one, or an attempt that leads by [`CLOSE`] points or less.
+    /// Without beats also a row a later take left out between two rows it says again, and a
+    /// row that take added there: it may say the row in other words, and both play until a
+    /// person cuts one.
     pub look: bool,
 }
 
@@ -180,7 +183,9 @@ impl Lineup {
     /// carries on is appended, or right after the row the take said just before them when it
     /// then says that row again or one of the next, at most one row on for each new sentence and
     /// one more, so a sentence added or reworded in a retake plays where it was said. The rows
-    /// wait in one group for [`under_chapters`].
+    /// the take skips there, and with them the rows it added there, are worth a look
+    /// ([`Row::look`]), as is one row it skips between two it says again with nothing new. The
+    /// rows wait in one group for [`under_chapters`].
     fn add_unscripted(&mut self, transcript: &Transcript) {
         let take = transcript.take();
         let words = transcript.words();
@@ -204,13 +209,28 @@ impl Lineup {
             .iter()
             .map(|s| said_again(&words[s.clone()], &texts))
             .collect();
+        // The rows between two the take says again that it says nowhere.
+        let skipped = |from: usize, to: usize| -> Vec<usize> {
+            let rows = from + 1..to;
+            rows.filter(|row| !said_again.contains(&Some(*row)))
+                .collect()
+        };
         let mut i = 0;
         while i < sentences.len() {
             let row = said_again[i];
             let run = said_again[i..].iter().take_while(|r| **r == row).count();
             let stretch = &words[sentences[i].start..sentences[i + run - 1].end];
             match row {
-                Some(row) => self.push(places[row], take, span(stretch)),
+                Some(row) => {
+                    self.push(places[row], take, span(stretch));
+                    // One row left out right before this one: a sentence the retake dropped.
+                    let before = i.checked_sub(1).and_then(|b| said_again[b]);
+                    if let Some(before) = before.filter(|before| before + 2 == row) {
+                        for row in skipped(before, row) {
+                            self.groups[0].rows[places[row].row].look = true;
+                        }
+                    }
+                }
                 None => {
                     // New between two sentences said again, of one row or of a row and one
                     // that follows it: its place is after the first. The second may be a row on
@@ -221,8 +241,15 @@ impl Lineup {
                     let between =
                         before.filter(|b| next.is_some_and(|n| n >= *b && n <= *b + 1 + run));
                     let mut index = between.map(|row| places[row].row + 1 + put_after[row]);
+                    let skipped = between
+                        .zip(next)
+                        .map_or_else(Vec::new, |(before, next)| skipped(before, next));
+                    for row in &skipped {
+                        self.groups[0].rows[places[*row].row].look = true;
+                    }
                     for group in groups(stretch) {
                         let at = self.new_row(group, index);
+                        self.groups[0].rows[at.row].look = !skipped.is_empty();
                         for place in places.iter_mut().filter(|p| p.row >= at.row) {
                             place.row += 1;
                         }
@@ -249,6 +276,7 @@ impl Lineup {
 
     /// Scores every attempt and writes each row's proposal. `texts` are the content words of
     /// each row in order: for a beat the ones the takes were aligned to, its bullet and script.
+    /// A row that is already worth a look stays so.
     fn propose(&mut self, takes: &[&TakeWords<'_>], texts: Vec<Vec<String>>) {
         let facts: BTreeMap<&Id, Facts<'_>> = takes
             .iter()
@@ -270,7 +298,7 @@ impl Lineup {
             let row = &mut self.groups[at.group].rows[at.row];
             row.scores = scores;
             row.proposal = proposal;
-            row.look = look;
+            row.look |= look;
         }
     }
 
@@ -1736,6 +1764,84 @@ mod tests {
                 assert_eq!(titles, chapters);
             }
         }
+    }
+
+    #[test]
+    fn without_beats_rows_a_take_skips_between_two_it_repeats_are_worth_a_look() {
+        let script = Script::parse("# A\n").unwrap();
+        let (intro, outro) = ("Welcome to the channel.", "Thanks for watching today.");
+        let first = said(
+            "t01",
+            0,
+            &format!(
+                "{intro} The parser reads every token. The lexer splits the input. \
+                 The renderer draws every frame. {outro}"
+            ),
+        );
+        // The rows worth a look after `later` was recorded.
+        let looks = |later: &str| -> Vec<String> {
+            let second = said("t02", 0, later);
+            let takes = [with(&first, None), with(&second, None)];
+            let lineup = Lineup::new(&script, &Cut::default(), &takes);
+            let rows = lineup.rows().filter(|(_, row)| row.look);
+            rows.map(|(_, row)| row.text.clone()).collect()
+        };
+        // One sentence in other words: it and the one it stands for both play.
+        assert_eq!(
+            looks(&format!(
+                "{intro} Tokens come from our tokenizer. The lexer splits the input. \
+                 The renderer draws every frame. {outro}"
+            )),
+            [
+                "Tokens come from our tokenizer.",
+                "The parser reads every token."
+            ]
+        );
+        // Three in a row.
+        assert_eq!(
+            looks(&format!(
+                "{intro} Tokens come from our tokenizer. We chop text up first. \
+                 Pixels get drawn last. {outro}"
+            )),
+            [
+                "Tokens come from our tokenizer.",
+                "We chop text up first.",
+                "Pixels get drawn last.",
+                "The parser reads every token.",
+                "The lexer splits the input.",
+                "The renderer draws every frame."
+            ]
+        );
+        // A sentence the retake left out, with nothing new in its place.
+        assert_eq!(
+            looks(&format!(
+                "{intro} The parser reads every token. The renderer draws every frame. {outro}"
+            )),
+            ["The lexer splits the input."]
+        );
+        // A sentence added between two rows that follow each other skips nothing.
+        assert_eq!(
+            looks(&format!(
+                "{intro} Sessions live in the cookie store. The parser reads every token. \
+                 The lexer splits the input. The renderer draws every frame. {outro}"
+            )),
+            [""; 0]
+        );
+        // A take that carries on and lands between two stock lines.
+        let short = said(
+            "t01",
+            0,
+            &format!("{intro} The parser reads every token. {outro}"),
+        );
+        let carries_on = said(
+            "t02",
+            0,
+            &format!("{intro} Sessions live in the cookie store. {outro}"),
+        );
+        let takes = [with(&short, None), with(&carries_on, None)];
+        let lineup = Lineup::new(&script, &Cut::default(), &takes);
+        let looks: Vec<bool> = lineup.rows().map(|(_, row)| row.look).collect();
+        assert_eq!(looks, [false, true, true, false]);
     }
 
     #[test]

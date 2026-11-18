@@ -21,7 +21,8 @@ use crate::takes::take_name;
 use crate::theme::*;
 use crate::ui::{hint, label};
 
-/// A beat with more than one attempt, where the transcript shows it.
+/// A beat with more than one attempt, or one a later take skipped or added in its place
+/// ([`Row::look`]), where the transcript shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Beat {
     pub row: RowAt,
@@ -134,7 +135,8 @@ impl EditScreen {
         let lineup = folder.lineup();
         let cut = &folder.project.cut;
         let mut beats = Vec::new();
-        for (row_at, row) in lineup.rows().filter(|(_, row)| row.attempts.len() > 1) {
+        let shown = |row: &Row| row.attempts.len() > 1 || row.look;
+        for (row_at, row) in lineup.rows().filter(|(_, row)| shown(row)) {
             let pieces = cut.plays(&lineup, row, None);
             let mut first = None;
             let mut frames: Option<Range<u64>> = None;
@@ -381,7 +383,11 @@ impl EditScreen {
         let Some(beat) = self.looks.beat_playing(self.playhead).cloned() else {
             return;
         };
-        let Some(row) = self.looks.row(beat.row) else {
+        let Some(row) = self
+            .looks
+            .row(beat.row)
+            .filter(|row| row.attempts.len() > 1)
+        else {
             return;
         };
         let picked = !self.folder.read(cx).project.cut.picked(row).is_empty();
@@ -423,7 +429,9 @@ impl EditScreen {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(row) = self.looks.beat_playing(self.playhead).map(|b| b.row) {
+        let beat = self.looks.beat_playing(self.playhead).map(|b| b.row);
+        let attempts = |row: &RowAt| self.looks.row(*row).is_some_and(|r| r.attempts.len() > 1);
+        if let Some(row) = beat.filter(attempts) {
             self.set_playing(false);
             cx.emit(CompareBeat(row));
         }
@@ -467,7 +475,8 @@ pub fn count(this: &EditScreen, cx: &mut Context<EditScreen>) -> Option<Stateful
     })
 }
 
-/// The marker where a beat with other attempts starts: which attempt plays, of how many.
+/// The marker where a beat with other attempts starts: which attempt plays, of how many. A
+/// beat with one attempt that is worth a look asks whether a neighbour says it again.
 pub fn beat_chip(this: &EditScreen, beat: &Beat, cx: &mut Context<EditScreen>) -> Stateful<Div> {
     let of = this.looks.row(beat.row).map_or(0, |row| row.attempts.len());
     let playing: Vec<String> = beat.playing.iter().map(|i| (i + 1).to_string()).collect();
@@ -495,7 +504,11 @@ pub fn beat_chip(this: &EditScreen, beat: &Beat, cx: &mut Context<EditScreen>) -
         .when(open, |chip| {
             chip.child(div().size(px(5.)).rounded_full().bg(ACCENT))
         })
-        .child(format!("{} of {of}", playing.join("+")))
+        .child(if of > 1 {
+            format!("{} of {of}", playing.join("+"))
+        } else {
+            "said twice?".to_owned()
+        })
         .on_click(cx.listener(move |this, _, _, cx| {
             this.selection = None;
             this.lanes.picked = None;
@@ -555,6 +568,7 @@ pub fn section(this: &EditScreen, cx: &App) -> Option<Div> {
         let picked = !cut.picked(row).is_empty();
         // K answers the beat only while it is the target, not a finding near the playhead.
         let open = matches!(look, Some(Look::Beat(_)));
+        let contested = row.attempts.len() > 1;
         // The keys come first: a long list of attempts must not push them out of sight.
         section = section
             .child(title(if open { "Worth a look" } else { "This beat" }))
@@ -562,8 +576,11 @@ pub fn section(this: &EditScreen, cx: &App) -> Option<Div> {
             .when(open, |section| {
                 section.child(hint("K", "It is fine as it plays"))
             })
-            .child(hint("A", "Play the next attempt and use it"))
-            .child(hint("⇧A", "Compare the attempts side by side"))
+            .when(contested, |section| {
+                section
+                    .child(hint("A", "Play the next attempt and use it"))
+                    .child(hint("⇧A", "Compare the attempts side by side"))
+            })
             .children(row.attempts.iter().enumerate().map(|(i, attempt)| {
                 let plays = beat.playing.contains(&i);
                 div()
@@ -583,6 +600,10 @@ pub fn section(this: &EditScreen, cx: &App) -> Option<Div> {
                     .child(label(format!("{} of 100", row.scores[i])))
             }))
             .child(label(match (picked, beat.playing.len()) {
+                _ if !contested => {
+                    "A later take left this out or said it in other words, and both play. \
+                     Select the one you do not want and delete it."
+                }
                 (true, _) => "Your pick. It stays when a later take scores better.",
                 (false, 1) if open => "An earlier or a close attempt plays. Hear the others.",
                 (false, 1) => "The best scored attempt plays.",
