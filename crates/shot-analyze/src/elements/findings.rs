@@ -548,15 +548,18 @@ fn restarts(words: &[&W], cued: &[Finding]) -> Vec<Finding> {
             .filter_map(|b| {
                 let aligned = align(words, i..b, b)?;
                 let confidence = restart_confidence(words, aligned, b)?;
-                let range = span(words, passage_start(words, i, floor), b)?;
+                // The second attempt keeps the words that open its sentence, as the first
+                // loses its own: "This parser reads. The parser reads" keeps "The".
+                let kept = passage_start(words, b, aligned.a_end);
+                let range = span(words, passage_start(words, i, floor), kept)?;
                 let free = !cued.iter().any(|c| c.range.overlaps(range));
-                free.then_some((aligned.same, b, range, confidence))
+                free.then_some((aligned.same, b, kept, range, confidence))
             })
             .max_by_key(|(same, ..)| *same);
         match hit {
-            Some((_, b, range, confidence)) => {
+            Some((_, b, kept, range, confidence)) => {
                 found.push(Finding::new(ElementKind::Retake, range, confidence));
-                floor = b;
+                floor = kept;
                 i = b;
             }
             None => i += 1,
@@ -611,7 +614,10 @@ fn cues(words: &[&W]) -> Vec<Finding> {
             .filter(|&(_, _, same)| same >= 3)
             .max_by_key(|&(_, _, same)| same);
         let finding = match repeat {
-            Some((i, b, _)) => span(words, passage_start(words, i, 0), b).map(|r| (r, 90)),
+            Some((i, b, _)) => {
+                let kept = passage_start(words, b, end);
+                span(words, passage_start(words, i, 0), kept).map(|r| (r, 90))
+            }
             None => span(words, c, end).map(|r| (r, 70)),
         };
         if let Some((range, confidence)) = finding {
@@ -892,6 +898,21 @@ mod tests {
                 ElementKind::Retake,
                 "The first thing we do is create a new project.".into(),
                 92
+            )]
+        );
+    }
+
+    #[test]
+    fn a_restart_keeps_the_word_that_opens_the_second_attempt() {
+        let t = transcript(
+            "This parser reads our local project files today. The parser reads our local project files today.",
+        );
+        assert_eq!(
+            run(&t, &[]),
+            [(
+                ElementKind::Retake,
+                "This parser reads our local project files today.".into(),
+                85
             )]
         );
     }
