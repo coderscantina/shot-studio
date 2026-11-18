@@ -70,7 +70,8 @@ pub struct Row {
     /// older attempt over a newer one, or an attempt that leads by [`CLOSE`] points or less.
     /// Without beats also a row a later take left out between two rows it says again, and a
     /// row that take added there: it may say the row in other words, and both play until a
-    /// person cuts one. The same holds for a retake's new opening and ending.
+    /// person cuts one. What a retake says before, between and after the rows it says again is
+    /// worth a look too: it may say rows in other words or be a remark that does not belong.
     pub look: bool,
 }
 
@@ -186,9 +187,10 @@ impl Lineup {
     /// the take skips there, and with them the rows it added there, are worth a look
     /// ([`Row::look`]), as is one row it skips between two it says again with nothing new. A
     /// take that says again half of its sentences or more is a retake: what it says before the
-    /// first row it says again goes before that row, and that and what it says after the last
-    /// are worth a look with the rows it leaves unsaid there. The rows wait in one group for
-    /// [`under_chapters`].
+    /// first row it says again goes before that row, what it says between two rows it says
+    /// again goes after the first, and those and what it says after the last are worth a look,
+    /// with the rows it leaves unsaid there when they are at most one for each new sentence. The
+    /// rows wait in one group for [`under_chapters`].
     fn add_unscripted(&mut self, transcript: &Transcript) {
         let take = transcript.take();
         let words = transcript.words();
@@ -239,27 +241,40 @@ impl Lineup {
                     // New between two sentences said again, of one row or of a row and one
                     // that follows it: its place is after the first. The second may be a row on
                     // for each new sentence, which then says a row between them in other words.
-                    // A retake's new opening goes before the row it then says, which may be a
-                    // row on for each new sentence, and its new ending stays at the end when it
-                    // leaves at most a row unsaid for each new sentence: either may say those
-                    // rows in other words. Anything else carries on, at the end.
+                    // What a retake says before the first row it says again goes before that
+                    // row, what it says between two rows that are further apart goes after the
+                    // first, and what it says after the last stays at the end: each is worth a
+                    // look, as a remark or as other words for the rows the retake leaves unsaid
+                    // there, when those are at most a row for each new sentence. Anything else
+                    // carries on, at the end.
                     let before = i.checked_sub(1).and_then(|b| said_again[b]);
                     let next = said_again.get(i + run).copied().flatten();
                     let between =
                         before.filter(|b| next.is_some_and(|n| n >= *b && n <= *b + 1 + run));
+                    // The row the new rows go right after.
+                    let after = between.or(before.filter(|_| retake && next.is_some()));
                     let (mut index, skipped, look) = match (between, before, next) {
                         (Some(row), _, Some(next)) => {
                             let skipped = unsaid(row + 1..next);
                             let look = !skipped.is_empty();
                             (Some(places[row].row + 1 + put_after[row]), skipped, look)
                         }
-                        (None, None, Some(next)) if retake && next <= run => {
-                            (Some(places[next].row), unsaid(0..next), true)
+                        (None, None, Some(next)) if retake => {
+                            let skipped = if next <= run {
+                                unsaid(0..next)
+                            } else {
+                                Vec::new()
+                            };
+                            (Some(places[next].row), skipped, true)
                         }
                         (None, Some(before), None) if retake => {
                             let skipped = unsaid(before + 1..texts.len());
-                            let look = skipped.len() <= run;
-                            (None, if look { skipped } else { Vec::new() }, look)
+                            let reworded = skipped.len() <= run;
+                            (None, if reworded { skipped } else { Vec::new() }, true)
+                        }
+                        (None, Some(before), Some(_)) if retake => {
+                            let index = places[before].row + 1 + put_after[before];
+                            (Some(index), Vec::new(), true)
                         }
                         _ => (None, Vec::new(), false),
                     };
@@ -273,7 +288,7 @@ impl Lineup {
                             place.row += 1;
                         }
                         index = index.map(|index| index + 1);
-                        if let Some(row) = between {
+                        if let Some(row) = after {
                             put_after[row] += 1;
                         }
                         self.push(at, take, span(group));
@@ -639,9 +654,10 @@ fn proposal(
 /// row before it when the same take said both, or when the next row the cut plays, after the
 /// rows of its take that the cut places nowhere either, is in that row's chapter, so a chapter
 /// is not split by the passage a later take replaced or by the sentences it added, renamed or
-/// not, and else goes under its take's name. A take that was
-/// just appended whole plays under its own name, `Take <take>`: that chapter holds the take
-/// until it is composed and places none of its rows.
+/// not. Such a row at the very start opens the chapter of the next row the cut plays, so a
+/// retake's new opening is no chapter of its own. Else it goes under its take's name. A take
+/// that was just appended whole plays under its own name, `Take <take>`: that chapter holds the
+/// take until it is composed and places none of its rows.
 fn under_chapters(rows: Vec<Row>, cut: &Cut) -> Vec<Group> {
     // The chapter that plays a row, by its title, `placed` without the take's own chapter.
     let chapter = |row: &Row, placed: bool| -> Option<&str> {
@@ -666,14 +682,21 @@ fn under_chapters(rows: Vec<Row>, cut: &Cut) -> Vec<Group> {
         // The rows of this take that follow and that the cut places nowhere go where this goes.
         let same = |j: &usize| playing[i + j].is_none() && said[*j] == said[0];
         let follow = (1..said.len()).take_while(same).count();
-        let next = holding[i + 1 + follow..].iter().flatten().next();
-        let inside =
-            |group: &Group| before == said[0].as_ref() || next.is_some_and(|n| *n == group.title);
-        let title = match (playing[i], groups.last(), &said[0]) {
-            (Some(title), _, _) => title.to_owned(),
-            (None, Some(group), _) if inside(group) => group.title.clone(),
-            (None, _, Some(take)) => format!("Take {take}"),
-            (None, _, None) => String::new(),
+        let next = (i + 1 + follow..holding.len()).find_map(|j| Some((holding[j]?, j - i)));
+        let inside = |group: &Group| {
+            before == said[0].as_ref() || next.is_some_and(|(title, _)| title == group.title)
+        };
+        // A row at the very start that a later take said than the row that follows it.
+        let opens = |take: &Id, next: usize| {
+            let first = said[next].as_ref();
+            first.is_some_and(|first| take_order(first) < take_order(take))
+        };
+        let title = match (playing[i], groups.last(), next, &said[0]) {
+            (Some(title), ..) => title.to_owned(),
+            (None, Some(group), ..) if inside(group) => group.title.clone(),
+            (None, None, Some((title, next)), Some(take)) if opens(take, next) => title.to_owned(),
+            (None, _, _, Some(take)) => format!("Take {take}"),
+            (None, _, _, None) => String::new(),
         };
         match groups.last_mut() {
             Some(group) if group.title == title => group.rows.push(row),
@@ -1636,6 +1659,124 @@ mod tests {
     }
 
     #[test]
+    fn without_beats_a_retakes_remark_plays_where_it_was_said_and_is_worth_a_look() {
+        let script = Script::parse("# A\n").unwrap();
+        let whole = TimeRange::new(Micros(0), Micros(120_000_000)).unwrap();
+        // The sentences the cut plays after `later` was recorded and composed, and the rows
+        // worth a look. Composing again changes neither.
+        let played = |first: &[&str], later: &str| -> (String, Vec<String>) {
+            let first = said("t01", 0, &first.join(" "));
+            let second = said("t02", 0, later);
+            let takes = [with(&first, None), with(&second, None)];
+            let mut cut = Cut::default()
+                .append_take(id("t01"), "Intro", whole)
+                .append_take(id("t02"), "Take t02", whole);
+            let mut rounds = Vec::new();
+            for _ in 0..2 {
+                cut = cut
+                    .compose(&Lineup::new(&script, &cut, &takes), Some(&id("t02")))
+                    .unwrap();
+                let blocks = cut.chapters.iter().flat_map(|c| &c.takes);
+                let words = blocks.flat_map(|edit| {
+                    let take = if edit.take == id("t01") {
+                        &first
+                    } else {
+                        &second
+                    };
+                    let kept = take.words().iter().filter(|w| edit.keeps(w.range));
+                    kept.map(|w| w.text.as_str())
+                });
+                let lineup = Lineup::new(&script, &cut, &takes);
+                let looks = lineup.rows().filter(|(_, row)| row.look);
+                rounds.push((
+                    words.collect::<Vec<_>>().join(" "),
+                    looks.map(|(_, row)| row.text.clone()).collect(),
+                ));
+            }
+            assert_eq!(rounds[0], rounds[1]);
+            rounds.remove(0)
+        };
+        let long = [
+            "Welcome to the channel.",
+            "The parser reads every token.",
+            "The lexer splits the input.",
+            "The renderer draws every frame.",
+            "Caching comes last.",
+            "Nightly backups copy the database offsite.",
+            "Restores are tested every single week.",
+            "Sessions live in the cookie store.",
+            "Rotate the keys monthly.",
+            "Thanks for watching today.",
+        ];
+        // `rows` of `of` with `remark` before the row at `at`, as the cut plays them.
+        let with_remark = |of: &[&str], at: usize, remark: &str| -> (String, Vec<String>) {
+            let mut rows = of.to_vec();
+            rows.insert(at, remark);
+            (rows.join(" "), vec![remark.to_owned()])
+        };
+        // A remark before a pickup from the middle plays before the row it leads into.
+        let remark = "Okay from the caching part again.";
+        assert_eq!(
+            played(&long, &format!("{remark} {}", long[4..].join(" "))),
+            with_remark(&long, 4, remark)
+        );
+        // A remark after a pickup stays at the end, and is marked whatever the take left unsaid.
+        let remark = "Yeah that sounded better somehow.";
+        assert_eq!(
+            played(&long, &format!("{} {remark}", long[4])),
+            with_remark(&long, 10, remark)
+        );
+        let remark = "Okay I think that was good.";
+        assert_eq!(
+            played(&long, &format!("{} {remark}", long[4..8].join(" "))),
+            with_remark(&long, 10, remark)
+        );
+        // A remark between two pickups plays after the first.
+        let remark = "Alright now the other sentence.";
+        assert_eq!(
+            played(&long, &format!("{} {remark} {}", long[2], long[7])),
+            with_remark(&long, 3, remark)
+        );
+        // The same with three sentences.
+        let short = &long[1..4];
+        let remark = "Okay, take two.";
+        assert_eq!(
+            played(short, &format!("{remark} {}", short[2])),
+            with_remark(short, 2, remark)
+        );
+        let remark = "That sounded right";
+        assert_eq!(
+            played(short, &format!("{} {remark}", short[0])),
+            with_remark(short, 3, remark)
+        );
+    }
+
+    #[test]
+    fn without_beats_a_retakes_new_opening_is_in_the_chapter_of_the_row_it_leads_into() {
+        let script = Script::parse("# A\n").unwrap();
+        let text = "The parser reads every token. The lexer splits the input.";
+        let first = said("t01", 0, text);
+        let second = said("t02", 0, &format!("Okay take two here we go. {text}"));
+        let whole = TimeRange::new(Micros(0), Micros(20_000_000)).unwrap();
+        let takes = [with(&first, None), with(&second, None)];
+        let mut cut = Cut::default()
+            .append_take(id("t01"), "Intro", whole)
+            .append_take(id("t02"), "Take t02", whole);
+        for _ in 0..2 {
+            let lineup = Lineup::new(&script, &cut, &takes);
+            let groups: Vec<(&str, usize)> = lineup
+                .groups
+                .iter()
+                .map(|g| (g.title.as_str(), g.rows.len()))
+                .collect();
+            assert_eq!(groups, [("Intro", 3)]);
+            cut = cut.compose(&lineup, Some(&id("t02"))).unwrap();
+            let titles: Vec<&str> = cut.chapters.iter().map(|c| c.title.as_str()).collect();
+            assert_eq!(titles, ["Intro"]);
+        }
+    }
+
+    #[test]
     fn a_take_whose_recording_was_undone_is_not_lined_up() {
         let script = Script::parse("# A\n").unwrap();
         let first = said("t01", 0, "The loader runs on the server.");
@@ -1740,17 +1881,19 @@ mod tests {
                 "Thanks for watching today.",
             ]
         );
-        // A take that repeats only the stock intro and outro carries on: it is appended.
+        // A take that says again its intro and outro, two of its three sentences, is a retake:
+        // what it says between them plays after the intro, not after the outro.
         let third = said(
             "t03",
             0,
             "Welcome to the channel. Sessions live in the cookie store. Thanks for watching today.",
         );
         assert_eq!(
-            rows(&[with(&first, None), with(&third, None)])[4..],
+            rows(&[with(&first, None), with(&third, None)])[..3],
             [
-                "Thanks for watching today.",
-                "Sessions live in the cookie store."
+                "Welcome to the channel.",
+                "Sessions live in the cookie store.",
+                "The parser reads every token."
             ]
         );
     }
