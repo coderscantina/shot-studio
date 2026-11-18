@@ -643,7 +643,7 @@ impl EditScreen {
                 .map
                 .output_range(at, block(at)?.overlays.get(index)?.range),
             Pick::Cut(at, range) => {
-                let frame = self.map.output_frame(at, range.to())?;
+                let frame = self.map.seam(at, range)?;
                 Some(frame.saturating_sub(MIN_SPAN / 2)..frame + MIN_SPAN / 2)
             }
             Pick::Layout(at, range) => self.map.output_range(at, range),
@@ -2498,7 +2498,7 @@ fn seams(this: &EditScreen, window: &Range<u64>, x: &impl Fn(u64) -> f32) -> Vec
         })
         .filter_map(|(block, item)| match item {
             model::Item::Cut(run) => {
-                let frame = this.map.output_frame(block.at, run.range.to())?;
+                let frame = this.map.seam(block.at, run.range)?;
                 window.contains(&frame).then(|| {
                     let removed: Vec<&str> = block.words[run.words.clone()]
                         .iter()
