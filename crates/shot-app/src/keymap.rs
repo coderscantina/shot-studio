@@ -47,6 +47,7 @@ fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("escape", prompter::HidePrompter, prompter_output),
         // Edit screen
         KeyBinding::new("space", edit::TogglePlay, edit),
+        KeyBinding::new("shift-space", edit::PlayAround, edit),
         KeyBinding::new("backspace", edit::DeleteSelection, edit),
         KeyBinding::new("delete", edit::DeleteSelection, edit),
         KeyBinding::new("r", edit::RestoreSelection, edit),

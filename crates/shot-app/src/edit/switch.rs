@@ -146,7 +146,7 @@ impl EditScreen {
         }
     }
 
-    fn close_switch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn close_switch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.lanes.switch.take().is_some() {
             window.focus(&self.focus, cx);
         }

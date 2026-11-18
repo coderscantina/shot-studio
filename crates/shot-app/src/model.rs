@@ -411,6 +411,29 @@ impl EditMap {
             .map(|s| s.output_frame + (frame - s.source_frames.start))
     }
 
+    /// The output frame showing `time` of the block at `at`, or else the block's first kept
+    /// media after it.
+    pub fn output_frame_from(&self, at: TakeAt, time: Micros) -> Option<u64> {
+        let frame = time.0 * u64::from(FPS) / 1_000_000;
+        self.spans
+            .iter()
+            .filter(|s| s.at == at && s.source_frames.end > frame)
+            .map(|s| s.output_frame + frame.saturating_sub(s.source_frames.start))
+            .min()
+    }
+
+    /// Where the cut `range` of the block at `at` joins in the output: the block's next kept
+    /// media, or the end of its last for a cut that ends the block.
+    pub fn seam(&self, at: TakeAt, range: TimeRange) -> Option<u64> {
+        self.output_frame_from(at, range.from()).or_else(|| {
+            self.spans
+                .iter()
+                .filter(|s| s.at == at)
+                .map(|s| s.output_frames().end)
+                .max()
+        })
+    }
+
     /// Every output frame showing take time `at` of `take`, once per span that keeps it, as
     /// export places the lock's moments.
     pub fn outputs_of<'a>(&'a self, take: &'a Id, at: Micros) -> impl Iterator<Item = u64> + 'a {
@@ -532,7 +555,7 @@ pub struct DocWord {
     pub text: String,
     pub range: TimeRange,
     pub state: WordState,
-    /// Output frame of the word's start, in the view's output.
+    /// Output frame of the word's start, or of its first kept media, in the view's output.
     pub output: Option<u64>,
 }
 
@@ -611,7 +634,12 @@ pub fn document(
                     text: w.word.text.clone(),
                     range: w.word.range,
                     state: w.state,
-                    output: map.output_frame(at, w.word.range.from()),
+                    // A cut next to a kept word may take its first milliseconds; the word then
+                    // starts where its media does.
+                    output: match w.state {
+                        WordState::Kept => map.output_frame_from(at, w.word.range.from()),
+                        _ => map.output_frame(at, w.word.range.from()),
+                    },
                 })
                 .collect();
             let layout_at = |time: Micros| {
@@ -759,6 +787,67 @@ fn length_breaks(words: &[DocWord], layout_at: impl Fn(Micros) -> Layout) -> Vec
         }
     }
     breaks
+}
+
+/// Every word the transcript shows, in output order: the block's place in `doc`, the block and
+/// the word's index.
+fn shown_words(doc: &[BlockDoc]) -> impl Iterator<Item = (usize, TakeAt, usize)> + '_ {
+    doc.iter().enumerate().flat_map(|(n, block)| {
+        block
+            .paragraphs
+            .iter()
+            .flat_map(|p| &p.items)
+            .filter_map(move |item| match item {
+                Item::Word(index) => Some((n, block.at, *index)),
+                Item::Cut(_) => None,
+            })
+    })
+}
+
+/// The shown word after, or before, word `index` of block `at`, across blocks and chapters.
+/// `index` may be a word the view hides, such as a removed word of an opened cut.
+pub fn shown_word_next(
+    doc: &[BlockDoc],
+    at: TakeAt,
+    index: usize,
+    forward: bool,
+) -> Option<(TakeAt, usize)> {
+    let here = (doc.iter().position(|b| b.at == at)?, index);
+    let found = if forward {
+        shown_words(doc).find(|&(n, _, i)| (n, i) > here)
+    } else {
+        shown_words(doc).filter(|&(n, _, i)| (n, i) < here).last()
+    };
+    found.map(|(_, at, index)| (at, index))
+}
+
+/// The first removed word of the person's cut right before word `index` of `block`, if that cut
+/// holds words. A cut of `index` that starts there joins it, so cutting word after word leaves
+/// one cut. A cut of the style rules stays theirs, so Cut and a restyle can still change it.
+pub fn cut_words_before(block: &BlockDoc, index: usize) -> Option<usize> {
+    let items: Vec<&Item> = block.paragraphs.iter().flat_map(|p| &p.items).collect();
+    items.windows(2).find_map(|pair| match pair {
+        [Item::Cut(run), Item::Word(word)]
+            if *word == index && run.manual && !run.words.is_empty() =>
+        {
+            Some(run.words.start)
+        }
+        _ => None,
+    })
+}
+
+/// The last shown word that starts at or before output frame `frame`, else the first one.
+pub fn shown_word_at(doc: &[BlockDoc], frame: u64) -> Option<(TakeAt, usize)> {
+    let starts = |&(n, _, index): &(usize, TakeAt, usize)| {
+        doc[n].words[index]
+            .output
+            .is_some_and(|start| start <= frame)
+    };
+    shown_words(doc)
+        .filter(starts)
+        .last()
+        .or_else(|| shown_words(doc).next())
+        .map(|(_, at, index)| (at, index))
 }
 
 /// Selected words of one take block, from the word the selection started at to the word it
@@ -1138,6 +1227,101 @@ mod tests {
             range: range(from, to),
             confidence: 90,
         }
+    }
+
+    #[test]
+    fn the_word_cursor_skips_cut_words_and_crosses_takes() {
+        let cut = Cut {
+            chapters: vec![
+                Chapter {
+                    title: "A".into(),
+                    takes: vec![block(
+                        "t01",
+                        vec![
+                            keep(0, 1_300_000),
+                            remove(1_300_000, 2_000_000),
+                            keep(2_000_000, 3_000_000),
+                        ],
+                    )],
+                },
+                Chapter {
+                    title: "B".into(),
+                    takes: vec![block("t02", vec![keep(0, 1_000_000)])],
+                },
+            ],
+            ..Cut::default()
+        };
+        let mut one = Transcript::new(id("t01"));
+        for w in [
+            word("ship", 100_000, 600_000),
+            word("uh", 1_400_000, 1_800_000),
+            // Starts inside the cut, as when a cut's edge takes a word's first milliseconds.
+            word("it", 1_950_000, 2_500_000),
+        ] {
+            one.push(w).unwrap();
+        }
+        let mut two = Transcript::new(id("t02"));
+        two.push(word("now", 100_000, 500_000)).unwrap();
+        let transcripts = HashMap::from([(id("t01"), one), (id("t02"), two)]);
+        let p = project(cut);
+        let lock = Lock::default();
+        let map = EditMap::of(&p, &lock, View::Edited);
+        let doc = document(
+            &p.cut,
+            &lock,
+            &transcripts,
+            &map,
+            View::Edited,
+            Layout::Face,
+        );
+        let a = TakeAt {
+            chapter: 0,
+            take: 0,
+        };
+        let b = TakeAt {
+            chapter: 1,
+            take: 0,
+        };
+
+        // "uh" is cut, so the cursor steps over it, and on into the next chapter's take.
+        assert_eq!(shown_word_next(&doc, a, 0, true), Some((a, 2)));
+        assert_eq!(shown_word_next(&doc, a, 2, true), Some((b, 0)));
+        assert_eq!(shown_word_next(&doc, b, 0, true), None);
+        assert_eq!(shown_word_next(&doc, b, 0, false), Some((a, 2)));
+        // From a hidden word, as in an opened cut, it goes on to the next shown one.
+        assert_eq!(shown_word_next(&doc, a, 1, true), Some((a, 2)));
+
+        // "it" starts where its kept media does, right after "ship"'s 1.3 s.
+        let it = doc[0].words[2].output.unwrap();
+        assert_eq!(it, 78);
+        assert_eq!(shown_word_at(&doc, it), Some((a, 2)));
+        // A cut of "it" joins the cut of "uh" right before it.
+        assert_eq!(cut_words_before(&doc[0], 2), Some(1));
+        assert_eq!(cut_words_before(&doc[0], 0), None);
+        // A playhead on cut media goes on to the next kept media, as after a cut under it.
+        assert_eq!(map.output_frame_from(a, Micros(1_400_000)), Some(78));
+        assert_eq!(map.output_frame_from(a, Micros(3_000_000)), None);
+        // A cut that ends the block joins where its last kept media ends.
+        assert_eq!(
+            map.seam(a, range(3_000_000, 3_200_000)),
+            Some(map.chapters[0].frames.end)
+        );
+
+        // The same "uh" cut by a rule is not joined.
+        let mut ruled = p.cut.clone();
+        ruled.chapters[0].takes[0].ranges = vec![keep(0, 3_000_000)];
+        let lock = silences(&[(1_300_000, 2_000_000)]);
+        let map = EditMap::of(&project(ruled.clone()), &lock, View::Edited);
+        let doc = document(
+            &ruled,
+            &lock,
+            &transcripts,
+            &map,
+            View::Edited,
+            Layout::Face,
+        );
+        assert_eq!(cut_words_before(&doc[0], 2), None);
+        assert_eq!(shown_word_at(&doc, it - 1), Some((a, 0)));
     }
 
     #[test]

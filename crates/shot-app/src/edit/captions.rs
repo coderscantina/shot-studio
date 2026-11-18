@@ -124,12 +124,12 @@ impl EditScreen {
     }
 
     /// Opens or closes the panel. It opens in the Picture workspace unless Text is on show.
-    pub(super) fn toggle_captions(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn toggle_captions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.captions.open = !self.captions.open;
         self.captions.editing = None;
         self.captions.note = None;
         if self.captions.open && self.workspace != super::Workspace::Text {
-            self.set_workspace(super::Workspace::Picture, cx);
+            self.set_workspace(super::Workspace::Picture, window, cx);
         }
         self.rebuild(cx);
         cx.notify();
@@ -500,7 +500,7 @@ pub fn panel(this: &EditScreen, cx: &mut Context<EditScreen>) -> Stateful<Div> {
                 .cursor_pointer()
                 .hover(|s| s.bg(RAISED))
                 .child(icon("close", ICON_SM, MUTED))
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_captions(cx))),
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_captions(window, cx))),
         );
     let about = label(
         "Burned into Shorts and X clips. The main video ships them as a captions file, and the preview shows them while this panel is open.",
@@ -1097,7 +1097,7 @@ pub fn entry(this: &EditScreen, cx: &mut Context<EditScreen>) -> AnyElement {
         .hover(|s| s.text_color(STRONG))
         .child(style_name(style))
         .child(icon("edit", ICON_SM, MUTED))
-        .on_click(cx.listener(|this, _, _, cx| this.toggle_captions(cx)))
+        .on_click(cx.listener(|this, _, window, cx| this.toggle_captions(window, cx)))
         .into_any_element()
 }
 

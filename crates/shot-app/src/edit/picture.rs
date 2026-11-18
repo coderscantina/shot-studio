@@ -361,7 +361,7 @@ fn layers(this: &EditScreen, cx: &mut Context<EditScreen>) -> Stateful<Div> {
                     gpui_component::tooltip::Tooltip::new("Edit the captions and their style")
                         .build(window, cx)
                 })
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_captions(cx))),
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_captions(window, cx))),
         )
         .children(zoom.map(|z| {
             layer(

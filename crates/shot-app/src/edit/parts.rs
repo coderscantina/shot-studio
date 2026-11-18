@@ -265,9 +265,6 @@ impl EditScreen {
         }
         let at = (x - bounds.origin.x) / bounds.size.width;
         self.seek(frame_at(at, self.map.frames));
-        if let Some(chapter) = self.map.chapter_at(self.playhead) {
-            self.chapter = chapter;
-        }
         cx.notify();
     }
 
@@ -335,28 +332,36 @@ impl EditScreen {
                     Segment::new(
                         "Text",
                         workspace == Workspace::Text,
-                        cx.listener(|this, _, _, cx| this.set_workspace(Workspace::Text, cx)),
+                        cx.listener(|this, _, window, cx| {
+                            this.set_workspace(Workspace::Text, window, cx)
+                        }),
                     )
                     .icon("text")
                     .compact(compact),
                     Segment::new(
                         "Picture",
                         workspace == Workspace::Picture,
-                        cx.listener(|this, _, _, cx| this.set_workspace(Workspace::Picture, cx)),
+                        cx.listener(|this, _, window, cx| {
+                            this.set_workspace(Workspace::Picture, window, cx)
+                        }),
                     )
                     .icon("picture")
                     .compact(compact),
                     Segment::new(
                         "Timeline",
                         workspace == Workspace::Timeline,
-                        cx.listener(|this, _, _, cx| this.set_workspace(Workspace::Timeline, cx)),
+                        cx.listener(|this, _, window, cx| {
+                            this.set_workspace(Workspace::Timeline, window, cx)
+                        }),
                     )
                     .icon("timeline")
                     .compact(compact),
                     Segment::new(
                         "Product",
                         workspace == Workspace::Product,
-                        cx.listener(|this, _, _, cx| this.set_workspace(Workspace::Product, cx)),
+                        cx.listener(|this, _, window, cx| {
+                            this.set_workspace(Workspace::Product, window, cx)
+                        }),
                     )
                     .icon("cursor")
                     .compact(compact),

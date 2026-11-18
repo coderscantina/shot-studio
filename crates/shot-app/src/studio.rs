@@ -385,17 +385,11 @@ impl Studio {
         }
     }
 
-    /// The screen a new window opens on: the video's next step. A video outside a channel has
-    /// no status, so it opens on Record until it has takes, on Cut while a take waits for its
-    /// transcript and on Edit after.
+    /// The screen a new window opens on: the video's next step, the one the nav marks. A video
+    /// outside a channel has no status, so it opens on Record until it has takes, on Cut while a
+    /// take waits for its transcript or a rule's finding waits for an answer, and on Edit after.
     fn first_screen(&self, cx: &App) -> Screen {
-        match self.step(cx) {
-            None => Screen::Ship,
-            Some(Screen::Record) => Screen::Record,
-            Some(Screen::Cut) if untranscribed(self.folder.read(cx)) => Screen::Cut,
-            Some(_) if self.planning.is_none() => Screen::Edit,
-            Some(step) => step,
-        }
+        self.step(cx).unwrap_or(Screen::Ship)
     }
 
     fn show(&mut self, screen: Screen, window: &mut Window, cx: &mut Context<Self>) {

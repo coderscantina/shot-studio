@@ -734,6 +734,17 @@ fn counts(cut: &Cut, lock: &Lock) -> Vec<KindCount> {
     out
 }
 
+/// How many passages a person cut, and their length, so the rule list does not say nothing
+/// was cut when only the rules cut nothing.
+fn manual_cuts(cut: &Cut, lock: &Lock) -> (usize, Micros) {
+    model::blocks(cut)
+        .flat_map(|(_, edit)| model::removals(edit, lock))
+        .filter(|(_, by)| *by == RemovedBy::Manual)
+        .fold((0, Micros(0)), |(n, time), (range, _)| {
+            (n + 1, Micros(time.0 + range.duration().0))
+        })
+}
+
 /// `M:SS` of a length.
 fn minutes(t: Micros) -> String {
     let seconds = t.0 / 1_000_000;
@@ -891,6 +902,7 @@ impl CutScreen {
         let folder = self.folder.read(cx);
         let format = crate::board::format_name(folder.project.video.format);
         let recorded = !folder.project.cut.chapters.is_empty();
+        let (yours, yours_time) = manual_cuts(&folder.project.cut, folder.lock());
         let rows = counts.iter().map(|count| {
             div()
                 .id(SharedString::from(format!("rule-{}", count.kind)))
@@ -971,7 +983,15 @@ impl CutScreen {
             )
             .children(rows)
             .when(recorded && counts.is_empty(), |this| {
-                this.child(div().px(px(4.)).child(note("Nothing cut yet.".to_owned())))
+                let text = match yours {
+                    0 => "Nothing cut yet.".to_owned(),
+                    1 => format!("The rules cut nothing. You cut 1 passage, {}.", minutes(yours_time)),
+                    n => format!(
+                        "The rules cut nothing. You cut {n} passages, {}.",
+                        minutes(yours_time)
+                    ),
+                };
+                this.child(div().px(px(4.)).child(note(text)))
             })
             .child(
                 div()
@@ -1644,8 +1664,10 @@ impl CutScreen {
             return None;
         }
         let open = queue.len();
-        let title = if applied_mode || entering {
+        let title = if applied_mode || (entering && !offered.is_empty()) {
             "Applied by the rules"
+        } else if entering {
+            "Your answers"
         } else {
             "Needs your call"
         };

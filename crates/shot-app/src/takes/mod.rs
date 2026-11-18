@@ -546,8 +546,10 @@ impl TakesView {
         cx.notify();
     }
 
+    /// Rates the focused attempt, at a beat with another attempt to rate it against.
     fn rate(&mut self, stars: u8, cx: &mut Context<Self>) {
-        let Some((_, _, attempt)) = self.focused() else {
+        let Some((_, _, attempt)) = self.focused().filter(|(_, row, _)| row.attempts.len() > 1)
+        else {
             return;
         };
         let attempt = attempt.clone();
@@ -559,7 +561,8 @@ impl TakesView {
     }
 
     fn pick(&mut self, cx: &mut Context<Self>) {
-        let (Some((_, row, attempt)), Some(chosen)) = (self.focused(), self.chosen()) else {
+        let focused = self.focused().filter(|(_, row, _)| row.attempts.len() > 1);
+        let (Some((_, row, attempt)), Some(chosen)) = (focused, self.chosen()) else {
             return;
         };
         let cut = &self.folder.read(cx).project.cut;
@@ -811,6 +814,8 @@ impl TakesView {
         let focused = self.at == (row, index);
         let rating = cut.rating(attempt);
         let picked = rating.is_some_and(|r| r.pick);
+        // Stars and the pick mean something only next to another attempt.
+        let choice = row_data.attempts.len() > 1;
         let kept = cut.kept_of(&attempt.take, attempt.range);
         let whole = kept.0 * 2 >= attempt.range.duration().0;
         let words = self.words_of(attempt);
@@ -938,18 +943,20 @@ impl TakesView {
                         ))
                     })
                     .child(div().flex_1())
-                    .child(stars(rating.and_then(|r| r.stars), ICON_SM))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(4.))
-                            .text_size(TEXT_XS)
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(ACCENT)
-                            .child(icon("pick", ICON, if picked { ACCENT } else { FAINT }))
-                            .when(picked, |this| this.child("Picked")),
-                    ),
+                    .when(choice, |this| {
+                        this.child(stars(rating.and_then(|r| r.stars), ICON_SM))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(4.))
+                                    .text_size(TEXT_XS)
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(ACCENT)
+                                    .child(icon("pick", ICON, if picked { ACCENT } else { FAINT }))
+                                    .when(picked, |this| this.child("Picked")),
+                            )
+                    }),
             )
             .child(
                 div()
@@ -1102,6 +1109,8 @@ impl TakesView {
                     .any(|a| cut.rating(a).is_some_and(|r| r.pick))
             })
             .count();
+        // With one attempt at every beat there is nothing to pick between.
+        let choice = self.lineup.rows().any(|(_, row)| row.attempts.len() > 1);
         let summary = match twice {
             0 => format!("{takes}, {} beats, {picked} picked", self.rows.len()),
             n => format!(
@@ -1128,10 +1137,12 @@ impl TakesView {
                     )
                     .child(div().text_size(TEXT_SM).text_color(MUTED).child(summary)),
             )
-            .child(
-                big_button("assemble", "takes", "Assemble picks", "⇧↩", twice > 0)
-                    .on_click(cx.listener(|this, _, _, cx| this.assemble(cx))),
-            )
+            .when(choice, |header| {
+                header.child(
+                    big_button("assemble", "takes", "Assemble picks", "⇧↩", twice > 0)
+                        .on_click(cx.listener(|this, _, _, cx| this.assemble(cx))),
+                )
+            })
     }
 
     fn side(&self, cx: &mut Context<Self>) -> Div {
@@ -1144,6 +1155,10 @@ impl TakesView {
         let partner = self.partner(cx);
         let marked = self.mark.and_then(|_| self.chosen());
         let has_mark = marked.is_some();
+        // Comparing, rating and picking need another attempt at the beat.
+        let choice = focused
+            .as_ref()
+            .is_some_and(|(_, row, _)| row.attempts.len() > 1);
         let title = match &focused {
             Some((_, _, a)) => format!("{}, beat {}", take_name(&a.take), self.at.0 + 1),
             None => "No attempt".to_owned(),
@@ -1211,21 +1226,23 @@ impl TakesView {
                 )
                 .on_click(cx.listener(|this, _, _, cx| this.play_focused(cx))),
             )
-            .child(
-                action(
-                    "takes-compare",
-                    if comparing { "pause" } else { "compare" },
-                    match (&compare_to, comparing) {
-                        (_, true) => "Pause".to_owned(),
-                        (Some(other), false) => format!("Compare with {other}"),
-                        (None, false) => "Compare".to_owned(),
-                    },
-                    "A",
-                    false,
+            .when(choice, |side| {
+                side.child(
+                    action(
+                        "takes-compare",
+                        if comparing { "pause" } else { "compare" },
+                        match (&compare_to, comparing) {
+                            (_, true) => "Pause".to_owned(),
+                            (Some(other), false) => format!("Compare with {other}"),
+                            (None, false) => "Compare".to_owned(),
+                        },
+                        "A",
+                        false,
+                    )
+                    .when(compare_to.is_none(), |this| this.opacity(0.5))
+                    .on_click(cx.listener(|this, _, _, cx| this.compare(cx))),
                 )
-                .when(compare_to.is_none(), |this| this.opacity(0.5))
-                .on_click(cx.listener(|this, _, _, cx| this.compare(cx))),
-            )
+            })
             .child(
                 action(
                     "takes-use",
@@ -1247,9 +1264,12 @@ impl TakesView {
                     .flex_col()
                     .gap(px(8.))
                     .child(hint("↑ ↓", "Beats"))
-                    .child(hint("← →", "Attempts"))
-                    .child(hint("1–5", "Rate, the same again clears"))
-                    .child(hint("P", "Circle as the pick"))
+                    .when(choice, |hints| {
+                        hints
+                            .child(hint("← →", "Attempts"))
+                            .child(hint("1–5", "Rate, the same again clears"))
+                            .child(hint("P", "Circle as the pick"))
+                    })
                     .child(hint("⇧← ⇧→", "Mark words, or click and ⇧click"))
                     .child(hint("Esc", "Clear the mark")),
             )

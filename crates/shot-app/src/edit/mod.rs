@@ -63,6 +63,9 @@ fn word_selection() -> gpui::Hsla {
 /// forward Delete do the same.
 pub const DELETE_KEYS: &str = "⌫ ⌦";
 
+/// How much ⇧Space plays on each side of the caret or playhead, in frames: 1.5 s.
+const AROUND: u64 = FPS as u64 * 3 / 2;
+
 /// How long "Saved" shows after an edit is written.
 const SAVED_FOR: Duration = Duration::from_millis(1600);
 
@@ -84,6 +87,7 @@ actions!(
         NextWord,
         ExtendPrevious,
         ExtendNext,
+        PlayAround,
         AcceptProposal,
         FocusPrevious,
         ShowProposal,
@@ -209,6 +213,9 @@ pub struct EditScreen {
     previewing: Option<String>,
     /// Scroll the transcript to the selected proposal on the next render.
     scroll_to_card: bool,
+    /// The paragraph the transcript last showed the playhead in. When the playhead moves to
+    /// another one, the transcript scrolls it into view.
+    revealed: Option<(TakeAt, usize)>,
     claude: Option<Claude>,
     /// Claude writing another take.
     run: Option<AgentRun>,
@@ -280,6 +287,7 @@ impl EditScreen {
             proposal: None,
             previewing: None,
             scroll_to_card: false,
+            revealed: None,
             claude: Claude::find(),
             run: None,
             captions: captions::CaptionsState::default(),
@@ -315,8 +323,9 @@ impl EditScreen {
         self.chapter = self
             .chapter
             .min(project.cut.chapters.len().saturating_sub(1));
+        // Media an edit cut under the playhead hands it on to the next kept media of its block.
         let frame = keep
-            .and_then(|(at, time)| self.map.output_frame(at, time))
+            .and_then(|(at, time)| self.map.output_frame_from(at, time))
             .unwrap_or(self.playhead)
             .min(self.map.frames.saturating_sub(1));
         self.playhead = frame;
@@ -425,6 +434,9 @@ impl EditScreen {
     fn seek(&mut self, frame: u64) {
         let frame = frame.min(self.map.frames.saturating_sub(1));
         self.playhead = frame;
+        if let Some(chapter) = self.map.chapter_at(frame) {
+            self.chapter = chapter;
+        }
         self.engine.seek(frame);
         self.sound.seek(frame);
         self.seeking = true;
@@ -517,6 +529,29 @@ impl EditScreen {
         cx.notify();
     }
 
+    /// ⇧Space: plays [`AROUND`] on each side of the picked cut's seam, the selection's first
+    /// word or the playhead, so a cut is heard where it joins.
+    fn play_around(&mut self, _: &PlayAround, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus.is_focused(window) {
+            cx.propagate();
+            return;
+        }
+        let seam = match self.lanes.picked {
+            Some(timeline::Pick::Cut(at, range)) => self.map.seam(at, range),
+            _ => None,
+        };
+        let at = seam
+            .or_else(|| {
+                let s = self.selection?;
+                self.block(s.at)?.words.get(*s.words().start())?.output
+            })
+            .unwrap_or(self.playhead);
+        self.seek(at.saturating_sub(AROUND));
+        self.set_playing(true);
+        self.play_until = Some(at + AROUND);
+        cx.notify();
+    }
+
     // Selection.
 
     fn select_word(&mut self, at: TakeAt, index: usize, extend: bool, cx: &mut Context<Self>) {
@@ -539,28 +574,37 @@ impl EditScreen {
         cx.notify();
     }
 
-    /// Moves the selected word, or without a selection the playhead by a frame, or a second
-    /// with Shift.
-    fn move_selection(&mut self, step: isize, extend: bool, cx: &mut Context<Self>) {
-        let Some(selection) = self.selection else {
-            let frames = if extend { i64::from(FPS) } else { 1 } * step as i64;
+    /// The arrows. In Text, they step through the shown words, across takes and chapters, and
+    /// without a selection select the word at the playhead. Shift extends inside one take
+    /// block. In the other workspaces, without a selection they step the playhead by a frame,
+    /// or a second with Shift.
+    fn move_selection(&mut self, forward: bool, extend: bool, cx: &mut Context<Self>) {
+        // A key that moves the caret stops playback, so the caret stays where the cut goes.
+        if self.playing {
             self.set_playing(false);
+        }
+        let Some(selection) = self.selection else {
+            if self.workspace == Workspace::Text {
+                if let Some((at, index)) = model::shown_word_at(&self.doc, self.playhead) {
+                    self.select_word(at, index, false, cx);
+                }
+                return;
+            }
+            let frames = if extend { i64::from(FPS) } else { 1 } * if forward { 1 } else { -1 };
             self.seek(self.playhead.saturating_add_signed(frames));
             cx.notify();
             return;
         };
-        let Some(len) = self.block(selection.at).map(|b| b.words.len()) else {
+        let Some((at, head)) =
+            model::shown_word_next(&self.doc, selection.at, selection.head, forward)
+        else {
             return;
         };
-        let head = selection
-            .head
-            .saturating_add_signed(step)
-            .min(len.saturating_sub(1));
-        if extend {
+        if !extend {
+            self.select_word(at, head, false, cx);
+        } else if at == selection.at {
             self.selection = Some(Selection { head, ..selection });
             cx.notify();
-        } else {
-            self.select_word(selection.at, head, false, cx);
         }
     }
 
@@ -581,14 +625,16 @@ impl EditScreen {
         &mut self,
         cx: &mut Context<Self>,
         change: impl FnOnce(&Cut) -> Result<Cut, EditError>,
-    ) {
+    ) -> bool {
         let result = self.folder.update(cx, |folder, cx| {
             let cut = change(&folder.project.cut).map_err(|e| e.to_string())?;
             folder.write_cut(cut)?;
             cx.notify();
             Ok::<_, String>(())
         });
+        let written = result.is_ok();
         self.wrote(result, cx);
+        written
     }
 
     /// After an edit was written or failed: a failure stays on screen until an edit works,
@@ -633,8 +679,26 @@ impl EditScreen {
         let Some(transcript) = self.folder.read(cx).transcripts.get(&take).cloned() else {
             return;
         };
-        self.selection = None;
-        self.edit(cx, |cut| cut.delete_words(at, &transcript, range));
+        let (first, last) = self
+            .selection
+            .map_or((0, 0), |s| (*s.words().start(), *s.words().end()));
+        // Joining the cut right before keeps no sliver of pause between two cuts in a row.
+        let range = self
+            .block(at)
+            .and_then(|b| b.words.get(model::cut_words_before(b, first)?))
+            .and_then(|w| shot_core::TimeRange::new(w.range.from(), range.to()))
+            .unwrap_or(range);
+        let caret = model::shown_word_next(&self.doc, at, last, true);
+        if !self.edit(cx, |cut| cut.delete_words(at, &transcript, range)) {
+            return;
+        }
+        // The caret moves on to the next word, so the next cut needs no mouse. The rebuild after
+        // the edit keeps the playhead on that word's media, so it lands on the seam.
+        self.selection = caret.map(|(at, index)| Selection::word(at, index));
+        if let Some(frame) = caret.and_then(|(at, index)| self.block(at)?.words.get(index)?.output)
+        {
+            self.seek(frame);
+        }
     }
 
     fn restore_selection(&mut self, _: &RestoreSelection, _: &mut Window, cx: &mut Context<Self>) {
@@ -810,10 +874,13 @@ impl EditScreen {
         }
     }
 
-    /// Switches the workspace. A pick belongs to the Timeline lanes, so it is dropped.
-    fn set_workspace(&mut self, workspace: Workspace, cx: &mut Context<Self>) {
+    /// Switches the workspace. A pick and an open switch belong to the Timeline lanes, so they
+    /// are dropped, and Text shows the playhead's paragraph again.
+    fn set_workspace(&mut self, workspace: Workspace, window: &mut Window, cx: &mut Context<Self>) {
         if self.workspace != workspace {
             self.lanes.picked = None;
+            self.close_switch(window, cx);
+            self.revealed = None;
         }
         self.workspace = workspace;
         cx.notify();
@@ -929,10 +996,12 @@ impl Render for EditScreen {
             .flex_col()
             .min_h_0()
             .on_action(cx.listener(Self::toggle_play))
+            .on_action(cx.listener(Self::play_around))
             .on_action(cx.listener(Self::delete_selection))
             .on_action(cx.listener(Self::restore_selection))
             .on_action(cx.listener(|this, _: &ClearSelection, _, cx| {
-                if !this.close_picker()
+                if this.lanes.switch.take().is_none()
+                    && !this.close_picker()
                     && !std::mem::take(&mut this.text.layouts_open)
                     && !this.drop_text_pick()
                     && !this.stop_proposal(cx)
@@ -990,23 +1059,27 @@ impl Render for EditScreen {
             .on_action(cx.listener(|this, _: &Layout2, _, cx| this.set_layout(1, cx)))
             .on_action(cx.listener(|this, _: &Layout3, _, cx| this.set_layout(2, cx)))
             .on_action(cx.listener(|this, _: &Layout4, _, cx| this.set_layout(3, cx)))
-            .on_action(
-                cx.listener(|this, _: &ShowText, _, cx| this.set_workspace(Workspace::Text, cx)),
-            )
-            .on_action(cx.listener(|this, _: &ShowPicture, _, cx| {
-                this.set_workspace(Workspace::Picture, cx)
+            .on_action(cx.listener(|this, _: &ShowText, window, cx| {
+                this.set_workspace(Workspace::Text, window, cx)
             }))
-            .on_action(cx.listener(|this, _: &ShowTimeline, _, cx| {
-                this.set_workspace(Workspace::Timeline, cx)
+            .on_action(cx.listener(|this, _: &ShowPicture, window, cx| {
+                this.set_workspace(Workspace::Picture, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ShowTimeline, window, cx| {
+                this.set_workspace(Workspace::Timeline, window, cx)
             }))
             .on_action(
-                cx.listener(|this, _: &PreviousWord, _, cx| this.move_selection(-1, false, cx)),
+                cx.listener(|this, _: &PreviousWord, _, cx| this.move_selection(false, false, cx)),
             )
-            .on_action(cx.listener(|this, _: &NextWord, _, cx| this.move_selection(1, false, cx)))
             .on_action(
-                cx.listener(|this, _: &ExtendPrevious, _, cx| this.move_selection(-1, true, cx)),
+                cx.listener(|this, _: &NextWord, _, cx| this.move_selection(true, false, cx)),
             )
-            .on_action(cx.listener(|this, _: &ExtendNext, _, cx| this.move_selection(1, true, cx)))
+            .on_action(
+                cx.listener(|this, _: &ExtendPrevious, _, cx| this.move_selection(false, true, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ExtendNext, _, cx| this.move_selection(true, true, cx)),
+            )
             .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
                 if event.pressed_button == Some(gpui::MouseButton::Left) {
                     this.drag_lanes(event.position, cx);

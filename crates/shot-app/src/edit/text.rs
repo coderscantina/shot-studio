@@ -227,10 +227,8 @@ pub fn render(this: &mut EditScreen, window: &mut Window, cx: &mut Context<EditS
         .chapters
         .get(this.chapter)
         .map_or(0..0, |c| c.frames.clone());
-    // Set by a click in the outline: the transcript scrolls to the playhead's paragraph once.
-    let follow = window.use_keyed_state("text-follow", cx, |_, _| false);
-    let outline = outline(this, &follow, cx);
-    let document = document(this, &follow, cx);
+    let outline = outline(this, cx);
+    let document = document(this, cx);
     let side = div()
         .flex_1()
         .min_h_0()
@@ -268,12 +266,8 @@ pub fn render(this: &mut EditScreen, window: &mut Window, cx: &mut Context<EditS
 }
 
 /// The chapters, and under the one on show its paragraphs by their first words. A click on a
-/// paragraph seeks there and scrolls the transcript to it.
-fn outline(
-    this: &EditScreen,
-    follow: &Entity<bool>,
-    cx: &mut Context<EditScreen>,
-) -> Stateful<Div> {
+/// paragraph seeks there, and the transcript follows.
+fn outline(this: &EditScreen, cx: &mut Context<EditScreen>) -> Stateful<Div> {
     let current = current_paragraph(this);
     let mut list: Vec<AnyElement> = Vec::new();
     for (index, chapter) in this.map.chapters.iter().enumerate() {
@@ -304,6 +298,7 @@ fn outline(
                 .child(mono(timecode(length)).text_size(TEXT_SM))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.chapter = index;
+                    this.revealed = None;
                     this.selection = None;
                     this.lanes.picked = None;
                     if let Some(start) = start {
@@ -333,7 +328,6 @@ fn outline(
                     .take(12)
                     .collect();
                 let now = current == Some((block.at, number));
-                let follow = follow.clone();
                 paragraphs = paragraphs.child(
                     div()
                         .id(("paragraph", row))
@@ -364,8 +358,9 @@ fn outline(
                         )
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.selection = None;
+                            // Shown again even when the playhead was in it already.
+                            this.revealed = None;
                             this.seek(start);
-                            follow.update(cx, |follow, _| *follow = true);
                             cx.notify();
                         })),
                 );
@@ -407,7 +402,29 @@ fn current_paragraph(this: &EditScreen) -> Option<(TakeAt, usize)> {
         .map(|(at, i, _)| (at, i))
 }
 
-fn document(this: &mut EditScreen, follow: &Entity<bool>, cx: &mut Context<EditScreen>) -> Div {
+/// Whether transcript row `row` is in view as the last frame painted it, so following the
+/// playhead leaves the text alone. While playing the whole paragraph must show, while paused any
+/// part of it is enough, so a click on a word never moves the text. A paragraph in another chapter than
+/// the last one revealed is never in view: the rows are not the same.
+fn in_view(this: &EditScreen, row: usize) -> bool {
+    let same_chapter = this.revealed.map(|(at, _)| at.chapter) == Some(this.chapter);
+    let view = this.scroll.bounds();
+    same_chapter
+        && this.scroll.bounds_for_item(row).is_some_and(|item| {
+            // The handle keeps a child's bounds as laid out, before the scroll moves them.
+            let (top, bottom) = (
+                item.top() + this.scroll.offset().y,
+                item.bottom() + this.scroll.offset().y,
+            );
+            if this.playing {
+                top >= view.top() && bottom <= view.bottom()
+            } else {
+                bottom > view.top() && top < view.bottom()
+            }
+        })
+}
+
+fn document(this: &mut EditScreen, cx: &mut Context<EditScreen>) -> Div {
     if this.map.chapters.is_empty() {
         return ui::pane().flex_1().flex().flex_col().child(
             ui::empty_state(
@@ -446,8 +463,9 @@ fn document(this: &mut EditScreen, follow: &Entity<bool>, cx: &mut Context<EditS
     let rail = |start, layout| rail(columns, start, layout);
     let mut rows: Vec<Div> = Vec::new();
     let mut scroll_to = None;
-    let following = *follow.read(cx);
     let playing_in = current_paragraph(this);
+    let reveal = playing_in.is_some() && playing_in != this.revealed;
+    let mut reveal_row = None;
     if let Some(note) = proposals::agent_note(this) {
         rows.push(doc_row(rail(None, None), note.into_any_element()));
     }
@@ -491,8 +509,8 @@ fn document(this: &mut EditScreen, follow: &Entity<bool>, cx: &mut Context<EditS
                 index = end;
                 continue;
             }
-            if following && playing_in == Some((block.at, index)) {
-                scroll_to = Some(rows.len());
+            if reveal && playing_in == Some((block.at, index)) {
+                reveal_row = Some(rows.len());
             }
             let current = paragraph.start.is_some_and(|start| start <= this.playhead)
                 && block
@@ -508,13 +526,17 @@ fn document(this: &mut EditScreen, follow: &Entity<bool>, cx: &mut Context<EditS
             index += 1;
         }
     }
+    if scroll_to.is_none()
+        && let Some(row) = reveal_row
+        && !in_view(this, row)
+    {
+        scroll_to = Some(row);
+    }
     if let Some(row) = scroll_to {
         this.scroll.scroll_to_top_of_item(row);
     }
     this.scroll_to_card = false;
-    if following {
-        follow.update(cx, |follow, _| *follow = false);
-    }
+    this.revealed = playing_in;
     ui::pane()
         .relative()
         .flex_1()
@@ -795,7 +817,8 @@ fn paragraph_element(
                 let open = this
                     .expanded
                     .contains(&super::run_key(at, run.range.from()));
-                children.push(cut(at, run, open, cx).into_any_element());
+                let picked = this.lanes.picked == Some(Pick::Cut(at, run.range));
+                children.push(cut(at, run, open, picked, cx).into_any_element());
                 if open {
                     for i in run.words.clone() {
                         children.push(word(this, block, i, effects, cx).into_any_element());
@@ -1105,7 +1128,7 @@ impl SwitchMenu {
             let screen = self.screen.clone();
             move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
                 screen.update(cx, |this, cx| {
-                    this.edit(cx, |cut| apply_layout(cut, at, range, to, default))
+                    this.edit(cx, |cut| apply_layout(cut, at, range, to, default));
                 })
             }
         };
@@ -1136,18 +1159,32 @@ fn layout_choices(this: &EditScreen, cx: &App) -> Vec<Layout> {
 }
 
 /// A cut between words: a faint seam for short auto cuts, a red length chip for the rest.
-/// Clicking opens it to show the removed words, a right-click offers Restore.
-fn cut(at: TakeAt, run: &CutRun, open: bool, cx: &mut Context<EditScreen>) -> impl IntoElement {
+/// Clicking picks it, so R restores it, and opens it to show the removed words; a right-click
+/// offers Restore.
+fn cut(
+    at: TakeAt,
+    run: &CutRun,
+    open: bool,
+    picked: bool,
+    cx: &mut Context<EditScreen>,
+) -> impl IntoElement {
     let key = (run.range.from().0 / 1000) as usize;
     let from = run.range.from();
+    let range = run.range;
     let toggle = cx.listener(move |this, _, _, cx| {
         let key = super::run_key(at, from);
         if !this.expanded.remove(&key) {
             this.expanded.insert(key);
         }
+        this.selection = None;
+        this.text.picked = None;
+        this.lanes.picked = Some(Pick::Cut(at, range));
+        // The playhead goes to the seam, so the arrows and ⇧Space start from the cut.
+        if let Some(frame) = this.map.seam(at, range) {
+            this.seek(frame);
+        }
         cx.notify();
     });
-    let range = run.range;
     let menu = cx.listener(move |this, _: &MouseDownEvent, _, cx| {
         this.selection = None;
         this.text.picked = None;
@@ -1164,7 +1201,7 @@ fn cut(at: TakeAt, run: &CutRun, open: bool, cx: &mut Context<EditScreen>) -> im
             .mx(px(3.))
             .mr(px(8.))
             .rounded(px(1.))
-            .bg(FAINT)
+            .bg(if picked { CUT } else { FAINT })
             .on_click(toggle);
     }
     div()
@@ -1177,6 +1214,12 @@ fn cut(at: TakeAt, run: &CutRun, open: bool, cx: &mut Context<EditScreen>) -> im
         .mr(px(6.))
         .rounded(px(5.))
         .bg(CUT_TINT)
+        .border_1()
+        .border_color(if picked {
+            CUT.into()
+        } else {
+            gpui::transparent_black()
+        })
         .text_color(CUT_TEXT)
         .font_family(MONO)
         .text_size(TEXT_XS)
@@ -1505,15 +1548,15 @@ fn inspector(this: &EditScreen, cx: &mut Context<EditScreen>) -> Stateful<Div> {
                     .flex()
                     .flex_col()
                     .gap(px(8.))
-                    .child(label("Click a word to select it, Shift-click to extend"))
+                    .child(label("Click a word, or ←→ from the playhead, ⇧ to extend"))
                     .child(hint(super::DELETE_KEYS, "Cut the selected words"))
-                    .child(hint("R", "Restore cut words"))
+                    .child(hint("⇧Space", "Hear the cut"))
+                    .child(hint("R", "Restore cut words or a picked cut"))
                     .child(hint("Z", "Zoom in on them"))
                     .child(hint("H", "Highlight them on the screen"))
                     .child(hint("S", "Place a sound"))
                     .child(hint("P", "Pop an emoji or sticker"))
-                    .child(hint("L", "Switch the layout, or 1–4"))
-                    .child(hint("←→", "Step word by word, ⇧ to extend")),
+                    .child(hint("L", "Switch the layout, or 1–4")),
             ),
         });
     // What is on screen stays in view under the rest, which scrolls when the pane is short.
