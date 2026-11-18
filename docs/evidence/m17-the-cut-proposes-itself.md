@@ -74,6 +74,21 @@ Six faults found while building were fixed on `m17/integration` after the report
 
 The picks of the three script takes are now the ignored test `crates/shot-cli/tests/takes.rs`: it muxes each clip over a test pattern with ffmpeg, runs `shot ingest` three times and expects the chapters and takes of the `cut.kdl` above, one playing attempt per beat and no restart in kept media.
 
+## Fixes after the review
+
+Three reviews of `1f3cb45` found 19 faults. All are fixed on `m17/integration`, each testable one with a test, checked 2026-11-18 with fmt, workspace clippy, `cargo test --workspace` (630 passed) and the three ignored fixture tests.
+
+- The pick: the frame of a proposal is the best scored attempt among those that say the beat whole, so a retake of one sentence is spliced in and never replaces the beat. The score counts the beat's script. A sentence replaces another only when it says all its content words and is as clean, fillers counted. A flubbed sentence can be replaced. Without a script, only a sentence that repeats a sentence competes (`takes::tests`).
+- Switching: a person's layouts, zooms, overlays and override answers in material that leaves the cut wait in the `takes` block as `take` blocks and `override` nodes and come back with it ([contract](../contracts/project-files.md#takes)).
+- Composing: the app composes after a take was transcribed in Edit, after a failed analysis, and on open when a take the cut plays was analyzed after `cut.kdl` was written. The analysis of a take whose recording was undone no longer brings it back. A cut a Short keeps from composing says why, in Edit, Record and `shot ingest` (`folder::tests`).
+- Review keys: N, K, C and A act only in Text, K and C leave an item the playhead moved off, A steps from a splice to the first attempt whole, through the attempts and back to the splice, K and C on a beat write `looked` nodes and no pick, an unsure finding that crosses a block edge is queued with what plays of it, the keys stand above the attempts, and a Recorded card says "N to look at" from the same count as Edit.
+- The detector keeps the word that opens the second attempt of a restart: "This parser reads ... today. The parser reads ..." cuts the first sentence and keeps "The".
+- Ship plans again when the folder changes and when a run starts, so the description and chapter times are those of the cut it exports.
+
+Seen in the debug app on the three ingested takes, at 1600x1000: `m17/review-beat-keys.png` shows "Clap gives us help text" with three attempts and K, A and ⇧A above them, and `m17/review-beat-answered.png` the same video after K, which wrote `looked t03 from=3_690_000 to=9_090_000`, no pick, and took the count away.
+
+A Short still keeps the main cut from dropping a take it uses. A Short is cut from the main cut's segments and the lock, which the rules build only for material the main cut keeps, so letting the take go needs the engine and three contract rules to change. That is left to Mike.
+
 ## Not verified
 
 - Recording through the app with the prompter: the takes came in through `shot ingest`. The app's append and its second compose after analysis are covered by `folder::tests::a_retake_of_a_beat_plays_in_place_of_the_earlier_attempt` and by reading, not by a recording.
@@ -81,6 +96,7 @@ The picks of the three script takes are now the ignored test `crates/shot-cli/te
 - The text cutting fixes that are wiring only: the caret scrolling into view, the "R restores this cut" note, the two step click on a cut chip and the Timeline's seam highlight. The control socket cannot click.
 - A real voice. `say` speaks more evenly than a person.
 - Release build and bench: not run.
+- Of the fixes after the review, by reading only: K and C leaving an item after a seek, the keys doing nothing outside Text, A's steps on a real splice (its order has a unit test), the error line for a cut that was not composed, composing after Transcribe in Edit, and Ship planning again. The control socket cannot seek or click, and no fixture retakes half a beat.
 
 ## Left open
 
