@@ -10,7 +10,7 @@ Updated 2026-11-18. Read by agents at the start of a thread; rewrite it before h
 - The best scored attempt plays every beat, sentence by sentence, under the script's chapters (`Lineup` scores and proposals, `Cut::compose`). The app composes after a take and after its analysis, `shot ingest` after analysis. A person's pick and a beat a person edited stay. Stars are gone.
 - The restart detector aligns words: restarts without a full stop, reworded ones, ones after a short sentence and spoken cues are cut, a doubled word such as "very, very" asks, a number is no link, kept fillers lower a filler's confidence.
 - Text counts what is worth a look (N, K, C), shows which attempt plays a beat ("2 of 3") and switches it in place (A). The Cut step is gone: Record, Edit, Ship. The takes side by side open from a beat (shift-A).
-- The text cutting faults of the review are fixed except one, see the known gaps.
+- The text cutting faults of the review are fixed. Six faults found while building were fixed after the report, see the evidence: among them a person's cuts in an attempt that left the cut now wait in `cut.kdl` as `remove <take>` nodes of the `takes` block, a contract addition for Mike to confirm.
 
 `main` holds precise cuts by text, transcript menus and record changes (2026-11-17), commits from `4ca5097` up to the take Remove fix, not pushed:
 - Word edges grow into the gaps where the audio still sounds (`word_bounds`), since Whisper starts a word after a pause up to 200 ms late and a cut there left its first syllable. `shot analyze` measures cached transcripts again against `mic.mp4` (stable, about 1 s a take).
@@ -54,6 +54,7 @@ No app is running. Generated media is in `$HOME/.cache/shot-studio-fixtures`. Th
 ## Waiting on Mike
 
 - Merge `m17/integration` into `main`, after a look at milestone 17 with a real recording.
+- Confirm the `remove <take> from=<time> to=<time>` node in the `takes` block of `cut.kdl`, which keeps a person's cuts of an attempt that left the cut (contract, Takes).
 - Milestone 17's open item: a pacing switch and rule switches in Text, which would write the video's `format.kdl` layer. The app never had them.
 - Decide on a slimmer floating word toolbar in Text (Sol: Cut, Restore and one effects menu, keys unchanged).
 - Adopt or change 0038 and 0039, and the retake rule above.

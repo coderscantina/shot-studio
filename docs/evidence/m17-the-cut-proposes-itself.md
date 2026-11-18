@@ -4,7 +4,7 @@ Source: `m17/integration` at the merge of `m17/text-faults` (`e5b7622`), built 2
 
 ## Checks
 
-`cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` pass. `bash -n scripts/fixtures.sh` passes, `shellcheck` and the `takes` group were run by the detector stream. The ignored fixture test `one_take_finds_its_restarts_and_cue_and_asks_about_emphasis` passes with `SHOT_FIXTURES` set.
+`cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` pass. `bash -n scripts/fixtures.sh` passes, `shellcheck` and the `takes` group were run by the detector stream. The ignored fixture tests `one_take_finds_its_restarts_and_cue_and_asks_about_emphasis` and `three_takes_of_a_script_play_every_beat_once_with_the_clean_retakes` pass with `SHOT_FIXTURES` set.
 
 ## Media
 
@@ -61,6 +61,19 @@ Driven through the control socket, screenshots at 1600x1000 in `m17/`:
 - `scripted-switched.png`: A on "Clap gives us help text" played take 1 in place and wrote `attempt t01 from=20_400_000 to=25_530_000 pick=#true`; the marker reads "1 of 3" and the count dropped.
 - `scripted-takes.png`: shift-A opens the takes side by side on that beat, with Back to Edit.
 
+## Fixes before the review
+
+Six faults found while building were fixed on `m17/integration` after the report, each with a test:
+
+- A word cut stops at a rule's cut in the pause it takes (`Cut::delete_words` reads the lock).
+- A person's cuts in an attempt that leaves the cut wait as `remove <take>` nodes of the `takes` block and come back with the attempt ([contract](../contracts/project-files.md#takes)). This adds a node to `cut.kdl`.
+- Without beats, a renamed chapter stays whole when a later take's passage plays in it.
+- The app reads a take from disk once for each time its transcript or elements file is written, not on every rebuild of Text.
+- `shot check` prints `info: N to look at in Edit (N), which does not stop a ship` for the main cut. Its exit code and problem count are unchanged. On the three ingested takes it printed 1 beside 6 problems of the missing export.
+- A chapter's "Cut out" line counts the rules' cuts with a person's. On the three ingested takes "Intro" read "1.4 s in 2 cuts" where it read "Nothing yet", seen in the debug app by screenshot.
+
+The picks of the three script takes are now the ignored test `crates/shot-cli/tests/takes.rs`: it muxes each clip over a test pattern with ffmpeg, runs `shot ingest` three times and expects the chapters and takes of the `cut.kdl` above, one playing attempt per beat and no restart in kept media.
+
 ## Not verified
 
 - Recording through the app with the prompter: the takes came in through `shot ingest`. The app's append and its second compose after analysis are covered by `folder::tests::a_retake_of_a_beat_plays_in_place_of_the_earlier_attempt` and by reading, not by a recording.
@@ -72,5 +85,4 @@ Driven through the control socket, screenshots at 1600x1000 in `m17/`:
 ## Left open
 
 - A pacing switch and rule switches in Text. The Cut screen had none either: pacing and rules are the format's style rules. Text lists what the rules cut by kind and says where they are set.
-- The script fixtures have no `#[ignore]`d test for their picks; the table above is from a hand run.
 - `README.md` still describes the review queue and shows its screenshot. It has uncommitted changes of Mike's on `main`, so it was not touched.
