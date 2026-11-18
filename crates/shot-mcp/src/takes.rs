@@ -5,7 +5,9 @@
 
 use std::path::Path;
 
-use shot_core::{Cut, Elements, Id, Lineup, Project, TakeWords, Transcript};
+use shot_core::{Cut, Elements, Id, Lineup, Lock, Project, TakeWords, Transcript};
+
+use crate::style::{self, Opened, Repo};
 
 /// The takes in the video's media folder, also the ones the cut no longer uses.
 pub fn media_takes(dir: &Path) -> Vec<Id> {
@@ -44,11 +46,33 @@ pub fn lineup(dir: &Path, project: &Project) -> Lineup {
     Lineup::new(&project.script, &project.cut, &words)
 }
 
-/// The cut of the video at `dir` composed from its takes, see [`Cut::compose`]. `new` is a take
-/// just appended whole.
-pub fn compose(dir: &Path, project: &Project, new: Option<&Id>) -> Result<Cut, String> {
-    project
+/// The cut of the video `opened` from `dir` composed from its takes, see [`Cut::compose`], and
+/// checked with [`keeps_shorts`]. `new` is a take just appended whole.
+pub fn compose(dir: &Path, opened: &Opened, new: Option<&Id>) -> Result<Cut, String> {
+    let project = &opened.project;
+    let cut = project
         .cut
         .compose(&lineup(dir, project), new)
+        .map_err(|e| e.to_string())?;
+    keeps_shorts(&opened.disk, &opened.slug, &project.cut, &opened.lock, &cut)?;
+    Ok(cut)
+}
+
+/// Refuses `composed`, made from the cut `before` of video `slug` that plays with `lock`, when
+/// a clip of a Short would play nothing with the lock `composed` builds
+/// ([`Cut::check_derived`]). Every front end checks a composed cut with it before writing.
+pub fn keeps_shorts(
+    repo: &dyn Repo,
+    slug: &str,
+    before: &Cut,
+    lock: &Lock,
+    composed: &Cut,
+) -> Result<(), String> {
+    if composed == before || composed.derived.iter().all(|d| d.clips.is_empty()) {
+        return Ok(());
+    }
+    let candidate = style::lock_with(repo, slug, composed)?;
+    composed
+        .check_derived(&candidate, before, lock)
         .map_err(|e| e.to_string())
 }

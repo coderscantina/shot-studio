@@ -93,7 +93,7 @@ pub(crate) enum Composed {
 /// just appended whole, now that it has words and elements.
 pub(crate) fn compose(video: &Path, new: Option<&shot_core::Id>) -> Result<Composed, String> {
     let (_lock, opened) = crate::open(video)?;
-    let cut = match shot_mcp::takes::compose(video, &opened.project, new) {
+    let cut = match shot_mcp::takes::compose(video, &opened, new) {
         Ok(cut) => cut,
         Err(error) => return Ok(Composed::Refused(error)),
     };

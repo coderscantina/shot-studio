@@ -296,6 +296,34 @@ pub fn build_video(repo: &dyn Repo, slug: &str) -> Result<Built, String> {
     })
 }
 
+/// The lock the files of video `slug` build with `cut` in place of its `cut.kdl`: what writing
+/// `cut` would lock, before it is written.
+pub fn lock_with(repo: &dyn Repo, slug: &str, cut: &Cut) -> Result<Lock, String> {
+    let inputs = inputs(repo, slug)?;
+    let elements = read_elements(repo, slug, takes_of(cut))?;
+    build(&StyleInput {
+        imported: &inputs.imported,
+        brand: &inputs.brand,
+        format: &inputs.format,
+        video: &inputs.video_layer,
+        cut,
+        elements: &elements,
+        assets: &inputs.assets,
+    })
+    .map_err(|e| format!("{slug}: {e}"))
+}
+
+/// The takes the blocks of `cut` play, each once, in cut order.
+fn takes_of(cut: &Cut) -> Vec<&Id> {
+    let mut takes: Vec<&Id> = Vec::new();
+    for take in cut.chapters.iter().flat_map(|c| &c.takes).map(|t| &t.take) {
+        if !takes.contains(&take) {
+            takes.push(take);
+        }
+    }
+    takes
+}
+
 /// Reads what a build of video `slug` reads. Imports are read from `styles/<id>.kdl` of the
 /// repo, the checkout of the pinned commit.
 pub fn inputs(repo: &dyn Repo, slug: &str) -> Result<Inputs, String> {
@@ -310,13 +338,7 @@ pub fn inputs(repo: &dyn Repo, slug: &str) -> Result<Inputs, String> {
     let (path, format_text) = read(format!("formats/{}.kdl", video.format))?;
     let format = parsed(&path, format_text, FormatLayer::parse)?.unwrap_or_default();
     let (brand, imported, assets) = brand_inputs(repo, slug, &format, &video_layer)?;
-    let mut takes: Vec<&Id> = Vec::new();
-    for take in cut.chapters.iter().flat_map(|c| &c.takes).map(|t| &t.take) {
-        if !takes.contains(&take) {
-            takes.push(take);
-        }
-    }
-    let elements = read_elements(repo, slug, takes)?;
+    let elements = read_elements(repo, slug, takes_of(&cut))?;
     Ok(Inputs {
         video,
         cut,

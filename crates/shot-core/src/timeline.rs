@@ -451,7 +451,7 @@ fn take_segments(
 }
 
 /// Ranges merged where they overlap or touch, in order.
-fn union(mut ranges: Vec<TimeRange>) -> Vec<TimeRange> {
+pub(crate) fn union(mut ranges: Vec<TimeRange>) -> Vec<TimeRange> {
     ranges.sort_by_key(|r| r.from());
     let mut out: Vec<TimeRange> = Vec::with_capacity(ranges.len());
     for range in ranges {
@@ -467,7 +467,7 @@ fn union(mut ranges: Vec<TimeRange>) -> Vec<TimeRange> {
 }
 
 /// The parts of `range` outside the sorted, disjoint `cuts`.
-fn subtract(range: TimeRange, cuts: &[TimeRange]) -> Vec<TimeRange> {
+pub(crate) fn subtract(range: TimeRange, cuts: &[TimeRange]) -> Vec<TimeRange> {
     let mut out = Vec::new();
     let mut from = range.from();
     for cut in cuts.iter().filter(|c| c.overlaps(range)) {

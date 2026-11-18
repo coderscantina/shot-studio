@@ -537,7 +537,11 @@ impl VideoFolder {
     /// would leave, stays as it is, and [`VideoFolder::not_composed`] says why. Returns whether
     /// the cut changed.
     pub fn propose(&mut self, new: Option<&Id>) -> Result<bool, String> {
-        let cut = match self.project.cut.compose(&self.lineup(), new) {
+        let composed = self.project.cut.compose(&self.lineup(), new);
+        let checked = composed
+            .map_err(|e| e.to_string())
+            .and_then(|cut| self.keeps_shorts(&cut).map(|()| cut));
+        let cut = match checked {
             Ok(cut) => cut,
             Err(error) => {
                 self.not_composed = Some(format!("The cut was not composed: {error}"));
@@ -550,6 +554,20 @@ impl VideoFolder {
         }
         self.write_cut(cut)?;
         Ok(true)
+    }
+
+    /// Refuses `composed`, a cut composed from the project's, when a clip of a Short would play
+    /// nothing with the lock it builds, see [`shot_mcp::takes::keeps_shorts`].
+    fn keeps_shorts(&self, composed: &Cut) -> Result<(), String> {
+        let before = &self.project.cut;
+        shot_mcp::takes::keeps_shorts(&self.disk, &self.slug, before, &self.lock, composed)
+    }
+
+    /// Writes `cut`, composed from the project's cut by a person's choice of an attempt, as
+    /// [`VideoFolder::write_cut`] does, unless it would empty a Short.
+    pub fn write_composed(&mut self, cut: Cut) -> Result<(), String> {
+        self.keeps_shorts(&cut)?;
+        self.write_cut(cut)
     }
 
     /// Composes the cut when the analysis of `take` landed, see [`VideoFolder::propose`], as a
@@ -887,6 +905,53 @@ mod tests {
                 .contains("review")
         );
         assert_eq!(folder.project.cut.review_queue(folder.lock()).count(), 0);
+    }
+
+    #[test]
+    fn a_composed_cut_that_leaves_a_short_only_what_the_rules_cut_is_refused() {
+        let repo = tempfile::tempdir().unwrap();
+        let video = repo.path().join("videos/demo");
+        fs::create_dir_all(video.join("elements")).unwrap();
+        fs::create_dir_all(repo.path().join("formats")).unwrap();
+        let file = |path: &Path, text: &str| fs::write(path, text).unwrap();
+        file(
+            &repo.path().join("formats/opinion.kdl"),
+            shot_core::FormatKind::Opinion.preset_source(),
+        );
+        file(
+            &video.join("video.kdl"),
+            "title \"A\"\nstatus editing\nformat opinion\n",
+        );
+        file(&video.join("script.md"), "# A\n");
+        file(&video.join("format.kdl"), "");
+        // The Short spans a restart the rules cut, from 10 s to 12 s.
+        file(
+            &video.join("cut.kdl"),
+            "chapter \"A\" {\n    take t01 {\n        keep from=0 to=20_000_000\n    }\n}\n\n\
+             short clip {\n    clip t01 from=9_000_000 to=13_000_000\n}\n",
+        );
+        file(&video.join(LOCK_FILE), "lock 1\n");
+        file(
+            &video.join("elements/t01.jsonl"),
+            "{\"kind\":\"retake\",\"t\":10000000,\"to\":12000000,\"confidence\":99,\"by\":\"test\"}\n",
+        );
+        let mut folder = VideoFolder::open(&video).unwrap();
+        let before = folder.project.cut.clone();
+        // Another take replaces what is said around the restart: the cut still keeps a part
+        // of the clip, and its lock cuts all of that part.
+        let spliced = before.to_kdl().replace(
+            "    take t01 {\n        keep from=0 to=20_000_000\n    }\n",
+            "    take t01 {\n        keep from=0 to=9_000_000\n    }\n    take t02 {\n        keep from=0 to=1_000_000\n    }\n    take t01 {\n        keep from=10_000_000 to=12_000_000\n    }\n    take t02 {\n        keep from=1_000_000 to=2_000_000\n    }\n    take t01 {\n        keep from=13_000_000 to=20_000_000\n    }\n",
+        );
+        let spliced = Cut::parse(&spliced).unwrap();
+        let clip = &spliced.derived[0].clips[0];
+        assert!(spliced.kept_of(&clip.take, clip.range) > Micros(0));
+        let refused = folder.write_composed(spliced).unwrap_err();
+        assert!(
+            refused.contains("`clip` uses a part of take t01"),
+            "{refused}"
+        );
+        assert_eq!(folder.project.cut, before);
     }
 
     #[test]

@@ -383,16 +383,22 @@ impl EditScreen {
         // The lineup is lent to the edit and comes back: a refused switch, as when a Short
         // uses the take that would leave, changes nothing.
         let lineup = std::mem::take(&mut self.looks.lineup);
-        let wrote = self.edit(cx, |cut| {
-            let row = lineup
-                .row(beat.row)
-                .ok_or(EditError::UnknownRow(beat.row))?;
-            if chosen.is_empty() {
-                cut.propose_row(&lineup, beat.row)
-            } else {
-                cut.set_pick(row, &chosen).compose(&lineup, None)
-            }
+        let result = self.folder.update(cx, |folder, cx| {
+            let cut = &folder.project.cut;
+            let row = lineup.row(beat.row).ok_or(EditError::UnknownRow(beat.row));
+            let composed = row.and_then(|row| {
+                if chosen.is_empty() {
+                    cut.propose_row(&lineup, beat.row)
+                } else {
+                    cut.set_pick(row, &chosen).compose(&lineup, None)
+                }
+            });
+            folder.write_composed(composed.map_err(|e| e.to_string())?)?;
+            cx.notify();
+            Ok::<_, String>(())
         });
+        let wrote = result.is_ok();
+        self.wrote(result, cx);
         self.looks.lineup = lineup;
         if wrote {
             self.selection = None;

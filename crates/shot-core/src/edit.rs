@@ -800,6 +800,50 @@ impl Cut {
         Micros(kept)
     }
 
+    /// How much of `range` of `take` plays: what the main cut keeps of it less the cuts of
+    /// `lock`, as the timeline plays it.
+    pub fn played_of(&self, take: &Id, range: TimeRange, lock: &Lock) -> Micros {
+        let cuts = lock.take(take).into_iter().flat_map(|t| t.cuts());
+        let cuts = crate::timeline::union(cuts.collect());
+        let blocks = self.chapters.iter().flat_map(|c| &c.takes);
+        let played = blocks
+            .filter(|edit| edit.take == *take)
+            .flat_map(|edit| &edit.ranges)
+            .filter_map(|piece| match piece {
+                RangeEdit::Keep(kept) => kept.intersect(range),
+                RangeEdit::Remove(_) => None,
+            })
+            .flat_map(|kept| crate::timeline::subtract(kept, &cuts))
+            .map(|r| r.duration().0)
+            .sum();
+        Micros(played)
+    }
+
+    /// Refuses this cut, composed from `before`, when a clip of a derived cut that played in
+    /// `before` with `before_lock` plays nothing in it with `lock`, the lock this cut builds:
+    /// composing checks what the cut keeps, and the rules may cut all that is left of a clip,
+    /// as when a retake replaces the spoken parts around a restart a Short spans.
+    pub fn check_derived(
+        &self,
+        lock: &Lock,
+        before: &Cut,
+        before_lock: &Lock,
+    ) -> Result<(), EditError> {
+        for derived in &self.derived {
+            let emptied = |clip: &&crate::Clip| {
+                self.played_of(&clip.take, clip.range, lock) == Micros(0)
+                    && before.played_of(&clip.take, clip.range, before_lock) > Micros(0)
+            };
+            if let Some(clip) = derived.clips.iter().find(emptied) {
+                return Err(EditError::TakeInDerived {
+                    derived: derived.name.clone(),
+                    take: clip.take.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// The pieces that play `row`, in order: a person's picks, else what the cut holds of a
     /// row a person edited, else the row's proposal. A pick of nearly a whole attempt follows
     /// the attempt when a new transcript moves its edges. `new` is a take that was just
@@ -2200,6 +2244,46 @@ mod tests {
             .unwrap();
         assert_eq!(overlays(&moved, "t01"), [vec![], vec![(9, 11)]]);
         assert!(moved.left_effects.is_empty());
+    }
+
+    #[test]
+    fn a_splice_that_leaves_a_short_only_a_restart_the_rules_cut_is_refused() {
+        // The Short spans a restart the rules cut, from 4 s to 6 s of the first take.
+        let lock = Lock::parse(
+            "lock 1\n\ntake t01 {\n    cut from=4_000_000 to=6_000_000 on=retake t=4_000_000 layer=format rule=\"retake\"\n}\n",
+        )
+        .unwrap();
+        let cut = Cut::parse(&format!(
+            "{}\nshort hello {{\n    clip t01 from=1_000_000 to=9_000_000\n}}\n",
+            stacked().to_kdl()
+        ))
+        .unwrap();
+        let clip = &cut.derived[0].clips[0];
+        assert_eq!(
+            cut.played_of(&clip.take, clip.range, &lock),
+            Micros(6_000_000)
+        );
+        // A retake replaces the spoken parts: the first take keeps only the restart there.
+        let mut lineup = lineup();
+        lineup.groups[0].rows[0].proposal = vec![
+            attempt("t02", 1., 4.),
+            attempt("t01", 4., 6.),
+            attempt("t02", 6., 9.),
+        ];
+        lineup.groups[0].rows[1].proposal = vec![attempt("t01", 11., 19.)];
+        let composed = cut
+            .compose(&lineup, Some(&Id::new("t02").unwrap()))
+            .unwrap();
+        assert_eq!(composed.kept_of(&clip.take, clip.range), Micros(2_000_000));
+        assert_eq!(
+            composed.check_derived(&lock, &cut, &lock),
+            Err(EditError::TakeInDerived {
+                derived: Id::new("hello").unwrap(),
+                take: Id::new("t01").unwrap(),
+            })
+        );
+        // A clip that played nothing before is none this composing emptied.
+        assert_eq!(composed.check_derived(&lock, &composed, &lock), Ok(()));
     }
 
     #[test]

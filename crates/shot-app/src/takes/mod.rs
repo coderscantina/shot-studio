@@ -515,7 +515,7 @@ impl TakesView {
             .set_pick(row, chosen.as_slice())
             .compose(&self.lineup, None);
         self.write(note, cx, |folder| {
-            folder.write_cut(cut.map_err(|e| e.to_string())?)
+            folder.write_composed(cut.map_err(|e| e.to_string())?)
         });
         self.mark = None;
     }
