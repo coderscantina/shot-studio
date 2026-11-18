@@ -924,6 +924,7 @@ impl EditScreen {
     fn set_workspace(&mut self, workspace: Workspace, window: &mut Window, cx: &mut Context<Self>) {
         if self.workspace != workspace {
             self.lanes.picked = None;
+            self.looks.current = None;
             self.close_switch(window, cx);
             self.revealed = None;
         }

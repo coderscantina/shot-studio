@@ -55,6 +55,7 @@ No app is running. Generated media is in `$HOME/.cache/shot-studio-fixtures`. Th
 
 - Merge `m17/integration` into `main`, after a look at milestone 17 with a real recording.
 - Confirm the `remove <take> from=<time> to=<time>` node in the `takes` block of `cut.kdl`, which keeps a person's cuts of an attempt that left the cut (contract, Takes).
+- Confirm the `looked <take> from=<time> to=<time>` node in the `takes` block of `cut.kdl`, which K and C on a beat write instead of a pick, so a later, better take still wins the beat (contract, Takes).
 - Confirm the `take <take> { layout, zoom, overlay }` blocks and `override` nodes in the `takes` block of `cut.kdl`, which keep a person's layouts, zooms, overlays and K and C answers in material that left the cut and give them back when it plays again (contract, Takes).
 - Milestone 17's open item: a pacing switch and rule switches in Text, which would write the video's `format.kdl` layer. The app never had them.
 - Decide on a slimmer floating word toolbar in Text (Sol: Cut, Restore and one effects menu, keys unchanged).

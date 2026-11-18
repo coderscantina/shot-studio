@@ -5,8 +5,8 @@ use kdl::KdlValue;
 use crate::kdl_io::{Bare, FromKdl, Node, Source, ToKdl, Writer, keyword_enum};
 use crate::migrate::old::{self, OldBlock, Review, refused};
 use crate::{
-    CaptionStyle, Decision, Effect, EffectKey, ElementKind, Id, Layout, Micros, ParseError, Target,
-    TimeRange, Transition,
+    Attempt, CaptionStyle, Decision, Effect, EffectKey, ElementKind, Id, Layout, Micros,
+    ParseError, Target, TimeRange, Transition,
 };
 
 /// `cut.kdl`: the edit. Everything is addressed by take id and the take's media time.
@@ -24,6 +24,10 @@ pub struct Cut {
     /// Picks and picks of the Takes view, by take (`t9` before `t10`), then `from`. The
     /// ranges of one take do not overlap.
     pub picks: Vec<Pick>,
+    /// The pieces of the proposals a person looked at and left as proposed, by take like the
+    /// picks, then `from`. They choose nothing: a later take may still win the beat, and its
+    /// proposal is then one to look at again ([`Cut::looked`]).
+    pub looked: Vec<Attempt>,
     /// A person's cuts in attempts that left the main cut, by take like the picks, then `from`.
     /// None of them lies in a block of the cut: composing gives them back to the attempt when
     /// it plays again.
@@ -418,6 +422,7 @@ impl Cut {
         cut.music = music;
         if let Some(takes) = picks {
             cut.picks = takes.picks;
+            cut.looked = takes.looked;
             cut.left_cuts = takes.left_cuts;
             cut.left_effects = takes.left_effects;
             cut.left_overrides = takes.left_overrides;
@@ -501,13 +506,16 @@ impl Cut {
                 .end();
         }
         let left = !self.left_effects.is_empty() || !self.left_overrides.is_empty();
-        if !self.picks.is_empty() || !self.left_cuts.is_empty() || left {
+        if !self.picks.is_empty() || !self.looked.is_empty() || !self.left_cuts.is_empty() || left {
             separate(&mut w);
             w.node("takes").open();
             for pick in &self.picks {
                 write_range(w.node("attempt").arg(&pick.take), pick.range);
                 w.prop("pick", &true);
                 w.end();
+            }
+            for looked in &self.looked {
+                write_range(w.node("looked").arg(&looked.take), looked.range).end();
             }
             for left in &self.left_cuts {
                 write_range(w.node("remove").arg(&left.take), left.range).end();
@@ -775,6 +783,7 @@ impl CaptionFix {
 /// What a `takes` block holds, each list in canonical order.
 struct TakesBlock {
     picks: Vec<Pick>,
+    looked: Vec<Attempt>,
     left_cuts: Vec<LeftCut>,
     left_effects: Vec<TakeEdit>,
     left_overrides: Vec<Override>,
@@ -790,11 +799,20 @@ impl Pick {
     fn read_all(node: Node<'_>) -> Result<TakesBlock, ParseError> {
         node.expect_block(0, &[])?;
         let mut picks: Vec<(Self, Node<'_>)> = Vec::new();
+        let mut looked: Vec<Attempt> = Vec::new();
         let mut left_cuts = Vec::new();
         let mut left_effects: Vec<TakeEdit> = Vec::new();
         let mut left_overrides: Vec<Override> = Vec::new();
         for child in node.children() {
             match child.name() {
+                "looked" => {
+                    child.expect(1, &["from", "to"])?;
+                    looked.push(Attempt {
+                        take: child.arg(0)?,
+                        range: TimeRange::read(child)?,
+                    });
+                    continue;
+                }
                 "remove" => {
                     child.expect(1, &["from", "to"])?;
                     left_cuts.push(LeftCut {
@@ -868,8 +886,12 @@ impl Pick {
         left_overrides.sort_by(|a, b| {
             (takes_order(&a.take), a.at, a.kind).cmp(&(takes_order(&b.take), b.at, b.kind))
         });
+        looked.sort_by(|a, b| {
+            (takes_order(&a.take), a.range.from()).cmp(&(takes_order(&b.take), b.range.from()))
+        });
         Ok(TakesBlock {
             picks: picks.into_iter().map(|(r, _)| r).collect(),
+            looked,
             left_cuts,
             left_effects,
             left_overrides,

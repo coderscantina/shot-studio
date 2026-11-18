@@ -13,7 +13,7 @@ A review on 2026-11-18 ran two spoken test videos through the app. "Assemble pic
 - **A person's choice wins.** Switching a beat to another attempt writes a pick, and a pick stays when a later take scores better. A beat a person cut words in or answered a finding in is not picked again. Stars go: old ones are read and dropped on the next write.
 - **Restarts are cut and shown.** A clear restart is cut at once. A doubtful one, and a doubled single word such as "very, very", asks first.
 - **Without a script, a later take is appended.** Only sentences that say again what a sentence of an earlier take said compete with it.
-- **The transcript is the one review surface.** Text marks what is worth a look: restarts that were cut, unsure cuts, sentence splices between takes and beats whose attempts scored close. A count goes down as they are answered and never blocks Ship. Answers are overrides, as Keep and Cut are today. A beat with other attempts shows a marker, and one key steps through them in place.
+- **The transcript is the one review surface.** Text marks what is worth a look: restarts that were cut, unsure cuts, sentence splices between takes and beats whose attempts scored close. A count goes down as they are answered and never blocks Ship. Answers are overrides, as Keep and Cut are today, and for a beat a mark that its proposal was looked at, which is no pick. A beat with other attempts shows a marker, and one key steps through them in place.
 - **The Cut step goes.** The nav is Record, Edit, Ship. Pacing and the rule switches move into a panel of Text. The Takes grid stays as a detail view opened from a beat, for comparing two attempts. The board keeps its Recorded column, whose cards open Edit.
 
 ## Rejected alternatives

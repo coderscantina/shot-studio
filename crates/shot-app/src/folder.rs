@@ -526,6 +526,7 @@ impl VideoFolder {
             }
             cut.chapters.retain(|chapter| !chapter.takes.is_empty());
             cut.picks.retain(|p| p.take != *take);
+            cut.looked.retain(|l| l.take != *take);
             cut.left_cuts.retain(|l| l.take != *take);
             cut.left_effects.retain(|l| l.take != *take);
             cut.left_overrides.retain(|o| o.take != *take);

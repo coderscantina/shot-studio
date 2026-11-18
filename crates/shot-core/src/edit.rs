@@ -157,32 +157,50 @@ impl Cut {
     }
 
     /// The open review items of the main cut in cut order: the lock's `review` instances of
-    /// each block's take that lie in its kept material.
+    /// each block's take, each with what the block keeps of it, from the first kept moment to
+    /// the last. An item that starts before its block or ends after it is one too, in the first
+    /// block that plays some of it, and keeps the element's time for its answer.
     pub fn review_queue<'a>(
         &'a self,
         lock: &'a Lock,
     ) -> impl Iterator<Item = (TakeAt, Review)> + 'a {
-        self.chapters
-            .iter()
-            .enumerate()
-            .flat_map(move |(chapter, c)| {
-                c.takes.iter().enumerate().flat_map(move |(take, edit)| {
-                    let instances = lock.take(&edit.take).into_iter().flat_map(|t| &t.instances);
-                    instances.filter_map(move |i| match (&i.applied, i.element.target) {
-                        (&Applied::Review(range), Target::Kind(kind)) if edit.keeps(range) => {
-                            Some((
-                                TakeAt { chapter, take },
-                                Review {
-                                    range,
-                                    kind,
-                                    t: i.element.t,
-                                },
-                            ))
-                        }
-                        _ => None,
-                    })
-                })
-            })
+        let mut queue: Vec<(TakeAt, Review)> = Vec::new();
+        let mut queued: Vec<(&Id, ElementKind, Micros)> = Vec::new();
+        for (chapter, c) in self.chapters.iter().enumerate() {
+            for (take, edit) in c.takes.iter().enumerate() {
+                let instances = lock.take(&edit.take).into_iter().flat_map(|t| &t.instances);
+                for i in instances {
+                    let (&Applied::Review(range), Target::Kind(kind)) =
+                        (&i.applied, i.element.target)
+                    else {
+                        continue;
+                    };
+                    let mut kept = edit.ranges.iter().filter_map(|r| match r {
+                        RangeEdit::Keep(kept) => kept.intersect(range),
+                        RangeEdit::Remove(_) => None,
+                    });
+                    let Some(first) = kept.next() else {
+                        continue;
+                    };
+                    let key = (&edit.take, kind, i.element.t);
+                    if queued.contains(&key) {
+                        continue;
+                    }
+                    queued.push(key);
+                    let last = kept.next_back().unwrap_or(first);
+                    queue.push((
+                        TakeAt { chapter, take },
+                        Review {
+                            range: TimeRange::new(first.from(), last.to())
+                                .expect("kept pieces are in order"),
+                            kind,
+                            t: i.element.t,
+                        },
+                    ));
+                }
+            }
+        }
+        queue.into_iter()
     }
 
     /// K or C on the review item at `range` of the block at `at`: `override { keep }` or
@@ -647,6 +665,36 @@ impl Cut {
         cut
     }
 
+    /// Marks `pieces`, what plays `row` as proposed, as looked at, in place of the row's
+    /// earlier marks. Unlike a pick it chooses nothing, see [`Cut::looked`].
+    pub fn set_looked(&self, row: &Row, pieces: &[Attempt]) -> Cut {
+        let mut cut = self.clone();
+        cut.looked.retain(|l| {
+            !row.attempts
+                .iter()
+                .any(|a| a.take == l.take && a.range.overlaps(l.range))
+        });
+        cut.looked.extend(pieces.iter().cloned());
+        cut.looked.sort_by(|a, b| {
+            (takes_order(&a.take), a.range.from()).cmp(&(takes_order(&b.take), b.range.from()))
+        });
+        cut
+    }
+
+    /// Whether a person looked at every one of `pieces`: a mark of the piece's take covers
+    /// nine tenths of it, so the mark follows a re-analysis that moves the piece's edges. A
+    /// proposal with a piece of a later take is not looked at.
+    pub fn looked(&self, pieces: &[Attempt]) -> bool {
+        pieces.iter().all(|piece| {
+            self.looked.iter().any(|l| {
+                l.take == piece.take
+                    && l.range
+                        .intersect(piece.range)
+                        .is_some_and(|both| 10 * both.duration().0 >= 9 * piece.range.duration().0)
+            })
+        })
+    }
+
     /// How much of `range` of `take` the main cut keeps, over every block of the take.
     pub fn kept_of(&self, take: &Id, range: TimeRange) -> Micros {
         let kept = self
@@ -697,7 +745,7 @@ impl Cut {
     /// What a person may want to look at before the video ships, in no order: findings the
     /// rules were not sure of, restarts and misspoken passages the rules cut and nobody
     /// answered, and beats whose proposal is worth a look ([`Row::look`]) and that a person
-    /// neither picked nor edited.
+    /// neither picked, edited nor looked at.
     pub fn looks(&self, lineup: &Lineup, lock: &Lock) -> Vec<Look> {
         let mut looks: Vec<Look> = self
             .review_queue(lock)
@@ -735,6 +783,7 @@ impl Cut {
                     row.look
                         && self.picked(row).is_empty()
                         && self.held_by_hand(lineup, row, None).is_none()
+                        && !self.looked(&row.proposal)
                 })
                 .map(|(at, _)| Look::Beat(at)),
         );
@@ -1315,6 +1364,24 @@ mod tests {
 
     fn ranges(cut: &Cut) -> &[RangeEdit] {
         &cut.chapters[0].takes[0].ranges
+    }
+
+    #[test]
+    fn a_finding_that_starts_before_its_block_is_queued_with_what_plays_of_it() {
+        // A restart at 1.95 to 2.30 s, and a block that starts at 2.00 s.
+        let lock = Lock::parse(
+            "lock 1\n\ntake t01 {\n    review from=1_950_000 to=2_300_000 on=retake t=1_950_000 layer=format rule=\"retake\"\n}\n",
+        )
+        .unwrap();
+        let cut = cut(vec![keep(2_000_000, 10_000_000)]);
+        let queue: Vec<_> = cut.review_queue(&lock).collect();
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].1.range, range(2_000_000, 2_300_000));
+        // The answer names the element where it starts.
+        let answered = cut
+            .decide(AT, queue[0].1.range, Decision::Cut, &lock)
+            .unwrap();
+        assert_eq!(answered.overrides[0].at, Micros(1_950_000));
     }
 
     #[test]
@@ -1946,6 +2013,18 @@ mod tests {
         let row = lineup.row(row_at(1, 0)).unwrap();
         let kept = cut.set_pick(row, &cut.plays(&lineup, row, None));
         assert_eq!(kept.looks(&lineup, &lock).len(), 2);
+        // Looking at the beat answers it without a pick, until a later take is proposed.
+        let seen = cut.set_looked(row, &row.proposal);
+        assert!(seen.picks.is_empty());
+        assert_eq!(seen.looks(&lineup, &lock).len(), 2);
+        assert!(
+            seen.to_kdl()
+                .starts_with("takes {\n    looked t02 from=21_000_000 to=29_000_000\n}\n")
+        );
+        assert_eq!(Cut::parse(&seen.to_kdl()).unwrap(), seen);
+        let mut retaken = lineup.clone();
+        retaken.groups[1].rows[0].proposal = vec![attempt("t03", 21., 29.)];
+        assert_eq!(seen.looks(&retaken, &lock).len(), 3);
         let answered = kept.answer(&new, ElementKind::Retake, s(2.), Decision::Cut);
         assert!(
             answered

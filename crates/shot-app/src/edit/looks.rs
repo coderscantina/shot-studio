@@ -7,11 +7,14 @@
 use std::ops::Range;
 
 use gpui::{App, Context, Div, FontWeight, Stateful, Window, div, prelude::*, px};
-use shot_core::{Decision, EditError, ElementKind, Lineup, Look, Row, RowAt, TakeAt, TimeRange};
+use shot_core::{
+    Attempt, Decision, EditError, ElementKind, Lineup, Look, Row, RowAt, TakeAt, TimeRange,
+};
 
 use super::timeline::Pick;
 use super::{
     AROUND, CompareAttempts, CompareBeat, CutLook, EditScreen, KeepLook, NextAttempt, NextLook,
+    Workspace,
 };
 use crate::model::{FPS, Item, Selection};
 use crate::takes::take_name;
@@ -29,6 +32,21 @@ pub struct Beat {
     pub frames: Range<u64>,
     /// The attempts that play it, as indexes into the row's attempts.
     pub playing: Vec<usize>,
+}
+
+/// How many frames past the end of what N or A played the playhead still rests on it.
+const REST: u64 = 6;
+
+/// The attempts of `row` that `pieces` play, as indexes into the row's attempts.
+fn playing(lineup: &Lineup, row: &Row, pieces: &[Attempt]) -> Vec<usize> {
+    (0..row.attempts.len())
+        .filter(|&i| {
+            let reach = lineup.padded(&row.attempts[i]);
+            pieces
+                .iter()
+                .any(|p| p.take == reach.take && p.range.overlaps(reach.range))
+        })
+        .collect()
 }
 
 /// The lineup as the transcript shows it, rebuilt with the document.
@@ -57,7 +75,7 @@ impl Looks {
     /// while the playhead rests at its end, where the next beat begins.
     fn beat_playing(&self, frame: u64) -> Option<&Beat> {
         let rested = |b: &&Beat| {
-            Some(b.row) == self.played && (b.frames.start..=b.frames.end + 6).contains(&frame)
+            Some(b.row) == self.played && (b.frames.start..=b.frames.end + REST).contains(&frame)
         };
         self.beats
             .iter()
@@ -116,14 +134,7 @@ impl EditScreen {
                     }
                 }
             }
-            let playing = (0..row.attempts.len())
-                .filter(|&i| {
-                    let reach = lineup.padded(&row.attempts[i]);
-                    pieces
-                        .iter()
-                        .any(|p| p.take == reach.take && p.range.overlaps(reach.range))
-                })
-                .collect();
+            let playing = playing(&lineup, row, &pieces);
             if let (Some((at, word)), Some(frames)) = (first, frames) {
                 beats.push(Beat {
                     row: row_at,
@@ -238,19 +249,51 @@ impl EditScreen {
         cx.notify();
     }
 
+    /// Whether the review keys act: only in Text, where the items show. Elsewhere the key
+    /// goes on to whatever else is bound to it.
+    fn reviews(&self, cx: &mut Context<Self>) -> bool {
+        let text = self.workspace == Workspace::Text;
+        if !text {
+            cx.propagate();
+        }
+        text
+    }
+
     pub(super) fn next_look(&mut self, _: &NextLook, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.reviews(cx) {
+            return;
+        }
         // From the item N last went to, on to the one after it.
         let from = self
-            .looks
-            .current
+            .current_look()
             .and_then(|current| self.looks.items.iter().find(|(look, _)| *look == current))
             .map_or(self.playhead, |(_, frame)| frame + 1);
         self.go_to_look(from, cx);
     }
 
+    /// The item N went to, while the playhead is still on what N played of it. After a seek,
+    /// a scrub or playing on, it is no longer the one the person sees.
+    pub(super) fn current_look(&self) -> Option<Look> {
+        let current = self.looks.current?;
+        let (_, frame) = self.looks.items.iter().find(|(look, _)| *look == current)?;
+        let second = u64::from(FPS);
+        let played = match current {
+            Look::Unsure { review, .. } => {
+                let length = review.range.duration().0 * second / 1_000_000;
+                frame.saturating_sub(second)..=frame + length + second + REST
+            }
+            Look::Restart { .. } => frame.saturating_sub(AROUND)..=frame + AROUND + REST,
+            Look::Beat(row) => {
+                let beat = self.looks.beats.iter().find(|b| b.row == row)?;
+                beat.frames.start..=beat.frames.end + REST
+            }
+        };
+        played.contains(&self.playhead).then_some(current)
+    }
+
     /// The item K and C answer: the one N went to, else the one at the playhead.
     fn look_here(&self) -> Option<Look> {
-        self.looks.current.or_else(|| {
+        self.current_look().or_else(|| {
             let second = u64::from(FPS);
             self.looks
                 .items
@@ -267,9 +310,13 @@ impl EditScreen {
         })
     }
 
-    /// K keeps what plays: an unsure finding stays, a cut restart plays again, a beat keeps its
-    /// proposal as the person's pick. C cuts: the finding goes, the restart stays cut.
+    /// K keeps what plays: an unsure finding stays, a cut restart plays again. C cuts: the
+    /// finding goes, the restart stays cut. Either answers a beat as looked at, which is no
+    /// pick: a later take that scores better still plays it.
     fn answer_look(&mut self, decision: Decision, cx: &mut Context<Self>) {
+        if !self.reviews(cx) {
+            return;
+        }
         let Some(look) = self.look_here() else {
             return;
         };
@@ -286,10 +333,10 @@ impl EditScreen {
                     let take = &cut.chapters[at.chapter].takes[at.take].take;
                     cut.answer(take, kind, t, decision)
                 }
-                Look::Beat(at) => match (lineup.row(at), decision) {
-                    (Some(row), Decision::Keep) => cut.set_pick(row, &cut.plays(lineup, row, None)),
-                    _ => cut.clone(),
-                },
+                Look::Beat(at) => {
+                    let row = lineup.row(at).ok_or(EditError::UnknownRow(at))?;
+                    cut.set_looked(row, &row.proposal)
+                }
             })
         });
         self.looks.lineup = lineup;
@@ -310,18 +357,23 @@ impl EditScreen {
     }
 
     /// A: the beat at the playhead plays its next attempt, as the person's pick, and is played.
+    /// From sentences of several attempts it goes to the first attempt whole, and after the
+    /// last attempt back to those sentences, the proposal, so the spliced sentence is not lost.
     pub(super) fn next_attempt(&mut self, _: &NextAttempt, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.reviews(cx) {
+            return;
+        }
         let Some(beat) = self.looks.beat_playing(self.playhead).cloned() else {
             return;
         };
         let Some(row) = self.looks.row(beat.row) else {
             return;
         };
-        let next = beat
-            .playing
-            .last()
-            .map_or(0, |last| (last + 1) % row.attempts.len());
-        let attempt = row.attempts[next].clone();
+        let spliced = playing(&self.looks.lineup, row, &row.proposal).len() > 1;
+        let chosen: Vec<Attempt> = next_attempt(&beat.playing, row.attempts.len(), spliced)
+            .map(|i| row.attempts[i].clone())
+            .into_iter()
+            .collect();
         // The lineup is lent to the edit and comes back: a refused switch, as when a Short
         // uses the take that would leave, changes nothing.
         let lineup = std::mem::take(&mut self.looks.lineup);
@@ -329,8 +381,7 @@ impl EditScreen {
             let row = lineup
                 .row(beat.row)
                 .ok_or(EditError::UnknownRow(beat.row))?;
-            cut.set_pick(row, std::slice::from_ref(&attempt))
-                .compose(&lineup, None)
+            cut.set_pick(row, &chosen).compose(&lineup, None)
         });
         self.looks.lineup = lineup;
         if wrote {
@@ -351,6 +402,17 @@ impl EditScreen {
             self.set_playing(false);
             cx.emit(CompareBeat(row));
         }
+    }
+}
+
+/// What A plays after the attempts at `playing`, of a row with `attempts`: the next attempt
+/// whole, from sentences of several attempts the first one, and `None`, the proposal again,
+/// after the last attempt of a row whose proposal is `spliced` from several.
+fn next_attempt(playing: &[usize], attempts: usize, spliced: bool) -> Option<usize> {
+    match *playing {
+        [last] if last + 1 < attempts => Some(last + 1),
+        [_] if spliced => None,
+        _ => Some(0),
     }
 }
 
@@ -420,7 +482,7 @@ pub fn beat_chip(this: &EditScreen, beat: &Beat, cx: &mut Context<EditScreen>) -
 /// and the keys that answer it.
 pub fn section(this: &EditScreen, cx: &App) -> Option<Div> {
     let beat = this.looks.beat_playing(this.playhead);
-    let look = this.looks.current.or_else(|| {
+    let look = this.current_look().or_else(|| {
         let row = beat?.row;
         this.looks
             .items
@@ -462,9 +524,15 @@ pub fn section(this: &EditScreen, cx: &App) -> Option<Div> {
         let cut = &this.folder.read(cx).project.cut;
         let picked = !cut.picked(row).is_empty();
         let open = look.is_some();
+        // The keys come first: a long list of attempts must not push them out of sight.
         section = section
             .child(title(if open { "Worth a look" } else { "This beat" }))
             .child(text(row.text.clone()))
+            .when(open, |section| {
+                section.child(hint("K", "It is fine as it plays"))
+            })
+            .child(hint("A", "Play the next attempt and use it"))
+            .child(hint("⇧A", "Compare the attempts side by side"))
             .children(row.attempts.iter().enumerate().map(|(i, attempt)| {
                 let plays = beat.playing.contains(&i);
                 div()
@@ -488,12 +556,24 @@ pub fn section(this: &EditScreen, cx: &App) -> Option<Div> {
                 (false, 1) if open => "An earlier or a close attempt plays. Hear the others.",
                 (false, 1) => "The best scored attempt plays.",
                 (false, _) => "Sentences of more than one attempt play. Hear the joins.",
-            }))
-            .child(hint("A", "Play the next attempt and use it"))
-            .child(hint("⇧A", "Compare the attempts side by side"))
-            .when(open, |section| section.child(hint("K", "Keep what plays")));
+            }));
     }
     Some(section.when(!this.looks.items.is_empty(), |section| {
         section.child(hint("N", "The next one to look at"))
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::next_attempt;
+
+    #[test]
+    fn a_steps_through_the_whole_attempts_and_back_to_the_spliced_proposal() {
+        // Sentences of both attempts play: the first attempt whole, the second, the splice.
+        assert_eq!(next_attempt(&[0, 1], 2, true), Some(0));
+        assert_eq!(next_attempt(&[0], 2, true), Some(1));
+        assert_eq!(next_attempt(&[1], 2, true), None);
+        // Without a splice the last attempt goes on to the first.
+        assert_eq!(next_attempt(&[2], 3, false), Some(0));
+    }
 }

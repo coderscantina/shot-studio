@@ -361,6 +361,7 @@ fn outline(this: &EditScreen, cx: &mut Context<EditScreen>) -> Stateful<Div> {
                         )
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.selection = None;
+                            this.looks.current = None;
                             // Shown again even when the playhead was in it already.
                             this.revealed = None;
                             this.seek(start);
@@ -670,7 +671,7 @@ const CLEAR: f32 = 8.;
 fn floating_toolbar(this: &EditScreen, pad: f32, cx: &mut Context<EditScreen>) -> Option<Div> {
     // The words of an unsure finding are selected to show what would go: the inspector has
     // its keys, and the toolbar would cover the text around it.
-    if matches!(this.looks.current, Some(shot_core::Look::Unsure { .. })) {
+    if matches!(this.current_look(), Some(shot_core::Look::Unsure { .. })) {
         return None;
     }
     let selection = this.selection?;
