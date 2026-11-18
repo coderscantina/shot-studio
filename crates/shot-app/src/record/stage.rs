@@ -123,7 +123,7 @@ impl RecordScreen {
                     .truncate()
                     .child(format!("Showing the raw feed: {e}"))
             }))
-            .children(self.failure())
+            .children(self.failure(cx))
             .children(problem.map(|problem| {
                 alert(problem).child(
                     Button::new("retry-preview")

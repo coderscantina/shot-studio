@@ -4,8 +4,8 @@
 //! Recording works part by part. The outline picks what the next take records: the whole
 //! script, a chapter, or a chapter from one of its beats. The prompter starts there and stops at
 //! the part's end, and a finished take stays on this screen: it joins the outline, the part
-//! moves on to the next chapter nobody recorded yet, and Review opens the take in the Cut
-//! screen's takes. A take that repeats beats plays in place of the earlier attempts (see
+//! moves on to the next chapter nobody recorded yet, and Review shows the takes side by side.
+//! After each take the cut is composed again, so the best attempt plays every beat (see
 //! [`VideoFolder::append_take`]). A take can be removed from the outline, its media to the Trash.
 //!
 //! The inputs sit in a bar over the stage: each chip says whether its track records, and opens
@@ -86,7 +86,7 @@ actions!(
 /// A finished take, emitted once it is in `cut.kdl`.
 pub struct Recorded;
 
-/// Review the takes, the newest focused, in the Cut screen.
+/// Show the takes side by side.
 pub struct ReviewTakes;
 
 /// The take that just finished, as the stage reports it.
@@ -1105,20 +1105,20 @@ pub(crate) fn analyze_later(folder: &Entity<VideoFolder>, take: &Id, cx: &mut Ap
         command.arg("--claude");
     }
     let folder = folder.clone();
+    let take = take.clone();
     cx.spawn(async move |cx| {
-        let analyzed = cx
-            .background_spawn(async move { command.status() })
-            .await
-            .is_ok_and(|s| s.success());
-        if analyzed {
-            folder.update(cx, |folder, cx| {
-                // A failed reload shows on the next edit; nothing waits on this one.
-                let _ = folder
-                    .load_transcripts()
-                    .and_then(|()| folder.rebuild_lock());
-                cx.notify();
-            });
-        }
+        // A failed analysis may still have written the take's transcript, so the cut is
+        // composed either way.
+        let _ = cx.background_spawn(async move { command.status() }).await;
+        folder.update(cx, |folder, cx| {
+            // A failed reload shows on the next edit; nothing waits on this one.
+            // The analysis knows the take's stumbles now, so its attempts score for real.
+            let _ = folder
+                .load_transcripts()
+                .and_then(|()| folder.rebuild_lock())
+                .and_then(|()| folder.propose_analyzed(&take));
+            cx.notify();
+        });
     })
     .detach();
 }
@@ -1295,19 +1295,24 @@ impl RecordScreen {
         ))
     }
 
-    /// The error of the last take, with a way to the setting that fixes a missing permission.
-    fn failure(&self) -> Option<Div> {
-        let failure = self.error.as_ref()?;
-        Some(
-            alert(failure.message.clone()).children(failure.permission.map(|permission| {
-                let url = settings_url(permission);
-                Button::new("open-privacy")
-                    .small()
-                    .label("Open Privacy & Security")
-                    .on_click(move |_, _, cx| cx.open_url(url))
-            })),
-        )
+    /// The error of the last take, with a way to the setting that fixes a missing permission,
+    /// and why the cut was not composed, for as long as the folder says so.
+    fn failure(&self, cx: &App) -> Vec<Div> {
+        let not_composed = self.folder.read(cx).not_composed.clone().map(Failure::from);
+        let failures = self.error.clone().into_iter().chain(not_composed);
+        failures
+            .map(|failure| {
+                alert(failure.message).children(failure.permission.map(|permission| {
+                    let url = settings_url(permission);
+                    Button::new("open-privacy")
+                        .small()
+                        .label("Open Privacy & Security")
+                        .on_click(move |_, _, cx| cx.open_url(url))
+                }))
+            })
+            .collect()
     }
+
     fn transcript(&self, phase: &Phase) -> impl IntoElement {
         let words = self.shared.words.lock().expect("words").join(" ");
         let empty = match (self.choice.mic(), phase) {

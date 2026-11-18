@@ -11,7 +11,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use shot_board::Board;
-use shot_core::{Date, DerivedKind, Id, Micros, OutputKind, Project, Status, Transcript};
+use shot_core::{
+    Date, DerivedKind, Id, Lock, Micros, OutputKind, Project, Status, Timeline, Transcript,
+};
 
 use crate::describe::describe;
 use crate::lock::LockError;
@@ -76,15 +78,17 @@ pub struct Options {
 }
 
 /// Every cut of the project in timeline order: main first, then the derived cuts, timed as
-/// export renders them.
+/// export renders them with `lock`, the lock read with the project: [`export_cut`] takes the
+/// same one, so a plan and its render never follow two states of `cut.lock`.
 pub fn plan(
     video_dir: &Path,
     project: &Project,
+    lock: &Lock,
     transcripts: &HashMap<Id, Transcript>,
     options: Options,
 ) -> Result<Vec<PlannedCut>, LockError> {
-    let timeline = crate::lock::timeline(video_dir, project)?;
-    let bookends = crate::lock::bookends(video_dir, project)?;
+    let timeline = Timeline::evaluate(project, lock);
+    let bookends = crate::lock::bookends_with(video_dir, project, lock)?;
     let description = describe(project, timeline.main(), &bookends, transcripts);
     let hook = project
         .script
@@ -446,10 +450,11 @@ pub fn prepare(
     jobs: usize,
     step: &(dyn Fn(Step) + Sync),
 ) -> Result<Prepared, ShipError> {
-    let cuts = plan(video_dir, project, transcripts, options)?;
+    let lock = crate::lock::read(video_dir)?;
+    let cuts = plan(video_dir, project, &lock, transcripts, options)?;
     let mut problems = Vec::new();
     for cut in &cuts {
-        let found = export_cut(video_dir, project, cut, jobs, step, &|| false)?;
+        let found = export_cut(video_dir, project, &lock, cut, jobs, step, &|| false)?;
         problems.extend(found.into_iter().map(|p| (cut.name.clone(), p)));
     }
     Ok(Prepared { cuts, problems })
@@ -462,12 +467,13 @@ pub fn prepare(
 pub fn export_cut(
     video_dir: &Path,
     project: &Project,
+    lock: &Lock,
     cut: &PlannedCut,
     jobs: usize,
     step: &(dyn Fn(Step) + Sync),
     cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<Vec<crate::check::Problem>, ShipError> {
-    use shot_render::export::{ExportError, ExportOptions, export_until};
+    use shot_render::export::{ExportError, ExportOptions, export_with};
     if cancelled() {
         return Err(ShipError::Cancelled);
     }
@@ -478,9 +484,10 @@ pub fn export_cut(
             to_render: p.to_render,
         })
     };
-    match export_until(
+    match export_with(
         video_dir,
         project,
+        lock,
         &cut.name,
         &cut.export,
         ExportOptions { jobs },
@@ -494,7 +501,9 @@ pub fn export_cut(
     step(Step::Checking {
         cut: cut.name.clone(),
     });
-    match crate::media::check_cut_until(video_dir, project, &cut.name, &cut.export, cancelled) {
+    let checked =
+        crate::media::check_cut_with(video_dir, project, lock, &cut.name, &cut.export, cancelled);
+    match checked {
         Ok(problems) => Ok(problems),
         Err(crate::media::MediaError::Cancelled) => Err(ShipError::Cancelled),
         Err(e) => Err(ShipError::Render(format!("{}: {e}", cut.name))),

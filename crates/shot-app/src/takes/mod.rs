@@ -1,17 +1,18 @@
-//! The Takes view of the Cut screen: every take's attempt at each beat side by side, to rate,
-//! compare and compose the cut from. Rows are the beats of the script under their chapters
-//! (see [`Lineup`]); each row shows the attempts with their words, length, waveform, stars, the
-//! circle of the pick and whether the cut has them now.
+//! The takes side by side: every take's attempt at each beat, to compare and to pick from. It
+//! opens from a beat in Edit or a take on Record. Rows are the beats of the script under their
+//! chapters (see [`Lineup`]); each row shows the attempts with their words, length, waveform,
+//! the pick and whether the cut has them now.
 //!
 //! Arrows move between beats and attempts, Space plays the focused attempt as it would play in
-//! the cut, A plays it and then the same beat in another take, 1 to 5 rate it and P circles it.
-//! Shift with the arrows, or a click and a shift-click, marks words of the attempt. Enter puts
-//! the attempt, or the marked words, into the cut in place of what holds the beat now, and
-//! ⇧Enter assembles the whole cut from the picks. Every change is a write of `cut.kdl` through
-//! `shot-core`, so ⌘Z undoes it like any edit. A video dropped on the view is imported as a
+//! the cut, A plays it and then the same beat in another take, P picks it for the beat or takes
+//! the pick away. Shift with the arrows, or a click and a shift-click, marks words of the
+//! attempt. Enter picks the attempt, or the marked words, to play the beat. Every change is a
+//! write of `cut.kdl` through `shot-core`, so ⌘Z undoes it like any edit. ⌘Enter goes back to
+//! Edit. A video dropped on the view is imported as a
 //! take, see [`import`].
 
 pub mod import;
+pub mod player;
 
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
@@ -27,13 +28,13 @@ use shot_core::{
     TimeRange, Transcript, Word, word_diff, words_in,
 };
 
-use crate::cut::GoTo;
-use crate::cut::player::Player;
 use crate::folder::VideoFolder;
 use crate::peaks::Peaks;
+use crate::studio::GoTo;
 use crate::studio::Screen;
 use crate::theme::*;
 use crate::ui::{big_button, empty_state, hint, icon, kbd, label, mono, pane, scrolling_list};
+use player::Player;
 
 pub const CONTEXT: &str = "TakesView";
 /// Bars of an attempt's waveform.
@@ -50,14 +51,8 @@ actions!(
         PreviousAttempt,
         Play,
         Compare,
-        Rate1,
-        Rate2,
-        Rate3,
-        Rate4,
-        Rate5,
         Pick,
         UseThis,
-        Assemble,
         MarkMore,
         MarkLess,
         ClearMark,
@@ -131,30 +126,21 @@ pub fn take_name(take: &Id) -> String {
     }
 }
 
-/// The takes in the video's media folder.
-pub fn media_takes(dir: &std::path::Path) -> Vec<Id> {
-    std::fs::read_dir(dir.join("media"))
-        .map(|entries| {
-            entries
-                .filter_map(|e| Id::new(e.ok()?.file_name().into_string().ok()?))
-                .collect()
-        })
-        .unwrap_or_default()
-}
+pub use shot_mcp::takes::media_takes;
 
 /// A take's words and elements: the folder's when it has them loaded, else from the cache
-/// and the elements file. `None` while the take has no transcript yet.
+/// and the elements file, which the folder reads once for each time they are written. `None`
+/// while the take has no transcript yet.
 pub fn read_take(folder: &VideoFolder, id: &Id) -> Option<(Transcript, Option<Elements>)> {
-    let transcript = folder.transcripts.get(id).cloned().or_else(|| {
-        shot_analyze::cache::read_cached(&folder.dir, id)
-            .ok()
-            .flatten()
-    })?;
-    let elements = folder.elements.get(id).cloned().or_else(|| {
-        let text = std::fs::read_to_string(folder.dir.join(format!("elements/{id}.jsonl"))).ok()?;
-        Elements::parse(id.clone(), &text).ok()
-    });
-    Some((transcript, elements))
+    let Some(transcript) = folder.transcripts.get(id) else {
+        return folder.take_on_disk(id);
+    };
+    let elements = folder
+        .elements
+        .get(id)
+        .cloned()
+        .or_else(|| folder.take_on_disk(id)?.1);
+    Some((transcript.clone(), elements))
 }
 
 /// How long `attempt` plays in the cut: its media without what the take's blocks remove.
@@ -285,44 +271,6 @@ impl TakesView {
             .unwrap_or((0, 0))
     }
 
-    /// Whether the cut plays more than one take's attempt at some beat, which nobody has
-    /// composed yet: then the Cut screen opens on this view.
-    pub fn needs_composing(&self, cx: &App) -> bool {
-        needs_composing(&self.lineup, &self.folder.read(cx).played)
-    }
-
-    /// After a new recording: says which beats the newest take repeats and focuses the first
-    /// of them. True when it repeats any, so the Cut screen shows this view.
-    pub fn recorded(&mut self, cx: &mut Context<Self>) -> bool {
-        self.reload(cx);
-        // Take numbers only grow, so the new recording has the highest.
-        let Some(take) = self.newest.clone() else {
-            return false;
-        };
-        let take = &take;
-        let repeated = repeated_rows(&self.lineup, take);
-        let Some(&first) = repeated.first() else {
-            return false;
-        };
-        let new = self
-            .row_at(first)
-            .and_then(|r| r.attempts.iter().position(|a| a.take == *take))
-            .unwrap_or(0);
-        self.at = (first, new);
-        self.mark = None;
-        let beats = match repeated.len() {
-            1 => "1 beat".to_owned(),
-            n => format!("{n} beats"),
-        };
-        self.note = Some(format!(
-            "{} repeats {beats} of earlier takes and plays in their place now. Compare them \
-             per beat: Enter puts the focused attempt back into the cut.",
-            take_name(take)
-        ));
-        cx.notify();
-        true
-    }
-
     fn focused(&self) -> Option<(RowAt, &Row, &Attempt)> {
         let at = *self.rows.get(self.at.0)?;
         let row = self.lineup.row(at)?;
@@ -393,6 +341,16 @@ impl TakesView {
             .saturating_add_signed(by)
             .min(row.attempts.len() - 1);
         self.focus_on(self.at.0, attempt, cx);
+    }
+
+    /// Shows the beat at `at`, on the attempt the cut plays.
+    pub fn show_row(&mut self, at: RowAt, cx: &mut Context<Self>) {
+        let Some(row) = self.rows.iter().position(|r| *r == at) else {
+            return;
+        };
+        let cut = &self.folder.read(cx).played;
+        let attempt = self.row_at(row).and_then(|r| held(cut, r)).unwrap_or(0);
+        self.focus_on(row, attempt, cx);
     }
 
     fn focus_on(&mut self, row: usize, attempt: usize, cx: &mut Context<Self>) {
@@ -546,84 +504,48 @@ impl TakesView {
         cx.notify();
     }
 
-    /// Rates the focused attempt, at a beat with another attempt to rate it against.
-    fn rate(&mut self, stars: u8, cx: &mut Context<Self>) {
-        let Some((_, _, attempt)) = self.focused().filter(|(_, row, _)| row.attempts.len() > 1)
-        else {
+    /// Writes the cut composed with `chosen` as the focused row's pick, or with the row's
+    /// proposal again when `chosen` is `None`.
+    fn choose(&mut self, chosen: Option<Attempt>, note: Option<String>, cx: &mut Context<Self>) {
+        let Some((_, row, _)) = self.focused() else {
             return;
         };
-        let attempt = attempt.clone();
         let cut = &self.folder.read(cx).project.cut;
-        // The same stars again take them away.
-        let stars = (cut.rating(&attempt).and_then(|r| r.stars) != Some(stars)).then_some(stars);
-        let cut = cut.rate(&attempt, stars);
-        self.write(None, cx, |folder| folder.write_cut(cut));
+        let cut = cut
+            .set_pick(row, chosen.as_slice())
+            .compose(&self.lineup, None);
+        self.write(note, cx, |folder| {
+            folder.write_composed(cut.map_err(|e| e.to_string())?)
+        });
+        self.mark = None;
     }
 
+    /// Picks the focused attempt or its marked words for the beat, or takes the pick away
+    /// when it is the pick already.
     fn pick(&mut self, cx: &mut Context<Self>) {
         let focused = self.focused().filter(|(_, row, _)| row.attempts.len() > 1);
-        let (Some((_, row, attempt)), Some(chosen)) = (focused, self.chosen()) else {
+        let (Some((_, row, _)), Some(chosen)) = (focused, self.chosen()) else {
             return;
         };
         let cut = &self.folder.read(cx).project.cut;
-        let circled = cut
-            .rating(attempt)
-            .is_some_and(|r| r.pick && r.range == chosen.range);
-        let cut = cut.set_pick(row, (!circled).then_some(&chosen));
-        self.write(None, cx, |folder| folder.write_cut(cut));
+        let picked = cut.picked(row).iter().any(|p| p.range == chosen.range);
+        self.choose((!picked).then_some(chosen), None, cx);
     }
 
     fn use_this(&mut self, cx: &mut Context<Self>) {
-        let (Some((at, _, _)), Some(chosen)) = (self.focused(), self.chosen()) else {
+        let Some(chosen) = self.chosen() else {
             return;
         };
-        let folder = self.folder.read(cx);
-        let cut = folder.project.cut.use_attempt(&self.lineup, at, &chosen);
         let what = if self.mark.is_some() {
             "The marked words of"
         } else {
             "The attempt of"
         };
         let note = format!(
-            "{what} {} now hold this beat in the cut.",
+            "{what} {} play this beat now, and stay when a later take scores better.",
             take_name(&chosen.take)
         );
-        self.write(Some(note), cx, |folder| {
-            folder.write_cut(cut.map_err(|e| e.to_string())?)
-        });
-        self.mark = None;
-    }
-
-    fn assemble(&mut self, cx: &mut Context<Self>) {
-        let folder = self.folder.read(cx);
-        let cut = &folder.project.cut;
-        let mut counts: Vec<(Id, usize)> = Vec::new();
-        for (_, row) in self.lineup.rows() {
-            if let Some(choice) = cut.choice(row) {
-                match counts.iter_mut().find(|(take, _)| *take == choice.take) {
-                    Some((_, n)) => *n += 1,
-                    None => counts.push((choice.take, 1)),
-                }
-            }
-        }
-        counts.sort_by(|a, b| {
-            a.0.as_str()
-                .len()
-                .cmp(&b.0.as_str().len())
-                .then(a.0.cmp(&b.0))
-        });
-        let assembled = cut.assemble(&self.lineup);
-        let beats: usize = counts.iter().map(|(_, n)| n).sum();
-        let from = counts
-            .iter()
-            .map(|(take, n)| format!("{} for {n}", take_name(take)))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let note = format!("Assembled {beats} beats from your picks: {from}. ⌘Z undoes it.");
-        self.write(Some(note), cx, |folder| {
-            folder.write_cut(assembled.map_err(|e| e.to_string())?)
-        });
-        self.mark = None;
+        self.choose(Some(chosen), Some(note), cx);
     }
 
     /// On to Edit, or to Record while there is nothing to cut.
@@ -670,30 +592,11 @@ impl TakesView {
     }
 }
 
-/// Whether the cut plays more than one take's attempt at some beat.
-fn needs_composing(lineup: &Lineup, cut: &Cut) -> bool {
-    lineup.rows().any(|(_, row)| in_cut(cut, row).len() > 1)
-}
-
-/// The rows, by their place in order, where `take` has an attempt and an earlier take has one
-/// too.
-fn repeated_rows(lineup: &Lineup, take: &Id) -> Vec<usize> {
-    lineup
-        .rows()
-        .enumerate()
-        .filter(|(_, (_, row))| {
-            row.attempts.iter().any(|a| a.take == *take)
-                && row.attempts.iter().any(|a| a.take != *take)
-        })
-        .map(|(i, _)| i)
-        .collect()
-}
-
 /// A cut that plays `attempts` back to back as they would play in `cut`.
 fn clip(cut: &Cut, attempts: &[Attempt]) -> Cut {
     Cut {
         music: None,
-        ratings: Vec::new(),
+        picks: Vec::new(),
         overrides: Vec::new(),
         derived: Vec::new(),
         chapters: vec![Chapter {
@@ -769,18 +672,6 @@ fn attempt_text(
     (StyledText::new(text).with_highlights(highlights), ranges)
 }
 
-/// Five stars, the first `stars` lit.
-fn stars(stars: Option<u8>, size: gpui::Pixels) -> Div {
-    let lit = stars.unwrap_or(0);
-    div().flex().gap(px(1.)).children((1..=5).map(|n| {
-        if n <= lit {
-            icon("star-on", size, ACCENT)
-        } else {
-            icon("star", size, FAINT)
-        }
-    }))
-}
-
 /// A small tag such as "In the cut".
 fn tag(text: &'static str, on: bool) -> Div {
     div()
@@ -812,9 +703,11 @@ impl TakesView {
         let folder = self.folder.read(cx);
         let cut = &folder.played;
         let focused = self.at == (row, index);
-        let rating = cut.rating(attempt);
-        let picked = rating.is_some_and(|r| r.pick);
-        // Stars and the pick mean something only next to another attempt.
+        let picked = cut
+            .picked(row_data)
+            .iter()
+            .any(|p| p.take == attempt.take && p.range.overlaps(attempt.range));
+        // A pick means something only next to another attempt.
         let choice = row_data.attempts.len() > 1;
         let kept = cut.kept_of(&attempt.take, attempt.range);
         let whole = kept.0 * 2 >= attempt.range.duration().0;
@@ -944,18 +837,17 @@ impl TakesView {
                     })
                     .child(div().flex_1())
                     .when(choice, |this| {
-                        this.child(stars(rating.and_then(|r| r.stars), ICON_SM))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(4.))
-                                    .text_size(TEXT_XS)
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(ACCENT)
-                                    .child(icon("pick", ICON, if picked { ACCENT } else { FAINT }))
-                                    .when(picked, |this| this.child("Picked")),
-                            )
+                        this.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.))
+                                .text_size(TEXT_XS)
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(ACCENT)
+                                .child(icon("pick", ICON, if picked { ACCENT } else { FAINT }))
+                                .when(picked, |this| this.child("Picked")),
+                        )
                     }),
             )
             .child(
@@ -1103,14 +995,8 @@ impl TakesView {
         let picked = self
             .lineup
             .rows()
-            .filter(|(_, row)| {
-                row.attempts
-                    .iter()
-                    .any(|a| cut.rating(a).is_some_and(|r| r.pick))
-            })
+            .filter(|(_, row)| !cut.picked(row).is_empty())
             .count();
-        // With one attempt at every beat there is nothing to pick between.
-        let choice = self.lineup.rows().any(|(_, row)| row.attempts.len() > 1);
         let summary = match twice {
             0 => format!("{takes}, {} beats, {picked} picked", self.rows.len()),
             n => format!(
@@ -1137,12 +1023,10 @@ impl TakesView {
                     )
                     .child(div().text_size(TEXT_SM).text_color(MUTED).child(summary)),
             )
-            .when(choice, |header| {
-                header.child(
-                    big_button("assemble", "takes", "Assemble picks", "⇧↩", twice > 0)
-                        .on_click(cx.listener(|this, _, _, cx| this.assemble(cx))),
-                )
-            })
+            .child(
+                big_button("takes-back", "edit", "Back to Edit", "⌘↩", false)
+                    .on_click(cx.listener(|this, _, _, cx| this.go_on(cx))),
+            )
     }
 
     fn side(&self, cx: &mut Context<Self>) -> Div {
@@ -1202,7 +1086,7 @@ impl TakesView {
             )
             .children(marked.map(|part| {
                 div().text_size(TEXT_SM).text_color(BODY).child(format!(
-                    "{} marked. Use this puts only them into the cut.",
+                    "{} marked. Use this plays only them for the beat.",
                     seconds(part.range.duration())
                 ))
             }))
@@ -1267,8 +1151,7 @@ impl TakesView {
                     .when(choice, |hints| {
                         hints
                             .child(hint("← →", "Attempts"))
-                            .child(hint("1–5", "Rate, the same again clears"))
-                            .child(hint("P", "Circle as the pick"))
+                            .child(hint("P", "Pick for the beat, again clears"))
                     })
                     .child(hint("⇧← ⇧→", "Mark words, or click and ⇧click"))
                     .child(hint("Esc", "Clear the mark")),
@@ -1308,14 +1191,8 @@ impl Render for TakesView {
             .on_action(cx.listener(|this, _: &PreviousAttempt, _, cx| this.step_attempt(-1, cx)))
             .on_action(cx.listener(|this, _: &Play, _, cx| this.play_focused(cx)))
             .on_action(cx.listener(|this, _: &Compare, _, cx| this.compare(cx)))
-            .on_action(cx.listener(|this, _: &Rate1, _, cx| this.rate(1, cx)))
-            .on_action(cx.listener(|this, _: &Rate2, _, cx| this.rate(2, cx)))
-            .on_action(cx.listener(|this, _: &Rate3, _, cx| this.rate(3, cx)))
-            .on_action(cx.listener(|this, _: &Rate4, _, cx| this.rate(4, cx)))
-            .on_action(cx.listener(|this, _: &Rate5, _, cx| this.rate(5, cx)))
             .on_action(cx.listener(|this, _: &Pick, _, cx| this.pick(cx)))
             .on_action(cx.listener(|this, _: &UseThis, _, cx| this.use_this(cx)))
-            .on_action(cx.listener(|this, _: &Assemble, _, cx| this.assemble(cx)))
             .on_action(cx.listener(|this, _: &MarkMore, _, cx| this.step_mark(true, cx)))
             .on_action(cx.listener(|this, _: &MarkLess, _, cx| this.step_mark(false, cx)))
             .on_action(cx.listener(|this, _: &ClearMark, _, cx| {
@@ -1337,7 +1214,7 @@ impl Render for TakesView {
                 (
                     "No words to line up yet",
                     "The Takes view lines your takes up beat by beat by what you said. \
-                     Transcribe them on Review, then come back.",
+                     Transcribe them in Edit, then come back.",
                 )
             } else {
                 (
@@ -1347,16 +1224,8 @@ impl Render for TakesView {
                 )
             };
             let action = if untranscribed {
-                big_button(
-                    "takes-transcribe",
-                    "text",
-                    "Transcribe on Review",
-                    "⌥1",
-                    true,
-                )
-                .on_click(|_, window, cx| {
-                    window.dispatch_action(Box::new(crate::cut::ShowReview), cx)
-                })
+                big_button("takes-transcribe", "text", "Transcribe in Edit", "⌘↩", true)
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(GoTo(Screen::Edit))))
             } else {
                 big_button("takes-record", "record", "Record a take", "⌘↩", true)
                     .on_click(cx.listener(|this, _, _, cx| this.go_on(cx)))
@@ -1439,8 +1308,11 @@ mod tests {
 
     /// Beat one in both takes, beat two only in the first, beat three only in the second.
     fn lineup() -> Lineup {
-        let row = |attempts| Row {
+        let row = |attempts: Vec<Attempt>| Row {
             text: String::new(),
+            scores: vec![100; attempts.len()],
+            proposal: attempts.last().cloned().into_iter().collect(),
+            look: false,
             attempts,
         };
         Lineup {
@@ -1452,30 +1324,23 @@ mod tests {
                     row(vec![attempt("t02", 40, 50)]),
                 ],
             }],
+            scripted: true,
+            ..Lineup::default()
         }
     }
 
     #[test]
-    fn a_new_take_lands_on_the_beats_it_repeats() {
-        let lineup = lineup();
-        assert_eq!(repeated_rows(&lineup, &Id::new("t02").unwrap()), [0]);
-        assert!(repeated_rows(&lineup, &Id::new("t03").unwrap()).is_empty());
-    }
-
-    #[test]
-    fn the_takes_open_while_the_cut_plays_a_beat_twice() {
+    fn a_composed_cut_plays_each_beat_once() {
         let both = Cut::parse(
             "chapter \"A\" {\n    take t01 {\n        keep from=0 to=30\n    }\n}\n\nchapter \"Take t02\" {\n    take t02 {\n        keep from=0 to=50\n    }\n}\n",
         )
         .unwrap();
-        assert!(needs_composing(&lineup(), &both));
+        let lineup = lineup();
+        let twice = |cut: &Cut| lineup.rows().any(|(_, row)| in_cut(cut, row).len() > 1);
+        assert!(twice(&both));
         let composed = both
-            .use_attempt(
-                &lineup(),
-                RowAt { group: 0, row: 0 },
-                &attempt("t02", 0, 10),
-            )
+            .compose(&lineup, Some(&Id::new("t02").unwrap()))
             .unwrap();
-        assert!(!needs_composing(&lineup(), &composed));
+        assert!(!twice(&composed));
     }
 }

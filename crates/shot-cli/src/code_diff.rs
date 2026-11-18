@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use clap::Args;
-use shot_core::{Cut, Id, Micros, TimeRange};
+use shot_core::{Cut, Id, Micros, TakeAt, TimeRange};
 use shot_render::code_diff::{self, CodeDiffOverlay};
 
 #[derive(Args)]
@@ -66,14 +66,23 @@ pub fn run(args: CodeDiffArgs) -> Result<(), String> {
         highlight_at,
     }
     .to_overlay();
-    let mut cut = project.cut.clone();
-    let block = cut
+    let blocks = project
+        .cut
         .chapters
-        .iter_mut()
-        .flat_map(|c| &mut c.takes)
-        .find(|t| t.take == take && t.ranges.iter().any(|r| r.range().overlaps(range)))
+        .iter()
+        .enumerate()
+        .flat_map(|(chapter, c)| {
+            let blocks = c.takes.iter().enumerate();
+            blocks.map(move |(take, edit)| (TakeAt { chapter, take }, edit))
+        });
+    let (at, _) = blocks
+        .into_iter()
+        .find(|(_, t)| t.take == take && t.ranges.iter().any(|r| r.range().overlaps(range)))
         .ok_or_else(|| format!("the cut shows no part of {take} in that range"))?;
-    block.overlays.push(overlay);
+    let cut = project
+        .cut
+        .add_overlay(at, overlay)
+        .map_err(|e| e.to_string())?;
     let path = args.video.join(&file);
     std::fs::create_dir_all(args.video.join("sources")).map_err(|e| e.to_string())?;
     shot_fs::write(&path, snapshot).map_err(|e| format!("{}: {e}", path.display()))?;

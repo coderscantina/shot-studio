@@ -13,7 +13,7 @@ mod words;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -62,6 +62,9 @@ const CANDIDATES: usize = 4;
 const DIFF_CONTEXT: usize = 2;
 /// Encoder sessions of an export, as `shot export` runs them.
 const JOBS: usize = 3;
+/// Why a run uploaded nothing, when the cut or the lock changed while it rendered.
+const CHANGED: &str =
+    "The cut changed while it rendered, so nothing was uploaded. Export again, then ship.";
 /// Where a Desktop app OAuth client is created.
 const CREDENTIALS_URL: &str = "https://console.cloud.google.com/apis/credentials";
 
@@ -80,6 +83,8 @@ enum Event {
     Exported {
         cut: String,
         stamp: Option<u64>,
+        /// The [`render_stamp`] of the cut and the lock the run rendered.
+        rendered: u64,
         result: Result<Vec<Problem>, String>,
     },
     Preview {
@@ -111,7 +116,8 @@ struct Measured {
 struct Exported {
     size: u64,
     modified: SystemTime,
-    /// A project file changed after the export.
+    /// A project file changed after the export, or the export was rendered from another cut
+    /// or lock than the video has now.
     stale: bool,
 }
 
@@ -122,6 +128,10 @@ struct CutState {
     stamp: Option<u64>,
     measured: Option<Measured>,
     export: Option<Exported>,
+    /// The export a run of this screen wrote, by its modification time, with the
+    /// [`render_stamp`] it rendered: a lock rebuilt while the run rendered is older than the
+    /// export file, and still not what the export shows.
+    rendered: Option<(SystemTime, u64)>,
     /// A run is exporting this cut, so the check worker's results for it are old.
     exporting: bool,
     preview: Option<PathBuf>,
@@ -138,6 +148,9 @@ struct Run {
     /// When the cut being rendered started, for the time left.
     since: Instant,
     cancel: Arc<AtomicBool>,
+    /// The [`render_stamp`] of the video as it is now, kept up while the run goes: the run
+    /// uploads only what still is the video.
+    current: Arc<AtomicU64>,
     /// Things the person has to do by hand afterwards.
     notes: Vec<String>,
 }
@@ -171,6 +184,8 @@ pub struct ShipScreen {
     /// Why the chosen client file was not taken.
     client_note: Option<String>,
     cuts: Vec<PlannedCut>,
+    /// The folder changed since the cuts were planned: the next frame plans them again.
+    stale: bool,
     /// Why the cuts could not be planned.
     plan_error: Option<String>,
     states: HashMap<String, CutState>,
@@ -219,12 +234,24 @@ impl ShipScreen {
             ShipError::NoChannel(_) => "This video is not in a channel.".to_owned(),
             e => capitalized(&e.to_string()),
         });
+        // A take's analysis may compose the cut while this screen shows.
+        cx.observe(&folder, |this, folder, cx| {
+            this.stale = true;
+            if let Some(run) = &this.run {
+                let folder = folder.read(cx);
+                let now = render_stamp(&folder.project.cut.to_kdl(), folder.lock());
+                run.current.store(now, Ordering::Relaxed);
+            }
+            cx.notify();
+        })
+        .detach();
         Self {
             folder,
             channel,
             client: Client::load(&oauth::client_path()),
             client_note: None,
             cuts: Vec::new(),
+            stale: false,
             plan_error: None,
             states: HashMap::new(),
             selected: 0,
@@ -281,7 +308,15 @@ impl ShipScreen {
         }
         let folder = self.folder.read(cx);
         let dir = folder.dir.clone();
-        match ship::plan(&dir, &folder.project, &folder.transcripts, self.options()) {
+        let lock = folder.lock().clone();
+        let planned = ship::plan(
+            &dir,
+            &folder.project,
+            &lock,
+            &folder.transcripts,
+            self.options(),
+        );
+        match planned {
             Ok(cuts) => {
                 self.cuts = cuts;
                 self.plan_error = None;
@@ -306,14 +341,15 @@ impl ShipScreen {
         let names: Vec<&String> = self.cuts.iter().map(|c| &c.name).collect();
         self.states.retain(|name, _| names.contains(&name));
         let mut queue = Vec::new();
+        let current = render_stamp(&working, &lock);
         for cut in &self.cuts {
             let state = self.states.entry(cut.name.clone()).or_default();
-            state.export = exported(&dir, &cut.export);
+            state.export = exported(&dir, &cut.export, state.rendered, current);
             let Some(export) = &state.export else {
                 *state = CutState::default();
                 continue;
             };
-            let stamp = check_stamp(&dir, cut, &working);
+            let stamp = check_stamp(&dir, cut, current);
             if state.stamp != stamp || matches!(state.checks, Checks::NotExported | Checks::Running)
             {
                 state.checks = Checks::Running;
@@ -338,15 +374,18 @@ impl ShipScreen {
                     preview(&dir, &cut, &send);
                     let result = match known {
                         Some(mut measured) => {
-                            media::check_files(&dir, &project, &cut.name, &cut.export).map(|p| {
-                                measured.extend(p);
-                                measured.sort_by_key(|p| p.check);
-                                measured
-                            })
+                            media::check_files(&dir, &project, &lock, &cut.name, &cut.export).map(
+                                |p| {
+                                    measured.extend(p);
+                                    measured.sort_by_key(|p| p.check);
+                                    measured
+                                },
+                            )
                         }
-                        None => media::check_cut_until(
+                        None => media::check_cut_with(
                             &dir,
                             &project,
+                            &lock,
                             &cut.name,
                             &cut.export,
                             &cancelled,
@@ -471,13 +510,24 @@ impl ShipScreen {
                     state.set_checks(result);
                 }
             }
-            Event::Exported { cut, stamp, result } => {
-                let dir = self.folder.read(cx).dir.clone();
+            Event::Exported {
+                cut,
+                stamp,
+                rendered,
+                result,
+            } => {
+                let folder = self.folder.read(cx);
+                let dir = folder.dir.clone();
+                let current = render_stamp(&folder.project.cut.to_kdl(), folder.lock());
                 let export = self.cuts.iter().find(|c| c.name == cut);
                 let state = self.states.entry(cut.clone()).or_default();
                 state.exporting = false;
                 state.stamp = stamp;
-                state.export = export.and_then(|c| exported(&dir, &c.export));
+                let written = export.and_then(|c| std::fs::metadata(&c.export).ok());
+                let written = written.and_then(|m| m.modified().ok());
+                state.rendered = written.map(|at| (at, rendered));
+                state.export =
+                    export.and_then(|c| exported(&dir, &c.export, state.rendered, current));
                 state.set_checks(result);
             }
             Event::Preview { cut, path } => {
@@ -520,6 +570,25 @@ impl ShipScreen {
         if self.run.is_some() || cuts.is_empty() {
             return;
         }
+        // The plan, the export and its checks read one state of the project and one lock,
+        // the folder's as it is now. The cuts planned when the screen opened may describe an
+        // older one, as when a take's analysis composed the cut, and `cut.lock` may be
+        // written again while the run renders.
+        let folder = self.folder.read(cx);
+        let (dir, project) = (folder.dir.clone(), folder.project.clone());
+        let lock = folder.lock().clone();
+        let planned = ship::plan(&dir, &project, &lock, &folder.transcripts, self.options());
+        self.cuts = match planned {
+            Ok(planned) => planned,
+            Err(e) => {
+                self.plan_error = Some(e.to_string());
+                cx.notify();
+                return;
+            }
+        };
+        self.plan_error = None;
+        let wanted = |planned: &&PlannedCut| cuts.iter().any(|c| c.name == planned.name);
+        let cuts: Vec<PlannedCut> = self.cuts.iter().filter(wanted).cloned().collect();
         // Problems already shown count as seen: shipping with them is the person's call.
         let force = self.problems() > 0;
         for cut in &cuts {
@@ -528,6 +597,7 @@ impl ShipScreen {
             state.checks = Checks::Running;
         }
         let cancel = Arc::new(AtomicBool::new(false));
+        let current = Arc::new(AtomicU64::new(render_stamp(&project.cut.to_kdl(), &lock)));
         self.finished = None;
         self.run = Some(Run {
             ship: ship_to.is_some(),
@@ -536,13 +606,20 @@ impl ShipScreen {
             signing_in: false,
             since: Instant::now(),
             cancel: cancel.clone(),
+            current: current.clone(),
             notes: Vec::new(),
         });
-        let folder = self.folder.read(cx);
-        let (dir, project) = (folder.dir.clone(), folder.project.clone());
         let send = self.send.clone();
         std::thread::spawn(move || {
-            let outcome = run(&dir, &project, &cuts, ship_to, force, &cancel, &send);
+            let outcome = run(
+                &dir,
+                (&project, &lock),
+                &cuts,
+                ship_to,
+                force,
+                (&cancel, &current),
+                &send,
+            );
             let _ = send.send(Event::Finished(outcome));
         });
         self.poll(cx);
@@ -1959,6 +2036,9 @@ impl CutState {
 
 impl Render for ShipScreen {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if std::mem::take(&mut self.stale) {
+            self.reload(cx);
+        }
         // The studio takes the whole screen, outside its keys, so typing a headline stays text.
         if let Some((studio, _)) = &self.studio {
             return div().size_full().child(studio.clone()).into_any_element();
@@ -2012,22 +2092,23 @@ impl Render for ShipScreen {
     }
 }
 
-/// Exports `cuts` and checks each, then uploads and tags when `ship_to` is given. Runs on its
-/// own thread and reports to `send`.
+/// Exports `cuts` and checks each with the project and the lock they were planned with, then
+/// uploads and tags when `ship_to` is given, unless the video is no longer what was rendered:
+/// `current` is its [`render_stamp`] now. Runs on its own thread and reports to `send`.
 fn run(
     dir: &Path,
-    project: &shot_core::Project,
+    (project, lock): (&shot_core::Project, &shot_core::Lock),
     cuts: &[PlannedCut],
     ship_to: Option<(Channel, Client)>,
     force: bool,
-    cancel: &Arc<AtomicBool>,
+    (cancel, current): (&Arc<AtomicBool>, &AtomicU64),
     send: &Sender<Event>,
 ) -> Outcome {
     let cancelled = || cancel.load(Ordering::Relaxed);
     let step = |step: Step| {
         let _ = send.send(Event::Step(step));
     };
-    let cut_kdl = project.cut.to_kdl();
+    let rendered = render_stamp(&project.cut.to_kdl(), lock);
     let mut problems = 0;
     for cut in cuts {
         step(Step::Rendering {
@@ -2035,7 +2116,7 @@ fn run(
             rendered: 0,
             to_render: 0,
         });
-        let result = match ship::export_cut(dir, project, cut, JOBS, &step, &cancelled) {
+        let result = match ship::export_cut(dir, project, lock, cut, JOBS, &step, &cancelled) {
             Err(ShipError::Cancelled) => return Outcome::Stopped,
             result => result.map_err(|e| e.to_string()),
         };
@@ -2046,7 +2127,8 @@ fn run(
         problems += result.as_ref().map_or(0, Vec::len);
         let _ = send.send(Event::Exported {
             cut: cut.name.clone(),
-            stamp: check_stamp(dir, cut, &cut_kdl),
+            stamp: check_stamp(dir, cut, rendered),
+            rendered,
             result,
         });
         if let Some(e) = failed {
@@ -2085,14 +2167,15 @@ fn run(
     let mut on_step = |s: Step| {
         let _ = send.send(Event::Step(s));
     };
-    let mut result = ship::publish(
-        dir,
-        &channel,
-        cuts,
-        &mut youtube,
-        ship::today(),
-        &mut on_step,
-    );
+    // Analysis may have composed another cut or rebuilt the lock while this run rendered or
+    // waited for a sign-in: the export and its chapters are then an older video's. `None` then.
+    let mut publish = |youtube: &mut YouTube| {
+        (current.load(Ordering::Relaxed) == rendered)
+            .then(|| ship::publish(dir, &channel, cuts, youtube, ship::today(), &mut on_step))
+    };
+    let Some(mut result) = publish(&mut youtube) else {
+        return Outcome::Failed(CHANGED.to_owned());
+    };
     // A revoked sign-in: the record keeps what already went up, so the second try continues.
     if matches!(
         result,
@@ -2101,14 +2184,10 @@ fn run(
         if let Err(e) = sign_in(&mut youtube) {
             return Outcome::Failed(e);
         }
-        result = ship::publish(
-            dir,
-            &channel,
-            cuts,
-            &mut youtube,
-            ship::today(),
-            &mut on_step,
-        );
+        let Some(again) = publish(&mut youtube) else {
+            return Outcome::Failed(CHANGED.to_owned());
+        };
+        result = again;
     }
     match result {
         Ok(shipped) => Outcome::Shipped(shipped.tag),
@@ -2122,8 +2201,14 @@ fn measured_from_export(kind: CheckKind) -> bool {
     matches!(kind, CheckKind::Loudness | CheckKind::Frames)
 }
 
-/// The export of a cut, when there is one.
-fn exported(dir: &Path, export: &Path) -> Option<Exported> {
+/// The export of a cut, when there is one. `rendered` is the [`render_stamp`] a run of this
+/// screen rendered the file written at that time from, `current` the one of the video now.
+fn exported(
+    dir: &Path,
+    export: &Path,
+    rendered: Option<(SystemTime, u64)>,
+    current: u64,
+) -> Option<Exported> {
     let meta = std::fs::metadata(export).ok()?;
     let modified = meta.modified().ok()?;
     let edited = ["cut.kdl", "format.kdl", shot_ship::lock::LOCK_FILE]
@@ -2137,12 +2222,23 @@ fn exported(dir: &Path, export: &Path) -> Option<Exported> {
     Some(Exported {
         size: meta.len(),
         modified,
-        stale: edited.is_some_and(|e| e > modified),
+        stale: edited.is_some_and(|e| e > modified)
+            || rendered.is_some_and(|(at, stamp)| at == modified && stamp != current),
     })
 }
 
-/// A hash of what a cut's checks read: its export, the thumbnail and `cut.kdl`.
-fn check_stamp(dir: &Path, cut: &PlannedCut, cut_kdl: &str) -> Option<u64> {
+/// A hash of what a cut renders from: `cut.kdl` and the lock, as the run or the screen holds
+/// them, not as the files are when it is asked.
+fn render_stamp(cut_kdl: &str, lock: &shot_core::Lock) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (cut_kdl, lock.to_kdl()).hash(&mut hasher);
+    hasher.finish()
+}
+
+/// A hash of what a cut's checks read: its export, the thumbnail, and the cut and the lock
+/// by their [`render_stamp`].
+fn check_stamp(dir: &Path, cut: &PlannedCut, rendered: u64) -> Option<u64> {
     use std::hash::{Hash, Hasher};
     let modified = |path: &Path| std::fs::metadata(path).and_then(|m| m.modified()).ok();
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -2150,11 +2246,8 @@ fn check_stamp(dir: &Path, cut: &PlannedCut, cut_kdl: &str) -> Option<u64> {
     ship::thumbnail(dir)
         .and_then(|p| modified(&p))
         .hash(&mut hasher);
-    cut_kdl.hash(&mut hasher);
     // A video's frames follow its lock too, which a rule change rebuilds.
-    std::fs::read(dir.join(shot_ship::lock::LOCK_FILE))
-        .ok()
-        .hash(&mut hasher);
+    rendered.hash(&mut hasher);
     Some(hasher.finish())
 }
 
@@ -2296,4 +2389,38 @@ fn note(text: impl Into<SharedString>) -> Div {
         .text_size(TEXT_SM)
         .text_color(WARN)
         .child(text.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_export_rendered_from_an_older_lock_is_stale_though_the_file_is_newer() {
+        let dir = tempfile::tempdir().unwrap();
+        // A rule change rebuilt the lock while the run rendered: the export is the newer file.
+        std::fs::write(dir.path().join(shot_ship::lock::LOCK_FILE), "lock 1\n").unwrap();
+        let export = dir.path().join("main.mp4");
+        std::fs::write(&export, b"").unwrap();
+        let later = SystemTime::now() + std::time::Duration::from_secs(60);
+        let file = std::fs::File::options().write(true).open(&export).unwrap();
+        file.set_modified(later).unwrap();
+        let lock = |text: &str| shot_core::Lock::parse(text).unwrap();
+        let rendered = render_stamp("", &lock("lock 1\n"));
+        let rebuilt = render_stamp(
+            "",
+            &lock(
+                "lock 1\n\ntake t01 {\n    cut from=1_000_000 to=2_000_000 on=silence t=1_000_000 layer=format rule=\"silence\"\n}\n",
+            ),
+        );
+        let stale = |stamp, current| {
+            let found = exported(dir.path(), &export, stamp, current).unwrap();
+            found.stale
+        };
+        assert!(!stale(None, rebuilt), "by the files alone it looks current");
+        assert!(stale(Some((later, rendered)), rebuilt));
+        assert!(!stale(Some((later, rendered)), rendered));
+        // A stamp of an export that was written again since says nothing about the file.
+        assert!(!stale(Some((SystemTime::UNIX_EPOCH, rendered)), rebuilt));
+    }
 }

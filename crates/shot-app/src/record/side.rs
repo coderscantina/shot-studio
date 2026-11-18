@@ -466,7 +466,7 @@ impl RecordScreen {
                     )
                     .when(!busy && !confirming, |row| {
                         row.child(
-                            small_button(("review", key.clone()), "takes", "Review in Cut")
+                            small_button(("review", key.clone()), "takes", "Compare takes")
                                 .on_click(cx.listener(|_, _, _, cx| cx.emit(ReviewTakes))),
                         )
                         .child(

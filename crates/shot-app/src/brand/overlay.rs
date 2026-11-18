@@ -748,14 +748,14 @@ impl PlacedWindow {
     fn write(&mut self, draft: Draft, cx: &mut Context<Self>) {
         let (at, index, from) = (self.at, self.index, self.from);
         let result = self.folder.update(cx, |folder, cx| {
-            let mut cut = folder.project.cut.clone();
-            let slot = cut
-                .chapters
-                .get_mut(at.chapter)
-                .and_then(|c| c.takes.get_mut(at.take))
-                .and_then(|b| b.overlays.get_mut(index))
+            let cut = &folder.project.cut;
+            cut.chapters
+                .get(at.chapter)
+                .and_then(|c| c.takes.get(at.take))
+                .and_then(|b| b.overlays.get(index))
                 .ok_or("That overlay is gone")?;
-            *slot = draft.overlay(from);
+            // Through the core, so the overlay's copies across a splice change with it.
+            let cut = cut.set_overlay(at, index, Some(draft.overlay(from)));
             folder.write_cut(cut)?;
             cx.notify();
             Ok::<_, String>(())

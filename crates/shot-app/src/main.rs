@@ -25,7 +25,6 @@ mod bench;
 mod board;
 mod brand;
 mod control;
-mod cut;
 mod edit;
 mod edit_bench;
 mod engine;

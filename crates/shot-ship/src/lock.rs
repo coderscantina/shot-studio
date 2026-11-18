@@ -42,15 +42,23 @@ pub fn timeline(video_dir: &Path, project: &Project) -> Result<Timeline, LockErr
 
 /// The main cut's intro and outro where export places them, for chapter times: none when its
 /// brand has neither.
-#[cfg(target_os = "macos")]
 pub fn bookends(video_dir: &Path, project: &Project) -> Result<Bookends, LockError> {
+    bookends_with(video_dir, project, &read(video_dir)?)
+}
+
+/// [`bookends`] of the cut styled by `lock` instead of the folder's `cut.lock` as it is now.
+#[cfg(target_os = "macos")]
+pub fn bookends_with(
+    video_dir: &Path,
+    project: &Project,
+    lock: &Lock,
+) -> Result<Bookends, LockError> {
     use shot_render::join::Piece;
-    let brand = read(video_dir)?.brand;
-    let has_bookends = brand.intro.is_some() || brand.outro.is_some();
+    let has_bookends = lock.brand.intro.is_some() || lock.brand.outro.is_some();
     if !has_bookends {
         return Ok(Bookends::default());
     }
-    let plan = shot_render::export::preview_plan(video_dir, project)
+    let plan = shot_render::export::preview_plan_with(video_dir, project, lock)
         .map_err(|e| LockError::Bookends(e.to_string()))?;
     let placed = plan
         .pieces
@@ -78,7 +86,11 @@ pub fn bookends(video_dir: &Path, project: &Project) -> Result<Bookends, LockErr
 
 /// Export renders only on macOS, so elsewhere nothing is placed around the cut.
 #[cfg(not(target_os = "macos"))]
-pub fn bookends(_video_dir: &Path, _project: &Project) -> Result<Bookends, LockError> {
+pub fn bookends_with(
+    _video_dir: &Path,
+    _project: &Project,
+    _lock: &Lock,
+) -> Result<Bookends, LockError> {
     Ok(Bookends::default())
 }
 
@@ -107,5 +119,25 @@ mod tests {
             length(&timeline(dir.path(), &project).unwrap()).0,
             9_000_000
         );
+    }
+
+    #[test]
+    fn a_plan_follows_the_lock_read_with_the_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = project(
+            "chapter \"Hook\" {\n    take t01 {\n        keep from=0 to=10_000_000\n    }\n}\n",
+        );
+        let with_project = Lock::parse("lock 1\n").unwrap();
+        // `cut.lock` is written again after the run read its files: it cuts a second.
+        std::fs::write(
+            dir.path().join(LOCK_FILE),
+            "lock 1\n\ntake t01 {\n    cut from=2_000_000 to=3_000_000 on=silence t=2_000_000 layer=format rule=\"silence\"\n}\n",
+        )
+        .unwrap();
+        let transcripts = std::collections::HashMap::new();
+        let options = crate::ship::Options::default();
+        let cuts =
+            crate::ship::plan(dir.path(), &project, &with_project, &transcripts, options).unwrap();
+        assert_eq!(cuts[0].length.0, 10_000_000);
     }
 }

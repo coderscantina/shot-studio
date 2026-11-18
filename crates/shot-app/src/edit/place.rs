@@ -174,7 +174,7 @@ impl EditScreen {
             return;
         };
         self.place.picker = None;
-        self.edit(cx, |cut| place::with_overlay(cut, at, place::pop(t, pop)));
+        self.edit(cx, |cut| cut.add_overlay(at, place::pop(t, pop)));
     }
 
     /// Places a callout where the preview was clicked, `at` a fraction of its width and height,
@@ -197,7 +197,7 @@ impl EditScreen {
         let overlay = place::callout(self.folder.read(cx).elements.get(&take), t, point);
         self.place.callout = false;
         self.place.note = None;
-        self.edit(cx, |cut| place::with_overlay(cut, block, overlay));
+        self.edit(cx, |cut| cut.add_overlay(block, overlay));
     }
 
     fn add_lottie(&mut self, cx: &mut Context<Self>) {

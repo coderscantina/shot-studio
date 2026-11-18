@@ -27,7 +27,8 @@ use std::path::{Path, PathBuf};
 
 use shot_capture::events::{Mark, Marker, read_markers};
 use shot_core::{
-    Attr, Element, ElementKind, Elements, Id, Micros, Script, TimeRange, Transcript, Word,
+    Attr, Cut, Decision, Element, ElementKind, Elements, Id, Micros, Override, Script, TimeRange,
+    Transcript, Word,
 };
 
 pub use findings::{HeardRetake, heard_retakes};
@@ -36,7 +37,7 @@ pub use screen::{ReadOut, read_outs};
 pub use stream::Stream;
 
 use crate::events::{self, Input};
-use crate::{Error, Speech, idle, normalize, vision};
+use crate::{Error, Speech, cache, idle, normalize, vision};
 use findings::{Gaps, TakeFacts, Voice};
 
 /// The `by` of each source, with the version of its detector.
@@ -151,6 +152,7 @@ pub fn analyze(
         markers: &read_markers(&events)?,
         input: &events::input(&events)?,
         script: script.as_ref(),
+        speaker: kept_fillers(video, transcript)?,
     };
     let mut elements = local(&facts);
     if depth == Depth::Full {
@@ -183,6 +185,46 @@ struct Facts<'a> {
     markers: &'a [Marker],
     input: &'a Input,
     script: Option<&'a Script>,
+    /// The fillers a person kept in this video.
+    speaker: Voice,
+}
+
+/// What the `keep` overrides on fillers in `cut.kdl` say about the speaker: each counts for the
+/// phrase said there, in any take of the video. A cut written before the lock has no overrides.
+fn kept_fillers(video: &Path, transcript: &Transcript) -> Result<Voice, Error> {
+    let text = match fs::read_to_string(video.join("cut.kdl")) {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Voice::default()),
+        Err(e) => return Err(e.into()),
+    };
+    let Ok(cut) = Cut::parse(&text) else {
+        return Ok(Voice::default());
+    };
+    let kept: Vec<&Override> = cut
+        .overrides
+        .iter()
+        .filter(|o| o.kind == ElementKind::Filler && o.decision == Some(Decision::Keep))
+        .collect();
+    let mut voice = Voice::default();
+    for take in kept.chunk_by(|a, b| a.take == b.take) {
+        let cached = if take[0].take == *transcript.take() {
+            None
+        } else {
+            // A take without a readable transcript teaches nothing.
+            match cache::read_cached(video, &take[0].take) {
+                Ok(Some(cached)) => Some(cached),
+                _ => continue,
+            }
+        };
+        let words = cached.as_ref().unwrap_or(transcript);
+        for phrase in take
+            .iter()
+            .filter_map(|o| findings::filler_at(words, o.at, Override::TOLERANCE))
+        {
+            *voice.kept.entry(phrase).or_default() += 1;
+        }
+    }
+    Ok(voice)
 }
 
 /// Every element that needs no frame decoded.
@@ -213,7 +255,7 @@ fn local(facts: &Facts) -> Elements {
         duration: facts.duration,
     };
     // Gaps are left to the loop below, which keeps them whole.
-    for finding in findings::find(&take, &Voice::default(), SURE, IDLE_MIN) {
+    for finding in findings::find(&take, &facts.speaker, SURE, IDLE_MIN) {
         let kind = finding.kind;
         let by = if kind == ElementKind::Idle {
             BY_SCREEN

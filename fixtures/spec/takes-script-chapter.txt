@@ -1,0 +1,1 @@
+First we create the project with cargo new. [[slnc 900]] Then we add the clap crate to parse the arguments. [[slnc 1400]] Clap gives us help text and validation for free. It is, hmm, wait. [[slnc 900]] Clap gives us help text and validation for free.

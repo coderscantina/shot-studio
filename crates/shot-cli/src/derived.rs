@@ -6,6 +6,8 @@ use std::path::PathBuf;
 use clap::{Args, Subcommand};
 use shot_core::{CaptionStyle, Clip, DerivedCut, DerivedKind, Id, Micros, TimeRange};
 
+use crate::ingest::Composed;
+
 #[derive(Args)]
 pub struct DerivedArgs {
     /// The video folder.
@@ -58,7 +60,9 @@ fn style(text: &str) -> Result<CaptionStyle, String> {
 }
 
 pub fn run(args: DerivedArgs) -> Result<(), String> {
-    let (_lock, opened) = crate::open(&args.video)?;
+    let (lock, opened) = crate::open(&args.video)?;
+    let shipped = opened.project.video.status == shot_core::Status::Shipped;
+    let mut removed = false;
     let mut cut = opened.project.cut;
     let id = |text: &str| Id::new(text).ok_or_else(|| format!("{text} is not an id"));
     match args.action {
@@ -116,6 +120,7 @@ pub fn run(args: DerivedArgs) -> Result<(), String> {
             if cut.derived.len() == before {
                 return Err(format!("there is no derived cut named {name}"));
             }
+            removed = true;
         }
     }
     // Parsing the written text checks what the contract asks, such as the take being in the
@@ -123,5 +128,16 @@ pub fn run(args: DerivedArgs) -> Result<(), String> {
     let text = cut.to_kdl();
     shot_core::Cut::parse(&text).map_err(|e| format!("cut.kdl:{e}"))?;
     let path = args.video.join("cut.kdl");
-    shot_fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))
+    shot_fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
+    drop(lock);
+    // The cut it derived from may have kept the main cut from composing: compose now, as
+    // `shot ingest` does, and build the lock of the cut that makes.
+    if removed && !shipped {
+        match crate::ingest::compose(&args.video, None)? {
+            Composed::Written => crate::style::write(&args.video)?,
+            Composed::Refused(why) => eprintln!("the cut was not composed: {why}"),
+            Composed::Unchanged => {}
+        }
+    }
+    Ok(())
 }

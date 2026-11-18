@@ -37,10 +37,10 @@ pub use captions::{
 pub use credit::{Creator, Credit, License};
 pub use cut::{
     CaptionBreak, CaptionFix, Chapter, Clip, Cut, DerivedCut, DerivedKind, Framing, LayoutChange,
-    Music, Overlay, Override, OverrideEffect, ParamValue, Point, RangeEdit, Rating, TakeEdit, Zoom,
-    ZoomShape,
+    LeftCut, Music, Overlay, Override, OverrideEffect, ParamValue, Pick, Point, RangeEdit,
+    TakeEdit, Zoom, ZoomShape,
 };
-pub use edit::{Decision, EditError, Placed, RemovedBy, Review, TakeAt, WordState, WordView};
+pub use edit::{Decision, EditError, Look, Placed, RemovedBy, Review, TakeAt, WordState, WordView};
 pub use element::{Attr, AttrValue, DuplicateElement, Element, ElementKind, Elements};
 pub use engine::{StyleError, StyleInput, build};
 pub use error::ParseError;

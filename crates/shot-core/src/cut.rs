@@ -5,8 +5,8 @@ use kdl::KdlValue;
 use crate::kdl_io::{Bare, FromKdl, Node, Source, ToKdl, Writer, keyword_enum};
 use crate::migrate::old::{self, OldBlock, Review, refused};
 use crate::{
-    CaptionStyle, Decision, Effect, EffectKey, ElementKind, Id, Layout, Micros, ParseError, Target,
-    TimeRange, Transition,
+    Attempt, CaptionStyle, Decision, Effect, EffectKey, ElementKind, Id, Layout, Micros,
+    ParseError, Target, TimeRange, Transition,
 };
 
 /// `cut.kdl`: the edit. Everything is addressed by take id and the take's media time.
@@ -21,9 +21,28 @@ pub struct Cut {
     pub caption_breaks: Vec<CaptionBreak>,
     /// The music bed under the whole cut and its derived cuts.
     pub music: Option<Music>,
-    /// Ratings and picks of the Takes view, by take (`t9` before `t10`), then `from`. The
+    /// Picks and picks of the Takes view, by take (`t9` before `t10`), then `from`. The
     /// ranges of one take do not overlap.
-    pub ratings: Vec<Rating>,
+    pub picks: Vec<Pick>,
+    /// The pieces of the proposals a person looked at and left as proposed, by take like the
+    /// picks, then `from`. They choose nothing: a later take may still win the beat, and its
+    /// proposal is then one to look at again ([`Cut::looked`]).
+    pub looked: Vec<Attempt>,
+    /// A person's cuts in attempts that left the main cut, by take like the picks, then `from`.
+    /// None of them lies in a block of the cut: composing gives them back to the attempt when
+    /// it plays again.
+    pub left_cuts: Vec<LeftCut>,
+    /// A person's layouts, zooms and overlays in attempts that left the main cut: one block
+    /// per take without `ranges`, by take like the picks. Composing gives them back like the
+    /// cuts.
+    pub left_effects: Vec<TakeEdit>,
+    /// The overrides of takes that left the main cut, by take like the picks, then `at`, then
+    /// kind. Composing gives them back when the take plays again.
+    pub left_overrides: Vec<Override>,
+    /// The takes whose recording a person undid, by take like the picks, each once. Their
+    /// media stays in the folder, and they stay out of the lineup, so composing never brings
+    /// one back ([`crate::Lineup::new`]). Redo takes the mark away.
+    pub undone: Vec<Id>,
     /// The main cut, in output order.
     pub chapters: Vec<Chapter>,
     /// Changes to what the style rules gave single elements, in canonical order: by take in
@@ -79,24 +98,38 @@ pub struct CaptionFix {
     pub said: String,
 }
 
-/// A person's verdict on one attempt of the Takes view: an `attempt` node of the `takes` block.
-/// It names the attempt by its take and range, and binds to the attempt of that take that holds
-/// the middle of its range ([`Cut::rating`]), so it follows a re-alignment that moves the
-/// attempt's edges a little.
+/// A person's choice of what plays a beat: an `attempt` node of the `takes` block. It names
+/// the attempt by its take and range, and binds to the attempt of that take that holds the
+/// middle of its range ([`Cut::picked`]), so it follows a re-alignment that moves the attempt's
+/// edges a little.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Rating {
+pub struct Pick {
     pub take: Id,
-    /// The attempt, or the part of it a person marked and circled.
+    /// The attempt, or the part of it a person marked.
     pub range: TimeRange,
-    /// 1 to 5.
-    pub stars: Option<u8>,
-    /// Circled: the attempt, or part, that "Assemble picks" uses for its beat.
-    pub pick: bool,
 }
 
-impl Rating {
+impl Pick {
     /// The canonical order: by take, shorter ids first so `t9` comes before `t10`, then `from`.
-    fn order(&self) -> (usize, &str, Micros) {
+    pub(crate) fn order(&self) -> (usize, &str, Micros) {
+        (
+            self.take.as_str().len(),
+            self.take.as_str(),
+            self.range.from(),
+        )
+    }
+}
+
+/// A person's cut in an attempt that does not play: a `remove` node of the `takes` block.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LeftCut {
+    pub take: Id,
+    pub range: TimeRange,
+}
+
+impl LeftCut {
+    /// The canonical order, as [`Pick::order`].
+    pub(crate) fn order(&self) -> (usize, &str, Micros) {
         (
             self.take.as_str().len(),
             self.take.as_str(),
@@ -353,7 +386,7 @@ impl Cut {
         let doc = src.parse()?;
         let mut cut = Self::default();
         let (mut captions, mut fixes, mut music) = (None, None, None);
-        let mut ratings = None;
+        let mut picks = None;
         let mut breaks = Vec::new();
         let mut derived_clips = Vec::new();
         let mut overrides = Vec::new();
@@ -369,7 +402,7 @@ impl Cut {
                     breaks = read_breaks;
                 }
                 "music" => node.set_once(&mut music, Music::read(node)?)?,
-                "takes" => node.set_once(&mut ratings, Rating::read_all(node)?)?,
+                "takes" => node.set_once(&mut picks, Pick::read_all(node)?)?,
                 "chapter" => cut.chapters.push(Chapter::read(node, old.as_deref_mut())?),
                 "override" => overrides.push((Override::read(node)?, node)),
                 name @ ("short" | "x-clip") => {
@@ -391,7 +424,14 @@ impl Cut {
         cut.caption_fixes = fixes.unwrap_or_default();
         cut.caption_breaks = breaks;
         cut.music = music;
-        cut.ratings = ratings.unwrap_or_default();
+        if let Some(takes) = picks {
+            cut.picks = takes.picks;
+            cut.looked = takes.looked;
+            cut.left_cuts = takes.left_cuts;
+            cut.left_effects = takes.left_effects;
+            cut.left_overrides = takes.left_overrides;
+            cut.undone = takes.undone;
+        }
         let takes: HashSet<&Id> = cut
             .chapters
             .iter()
@@ -470,18 +510,31 @@ impl Cut {
                 .prop("duck", &music.duck)
                 .end();
         }
-        if !self.ratings.is_empty() {
+        let left = !self.left_effects.is_empty()
+            || !self.left_overrides.is_empty()
+            || !self.undone.is_empty();
+        if !self.picks.is_empty() || !self.looked.is_empty() || !self.left_cuts.is_empty() || left {
             separate(&mut w);
             w.node("takes").open();
-            for rating in &self.ratings {
-                write_range(w.node("attempt").arg(&rating.take), rating.range);
-                if let Some(stars) = &rating.stars {
-                    w.prop("stars", stars);
-                }
-                if rating.pick {
-                    w.prop("pick", &true);
-                }
+            for pick in &self.picks {
+                write_range(w.node("attempt").arg(&pick.take), pick.range);
+                w.prop("pick", &true);
                 w.end();
+            }
+            for looked in &self.looked {
+                write_range(w.node("looked").arg(&looked.take), looked.range).end();
+            }
+            for left in &self.left_cuts {
+                write_range(w.node("remove").arg(&left.take), left.range).end();
+            }
+            for left in &self.left_effects {
+                left.write(&mut w);
+            }
+            for left in &self.left_overrides {
+                left.write(&mut w);
+            }
+            for take in &self.undone {
+                w.node("undone").arg(take).end();
             }
             w.close();
         }
@@ -737,31 +790,108 @@ impl CaptionFix {
     }
 }
 
-impl Rating {
-    fn read_all(node: Node<'_>) -> Result<Vec<Self>, ParseError> {
+/// What a `takes` block holds, each list in canonical order.
+struct TakesBlock {
+    picks: Vec<Pick>,
+    looked: Vec<Attempt>,
+    left_cuts: Vec<LeftCut>,
+    left_effects: Vec<TakeEdit>,
+    left_overrides: Vec<Override>,
+    undone: Vec<Id>,
+}
+
+/// The canonical order of the `takes` block's nodes of one take, see [`Pick::order`].
+pub(crate) fn takes_order(take: &Id) -> (usize, &str) {
+    (take.as_str().len(), take.as_str())
+}
+
+impl Pick {
+    /// The picks and what a person made in attempts that left the cut.
+    fn read_all(node: Node<'_>) -> Result<TakesBlock, ParseError> {
         node.expect_block(0, &[])?;
-        let mut ratings: Vec<(Self, Node<'_>)> = Vec::new();
+        let mut picks: Vec<(Self, Node<'_>)> = Vec::new();
+        let mut looked: Vec<Attempt> = Vec::new();
+        let mut left_cuts = Vec::new();
+        let mut left_effects: Vec<TakeEdit> = Vec::new();
+        let mut left_overrides: Vec<Override> = Vec::new();
+        let mut undone: Vec<Id> = Vec::new();
         for child in node.children() {
+            match child.name() {
+                "undone" => {
+                    child.expect(1, &[])?;
+                    let take: Id = child.arg(0)?;
+                    if undone.contains(&take) {
+                        return Err(child.error(format!("duplicate `undone {take}`")));
+                    }
+                    undone.push(take);
+                    continue;
+                }
+                "looked" => {
+                    child.expect(1, &["from", "to"])?;
+                    looked.push(Attempt {
+                        take: child.arg(0)?,
+                        range: TimeRange::read(child)?,
+                    });
+                    continue;
+                }
+                "remove" => {
+                    child.expect(1, &["from", "to"])?;
+                    left_cuts.push(LeftCut {
+                        take: child.arg(0)?,
+                        range: TimeRange::read(child)?,
+                    });
+                    continue;
+                }
+                "take" => {
+                    let left = TakeEdit::read(child, None)?;
+                    if !left.ranges.is_empty() {
+                        return Err(child.error(
+                            "a `take` of the `takes` block holds layouts, zooms and overlays",
+                        ));
+                    }
+                    if left_effects.iter().any(|o| o.take == left.take) {
+                        return Err(child.error(format!("duplicate `take {}`", left.take)));
+                    }
+                    left_effects.push(left);
+                    continue;
+                }
+                "override" => {
+                    let left = Override::read(child)?;
+                    let same = |o: &Override| {
+                        o.take == left.take && o.kind == left.kind && o.at == left.at
+                    };
+                    if left_overrides.iter().any(same) {
+                        return Err(child.error(format!(
+                            "duplicate override of `{}` at {} in {}",
+                            left.kind, left.at.0, left.take
+                        )));
+                    }
+                    left_overrides.push(left);
+                    continue;
+                }
+                _ => {}
+            }
             if child.name() != "attempt" {
                 return Err(child.unknown());
             }
             child.expect(1, &["from", "to", "stars", "pick"])?;
-            let rating = Self {
+            let attempt = Self {
                 take: child.arg(0)?,
                 range: TimeRange::read(child)?,
-                stars: child.opt_prop("stars")?,
-                pick: child.opt_prop("pick")?.unwrap_or(false),
             };
-            if rating.stars.is_some_and(|stars| !(1..=5).contains(&stars)) {
-                return Err(child.error("`stars` is 1 to 5"));
+            // Stars were written before the score chose attempts: read, and dropped on the
+            // next write.
+            let stars: Option<u8> = child.opt_prop("stars")?;
+            let picked = child.opt_prop("pick")?.unwrap_or(false);
+            if stars.is_none() && !picked {
+                return Err(child.error("an `attempt` has `pick=#true`"));
             }
-            if rating.stars.is_none() && !rating.pick {
-                return Err(child.error("an `attempt` has `stars`, `pick=#true` or both"));
+            if picked {
+                picks.push((attempt, child));
             }
-            ratings.push((rating, child));
         }
-        ratings.sort_by(|(a, _), (b, _)| a.order().cmp(&b.order()));
-        for pair in ratings.windows(2) {
+        picks.sort_by(|(a, _), (b, _)| a.order().cmp(&b.order()));
+        for pair in picks.windows(2) {
             let [(a, _), (b, node)] = pair else {
                 unreachable!("windows of two")
             };
@@ -772,7 +902,23 @@ impl Rating {
                 )));
             }
         }
-        Ok(ratings.into_iter().map(|(r, _)| r).collect())
+        left_cuts.sort_by(|a, b| a.order().cmp(&b.order()));
+        left_effects.sort_by(|a, b| takes_order(&a.take).cmp(&takes_order(&b.take)));
+        left_overrides.sort_by(|a, b| {
+            (takes_order(&a.take), a.at, a.kind).cmp(&(takes_order(&b.take), b.at, b.kind))
+        });
+        looked.sort_by(|a, b| {
+            (takes_order(&a.take), a.range.from()).cmp(&(takes_order(&b.take), b.range.from()))
+        });
+        undone.sort_by(|a, b| takes_order(a).cmp(&takes_order(b)));
+        Ok(TakesBlock {
+            picks: picks.into_iter().map(|(r, _)| r).collect(),
+            looked,
+            left_cuts,
+            left_effects,
+            left_overrides,
+            undone,
+        })
     }
 }
 

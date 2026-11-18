@@ -129,12 +129,14 @@ impl Transcribe {
         }
     }
 
-    /// Loads the new transcripts into the folder, or shows why the job failed.
+    /// Loads the new transcripts into the folder and composes the cut with the attempts they
+    /// hold, or shows why the job failed.
     fn finish(&mut self, result: Result<Vec<Id>, String>, cx: &mut Context<Self>) {
         let loaded = result.and_then(|_| {
             self.folder.update(cx, |folder, cx| {
                 cx.notify();
-                folder.load_transcripts()
+                folder.load_transcripts()?;
+                folder.as_one_change(|folder| folder.propose(None).map(drop))
             })
         });
         self.state = match loaded {

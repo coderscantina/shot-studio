@@ -19,7 +19,7 @@ use gpui::{
 use gpui_component::Root;
 use gpui_component::input::{Escape, Input, InputEvent, InputState};
 use shot_board::{Activity, Board, Card, ReleaseTag};
-use shot_core::{Cut, FormatKind, Lock, Project, Script, Status, Timeline, Video};
+use shot_core::{Cut, FormatKind, Lineup, Lock, Project, Script, Status, Timeline, Video};
 use shot_mcp::bridge::{Claude, Reach};
 use shot_ship::lock::LOCK_FILE;
 use shot_ship::script_check;
@@ -1097,9 +1097,7 @@ fn card_info(board: &Board, slug: &str, video: &Video, proposals: usize) -> Card
     let lock = read(LOCK_FILE)
         .and_then(|text| Lock::parse(&text).ok())
         .unwrap_or_default();
-    let review = cut
-        .as_ref()
-        .map_or(0, |cut| cut.review_queue(&lock).count());
+    let mut review = 0;
     let length = match cut {
         Some(cut) => {
             let project = Project {
@@ -1111,6 +1109,14 @@ fn card_info(board: &Board, slug: &str, video: &Video, proposals: usize) -> Card
                 format: video.format.preset(),
                 cut,
             };
+            // What Edit counts as "N to look at". The takes' words are in the worktree only,
+            // so a video without one counts its findings and no beats.
+            if video.status == Status::Recorded {
+                let lineup = worktree.as_ref().map_or_else(Lineup::default, |folder| {
+                    shot_mcp::takes::lineup(folder, &project)
+                });
+                review = project.cut.looks(&lineup, &lock).len();
+            }
             let timeline = Timeline::evaluate(&project, &lock);
             let edited = timeline
                 .main()
@@ -1133,7 +1139,7 @@ fn card_info(board: &Board, slug: &str, video: &Video, proposals: usize) -> Card
     }
 }
 
-/// What a video waits for, from its column, its open proposals and its review queue.
+/// What a video waits for, from its column, its open proposals and what Edit has to look at.
 fn next_step(status: Status, proposals: usize, review: usize) -> Option<Next> {
     let plural =
         |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
@@ -1148,10 +1154,7 @@ fn next_step(status: Status, proposals: usize, review: usize) -> Option<Next> {
         ),
         Status::Scripting => ("Finish the script".to_owned(), false),
         Status::Ready => ("Record the takes".to_owned(), false),
-        Status::Recorded if review > 0 => (
-            format!("{} your call", plural(review, "cut needs", "cuts need")),
-            true,
-        ),
+        Status::Recorded if review > 0 => (format!("{review} to look at"), true),
         Status::Recorded => ("Edit the cut".to_owned(), false),
         Status::Editing if proposals > 0 => (
             format!("{} to review", plural(proposals, "proposal", "proposals")),
@@ -1273,8 +1276,7 @@ mod tests {
         let suggestions = next(Status::Scripting, 2, 0);
         assert_eq!(suggestions.text, "2 suggestions to review");
         assert!(suggestions.waiting);
-        assert_eq!(next(Status::Recorded, 0, 1).text, "1 cut needs your call");
-        assert_eq!(next(Status::Recorded, 0, 6).text, "6 cuts need your call");
+        assert_eq!(next(Status::Recorded, 0, 6).text, "6 to look at");
         assert!(!next(Status::Editing, 0, 3).waiting);
         assert!(next_step(Status::Shipped, 1, 0).is_none());
     }

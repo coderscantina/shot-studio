@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use shot_analyze::vision::{self, VisionError};
-use shot_core::{Cut, Id, Micros, Overlay, ParamValue, TakeEdit, TimeRange};
+use shot_core::{Cut, Id, Micros, Overlay, ParamValue, TakeAt, TakeEdit, TimeRange};
 
 use crate::layout::Rect;
 use crate::overlay::highlight::{self, ScreenLine};
@@ -127,9 +127,12 @@ pub fn redact(
             )
         }
     };
-    let mut cut = cut.clone();
-    block_at(&mut cut, take, said.from())?.overlays.push(placed);
-    Ok(cut)
+    // Through the core, so every block of the take that plays part of the range is covered.
+    cut.place_overlay(take, placed)
+        .map_err(|_| OverlayRuleError::NotInCut {
+            take: take.clone(),
+            at: said.from(),
+        })
 }
 
 /// A `highlight` around where `phrase`, said over `said` in `take`, shows on the screen when it
@@ -166,37 +169,35 @@ pub fn highlight_said(
 
 /// `cut` with `file` picked for the b-roll of `take` that covers `at`.
 pub fn fill_b_roll(cut: &Cut, take: &Id, at: Micros, file: &str) -> Result<Cut, OverlayRuleError> {
-    let mut cut = cut.clone();
-    let block = block_at(&mut cut, take, at)?;
-    let slot = block
+    let not_in_cut = || OverlayRuleError::NotInCut {
+        take: take.clone(),
+        at,
+    };
+    let (block, edit) = cut
+        .chapters
+        .iter()
+        .enumerate()
+        .flat_map(|(chapter, c)| {
+            let blocks = c.takes.iter().enumerate();
+            blocks.map(move |(take, edit)| (TakeAt { chapter, take }, edit))
+        })
+        .find(|(_, edit)| edit.take == *take && edit_keeps(edit, at))
+        .ok_or_else(not_in_cut)?;
+    let index = edit
         .overlays
-        .iter_mut()
-        .find(|o| {
+        .iter()
+        .position(|o| {
             o.template.as_str() == broll::TEMPLATE && o.range.from() <= at && at < o.range.to()
         })
         .ok_or_else(|| OverlayRuleError::NoSlot {
             take: take.clone(),
             at,
         })?;
+    let mut slot = edit.overlays[index].clone();
     let file_id = Id::new("file").expect("an id");
     slot.params.retain(|(name, _)| *name != file_id);
     slot.params
         .insert(0, (file_id, ParamValue::Text(file.to_owned())));
-    Ok(cut)
-}
-
-/// The take block of the main cut that keeps `take` at `at`.
-fn block_at<'a>(
-    cut: &'a mut Cut,
-    take: &Id,
-    at: Micros,
-) -> Result<&'a mut TakeEdit, OverlayRuleError> {
-    cut.chapters
-        .iter_mut()
-        .flat_map(|c| &mut c.takes)
-        .find(|edit| edit.take == *take && edit_keeps(edit, at))
-        .ok_or_else(|| OverlayRuleError::NotInCut {
-            take: take.clone(),
-            at,
-        })
+    // Through the core, so the slot's copies across a splice get the file too.
+    Ok(cut.set_overlay(block, index, Some(slot)))
 }

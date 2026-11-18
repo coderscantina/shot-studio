@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use shot_analyze::elements::findings::{self, TakeFacts, Voice};
 use shot_analyze::{Speech, SpeechDetector, Transcriber, decode_mono, models};
-use shot_core::{Id, Micros, Transcript};
+use shot_core::{ElementKind, Id, Micros, Transcript, Word};
 
 /// What a cut applies right away.
 const SURE: u8 = 85;
@@ -84,4 +84,64 @@ fn sure_findings_leave_the_clean_version_of_each_clip() {
             .collect();
         assert_eq!(kept.join(" "), clean, "{name}");
     }
+}
+
+/// The words a finding removes, as they were said.
+fn said(words: &[Word], finding: &findings::Finding) -> String {
+    words
+        .iter()
+        .filter(|w| {
+            let middle = Micros((w.range.from().0 + w.range.to().0) / 2);
+            finding.range.from() <= middle && middle < finding.range.to()
+        })
+        .map(|w| w.text.trim())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[test]
+#[ignore = "needs $SHOT_FIXTURES and the models"]
+fn one_take_finds_its_restarts_and_cue_and_asks_about_emphasis() {
+    let wav = PathBuf::from(std::env::var_os("SHOT_FIXTURES").expect("SHOT_FIXTURES is set"))
+        .join("takes/one-take.wav");
+    let (transcript, speech, duration) = analyze(&wav);
+    let facts = TakeFacts {
+        transcript: &transcript,
+        speech: &speech,
+        still: &[],
+        again: &[],
+        duration,
+    };
+    let words = transcript.words();
+    let retakes: Vec<(String, u8)> =
+        findings::find(&facts, &Voice::default(), SURE, Micros(u64::MAX))
+            .iter()
+            .filter(|f| f.kind == ElementKind::Retake)
+            .map(|f| (said(words, f).to_lowercase(), f.confidence))
+            .collect();
+    println!("{retakes:#?}");
+    let sure = |needle: &str| {
+        retakes
+            .iter()
+            .any(|(text, confidence)| text.contains(needle) && *confidence >= SURE)
+    };
+    let doubled = retakes
+        .iter()
+        .filter(|(text, confidence)| text.trim_matches(',') == "the" && *confidence >= SURE)
+        .count();
+    assert_eq!(doubled, 2, "both doubled words: {retakes:?}");
+    assert!(sure("this makes the project"), "{retakes:?}");
+    assert!(sure("let me say that again"), "{retakes:?}");
+    assert!(
+        sure("it blocks"),
+        "the first attempt goes with the cue: {retakes:?}"
+    );
+    assert!(
+        retakes
+            .iter()
+            .filter(|(text, _)| text.contains("very"))
+            .all(|(_, confidence)| *confidence < SURE),
+        "{retakes:?}"
+    );
+    assert!(shot_analyze::elements::urls(words).is_empty());
 }

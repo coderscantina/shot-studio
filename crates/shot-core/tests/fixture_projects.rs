@@ -197,7 +197,7 @@ fn an_edit_changes_only_the_lines_of_its_take_block() {
     let selection = TimeRange::new(Micros(110_000_000), Micros(112_000_000)).unwrap();
 
     let edits = [
-        cut.delete_words(at, &transcript, selection).unwrap(),
+        cut.delete_words(at, &transcript, selection, &lock).unwrap(),
         cut.restore(
             at,
             TimeRange::new(Micros(173_000_000), Micros(174_000_000)).unwrap(),

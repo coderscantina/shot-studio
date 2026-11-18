@@ -12,7 +12,7 @@ use gpui_component::Sizable;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_component::tooltip::Tooltip;
-use shot_core::{Layout, Micros, Placed, RangeEdit, TakeAt, WordState, Zoom};
+use shot_core::{Layout, Micros, Placed, TakeAt, WordState, Zoom};
 
 use super::EditScreen;
 use super::lane_menu::{self, Place};
@@ -27,6 +27,9 @@ use crate::model::{
 use crate::theme::*;
 use crate::ui::{self, hint, icon, kbd, label, mono};
 
+/// What Backspace and Delete say on a picked cut, which they leave alone.
+pub(super) const RESTORE_NOTE: &str = "R restores this cut";
+
 /// The Text workspace's view of the effects: the one under the pointer, the one picked for the
 /// inspector, the layout picker and the last note of the selection tools.
 #[derive(Default)]
@@ -34,7 +37,7 @@ pub struct TextState {
     pub hovered: Option<MarkId>,
     pub picked: Option<MarkId>,
     pub layouts_open: bool,
-    note: Option<String>,
+    pub(super) note: Option<String>,
     /// Vision is looking for the selected words on the screen.
     finding: bool,
 }
@@ -194,7 +197,7 @@ impl EditScreen {
                     Ok(overlay) => {
                         this.text.note = None;
                         this.selection = None;
-                        this.edit(cx, |cut| crate::place::with_overlay(cut, at, overlay));
+                        this.edit(cx, |cut| cut.add_overlay(at, overlay));
                     }
                     Err(error) => {
                         this.text.note = Some(format!(
@@ -260,7 +263,7 @@ pub fn render(this: &mut EditScreen, window: &mut Window, cx: &mut Context<EditS
         .min_h_0()
         .flex()
         .flex_col()
-        .children(parts::error_strip(this))
+        .children(parts::error_strip(this, cx))
         .child(layout_store::TEXT.render(outline, document, side, window, cx))
         .child(parts::overview_footer(this, chapter_frames, cx))
 }
@@ -358,6 +361,7 @@ fn outline(this: &EditScreen, cx: &mut Context<EditScreen>) -> Stateful<Div> {
                         )
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.selection = None;
+                            this.looks.current = None;
                             // Shown again even when the playhead was in it already.
                             this.revealed = None;
                             this.seek(start);
@@ -422,6 +426,33 @@ fn in_view(this: &EditScreen, row: usize) -> bool {
                 bottom > view.top() && top < view.bottom()
             }
         })
+}
+
+/// Scrolls the transcript just far enough to show the caret word, once a frame has measured it.
+fn reveal_caret(this: &mut EditScreen) {
+    let Some(selection) = this.selection else {
+        this.reveal_caret = false;
+        return;
+    };
+    let key = word_key(selection.at, selection.head);
+    let measured = [&this.selection_start, &this.selection_anchor]
+        .into_iter()
+        .find_map(|anchor| anchor.get().filter(|(k, _)| *k == key));
+    let Some((_, word)) = measured else {
+        return;
+    };
+    this.reveal_caret = false;
+    // The anchor's bounds are in the scrolled content, the offset is zero or negative.
+    let height = this.scroll.bounds().size.height;
+    let mut offset = this.scroll.offset();
+    if word.top() + offset.y < px(0.) {
+        offset.y = px(CLEAR) - word.top();
+    } else if word.bottom() + offset.y > height {
+        offset.y = height - word.bottom() - px(CLEAR);
+    } else {
+        return;
+    }
+    this.scroll.set_offset(offset);
 }
 
 fn document(this: &mut EditScreen, cx: &mut Context<EditScreen>) -> Div {
@@ -537,6 +568,9 @@ fn document(this: &mut EditScreen, cx: &mut Context<EditScreen>) -> Div {
     }
     this.scroll_to_card = false;
     this.revealed = playing_in;
+    if this.reveal_caret {
+        reveal_caret(this);
+    }
     ui::pane()
         .relative()
         .flex_1()
@@ -560,7 +594,9 @@ fn document(this: &mut EditScreen, cx: &mut Context<EditScreen>) -> Div {
                         .font_weight(FontWeight::BOLD)
                         .child(title),
                 )
-                .children(range.map(|r| mono(r).text_color(MUTED))),
+                .children(range.map(|r| mono(r).text_color(MUTED)))
+                .child(div().flex_1())
+                .children(super::looks::count(this, cx)),
         )
         .child(
             div()
@@ -633,6 +669,11 @@ const CLEAR: f32 = 8.;
 /// words. It covers the text under it and never moves it. Hidden for the one frame before the
 /// selected words are measured.
 fn floating_toolbar(this: &EditScreen, pad: f32, cx: &mut Context<EditScreen>) -> Option<Div> {
+    // The words of an unsure finding are selected to show what would go: the inspector has
+    // its keys, and the toolbar would cover the text around it.
+    if matches!(this.current_look(), Some(shot_core::Look::Unsure { .. })) {
+        return None;
+    }
     let selection = this.selection?;
     this.selected()?;
     let words = selection.words();
@@ -808,6 +849,9 @@ fn paragraph_element(
         {
             children.push(mark_chip(this, mark, cx).into_any_element());
         }
+        if let Some(beat) = this.looks.beat_at(at, i) {
+            children.push(super::looks::beat_chip(this, beat, cx).into_any_element());
+        }
         children.push(word(this, block, i, effects, cx).into_any_element());
     };
     for item in &paragraph.items {
@@ -819,6 +863,16 @@ fn paragraph_element(
                     .contains(&super::run_key(at, run.range.from()));
                 let picked = this.lanes.picked == Some(Pick::Cut(at, run.range));
                 children.push(cut(at, run, open, picked, cx).into_any_element());
+                if picked && this.text.note.as_deref() == Some(RESTORE_NOTE) {
+                    children.push(
+                        div()
+                            .mr(px(6.))
+                            .text_size(TEXT_XS)
+                            .text_color(MUTED)
+                            .child(RESTORE_NOTE)
+                            .into_any_element(),
+                    );
+                }
                 if open {
                     for i in run.words.clone() {
                         children.push(word(this, block, i, effects, cx).into_any_element());
@@ -1159,8 +1213,8 @@ fn layout_choices(this: &EditScreen, cx: &App) -> Vec<Layout> {
 }
 
 /// A cut between words: a faint seam for short auto cuts, a red length chip for the rest.
-/// Clicking picks it, so R restores it, and opens it to show the removed words; a right-click
-/// offers Restore.
+/// A click picks it, so R restores it, and moves the playhead to its seam. A click on the picked
+/// cut opens or closes it to show the removed words. A right-click offers Restore.
 fn cut(
     at: TakeAt,
     run: &CutRun,
@@ -1171,10 +1225,15 @@ fn cut(
     let key = (run.range.from().0 / 1000) as usize;
     let from = run.range.from();
     let range = run.range;
-    let toggle = cx.listener(move |this, _, _, cx| {
-        let key = super::run_key(at, from);
-        if !this.expanded.remove(&key) {
-            this.expanded.insert(key);
+    let click = cx.listener(move |this, _, _, cx| {
+        this.text.note.take_if(|note| note == RESTORE_NOTE);
+        if picked {
+            let key = super::run_key(at, from);
+            if !this.expanded.remove(&key) {
+                this.expanded.insert(key);
+            }
+            cx.notify();
+            return;
         }
         this.selection = None;
         this.text.picked = None;
@@ -1188,6 +1247,7 @@ fn cut(
     let menu = cx.listener(move |this, _: &MouseDownEvent, _, cx| {
         this.selection = None;
         this.text.picked = None;
+        this.text.note.take_if(|note| note == RESTORE_NOTE);
         this.lanes.picked = Some(Pick::Cut(at, range));
         this.lanes.menu = Some(MenuOn::Pick);
         cx.notify();
@@ -1202,7 +1262,7 @@ fn cut(
             .mr(px(8.))
             .rounded(px(1.))
             .bg(if picked { CUT } else { FAINT })
-            .on_click(toggle);
+            .on_click(click);
     }
     div()
         .id(("cut", key))
@@ -1228,7 +1288,7 @@ fn cut(
         .child(div().w(px(2.)).h(px(10.)).rounded(px(1.)).bg(CUT))
         .child(seconds(run.removed))
         .on_mouse_down(MouseButton::Right, menu)
-        .on_click(toggle)
+        .on_click(click)
 }
 
 /// The selected words' tools, wrapping inside `room` when it is too narrow for one row: cut
@@ -1510,6 +1570,7 @@ fn inspector(this: &EditScreen, cx: &mut Context<EditScreen>) -> Stateful<Div> {
         .gap(px(16.))
         .px(px(18.))
         .py(px(16.))
+        .children(super::looks::section(this, cx))
         .map(|pane| match &selection {
             _ if mark.is_some() => pane.children(mark.map(|mark| mark_section(this, mark, cx))),
             _ if picked_zoom => pane.children(zoom.map(|zoom| zoom_section(this, zoom, true, cx))),
@@ -1543,21 +1604,24 @@ fn inspector(this: &EditScreen, cx: &mut Context<EditScreen>) -> Stateful<Div> {
                 .children(zoom.map(|zoom| zoom_section(this, zoom, false, cx))),
             // Nothing recorded: the document says what to do, so no word keys here.
             None if this.map.chapters.is_empty() => pane,
-            None => pane.child(chapter_summary(this, cx)).child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.))
-                    .child(label("Click a word, or ←→ from the playhead, ⇧ to extend"))
-                    .child(hint(super::DELETE_KEYS, "Cut the selected words"))
-                    .child(hint("⇧Space", "Hear the cut"))
-                    .child(hint("R", "Restore cut words or a picked cut"))
-                    .child(hint("Z", "Zoom in on them"))
-                    .child(hint("H", "Highlight them on the screen"))
-                    .child(hint("S", "Place a sound"))
-                    .child(hint("P", "Pop an emoji or sticker"))
-                    .child(hint("L", "Switch the layout, or 1–4")),
-            ),
+            None => pane
+                .child(chapter_summary(this, cx))
+                .child(rules_summary(this, cx))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.))
+                        .child(label("Click a word, or ←→ from the playhead, ⇧ to extend"))
+                        .child(hint(super::DELETE_KEYS, "Cut the selected words"))
+                        .child(hint("⇧Space", "Hear the cut"))
+                        .child(hint("R", "Restore cut words or a picked cut"))
+                        .child(hint("Z", "Zoom in on them"))
+                        .child(hint("H", "Highlight them on the screen"))
+                        .child(hint("S", "Place a sound"))
+                        .child(hint("P", "Pop an emoji or sticker"))
+                        .child(hint("L", "Switch the layout, or 1–4")),
+                ),
         });
     // What is on screen stays in view under the rest, which scrolls when the pane is short.
     ui::pane()
@@ -1570,7 +1634,8 @@ fn inspector(this: &EditScreen, cx: &mut Context<EditScreen>) -> Stateful<Div> {
             &this.inspector_scroll,
             body,
         ))
-        .child(
+        // Not under a beat's attempts: the pane is theirs, so the one that plays stays in view.
+        .children((!super::looks::shows_attempts(this)).then(|| {
             div()
                 .flex()
                 .flex_none()
@@ -1602,8 +1667,8 @@ fn inspector(this: &EditScreen, cx: &mut Context<EditScreen>) -> Stateful<Div> {
                         ))
                     },
                 )
-                .child(here("text", "Captions", super::captions::entry(this, cx))),
-        )
+                .child(here("text", "Captions", super::captions::entry(this, cx)))
+        }))
 }
 
 /// A picked effect other than a person's zoom: what it is and where it plays, where a style
@@ -1781,31 +1846,26 @@ fn zoom_section(
 /// Words of a long selection the inspector quotes.
 const QUOTE_WORDS: usize = 40;
 
-/// The chapter on show: its length and what the cuts took out of it. Counts from the cut list,
-/// so takes without a transcript count too; back-to-back removals are one cut.
+/// What the style rules cut of the whole video, see [`super::rules::summary`].
+fn rules_summary(this: &EditScreen, cx: &App) -> Div {
+    let folder = this.folder.read(cx);
+    let format = crate::board::format_name(folder.project.video.format);
+    super::rules::summary(&folder.project.cut, folder.lock(), format)
+}
+
+/// The chapter on show: its length and what a person's and the rules' cuts took out of it.
+/// Counts from the cut list and the lock, so takes without a transcript count too.
 fn chapter_summary(this: &EditScreen, cx: &App) -> Div {
     let Some(chapter) = this.map.chapters.get(this.chapter) else {
         return div();
     };
-    let cut = &this.folder.read(cx).project.cut;
-    let (mut cuts, mut removed) = (0, 0);
-    for take in cut
+    let folder = this.folder.read(cx);
+    let (cuts, removed) = folder
+        .project
+        .cut
         .chapters
         .get(this.chapter)
-        .into_iter()
-        .flat_map(|c| &c.takes)
-    {
-        let mut previous_removed = false;
-        for edit in &take.ranges {
-            let is_removed = matches!(edit, RangeEdit::Remove { .. });
-            if is_removed {
-                cuts += usize::from(!previous_removed);
-                removed += edit.range().duration().0;
-            }
-            previous_removed = is_removed;
-        }
-    }
-    let removed = shot_core::Micros(removed);
+        .map_or((0, Micros(0)), |c| crate::model::cut_out(c, folder.lock()));
     div()
         .flex()
         .flex_col()

@@ -179,7 +179,7 @@ impl EditScreen {
     }
 
     fn place_overlay(&mut self, at: TakeAt, overlay: Overlay, cx: &mut Context<Self>) {
-        self.edit(cx, |cut| place::with_overlay(cut, at, overlay));
+        self.edit(cx, |cut| cut.add_overlay(at, overlay));
     }
 }
 

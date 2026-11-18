@@ -24,7 +24,7 @@ use gpui::{
 };
 use gpui_component::menu::ContextMenuExt;
 use gpui_component::tooltip::Tooltip;
-use shot_core::{Applied, Id, Layout, Placed, RemovedBy, TakeAt, TimeRange, WordState};
+use shot_core::{Applied, Id, Layout, Micros, Placed, RemovedBy, TakeAt, TimeRange, WordState};
 use shot_render::join::BookendKind;
 use shot_render::overlay::highlight;
 use shot_render::plan::frame_time;
@@ -465,6 +465,7 @@ impl EditScreen {
         let Some(Drag::Shift {
             at,
             placed,
+            grip,
             was,
             now,
             ..
@@ -475,9 +476,34 @@ impl EditScreen {
         if now == was {
             return;
         }
-        let Some(range) = self.map.source_range(at, now) else {
+        let Some(mut range) = self.map.source_range(at, now) else {
             return;
         };
+        // An overlay's copy on the lane is clipped to its block: move the overlay, not the copy.
+        if let Placed::Overlay(index) = placed {
+            let stored = {
+                let cut = &self.folder.read(cx).project.cut;
+                let edit = cut
+                    .chapters
+                    .get(at.chapter)
+                    .and_then(|c| c.takes.get(at.take));
+                edit.and_then(|edit| {
+                    let (first, last) = (edit.ranges.first()?, edit.ranges.last()?);
+                    let block = TimeRange::new(first.range().from(), last.range().to())?;
+                    Some((edit.overlays.get(index)?.range, block))
+                })
+            };
+            let moved =
+                stored
+                    .zip(self.map.source_range(at, was))
+                    .and_then(|((stored, block), shown)| {
+                        dragged_overlay(stored, block, shown, range, grip)
+                    });
+            match moved {
+                Some(moved) => range = moved,
+                None => return,
+            }
+        }
         self.edit(cx, |cut| cut.set_range(at, placed, range));
         // Zooms are kept in time order, so the moved one may have a new index.
         if let Placed::Zoom(_) = placed {
@@ -643,7 +669,7 @@ impl EditScreen {
                 .map
                 .output_range(at, block(at)?.overlays.get(index)?.range),
             Pick::Cut(at, range) => {
-                let frame = self.map.output_frame(at, range.to())?;
+                let frame = self.map.seam(at, range)?;
                 Some(frame.saturating_sub(MIN_SPAN / 2)..frame + MIN_SPAN / 2)
             }
             Pick::Layout(at, range) => self.map.output_range(at, range),
@@ -800,7 +826,7 @@ pub fn render(this: &mut EditScreen, win: &mut Window, cx: &mut Context<EditScre
         .min_h_0()
         .flex()
         .flex_col()
-        .children(parts::error_strip(this))
+        .children(parts::error_strip(this, cx))
         .child(
             div()
                 .h(px(top))
@@ -2498,7 +2524,7 @@ fn seams(this: &EditScreen, window: &Range<u64>, x: &impl Fn(u64) -> f32) -> Vec
         })
         .filter_map(|(block, item)| match item {
             model::Item::Cut(run) => {
-                let frame = this.map.output_frame(block.at, run.range.to())?;
+                let frame = this.map.seam(block.at, run.range)?;
                 window.contains(&frame).then(|| {
                     let removed: Vec<&str> = block.words[run.words.clone()]
                         .iter()
@@ -2637,6 +2663,41 @@ fn playhead_line(this: &EditScreen, window: &Range<u64>) -> Option<Div> {
     )
 }
 
+/// The range of an overlay after a drag of the copy one block of its take shows. `stored` is the
+/// overlay's range, `block` the media that block spans, and the drag moved what the lane showed
+/// from `was` to `now`, all media time of the take. The copy is clipped to its block and to the
+/// block's cuts. An edge the overlay has in the block goes where the drag put it, so an edge
+/// that sat in a cut is stored where it was dropped. An edge outside the block, where the take's
+/// other blocks have their copies, moves by as much as the copy's edge did, with a body drag
+/// only: a trim of the block's edge changes nothing. Each edge gets its own change, since a cut
+/// between the two makes them differ and everything the lane showed covered must be. `None`
+/// when the drag changes nothing.
+fn dragged_overlay(
+    stored: TimeRange,
+    block: TimeRange,
+    was: TimeRange,
+    now: TimeRange,
+    grip: Grip,
+) -> Option<TimeRange> {
+    let by = |stored: Micros, now: Micros, was: Micros| {
+        Micros(stored.0.saturating_add_signed(now.0 as i64 - was.0 as i64))
+    };
+    let from = match (grip, stored.from() >= block.from()) {
+        (Grip::End, _) => stored.from(),
+        (_, true) => now.from(),
+        (Grip::Body, false) => by(stored.from(), now.from(), was.from()),
+        (Grip::Start, false) => return None,
+    };
+    let to = match (grip, stored.to() <= block.to()) {
+        (Grip::Start, _) => stored.to(),
+        (_, true) => now.to(),
+        (Grip::Body, false) => by(stored.to(), now.to(), was.to()),
+        (Grip::End, false) => return None,
+    };
+    let moved = TimeRange::new(from, to)?;
+    (moved != stored).then_some(moved)
+}
+
 /// Whether `template` belongs on the Highlight lane.
 pub fn is_highlight(template: &str) -> bool {
     template == highlight::TEMPLATE
@@ -2668,6 +2729,70 @@ mod tests {
             at_least(range(1_000_000, 3_000_000), hold, take),
             range(1_000_000, 3_000_000)
         );
+    }
+
+    #[test]
+    fn dragging_a_blurs_copy_after_a_splice_keeps_its_copy_before_it() {
+        let secs = |from: f64, to: f64| {
+            TimeRange::new(Micros((from * 1e6) as u64), Micros((to * 1e6) as u64)).unwrap()
+        };
+        // The take plays 0 to 4 s and 8 to 12 s around a retake, blurred from 3 s to 11 s.
+        let cut = shot_core::Cut::parse(
+            "chapter \"Intro\" {\n    take t01 {\n        keep from=0 to=4_000_000\n        overlay blur from=3_000_000 to=11_000_000\n    }\n    take t02 {\n        keep from=4_000_000 to=8_000_000\n    }\n    take t01 {\n        keep from=8_000_000 to=12_000_000\n        overlay blur from=3_000_000 to=11_000_000\n    }\n}\n",
+        )
+        .unwrap();
+        let (stored, block) = (secs(3., 11.), secs(8., 12.));
+        // The last block shows 8 to 11 s of it. Its end dragged to 10 s trims the overlay's end.
+        let trimmed = dragged_overlay(stored, block, secs(8., 11.), secs(8., 10.), Grip::End);
+        assert_eq!(trimmed, Some(secs(3., 10.)));
+        let last = TakeAt {
+            chapter: 0,
+            take: 2,
+        };
+        let written = cut
+            .set_range(last, Placed::Overlay(0), trimmed.unwrap())
+            .unwrap();
+        let copies: Vec<TimeRange> = written.chapters[0]
+            .takes
+            .iter()
+            .flat_map(|edit| &edit.overlays)
+            .map(|o| o.range)
+            .collect();
+        assert_eq!(copies, [secs(3., 10.), secs(3., 10.)]);
+        // The copy's start there is the block's edge, not the overlay's: it does not trim.
+        let start = dragged_overlay(stored, block, secs(8., 11.), secs(9., 11.), Grip::Start);
+        assert_eq!(start, None);
+        // The body shifts both ends, also past the block.
+        let shifted = dragged_overlay(stored, block, secs(8., 11.), secs(9., 12.), Grip::Body);
+        assert_eq!(shifted, Some(secs(4., 12.)));
+        // In the first block the start is the overlay's own.
+        let first = dragged_overlay(
+            stored,
+            secs(0., 4.),
+            secs(3., 4.),
+            secs(2., 4.),
+            Grip::Start,
+        );
+        assert_eq!(first, Some(secs(2., 11.)));
+    }
+
+    #[test]
+    fn a_blur_dragged_over_a_cut_covers_what_plays_and_an_edge_in_a_cut_goes_where_dropped() {
+        let secs = |from: f64, to: f64| {
+            TimeRange::new(Micros((from * 1e6) as u64), Micros((to * 1e6) as u64)).unwrap()
+        };
+        let block = secs(0., 12.);
+        // The block cuts 4 to 8 s. A blur over output 1 to 3 s is dragged to 3 to 5 s, which
+        // shows media 3 to 4 s and 8 to 9 s: all of it is blurred.
+        let moved = dragged_overlay(secs(1., 3.), block, secs(1., 3.), secs(3., 9.), Grip::Body);
+        assert_eq!(moved, Some(secs(3., 9.)));
+        // The block cuts 4 to 6 s, so a blur from 5 s shows from 6 s. Its start dragged to 7 s
+        // is at 7 s, not a second after where it was stored.
+        let stored = secs(5., 9.);
+        let trimmed = dragged_overlay(stored, block, secs(6., 9.), secs(7., 9.), Grip::Start);
+        assert_eq!(trimmed, Some(secs(7., 9.)));
+        let shifted = dragged_overlay(stored, block, secs(6., 9.), secs(7., 10.), Grip::Body);
+        assert_eq!(shifted, Some(secs(7., 10.)));
     }
 
     #[test]

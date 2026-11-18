@@ -16,6 +16,7 @@ pub mod brand;
 pub mod bridge;
 mod confine;
 pub mod style;
+pub mod takes;
 mod tee;
 pub mod text;
 pub mod transcript;
