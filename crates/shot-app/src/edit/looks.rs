@@ -50,6 +50,26 @@ fn playing(lineup: &Lineup, row: &Row, pieces: &[Attempt]) -> Vec<usize> {
         .collect()
 }
 
+/// Whether another row may stand for the row at `at`, a row worth a look with one attempt:
+/// a row next to it, across rows like it, that another take said alone. Else the row is a
+/// passage of its own, such as a retake's remark or a sentence a retake left out.
+fn said_twice(lineup: &Lineup, at: RowAt) -> bool {
+    let alone = |row: &Row| match row.attempts.as_slice() {
+        [only] if row.look => Some(only.take.clone()),
+        _ => None,
+    };
+    let rows: Vec<(RowAt, &Row)> = lineup.rows().collect();
+    let Some(i) = rows.iter().position(|(row, _)| *row == at) else {
+        return false;
+    };
+    let Some(take) = alone(rows[i].1) else {
+        return false;
+    };
+    let before = rows[..i].iter().rev().map_while(|(_, row)| alone(row));
+    let after = rows[i + 1..].iter().map_while(|(_, row)| alone(row));
+    before.chain(after).any(|other| other != take)
+}
+
 /// The lineup as the transcript shows it, rebuilt with the document.
 #[derive(Default)]
 pub struct Looks {
@@ -640,9 +660,13 @@ pub fn section(this: &EditScreen, cx: &App) -> Option<Div> {
                     .child(label(format!("{} of 100", row.scores[i])))
             }))
             .child(label(match (picked, beat.playing.len()) {
-                _ if !contested => {
+                _ if !contested && said_twice(&this.looks.lineup, beat.row) => {
                     "A later take left this out or said it in other words, and both play. \
                      Select the one you do not want and delete it."
+                }
+                _ if !contested => {
+                    "Only one take says this passage. Check that it belongs here, and \
+                     select it and delete it if it does not."
                 }
                 (true, _) => "Your pick. It stays when a later take scores better.",
                 (false, 1) if open => "An earlier or a close attempt plays. Hear the others.",
@@ -661,7 +685,7 @@ mod tests {
         Decision, ElementKind, Group, Lineup, Look, Micros, Row, RowAt, TakeAt, TimeRange,
     };
 
-    use super::{Beat, Looks, next_attempt};
+    use super::{Beat, Looks, next_attempt, said_twice};
 
     #[test]
     fn the_inspector_and_k_answer_the_beat_before_a_restart_near_the_playhead() {
@@ -781,6 +805,41 @@ mod tests {
         assert!(!looks.answers(beat(0), Decision::Cut));
         assert!(looks.answers(beat(0), Decision::Keep));
         assert!(looks.answers(beat(1), Decision::Cut));
+    }
+
+    #[test]
+    fn a_marked_row_is_said_twice_only_next_to_a_marked_row_of_another_take() {
+        let row = |takes: &[&str], look: bool| Row {
+            text: String::new(),
+            attempts: takes
+                .iter()
+                .map(|take| shot_core::Attempt {
+                    take: shot_core::Id::new(*take).unwrap(),
+                    range: TimeRange::new(Micros(0), Micros(1)).unwrap(),
+                })
+                .collect(),
+            scores: vec![100; takes.len()],
+            proposal: Vec::new(),
+            look,
+        };
+        // A retake's remark, a row both takes say, then a row the retake said in other words.
+        let lineup = Lineup {
+            groups: vec![Group {
+                title: String::new(),
+                rows: vec![
+                    row(&["t02"], true),
+                    row(&["t01", "t02"], false),
+                    row(&["t01"], true),
+                    row(&["t02"], true),
+                ],
+            }],
+            ..Lineup::default()
+        };
+        let twice = |row: usize| said_twice(&lineup, RowAt { group: 0, row });
+        assert_eq!(
+            [twice(0), twice(1), twice(2), twice(3)],
+            [false, false, true, true]
+        );
     }
 
     #[test]
