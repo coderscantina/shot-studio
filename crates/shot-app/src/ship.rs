@@ -2167,19 +2167,15 @@ fn run(
     let mut on_step = |s: Step| {
         let _ = send.send(Event::Step(s));
     };
-    // Analysis may have composed another cut or rebuilt the lock while this run rendered:
-    // the export and its chapters are then an older video's.
-    if current.load(Ordering::Relaxed) != rendered {
+    // Analysis may have composed another cut or rebuilt the lock while this run rendered or
+    // waited for a sign-in: the export and its chapters are then an older video's. `None` then.
+    let mut publish = |youtube: &mut YouTube| {
+        (current.load(Ordering::Relaxed) == rendered)
+            .then(|| ship::publish(dir, &channel, cuts, youtube, ship::today(), &mut on_step))
+    };
+    let Some(mut result) = publish(&mut youtube) else {
         return Outcome::Failed(CHANGED.to_owned());
-    }
-    let mut result = ship::publish(
-        dir,
-        &channel,
-        cuts,
-        &mut youtube,
-        ship::today(),
-        &mut on_step,
-    );
+    };
     // A revoked sign-in: the record keeps what already went up, so the second try continues.
     if matches!(
         result,
@@ -2188,14 +2184,10 @@ fn run(
         if let Err(e) = sign_in(&mut youtube) {
             return Outcome::Failed(e);
         }
-        result = ship::publish(
-            dir,
-            &channel,
-            cuts,
-            &mut youtube,
-            ship::today(),
-            &mut on_step,
-        );
+        let Some(again) = publish(&mut youtube) else {
+            return Outcome::Failed(CHANGED.to_owned());
+        };
+        result = again;
     }
     match result {
         Ok(shipped) => Outcome::Shipped(shipped.tag),
