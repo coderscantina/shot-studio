@@ -3,7 +3,8 @@
 //! ([0040]). The Takes view and [`Cut::compose`](crate::Cut::compose) read it.
 //!
 //! An attempt comes from the take's `beat` elements when it was recorded with the prompter:
-//! from each beat the prompter showed to the next, trimmed to the words said in it. A take
+//! from each beat the prompter showed to the next, trimmed to the words said in it, and to the
+//! retake when an earlier take already has the beat. A take
 //! without them is aligned to the script by word overlap: its sentences go to the beats whose
 //! text shares the most words with them, in order, and back to an earlier beat only when a
 //! sentence clearly says it again. What a retake of a beat says before and after the sentences
@@ -743,9 +744,10 @@ pub fn words_in(words: &[Word], range: TimeRange) -> &[Word] {
 }
 
 /// Attempts from the take's `beat` elements: each beat the prompter showed, up to the next,
-/// trimmed to its words. The last one runs until the take stops, so it ends [`before_remark`]
-/// when `taken` says an earlier take already has its row. `texts` are the content words of
-/// each row. `None` when the take has no beat elements.
+/// trimmed to its words. A beat is shown from the take's start or the beat before, and the
+/// last until the take stops, so where `taken` says an earlier take already has the row the
+/// attempt is the [`retake_only`]. `texts` are the content words of each row. `None` when the
+/// take has no beat elements.
 fn beat_attempts(
     take: &TakeWords<'_>,
     texts: &[Vec<String>],
@@ -772,8 +774,8 @@ fn beat_attempts(
         .filter_map(|(i, &(t, row))| {
             let until = beats.get(i + 1).map_or(end, |&(next, _)| next);
             let mut said = words_in(words, TimeRange::new(t, until)?);
-            if i + 1 == beats.len() && taken(row) {
-                said = before_remark(said, &texts[row]);
+            if taken(row) {
+                said = retake_only(said, &texts[row]);
             }
             (!said.is_empty()).then(|| (row, span(said)))
         })
@@ -781,21 +783,23 @@ fn beat_attempts(
     Some(found)
 }
 
-/// `words` up to the last of their sentences that shares a content word with `row`: what a
-/// retake says after it is a remark such as "okay, that one was better", not the row. All of
-/// them when no sentence shares one.
-fn before_remark<'a>(words: &'a [Word], row: &[String]) -> &'a [Word] {
+/// `words` from the first to the last of their sentences that shares a content word with
+/// `row`: what a retake says before it is a lead-in such as "okay, once more" and what it says
+/// after it a remark such as "okay, that one was better", not the row. All of them when no
+/// sentence shares one.
+fn retake_only<'a>(words: &'a [Word], row: &[String]) -> &'a [Word] {
     let shares = |sentence: &&Range<usize>| {
         let said = content_set(words[(*sentence).clone()].iter().map(|w| w.text.as_str()));
         row.iter().any(|word| said.contains(word))
     };
     let sentences = sentences(words);
-    let end = sentences
-        .iter()
-        .rev()
-        .find(shares)
-        .map_or(words.len(), |s| s.end);
-    &words[..end]
+    match (
+        sentences.iter().find(shares),
+        sentences.iter().rfind(shares),
+    ) {
+        (Some(first), Some(last)) => &words[first.start..last.end],
+        _ => words,
+    }
 }
 
 fn span(words: &[Word]) -> TimeRange {
@@ -857,7 +861,7 @@ fn groups(words: &[Word]) -> Vec<&[Word]> {
 /// first that shares a word lead into that row. Each run of sentences on one row becomes an
 /// attempt from its first sentence to its last. Where `taken` says an earlier take already
 /// has the row, the attempt is the retake only: a lead-in belongs to no row, so "okay, once
-/// more" is no attempt, and the attempt ends [`before_remark`].
+/// more" is no attempt, and the attempt is the [`retake_only`].
 fn align(
     words: &[Word],
     texts: &[Vec<String>],
@@ -936,7 +940,7 @@ fn align(
         let run = (j..sentences.len()).take_while(on_row).count();
         let said = &words[sentences[j].start..sentences[j + run - 1].end];
         let said = if taken(row) {
-            before_remark(said, &texts[row])
+            retake_only(said, &texts[row])
         } else {
             said
         };
@@ -1311,6 +1315,51 @@ mod tests {
             spoken(&cut, &[&first, &second]),
             "First we create the project with cargo. \
              Then we add the clap crate to parse arguments."
+        );
+    }
+
+    #[test]
+    fn a_prompter_retake_of_a_beat_plays_without_its_lead_in() {
+        let first = said(
+            "t01",
+            0,
+            "We install the speech model with a checksum. Then pick a channel folder in git. \
+             Now press record and talk.",
+        );
+        let retake = |beat: i64, text: &str| {
+            let second = said("t02", 0, text);
+            // The prompter writes the beat a take starts on at the take's zero.
+            let mut beats = Elements::new(id("t02"));
+            beats
+                .push(
+                    Element::at(ElementKind::Beat, Micros(0), "script")
+                        .with_integer(Attr::Index, beat),
+                )
+                .unwrap();
+            let cut = composed(
+                &script(),
+                &[
+                    (&first, None, "Take t01"),
+                    (&second, Some(&beats), "Take t02"),
+                ],
+            );
+            spoken(&cut, &[&first, &second])
+        };
+        assert_eq!(
+            retake(
+                3,
+                "Alright, here goes attempt number two. Finally we press record and talk."
+            ),
+            "We install the speech model with a checksum. Then pick a channel folder in git. \
+             Finally we press record and talk."
+        );
+        assert_eq!(
+            retake(
+                2,
+                "Okay once more. Pick the channel folder in git. Okay we are done."
+            ),
+            "We install the speech model with a checksum. Pick the channel folder in git. \
+             Now press record and talk."
         );
     }
 
