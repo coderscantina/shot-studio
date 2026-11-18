@@ -97,9 +97,12 @@ const SAME_SENTENCE: f64 = 0.5;
 /// An attempt says a row whole when it says this share of the content words that the attempt
 /// with the most says: four fifths.
 const WHOLE: (usize, usize) = (4, 5);
-/// A sentence with this many content words is one an attempt that says the row whole must not
-/// leave out.
-const SUBSTANTIVE: usize = 2;
+/// Words that acknowledge or fill and instruct nothing. A sentence whose one content word is
+/// one of them, "Okay." or "Right.", is none an attempt must say to say the row whole.
+const ACKNOWLEDGING: &[&str] = &[
+    "okay", "alright", "right", "yes", "yeah", "yep", "well", "good", "great", "cool", "nice",
+    "sure", "fine", "hmm", "uhm", "anyway",
+];
 
 impl Lineup {
     /// Lines up `takes` against the beats of `script`. `cut` names the groups when the script
@@ -534,10 +537,22 @@ struct Said {
     clean: u8,
 }
 
+impl Said {
+    /// Whether an attempt that says the row whole must not leave this sentence out: it means
+    /// two content words or more, or one that is not [`ACKNOWLEDGING`], such as "Twice."
+    fn substantive(&self) -> bool {
+        let mut meant = self.meant.iter();
+        match (meant.next(), meant.next()) {
+            (Some(only), None) => !ACKNOWLEDGING.contains(&only.as_str()),
+            (first, _) => first.is_some(),
+        }
+    }
+}
+
 /// The pieces that play a row, see [`Row::proposal`]. The frame is the best scored attempt,
 /// the newest of equals, among those that say the row whole: [`WHOLE`] of what the attempt
-/// with the most says, and at least half of every [`SUBSTANTIVE`] sentence of that attempt. So
-/// a retake of one sentence never stands for the beat. Each sentence of the frame then comes from the attempt
+/// with the most says, and at least half of every [`Said::substantive`] sentence of that
+/// attempt. So a retake of one sentence never stands for the beat. Each sentence of the frame then comes from the attempt
 /// that says it cleanest, the newest of equals, where that attempt's sentence says every
 /// content word the frame's means, outside its own stumbles. Unpadded, with whether it is worth a look, see
 /// [`Row::look`].
@@ -563,8 +578,7 @@ fn proposal(
         let says = says(i);
         let leaves_out = |sentence: &Said| {
             let shared = sentence.meant.iter().filter(|w| says.contains(w)).count();
-            sentence.meant.len() >= SUBSTANTIVE
-                && (shared as f64) < SAME_SENTENCE * sentence.meant.len() as f64
+            sentence.substantive() && (shared as f64) < SAME_SENTENCE * sentence.meant.len() as f64
         };
         WHOLE.1 * says.len() >= WHOLE.0 * most && !said[fullest].iter().any(leaves_out)
     };
@@ -1374,7 +1388,12 @@ mod tests {
                 word.range.from()
             };
             let mut beats = Elements::new(id("t01"));
-            for (t, index) in [(Micros(0), 1), (at("Then"), 2), (at(again), 2), (at("Now"), 3)] {
+            for (t, index) in [
+                (Micros(0), 1),
+                (at("Then"), 2),
+                (at(again), 2),
+                (at("Now"), 3),
+            ] {
                 beats
                     .push(
                         Element::at(ElementKind::Beat, t, "script")
@@ -2071,6 +2090,26 @@ mod tests {
             proposals(&lineup)[0],
             [("t02".into(), 9, 53), ("t01".into(), 67, 77)]
         );
+    }
+
+    #[test]
+    fn a_retake_keeps_a_one_word_sentence_only_the_first_take_says() {
+        let line = "Run the benchmark with the release profile.";
+        let script = Script::parse(&format!("# A\n\n## Setup\n\n- {line}\n")).unwrap();
+        let second = said("t02", 0, line);
+        let played = |last: &str| {
+            let first = said("t01", 0, &format!("{line} {last}"));
+            let takes = [(&first, None, "Take t01"), (&second, None, "Take t02")];
+            let cut = composed(&script, &takes);
+            let lineup = Lineup::new(&script, &cut, &[with(&first, None), with(&second, None)]);
+            let row = &lineup.groups[0].rows[0];
+            (spoken(&cut, &[&first, &second]), row.look)
+        };
+        // An instruction of one word stays, from the take that says it, and is worth a look.
+        assert_eq!(played("Twice."), (format!("{line} Twice."), true));
+        // An acknowledgement is nothing a retake leaves out.
+        assert_eq!(played("Okay."), (line.to_owned(), false));
+        assert_eq!(played("Right."), (line.to_owned(), false));
     }
 
     #[test]
