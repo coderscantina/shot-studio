@@ -59,9 +59,9 @@ pub struct Looks {
     pub items: Vec<(Look, u64)>,
     /// The item N last went to.
     pub current: Option<Look>,
-    /// After an answer was written: go on to the item that took the answered one's place in
-    /// the queue once the document is rebuilt.
-    go_on: Option<usize>,
+    /// After an answer was written: the items that followed the answered one, see
+    /// [`Looks::after`]. Once the document is rebuilt, N's place is the first still open.
+    go_on: Option<Vec<Look>>,
     /// After a beat was switched: play it once the document is rebuilt.
     play: Option<RowAt>,
     /// The beat N or A played last.
@@ -124,6 +124,35 @@ impl Looks {
             .map(|at| (at + 1) % items.len());
         on.or_else(|| items.iter().position(|(_, at)| *at >= frame))
             .unwrap_or(0)
+    }
+
+    /// The items that follow `look` in the queue, around to the ones before it. An answer may
+    /// take more than its own item out of the queue, as a restart's does with the beat it is
+    /// in, so the item to go on to is found by what it is, not by its place.
+    fn after(&self, look: Look) -> Vec<Look> {
+        let items = &self.items;
+        let at = items.iter().position(|(item, _)| *item == look);
+        let around = at.map(|at| items[at + 1..].iter().chain(&items[..at]));
+        around
+            .into_iter()
+            .flatten()
+            .map(|(look, _)| *look)
+            .collect()
+    }
+
+    /// Where the first of `looks` that is still in the queue is.
+    fn first_open(&self, looks: &[Look]) -> Option<usize> {
+        let place = |look: &Look| self.items.iter().position(|(item, _)| item == look);
+        looks.iter().find_map(place)
+    }
+
+    /// Whether `decision` answers `look`. C does nothing on a row with one attempt: a later
+    /// take may say it in other words, both play, and only cutting one of them answers that.
+    fn answers(&self, look: Look, decision: Decision) -> bool {
+        let Look::Beat(row) = look else {
+            return true;
+        };
+        decision == Decision::Keep || self.row(row).is_some_and(|row| row.attempts.len() > 1)
     }
 }
 
@@ -207,8 +236,10 @@ impl EditScreen {
         looks.lineup = lineup;
         looks.beats = beats;
         looks.items = items;
-        if let Some(at) = self.looks.go_on.take() {
-            self.go_to_look(at % self.looks.items.len().max(1), cx);
+        if let Some(after) = self.looks.go_on.take()
+            && let Some(at) = self.looks.first_open(&after)
+        {
+            self.go_to_look(at, cx);
         }
         if let Some(row) = self.looks.play.take() {
             self.play_beat(row);
@@ -328,16 +359,20 @@ impl EditScreen {
 
     /// K keeps what plays: an unsure finding stays, a cut restart plays again. C cuts: the
     /// finding goes, the restart stays cut. Either answers a beat as looked at, which is no
-    /// pick: a later take that scores better still plays it.
+    /// pick: a later take that scores better still plays it. C leaves a row with one attempt
+    /// as it is, see [`Looks::answers`].
     fn answer_look(&mut self, decision: Decision, cx: &mut Context<Self>) {
         if !self.reviews(cx) {
             return;
         }
-        let Some(look) = self.look_here() else {
+        let Some(look) = self
+            .look_here()
+            .filter(|look| self.looks.answers(*look, decision))
+        else {
             return;
         };
-        // The answered item leaves the queue, and the one after it takes its place.
-        let at = self.looks.items.iter().position(|(item, _)| *item == look);
+        // The answered item leaves the queue, and N goes on to the one that followed it.
+        let after = self.looks.after(look);
         // The lineup is lent to the edit and comes back, for the rebuild to replace.
         let lineup = std::mem::take(&mut self.looks.lineup);
         let wrote = self.edit(cx, |cut| {
@@ -362,7 +397,7 @@ impl EditScreen {
             self.looks.current = None;
             self.lanes.picked = None;
             self.selection = None;
-            self.looks.go_on = at;
+            self.looks.go_on = Some(after);
         }
     }
 
@@ -622,7 +657,9 @@ pub fn section(this: &EditScreen, cx: &App) -> Option<Div> {
 
 #[cfg(test)]
 mod tests {
-    use shot_core::{ElementKind, Look, Micros, RowAt, TakeAt, TimeRange};
+    use shot_core::{
+        Decision, ElementKind, Group, Lineup, Look, Micros, Row, RowAt, TakeAt, TimeRange,
+    };
 
     use super::{Beat, Looks, next_attempt};
 
@@ -682,6 +719,68 @@ mod tests {
         assert_eq!(looks.next(Some(restart), 600), 1);
         assert_eq!(looks.next(Some(Look::Beat(row)), 600), 0);
         assert_eq!(looks.next(None, 700), 0);
+    }
+
+    #[test]
+    fn an_answer_goes_on_to_the_item_that_followed_it_when_it_also_answers_another() {
+        let at = TakeAt {
+            chapter: 0,
+            take: 0,
+        };
+        let beat = |row: usize| Look::Beat(RowAt { group: 0, row });
+        let restart = Look::Restart {
+            at,
+            kind: ElementKind::Retake,
+            t: Micros(9_000_000),
+            range: TimeRange::new(Micros(9_000_000), Micros(9_800_000)).unwrap(),
+        };
+        let mut looks = Looks {
+            items: vec![
+                (beat(0), 600),
+                (restart, 640),
+                (beat(1), 900),
+                (beat(2), 1200),
+            ],
+            ..Looks::default()
+        };
+        let after = looks.after(restart);
+        assert_eq!(after, [beat(1), beat(2), beat(0)]);
+        // The answer to the restart also answered the beat it is in.
+        looks.items.drain(..2);
+        assert_eq!(looks.first_open(&after), Some(0));
+        looks.items.clear();
+        assert_eq!(looks.first_open(&after), None);
+    }
+
+    #[test]
+    fn c_does_nothing_on_a_row_with_one_attempt() {
+        let row = |attempts: usize| Row {
+            text: String::new(),
+            attempts: vec![
+                shot_core::Attempt {
+                    take: shot_core::Id::new("t01").unwrap(),
+                    range: TimeRange::new(Micros(0), Micros(1)).unwrap(),
+                };
+                attempts
+            ],
+            scores: vec![100; attempts],
+            proposal: Vec::new(),
+            look: true,
+        };
+        let looks = Looks {
+            lineup: Lineup {
+                groups: vec![Group {
+                    title: String::new(),
+                    rows: vec![row(1), row(2)],
+                }],
+                ..Lineup::default()
+            },
+            ..Looks::default()
+        };
+        let beat = |row: usize| Look::Beat(RowAt { group: 0, row });
+        assert!(!looks.answers(beat(0), Decision::Cut));
+        assert!(looks.answers(beat(0), Decision::Keep));
+        assert!(looks.answers(beat(1), Decision::Cut));
     }
 
     #[test]
