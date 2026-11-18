@@ -1,8 +1,9 @@
 //! `shot ingest`: a clip from outside, a phone clip first of all, made the next take of a video
-//! ([0039]): appended to `cut.kdl` as its own chapter like a recording, analysed, and the lock
-//! rebuilt.
+//! ([0039]): appended to `cut.kdl` as its own chapter like a recording, analysed, the cut
+//! composed from the takes ([0040]) and the lock rebuilt.
 //!
 //! [0039]: ../../../docs/decisions/0039-ingested-clips-are-takes.md
+//! [0040]: ../../../docs/decisions/0040-the-cut-proposes-itself.md
 
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -66,6 +67,7 @@ pub fn run(args: IngestArgs) -> Result<(), String> {
     }
     let analysed = analysis.elapsed();
     let build = Instant::now();
+    compose(&args.video, take)?;
     crate::style::write(&args.video)?;
     eprintln!(
         "transcoded in {:.2} s, analysed in {:.2} s, lock built in {:.2} s",
@@ -74,6 +76,18 @@ pub fn run(args: IngestArgs) -> Result<(), String> {
         build.elapsed().as_secs_f64()
     );
     Ok(())
+}
+
+/// Composes the cut now that the new take has words and elements, as the app does: the best
+/// scored attempt plays each beat unless a person chose or edited there.
+fn compose(video: &Path, take: &shot_core::Id) -> Result<(), String> {
+    let (_lock, opened) = crate::open(video)?;
+    let cut = shot_mcp::takes::compose(video, &opened.project, Some(take))?;
+    if cut == opened.project.cut {
+        return Ok(());
+    }
+    let path = video.join("cut.kdl");
+    shot_fs::write(&path, cut.to_kdl()).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// Appends the take to `cut.kdl` as a chapter of its own, as the app appends a recording.

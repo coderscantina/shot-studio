@@ -393,62 +393,65 @@ impl VideoFolder {
         self.write_cut(cut.map_err(|e| e.to_string())?)
     }
 
-    /// Appends a chapter that keeps all of a new take, with its layout and zoom hotkey markers
-    /// as nodes, and writes `cut.kdl`.
-    /// Puts a finished take into the cut as one change: as a chapter of its own, and where it
-    /// repeats beats an earlier take holds in the cut, in their place. The earlier attempts
-    /// stay in the Takes view to put back. Returns how many beats it took over.
+    /// Puts a finished take into the cut as one change: as a chapter of its own, with its
+    /// layout and zoom hotkey markers as nodes, and then the cut composed again, see
+    /// [`VideoFolder::propose`]. Returns how many beats the take plays now.
     pub fn append_take(&mut self, take: Id, duration: Micros) -> Result<usize, String> {
         let Some(range) = TimeRange::new(Micros(0), duration) else {
             return Err(format!("take {take} is empty"));
         };
         self.as_one_change(|folder| {
             folder.store_take(take.clone(), range)?;
-            folder.replace_retaken(&take)
+            folder.propose(Some(&take))?;
+            let lineup = folder.lineup();
+            let cut = &folder.project.cut;
+            Ok(lineup
+                .rows()
+                .filter(|(_, row)| {
+                    row.attempts.iter().any(|a| a.take != take)
+                        && cut.plays(&lineup, row, None).iter().any(|p| p.take == take)
+                })
+                .count())
         })
     }
 
-    /// Every take of the cut lined up against the script, see [`Lineup`].
+    /// Every take of the video lined up against the script, see [`Lineup`]: the takes the cut
+    /// uses and the ones in the media folder that left it, which a beat can go back to.
     pub fn lineup(&self) -> Lineup {
-        let words: Vec<TakeWords<'_>> = self
-            .transcripts
+        let mut ids = crate::takes::media_takes(&self.dir);
+        ids.extend(self.transcripts.keys().cloned());
+        ids.sort();
+        ids.dedup();
+        let takes: Vec<_> = ids
             .iter()
-            .map(|(id, transcript)| TakeWords {
+            .filter_map(|id| crate::takes::read_take(self, id))
+            .collect();
+        let words: Vec<TakeWords<'_>> = takes
+            .iter()
+            .map(|(transcript, elements)| TakeWords {
                 transcript,
-                elements: self.elements.get(id),
+                elements: elements.as_ref(),
             })
             .collect();
         Lineup::new(&self.project.script, &self.project.cut, &words)
     }
 
-    /// Lets `take`'s last attempt at each beat take the place of an earlier take's attempt the
-    /// cut plays there.
-    fn replace_retaken(&mut self, take: &Id) -> Result<usize, String> {
-        let lineup = self.lineup();
-        let mut cut = self.project.cut.clone();
-        let mut replaced = 0;
-        for (at, row) in lineup.rows() {
-            let Some(new) = row.attempts.iter().rfind(|a| a.take == *take) else {
-                continue;
-            };
-            let earlier = row
-                .attempts
-                .iter()
-                .any(|a| a.take != *take && cut.kept_of(&a.take, a.range).0 > 0);
-            if earlier {
-                cut = cut
-                    .use_attempt(&lineup, at, new)
-                    .map_err(|e| e.to_string())?;
-                replaced += 1;
-            }
+    /// Composes the cut from the takes as they line up now ([`Cut::compose`]): the best
+    /// scored attempt plays each beat unless a person chose or edited there. `new` is a take
+    /// just appended whole. A cut that cannot be composed, because a Short uses a take that
+    /// would leave, stays as it is. Returns whether the cut changed.
+    pub fn propose(&mut self, new: Option<&Id>) -> Result<bool, String> {
+        let Ok(cut) = self.project.cut.compose(&self.lineup(), new) else {
+            return Ok(false);
+        };
+        if cut == self.project.cut {
+            return Ok(false);
         }
-        if replaced > 0 {
-            self.write_cut(cut)?;
-        }
-        Ok(replaced)
+        self.write_cut(cut)?;
+        Ok(true)
     }
 
-    /// Takes `take` out of the video: out of the cut, its ratings, overrides and Shorts, and
+    /// Takes `take` out of the video: out of the cut, its picks, overrides and Shorts, and
     /// moves its media and elements to the Trash, where Finder can put them back. Undo cannot
     /// bring the media back, so the history before this change is dropped.
     pub fn remove_take(&mut self, take: &Id) -> Result<(), String> {
@@ -458,7 +461,7 @@ impl VideoFolder {
                 chapter.takes.retain(|edit| edit.take != *take);
             }
             cut.chapters.retain(|chapter| !chapter.takes.is_empty());
-            cut.ratings.retain(|r| r.take != *take);
+            cut.picks.retain(|p| p.take != *take);
             cut.overrides.retain(|o| o.take != *take);
             cut.caption_breaks.retain(|b| b.take != *take);
             for derived in &mut cut.derived {
@@ -883,7 +886,14 @@ mod tests {
             ["t02", "t01"],
             "the retake opens the cut, t01 keeps the rest"
         );
-        assert_eq!(folder.project.cut.chapters.len(), 1);
+        let titles: Vec<&str> = folder
+            .project
+            .cut
+            .chapters
+            .iter()
+            .map(|c| c.title.as_str())
+            .collect();
+        assert_eq!(titles, ["Hook", "Rule"], "under the script's chapters");
         assert!(
             folder.undo().unwrap(),
             "one undo takes the whole take back out"

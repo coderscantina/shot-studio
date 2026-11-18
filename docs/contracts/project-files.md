@@ -228,7 +228,7 @@ The edit of the main cut as a list of chapters, followed by the derived cuts. To
 | `captions <style>` | optional, overrides the format's caption style. The main cut ships captions as a sidecar file |
 | `caption-fixes { fix "<heard>" "<said>" ... }` | optional. Each `fix` replaces a run of transcript words that reads `heard`, ignoring case, with `said` wherever captions are shown, and the replacement takes the matched words' timing. `heard` is unique ignoring case, neither text is empty. Claude proposes fixes as text and a person edits them in Caption fixes, never through a proposal. The block also holds caption line breaks a person set: `split <take> at=<time>` starts a new line at the word of that take starting at `at`, `join <take> at=<time>` keeps that word on the line before. Breaks come after the fixes, sorted by take and time, one per word. When several fixes match at the same word, the longest wins, and a fix whose `said` has several words spreads the matched timing over them by length |
 | `music "<file>" gain=<dB> duck=<dB>` | optional. A music bed under the main cut and its derived cuts: a file relative to the video folder, its gain, and the gain it drops to under speech. Both are at most 0 |
-| `takes { attempt ... }` | optional, see [takes](#takes). Ratings and picks of the takes' attempts at each beat |
+| `takes { attempt ... }` | optional, see [takes](#takes). A person's picks among the takes' attempts at each beat |
 | `chapter "<title>" { ... }` | zero or more, in output order |
 | `override <take> <kind> at=<time> { ... }` | zero or more, see [overrides](#overrides). Canonical order: by take in cut order, then `at`, then kind |
 | `short <name> { ... }` | a 9:16 derived cut, reframed on the face |
@@ -409,28 +409,21 @@ short friday-deploys {
 
 ### Takes
 
-A video recorded in several takes has several attempts at a beat. The Takes view lines them up: a row per beat of `script.md`, with each take's attempt at it. An attempt comes from the take's `beat` [elements](#elements) when it was recorded with the prompter, from each beat the prompter showed to the next, trimmed to the words said in it; a take without them is aligned to the beats by the words its sentences share with them. Without beats in the script, the rows are the sentence groups of the first take. `shot-core` computes the attempts from the files, so they are not written down.
+A video recorded in several takes has several attempts at a beat. `shot-core` lines them up: a row per beat of `script.md`, with each take's attempts at it. An attempt comes from the take's `beat` [elements](#elements) when it was recorded with the prompter, from each beat the prompter showed to the next, trimmed to the words said in it. A take without them is aligned to the beats by the words its sentences share with them: its sentences go on from beat to beat, and back to an earlier beat only when a sentence shares two more words with it than with going on, which is a second attempt at that beat. What a retake says before the first beat it shares a word with belongs to no beat. Without beats in the script, the rows are the sentence groups of the first take, a later take's sentence that shares three content words and half of its own with a row is an attempt at it, and the rest of that take are new rows in the order it was said. Attempts are computed from the files, so they are not written down.
 
-The `takes` block holds what a person said about attempts, one `attempt <take> from=<time> to=<time>` each, in canonical order by take (`t9` before `t10`) and then `from`. The ranges of one take do not overlap.
+Each attempt has a score from 0 to 100, computed as well ([0040](../decisions/0040-the-cut-proposes-itself.md)): 50 for the share of its words that is no `filler`, `retake` or `misspoken` element, a `pause` counting as one word, 35 for the share of the beat's content words it says, 15 for ending on a sentence end. A row's proposal is its best scored attempt, the newest of equals. Each of its sentences that another attempt also says (half of the two sentences' content words shared) comes from the attempt that says it with the smaller share of `retake` and `misspoken` words, the newest of equals; a sentence that is half such words or more is no candidate. A proposal's pieces reach into the gaps around their words, half the gap to the take's next word and at most 300 ms, so a join between takes keeps a short pause.
 
-| Property | Meaning |
-| --- | --- |
-| `stars=<1 to 5>` | the attempt's rating |
-| `pick=#true` | circled: the attempt "Assemble picks" uses for its beat. The range is then the attempt, or the part of it the person marked |
+The `takes` block holds a person's picks, one `attempt <take> from=<time> to=<time> pick=#true` each, in canonical order by take (`t9` before `t10`) and then `from`. The ranges of one take do not overlap. The range is the attempt, or the part of it the person marked. A pick binds to the attempt of its take that holds the middle of its range, and a pick of nine tenths of that attempt or more plays the attempt as it is now, so it follows a re-alignment that moves the attempt's edges. A take that left the main cut keeps its picks. An `attempt` with `stars`, written before the score, is read and dropped on the next write.
 
-An `attempt` has `stars`, `pick` or both. It binds to the attempt of its take that holds the middle of its range, so it follows a re-alignment that moves the attempt's edges. A take that left the main cut keeps its ratings.
+Composing writes the chapters again from the lineup, one per group under the script's chapter title. A row plays its pick, else what the cut holds of it when a person cut words in it or answered a finding in it, else its proposal, with the removes, layouts, zooms and overlays the take's blocks have there. Neighbouring pieces of one take stay one block with the pause between them. A take without words keeps its blocks after the composed chapters. Overrides of a take that left the cut go with it, and composing that would take a take out of the cut that a derived cut uses is refused. Without beats and without a row that has two attempts, composing changes nothing.
 
-"Use this" puts an attempt, or a marked part of one, into the main cut in place of every attempt at that beat, with the removes, layouts, zooms and overlays its take blocks have there. "Assemble picks" writes the chapters again from the script: per beat the circled attempt, else the best rated, else the one the cut keeps most of, else the newest take's, under the script's chapter titles. Consecutive beats from one take stay one block with the pause between them. Overrides of a take that left the cut go with it, and an edit that would take a take out of the cut that a derived cut uses is refused.
+A finished take enters the cut as a chapter of its own, and the cut is composed in the same change, so one undo takes the whole take out again. The app composes again when the take's analysis lands, `shot ingest` after analysis. Removing a take on the Record screen takes it out of the video: out of the cut with its picks, overrides, caption breaks and Shorts clips, and its media folder and elements file go to the Trash. Undo stops before a removal.
 
-A finished take enters the cut as a chapter of its own. Where it repeats beats an earlier take holds in the cut, its last attempt at each of them takes their place, as "Use this" would, in the same change, so one undo takes the whole take out again. Removing a take on the Record screen takes it out of the video: out of the cut with its ratings, overrides, caption breaks and Shorts clips, and its media folder and elements file go to the Trash. Undo stops before a removal.
-
-The second take's opening is circled whole, and of its second attempt only the part from 14.1 s to 18.2 s:
+The second take's opening is picked whole, and of its second attempt only the part from 14.1 s to 18.2 s:
 
 ```kdl
 takes {
-    attempt t01 from=800_000 to=11_400_000 stars=3
-    attempt t01 from=13_000_000 to=21_500_000 stars=4
-    attempt t02 from=600_000 to=10_900_000 stars=5 pick=#true
+    attempt t02 from=600_000 to=10_900_000 pick=#true
     attempt t02 from=14_100_000 to=18_200_000 pick=#true
 }
 

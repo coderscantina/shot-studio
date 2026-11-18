@@ -9,7 +9,7 @@ A review on 2026-11-18 ran two spoken test videos through the app. "Assemble pic
 ## Choice
 
 - **The best scored attempt plays.** Every attempt at a beat gets a score from 0 to 100, computed like the attempt itself and never written: how few of its words are stumbles (fillers, restarts, misspoken words, pauses mid-sentence), how much of the beat's script it says, and whether it ends on a sentence end. The best plays, the newest wins a tie. It runs after every take and again when the take's analysis lands, as one undo step. There is no Assemble step.
-- **Sentences may come from another attempt.** The best attempt plays whole, unless another attempt has a sentence it lacks, or has clean a sentence it restarts or misspeaks without the rules being sure. That sentence then comes from the other attempt. A retake of half a beat therefore replaces that half.
+- **Sentences may come from another attempt.** The best attempt plays whole, unless another attempt says one of its sentences cleaner, with fewer restarted or misspoken words, or as clean and later. That sentence then comes from the other attempt. A retake of half a beat therefore replaces that half.
 - **A person's choice wins.** Switching a beat to another attempt writes a pick, and a pick stays when a later take scores better. A beat a person cut words in or answered a finding in is not picked again. Stars go: old ones are read and dropped on the next write.
 - **Restarts are cut and shown.** A clear restart is cut at once. A doubtful one, and a doubled single word such as "very, very", asks first.
 - **Without a script, a later take is appended.** Only passages that say again what an earlier take said compete with it.

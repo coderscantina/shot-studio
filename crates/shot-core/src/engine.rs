@@ -364,6 +364,17 @@ fn is_kept(kept: &[TimeRange], t: Micros) -> bool {
     i > 0 && t < kept[i - 1].to()
 }
 
+/// Whether the rules see `element`: its start is kept, or it is a stumble that reaches into
+/// kept material. A retake or a misspoken word starts in the gap before its first word, so
+/// one at the start of a block would otherwise be neither cut nor queued.
+fn is_seen(kept: &[TimeRange], element: &Element) -> bool {
+    let stumble = matches!(
+        element.kind,
+        ElementKind::Retake | ElementKind::Misspoken | ElementKind::Filler
+    );
+    is_kept(kept, element.t) || (stumble && kept.iter().any(|k| k.overlaps(element.range())))
+}
+
 /// The effect that won an element's [`EffectKey`] and where it came from.
 struct Winner<'a> {
     effect: &'a Effect,
@@ -398,7 +409,7 @@ fn evaluate_take(
             Phase::Elements => elements
                 .into_iter()
                 .flat_map(Elements::iter)
-                .filter(|e| is_kept(&kept, e.t))
+                .filter(|e| is_seen(&kept, e))
                 .map(Subject::of)
                 .collect(),
             Phase::Structure => structure_subjects(cut, take, &cut_union(&instances)),

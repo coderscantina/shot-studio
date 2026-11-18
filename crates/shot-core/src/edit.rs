@@ -6,8 +6,8 @@ use std::fmt;
 use crate::takes::{holds, middle};
 use crate::{
     Applied, Attempt, Chapter, Cut, EffectKey, ElementKind, Id, Instance, Layer, Layout,
-    LayoutChange, Lineup, Lock, Micros, Music, Overlay, Override, OverrideEffect, RangeEdit,
-    Rating, Row, RowAt, TakeEdit, Target, TimeRange, Transcript, Word, Zoom, ZoomShape, word_cut,
+    LayoutChange, Lineup, Lock, Micros, Music, Overlay, Override, OverrideEffect, Pick, RangeEdit,
+    Row, RowAt, TakeEdit, Target, TimeRange, Transcript, Word, Zoom, ZoomShape, word_cut,
 };
 
 /// One take block of the main cut: the chapter and the take's position in that chapter. A take
@@ -569,80 +569,34 @@ impl Cut {
     }
 }
 
-/// Composing the main cut from the attempts of several takes, see [`Lineup`].
+/// Composing the main cut from the attempts of several takes, see [`Lineup`] and [0040].
+///
+/// [0040]: ../../../docs/decisions/0040-the-cut-proposes-itself.md
 impl Cut {
-    /// The rating of `attempt`: the one of its take whose range's middle lies in the attempt.
-    pub fn rating(&self, attempt: &Attempt) -> Option<&Rating> {
-        self.ratings
-            .iter()
-            .find(|r| r.take == attempt.take && holds(attempt.range, middle(r.range)))
+    /// A person's pick among the attempts of `row`: the one whose middle lies in an attempt.
+    pub fn picked(&self, row: &Row) -> Option<&Pick> {
+        self.picks.iter().find(|p| {
+            row.attempts
+                .iter()
+                .any(|a| a.take == p.take && holds(a.range, middle(p.range)))
+        })
     }
 
-    /// Gives `attempt` 1 to 5 `stars`, or with `None` takes its stars away. A circle stays.
-    pub fn rate(&self, attempt: &Attempt, stars: Option<u8>) -> Cut {
-        let stars = stars.map(|s| s.clamp(1, 5));
-        let mut cut = self.clone();
-        match cut.rating_index(attempt) {
-            Some(index) => {
-                let rating = &mut cut.ratings[index];
-                rating.stars = stars;
-                if !rating.pick {
-                    rating.range = attempt.range;
-                }
-            }
-            None => cut.ratings.push(Rating {
-                take: attempt.take.clone(),
-                range: attempt.range,
-                stars,
-                pick: false,
-            }),
-        }
-        cut.settle_ratings();
-        cut
-    }
-
-    /// Circles `chosen`, an attempt of `row` or a part of one, as the row's pick, and takes the
-    /// circle from the row's other attempts. `None` takes the row's circle away.
+    /// Picks `chosen`, an attempt of `row` or a part of one, in place of the row's pick. `None`
+    /// takes the pick away, so the row's proposal plays again.
     pub fn set_pick(&self, row: &Row, chosen: Option<&Attempt>) -> Cut {
         let mut cut = self.clone();
-        for attempt in &row.attempts {
-            if let Some(index) = cut.rating_index(attempt) {
-                let rating = &mut cut.ratings[index];
-                rating.pick = false;
-                rating.range = attempt.range;
-            }
-        }
-        if let Some(chosen) = chosen {
-            match cut.rating_index(chosen) {
-                Some(index) => {
-                    cut.ratings[index].pick = true;
-                    cut.ratings[index].range = chosen.range;
-                }
-                None => cut.ratings.push(Rating {
-                    take: chosen.take.clone(),
-                    range: chosen.range,
-                    stars: None,
-                    pick: true,
-                }),
-            }
-        }
-        cut.settle_ratings();
-        cut
-    }
-
-    fn rating_index(&self, attempt: &Attempt) -> Option<usize> {
-        self.ratings
-            .iter()
-            .position(|r| r.take == attempt.take && r.range.overlaps(attempt.range))
-    }
-
-    /// Drops ratings that say nothing and puts the rest in canonical order.
-    fn settle_ratings(&mut self) {
-        self.ratings.retain(|r| r.stars.is_some() || r.pick);
-        self.ratings.sort_by(|a, b| {
-            let key = |r: &Rating| (r.take.as_str().len(), r.take.to_string(), r.range.from());
-            key(a).cmp(&key(b))
+        cut.picks.retain(|p| {
+            !row.attempts
+                .iter()
+                .any(|a| a.take == p.take && a.range.overlaps(p.range))
         });
+        cut.picks.extend(chosen.map(|chosen| Pick {
+            take: chosen.take.clone(),
+            range: chosen.range,
+        }));
+        cut.picks.sort_by(|a, b| a.order().cmp(&b.order()));
+        cut
     }
 
     /// How much of `range` of `take` the main cut keeps, over every block of the take.
@@ -662,119 +616,97 @@ impl Cut {
         Micros(kept)
     }
 
-    /// Puts `with`, an attempt of the row at `at` or a part of one, into the main cut in place
-    /// of whatever holds that row now. The material of every attempt of the row leaves the cut,
-    /// kept or removed, with pauses around it that belong to no row, and `with` goes where the
-    /// first of it was. When the cut has nothing of
-    /// the row, `with` goes after the material of the nearest row before it, else before the
-    /// nearest row after it, else into a chapter of its own at the end. The removes,
-    /// layouts, zooms and overlays inside `with` come along from the take's blocks; where the
-    /// cut has none of the take, `with` is kept whole.
-    pub fn use_attempt(
-        &self,
-        lineup: &Lineup,
-        at: RowAt,
-        with: &Attempt,
-    ) -> Result<Cut, EditError> {
-        let row = lineup.row(at).ok_or(EditError::UnknownRow(at))?;
-        let block = self.material(&with.take, with.range);
-        let holds_a_row = |piece: &TakeEdit| {
-            lineup.rows().flat_map(|(_, r)| &r.attempts).any(|a| {
-                a.take == piece.take && piece.ranges.iter().any(|r| r.range().overlaps(a.range))
-            })
-        };
-        let holes: Vec<&Attempt> = row.attempts.iter().collect();
-        let mut chapters = Vec::with_capacity(self.chapters.len() + 1);
-        let mut placed = None;
-        for (c, chapter) in self.chapters.iter().enumerate() {
-            let mut takes = Vec::with_capacity(chapter.takes.len() + 2);
-            for edit in &chapter.takes {
-                let mut mine: Vec<TimeRange> = holes
-                    .iter()
-                    .filter(|a| a.take == edit.take)
-                    .map(|a| a.range)
-                    .filter(|hole| edit.ranges.iter().any(|r| r.range().overlaps(*hole)))
-                    .collect();
-                if mine.is_empty() {
-                    takes.push(edit.clone());
-                    continue;
-                }
-                mine.sort_by_key(|r| r.from());
-                // A piece left between holes that holds no row's media, only the pauses
-                // around them, goes with its neighbours.
-                let piece = |from, to| {
-                    window(from, to)
-                        .and_then(|w| restrict(edit, w))
-                        .filter(|piece| holds_a_row(piece))
-                };
-                let mut cursor = Micros(0);
-                for hole in mine {
-                    takes.extend(piece(cursor, hole.from()));
-                    if placed.is_none() {
-                        placed = Some((c, takes.len()));
-                        takes.push(block.clone());
-                    }
-                    cursor = cursor.max(hole.to());
-                }
-                takes.extend(piece(cursor, Micros(u64::MAX)));
-            }
-            chapters.push(Chapter {
-                title: chapter.title.clone(),
-                takes,
+    /// The pieces that play `row`, in order: a person's pick, else what the cut holds of a row
+    /// a person edited, else the row's proposal. A pick of nearly a whole attempt follows the
+    /// attempt when a new transcript moves its edges. `new` is a take that was just appended
+    /// whole: the cut holds all of it, and none of it by a person's choice.
+    pub fn plays(&self, lineup: &Lineup, row: &Row, new: Option<&Id>) -> Vec<Attempt> {
+        if let Some(pick) = self.picked(row) {
+            let whole = row.attempts.iter().find(|a| {
+                a.take == pick.take
+                    && pick
+                        .range
+                        .intersect(a.range)
+                        .is_some_and(|both| 10 * both.duration().0 >= 9 * a.range.duration().0)
             });
+            let piece = whole.cloned().unwrap_or_else(|| Attempt {
+                take: pick.take.clone(),
+                range: pick.range,
+            });
+            return vec![lineup.padded(&piece)];
         }
-        let placed = match placed {
-            Some(placed) => placed,
-            None => insert_by_neighbours(self, &mut chapters, lineup, at, block),
-        };
-        join_around(&mut chapters, placed);
-        // A chapter whose material all moved goes with it.
-        let kept: Vec<Chapter> = chapters
-            .into_iter()
-            .zip(
-                self.chapters
-                    .iter()
-                    .map(|c| !c.takes.is_empty())
-                    .chain([true]),
-            )
-            .filter(|(c, had)| !c.takes.is_empty() || !had)
-            .map(|(c, _)| c)
-            .collect();
-        Cut {
-            chapters: kept,
-            ..self.clone()
-        }
-        .settle_takes()
+        self.held_by_hand(lineup, row, new)
+            .unwrap_or_else(|| row.proposal.clone())
     }
 
-    /// Builds the main cut from the lineup, one chapter per group under its title. Each row
-    /// gets its circled attempt or part, else its best rated attempt, else the attempt the cut
-    /// keeps most of now, else the newest take's; of equals the newest. Consecutive rows from
-    /// one take join into one block that keeps what lies between them, unless an attempt of
-    /// that take lies there. A row without attempts is left out.
-    pub fn assemble(&self, lineup: &Lineup) -> Result<Cut, EditError> {
+    /// What the cut holds of `row`, in cut order, when a person cut words in it or answered a
+    /// finding in it. Such a row is theirs: a proposal never replaces it.
+    fn held_by_hand(&self, lineup: &Lineup, row: &Row, new: Option<&Id>) -> Option<Vec<Attempt>> {
+        let mut held = Vec::new();
+        let mut by_hand = false;
+        let blocks = self.chapters.iter().flat_map(|c| &c.takes);
+        for edit in blocks.filter(|edit| Some(&edit.take) != new) {
+            for attempt in row.attempts.iter().filter(|a| a.take == edit.take) {
+                let reach = lineup.padded(attempt).range;
+                let mut inside = edit
+                    .ranges
+                    .iter()
+                    .filter_map(|r| r.range().intersect(reach));
+                let Some(first) = inside.next() else {
+                    continue;
+                };
+                let last = inside.next_back().unwrap_or(first);
+                by_hand |= edit.ranges.iter().any(|r| {
+                    matches!(r, RangeEdit::Remove(_)) && r.range().overlaps(attempt.range)
+                }) || self
+                    .overrides
+                    .iter()
+                    .any(|o| o.take == edit.take && holds(attempt.range, o.at));
+                held.extend(
+                    TimeRange::new(first.from(), last.to()).map(|range| Attempt {
+                        take: edit.take.clone(),
+                        range,
+                    }),
+                );
+            }
+        }
+        by_hand.then_some(held)
+    }
+
+    /// Builds the main cut from the lineup: one chapter per group under its title, each row
+    /// played by [`Cut::plays`]. Neighbouring pieces of one take join into one block that keeps
+    /// what lies between them, unless an attempt of that take lies there. A row without
+    /// attempts is left out, and a take the lineup does not know, such as one without words,
+    /// keeps its blocks after the composed chapters. Without beats and without a row that has
+    /// two attempts there is nothing to choose, and the cut stays as it is. `new` is the take
+    /// that was just appended, see [`Cut::plays`].
+    pub fn compose(&self, lineup: &Lineup, new: Option<&Id>) -> Result<Cut, EditError> {
         let everything: Vec<&Attempt> = lineup.rows().flat_map(|(_, r)| &r.attempts).collect();
+        if everything.is_empty() || !(lineup.scripted || lineup.contested()) {
+            return Ok(self.clone());
+        }
         let mut chapters = Vec::new();
         for group in &lineup.groups {
             let mut spans: Vec<Attempt> = Vec::new();
-            for row in &group.rows {
-                let Some(chosen) = self.choice(row) else {
-                    continue;
-                };
+            for piece in group
+                .rows
+                .iter()
+                .flat_map(|row| self.plays(lineup, row, new))
+            {
                 if let Some(last) = spans.last_mut()
-                    && last.take == chosen.take
-                    && last.range.to() <= chosen.range.from()
-                    && window(last.range.to(), chosen.range.from()).is_none_or(|gap| {
+                    && last.take == piece.take
+                    && last.range.to() <= piece.range.from()
+                    && window(last.range.to(), piece.range.from()).is_none_or(|gap| {
                         !everything
                             .iter()
-                            .any(|a| a.take == chosen.take && a.range.overlaps(gap))
+                            .any(|a| a.take == piece.take && a.range.overlaps(gap))
                     })
                 {
-                    last.range = TimeRange::new(last.range.from(), chosen.range.to())
-                        .expect("the later attempt ends after the earlier starts");
+                    last.range = TimeRange::new(last.range.from(), piece.range.to())
+                        .expect("the later piece ends after the earlier starts");
                     continue;
                 }
-                spans.push(chosen);
+                spans.push(piece);
             }
             if spans.is_empty() {
                 continue;
@@ -787,41 +719,26 @@ impl Cut {
                     .collect(),
             });
         }
+        let lined = lineup.takes();
+        for chapter in &self.chapters {
+            let takes: Vec<TakeEdit> = chapter
+                .takes
+                .iter()
+                .filter(|edit| !lined.contains(&edit.take))
+                .cloned()
+                .collect();
+            if !takes.is_empty() {
+                chapters.push(Chapter {
+                    title: chapter.title.clone(),
+                    takes,
+                });
+            }
+        }
         Cut {
             chapters,
             ..self.clone()
         }
         .settle_takes()
-    }
-
-    /// The attempt "Assemble picks" uses for `row`, see [`Cut::assemble`].
-    pub fn choice(&self, row: &Row) -> Option<Attempt> {
-        let picked = row.attempts.iter().find_map(|a| {
-            let rating = self.rating(a).filter(|r| r.pick)?;
-            Some(Attempt {
-                take: a.take.clone(),
-                range: rating.range,
-            })
-        });
-        let rated = || {
-            row.attempts
-                .iter()
-                .filter_map(|a| Some((self.rating(a)?.stars?, a)))
-                .max_by_key(|(stars, _)| *stars)
-                .map(|(_, a)| a.clone())
-        };
-        let held = || {
-            row.attempts
-                .iter()
-                .map(|a| (self.kept_of(&a.take, a.range), a))
-                .filter(|(kept, _)| kept.0 > 0)
-                .max_by_key(|(kept, _)| *kept)
-                .map(|(_, a)| a.clone())
-        };
-        picked
-            .or_else(rated)
-            .or_else(held)
-            .or_else(|| row.attempts.last().cloned())
     }
 
     /// A block of `take` over `range` with what the cut's blocks of that take have there: their
@@ -961,135 +878,6 @@ fn restrict(edit: &TakeEdit, window: TimeRange) -> Option<TakeEdit> {
             .cloned()
             .collect(),
     })
-}
-
-/// Puts `block` where the row at `at` belongs when the cut has none of it: right after the
-/// block that holds the end of the nearest row before it, split where a later row's media
-/// starts in that block; else right before the start of the nearest row after it; else in a
-/// chapter of its own at the end. Returns where it went.
-fn insert_by_neighbours(
-    cut: &Cut,
-    chapters: &mut Vec<Chapter>,
-    lineup: &Lineup,
-    at: RowAt,
-    block: TakeEdit,
-) -> (usize, usize) {
-    let rows: Vec<&Row> = lineup.rows().map(|(_, row)| row).collect();
-    let index = lineup.rows().position(|(r, _)| r == at).unwrap_or(0);
-    // Where the media of `attempts` starts in each block that has some, in cut order.
-    let starts = |attempts: &[Attempt]| {
-        let mut found = Vec::new();
-        for (c, chapter) in cut.chapters.iter().enumerate() {
-            for (b, edit) in chapter.takes.iter().enumerate() {
-                for attempt in attempts.iter().filter(|a| a.take == edit.take) {
-                    if let Some(media) = edit
-                        .ranges
-                        .iter()
-                        .find_map(|r| r.range().intersect(attempt.range))
-                    {
-                        found.push((c, b, media.from()));
-                    }
-                }
-            }
-        }
-        found
-    };
-    let split_at = |chapters: &mut Vec<Chapter>, c: usize, b: usize, t: Micros, block| {
-        let edit = chapters[c].takes.remove(b);
-        let before = window(Micros(0), t).and_then(|w| restrict(&edit, w));
-        let after = window(t, Micros(u64::MAX)).and_then(|w| restrict(&edit, w));
-        let takes = &mut chapters[c].takes;
-        let mut at = b;
-        if let Some(before) = before {
-            takes.insert(at, before);
-            at += 1;
-        }
-        takes.insert(at, block);
-        if let Some(after) = after {
-            takes.insert(at + 1, after);
-        }
-        (c, at)
-    };
-    let before = rows[..index]
-        .iter()
-        .rev()
-        .find_map(|row| starts(&row.attempts).last().copied());
-    if let Some((c, b, t)) = before {
-        let later = rows[index + 1..]
-            .iter()
-            .flat_map(|row| starts(&row.attempts))
-            .filter(|&(lc, lb, lt)| (lc, lb) == (c, b) && lt > t)
-            .map(|(_, _, lt)| lt)
-            .min();
-        return match later {
-            Some(t) => split_at(chapters, c, b, t, block),
-            None => {
-                chapters[c].takes.insert(b + 1, block);
-                (c, b + 1)
-            }
-        };
-    }
-    let after = rows[index + 1..]
-        .iter()
-        .find_map(|row| starts(&row.attempts).first().copied());
-    match after {
-        Some((c, b, t)) => split_at(chapters, c, b, t, block),
-        None => {
-            chapters.push(Chapter {
-                title: lineup.groups[at.group].title.clone(),
-                takes: vec![block],
-            });
-            (chapters.len() - 1, 0)
-        }
-    }
-}
-
-/// Joins the block at `placed` with its neighbours in the chapter where they are the same
-/// take and meet without a gap, so putting back what was there leaves the block as it was.
-fn join_around(chapters: &mut [Chapter], (c, b): (usize, usize)) {
-    let takes = &mut chapters[c].takes;
-    let mut b = b;
-    if b > 0 && meets(&takes[b - 1], &takes[b]) {
-        let next = takes.remove(b);
-        b -= 1;
-        join(&mut takes[b], next);
-    }
-    if b + 1 < takes.len() && meets(&takes[b], &takes[b + 1]) {
-        let next = takes.remove(b + 1);
-        join(&mut takes[b], next);
-    }
-}
-
-fn meets(a: &TakeEdit, b: &TakeEdit) -> bool {
-    a.take == b.take
-        && match (a.ranges.last(), b.ranges.first()) {
-            (Some(end), Some(start)) => end.range().to() == start.range().from(),
-            _ => false,
-        }
-}
-
-/// Appends `next`, which starts where `edit` ends, to `edit`, and joins what the seam split.
-fn join(edit: &mut TakeEdit, next: TakeEdit) {
-    let ranges = std::mem::take(&mut edit.ranges);
-    edit.ranges = merge_adjacent(ranges.into_iter().chain(next.ranges).collect());
-    edit.layouts.extend(next.layouts);
-    merge_layouts(&mut edit.layouts);
-    for zoom in next.zooms {
-        match edit.zooms.last_mut() {
-            Some(last)
-                if last.range.to() == zoom.range.from()
-                    && Zoom {
-                        range: zoom.range,
-                        ..*last
-                    } == zoom =>
-            {
-                last.range = TimeRange::new(last.range.from(), zoom.range.to())
-                    .expect("adjacent ranges join into a non-empty range");
-            }
-            _ => edit.zooms.push(zoom),
-        }
-    }
-    edit.overlays.extend(next.overlays);
 }
 
 fn same_kind(a: RangeEdit, b: RangeEdit) -> bool {
@@ -1612,11 +1400,13 @@ mod tests {
     }
 
     /// Two takes, each with three beats at 1 to 9 s, 11 to 19 s and 21 to 29 s, the first two
-    /// beats under "Intro" and the third under "Demo".
+    /// beats under "Intro" and the third under "Demo". The second take is proposed.
     fn lineup() -> Lineup {
         let row = |text: &str, from: f64, to: f64| crate::Row {
             text: text.to_owned(),
             attempts: vec![attempt("t01", from, to), attempt("t02", from, to)],
+            scores: vec![80, 100],
+            proposal: vec![attempt("t02", from, to)],
         };
         Lineup {
             groups: vec![
@@ -1629,6 +1419,8 @@ mod tests {
                     rows: vec![row("three", 21., 29.)],
                 },
             ],
+            scripted: true,
+            ..Lineup::default()
         }
     }
 
@@ -1636,180 +1428,101 @@ mod tests {
         RowAt { group, row }
     }
 
-    /// The first take as a rough cut, and the second appended after it as recording leaves it.
+    /// The first take as a rough cut with a person's cut in its second beat, and the second
+    /// appended after it as recording leaves it.
     fn recorded() -> Cut {
         Cut::parse(
-            "chapter \"Intro\" {\n    take t01 {\n        keep from=0 to=12_000_000\n        remove from=12_000_000 to=13_000_000 by=manual\n        keep from=13_000_000 to=30_000_000\n        zoom 120 from=15_000_000 to=16_000_000\n    }\n}\n\nchapter \"Take t02\" {\n    take t02 {\n        keep from=0 to=14_000_000\n        remove from=14_000_000 to=15_000_000 by=manual\n        keep from=15_000_000 to=30_000_000\n    }\n}\n",
+            "chapter \"Take t01\" {\n    take t01 {\n        keep from=0 to=12_000_000\n        remove from=12_000_000 to=13_000_000 by=manual\n        keep from=13_000_000 to=30_000_000\n    }\n}\n\nchapter \"Take t02\" {\n    take t02 {\n        keep from=0 to=30_000_000\n    }\n}\n",
         )
         .unwrap()
     }
 
-    #[test]
-    fn use_this_puts_an_attempt_in_place_of_what_holds_its_beat() {
-        let used = recorded()
-            .use_attempt(&lineup(), row_at(0, 1), &attempt("t02", 11., 19.))
-            .unwrap();
-        assert_eq!(
-            used.to_kdl(),
-            "chapter \"Intro\" {\n    take t01 {\n        keep from=0 to=11_000_000\n    }\n    take t02 {\n        keep from=11_000_000 to=14_000_000\n        remove from=14_000_000 to=15_000_000 by=manual\n        keep from=15_000_000 to=19_000_000\n    }\n    take t01 {\n        keep from=19_000_000 to=30_000_000\n    }\n}\n\nchapter \"Take t02\" {\n    take t02 {\n        keep from=0 to=11_000_000\n    }\n    take t02 {\n        keep from=19_000_000 to=30_000_000\n    }\n}\n"
-        );
-        // Every beat taken from t02 empties its chapter, which goes.
-        let all = (0..3).fold(recorded(), |cut, i| {
-            let (at, from) = [(row_at(0, 0), 1.), (row_at(0, 1), 11.), (row_at(1, 0), 21.)][i];
-            cut.use_attempt(&lineup(), at, &attempt("t02", from, from + 8.))
-                .unwrap()
-        });
-        assert!(all.chapters.iter().all(|c| c.title == "Intro"));
-    }
-
-    #[test]
-    fn using_what_holds_a_beat_already_changes_nothing() {
-        let cut = Cut::parse(
-            "chapter \"Intro\" {\n    take t01 {\n        keep from=0 to=12_000_000\n        remove from=12_000_000 to=13_000_000 by=manual\n        keep from=13_000_000 to=30_000_000\n        zoom 120 from=10_500_000 to=11_500_000\n        overlay lower-third from=3_000_000 to=8_000_000 {\n            text \"Hi\"\n        }\n    }\n}\n",
-        )
-        .unwrap();
-        let used = cut
-            .use_attempt(&lineup(), row_at(0, 1), &attempt("t01", 11., 19.))
-            .unwrap();
-        assert_eq!(used, cut);
-    }
-
-    #[test]
-    fn a_beat_the_cut_lacks_goes_after_the_beat_before_it() {
-        let cut = Cut::parse(
-            "chapter \"Intro\" {\n    take t01 {\n        keep from=0 to=10_000_000\n    }\n    take t01 {\n        keep from=20_000_000 to=30_000_000\n    }\n}\n",
-        )
-        .unwrap();
-        let used = cut
-            .use_attempt(&lineup(), row_at(0, 1), &attempt("t02", 12., 18.))
-            .unwrap();
-        let blocks: Vec<(String, u64)> = used.chapters[0]
-            .takes
+    fn blocks(cut: &Cut) -> Vec<(String, String, u64, u64)> {
+        cut.chapters
             .iter()
-            .map(|b| (b.take.to_string(), b.ranges[0].range().from().0 / 1_000_000))
-            .collect();
-        assert_eq!(
-            blocks,
-            [("t01".into(), 0), ("t02".into(), 12), ("t01".into(), 20)]
-        );
-    }
-
-    #[test]
-    fn assemble_takes_the_circle_then_the_stars_then_what_the_cut_holds() {
-        let lineup = lineup();
-        let rows: Vec<&crate::Row> = lineup.rows().map(|(_, r)| r).collect();
-        // Beat one: t01 has more stars. Beat two: a circled part of t02 beats t01's five stars.
-        // Beat three: nothing rated, the cut holds both whole, and t02 is the newer.
-        let cut = recorded()
-            .rate(&attempt("t01", 1., 9.), Some(4))
-            .rate(&attempt("t02", 1., 9.), Some(2))
-            .rate(&attempt("t01", 11., 19.), Some(5))
-            .set_pick(rows[1], Some(&attempt("t02", 12., 17.)));
-        assert_eq!(
-            cut.choice(rows[1]),
-            Some(attempt("t02", 12., 17.)),
-            "the circled part"
-        );
-        let assembled = cut.assemble(&lineup).unwrap();
-        assert_eq!(
-            assembled.to_kdl().split("chapter").next().unwrap(),
-            "takes {\n    attempt t01 from=1_000_000 to=9_000_000 stars=4\n    attempt t01 from=11_000_000 to=19_000_000 stars=5\n    attempt t02 from=1_000_000 to=9_000_000 stars=2\n    attempt t02 from=12_000_000 to=17_000_000 pick=#true\n}\n\n"
-        );
-        let blocks: Vec<(&str, String, Vec<RangeEdit>)> = assembled
-            .chapters
-            .iter()
-            .flat_map(|c| {
-                c.takes
-                    .iter()
-                    .map(move |b| (c.title.as_str(), b.take.to_string(), b.ranges.clone()))
-            })
-            .collect();
-        assert_eq!(
-            blocks,
-            [
-                ("Intro", "t01".into(), vec![keep(1_000_000, 9_000_000)]),
+            .flat_map(|c| c.takes.iter().map(move |t| (c, t)))
+            .map(|(c, t)| {
                 (
-                    "Intro",
-                    "t02".into(),
-                    vec![
-                        keep(12_000_000, 14_000_000),
-                        removed(14_000_000, 15_000_000),
-                        keep(15_000_000, 17_000_000)
-                    ]
-                ),
-                ("Demo", "t02".into(), vec![keep(21_000_000, 29_000_000)]),
-            ]
-        );
-    }
-
-    #[test]
-    fn assemble_joins_a_takes_consecutive_beats_and_drops_what_left() {
-        let mut cut = recorded();
-        cut.overrides.push(crate::Override {
-            take: Id::new("t02").unwrap(),
-            kind: crate::ElementKind::Filler,
-            at: s(14.),
-            decision: Some(Decision::Keep),
-            effects: Vec::new(),
-        });
-        for (from, to) in [(1., 9.), (11., 19.), (21., 29.)] {
-            cut = cut.rate(&attempt("t01", from, to), Some(3));
-        }
-        let assembled = cut.assemble(&lineup()).unwrap();
-        // t01 for every beat: beats one and two join with the silence between them.
-        assert_eq!(
-            assembled.chapters[0].takes[0].ranges,
-            [
-                keep(1_000_000, 12_000_000),
-                removed(12_000_000, 13_000_000),
-                keep(13_000_000, 19_000_000)
-            ]
-        );
-        assert_eq!(assembled.chapters[0].takes[0].zooms.len(), 1);
-        assert!(assembled.overrides.is_empty(), "t02 left the cut");
-
-        cut.derived.push(crate::DerivedCut {
-            kind: crate::DerivedKind::Short,
-            name: Id::new("teaser").unwrap(),
-            captions: None,
-            clips: vec![crate::Clip {
-                take: Id::new("t02").unwrap(),
-                range: secs(1., 5.),
-            }],
-        });
-        assert_eq!(
-            cut.assemble(&lineup()),
-            Err(EditError::TakeInDerived {
-                derived: Id::new("teaser").unwrap(),
-                take: Id::new("t02").unwrap()
+                    c.title.clone(),
+                    t.take.to_string(),
+                    t.ranges[0].range().from().0 / 1_000_000,
+                    t.ranges[t.ranges.len() - 1].range().to().0 / 1_000_000,
+                )
             })
+            .collect()
+    }
+
+    #[test]
+    fn compose_plays_the_proposal_and_leaves_a_beat_a_person_cut_in() {
+        let new = Id::new("t02").unwrap();
+        let composed = recorded().compose(&lineup(), Some(&new)).unwrap();
+        // Beat two keeps the first take, where a person cut a second, between two beats of
+        // the proposed second take.
+        assert_eq!(
+            blocks(&composed),
+            [
+                ("Intro".into(), "t02".into(), 1, 9),
+                ("Intro".into(), "t01".into(), 11, 19),
+                ("Demo".into(), "t02".into(), 21, 29),
+            ]
+        );
+        assert!(composed.to_kdl().contains("remove from=12_000_000"));
+        // Composing what is composed changes nothing.
+        assert_eq!(composed.compose(&lineup(), None).unwrap(), composed);
+    }
+
+    #[test]
+    fn a_pick_plays_instead_of_the_proposal_and_one_per_beat() {
+        let lineup = lineup();
+        let row = lineup.row(row_at(1, 0)).unwrap();
+        let picked = recorded().set_pick(row, Some(&attempt("t02", 21., 29.)));
+        let picked = picked.set_pick(row, Some(&attempt("t01", 21., 29.)));
+        assert_eq!(picked.picks.len(), 1);
+        assert_eq!(Cut::parse(&picked.to_kdl()).unwrap(), picked);
+        let new = Id::new("t02").unwrap();
+        let composed = picked.compose(&lineup, Some(&new)).unwrap();
+        assert_eq!(blocks(&composed)[2], ("Demo".into(), "t01".into(), 21, 29));
+        // A pick binds to its attempt after the attempt moved a little.
+        let mut moved = lineup.clone();
+        moved.groups[1].rows[0].attempts[0] = attempt("t01", 21.4, 29.2);
+        assert_eq!(
+            picked.plays(&moved, &moved.groups[1].rows[0], None),
+            [attempt("t01", 21.4, 29.2)]
+        );
+        let cleared = picked.set_pick(row, None);
+        assert!(cleared.picks.is_empty());
+    }
+
+    #[test]
+    fn compose_joins_a_takes_neighbouring_beats_and_keeps_a_take_without_words() {
+        let mut lineup = lineup();
+        for (_, row) in [(0, 0), (0, 1)].iter().zip(&mut lineup.groups[0].rows) {
+            row.proposal = vec![row.attempts[0].clone()];
+        }
+        let mut cut = Cut::parse(
+            "chapter \"Take t01\" {\n    take t01 {\n        keep from=0 to=30_000_000\n    }\n}\n\nchapter \"Take t02\" {\n    take t02 {\n        keep from=0 to=30_000_000\n    }\n}\n\nchapter \"B-roll\" {\n    take t03 {\n        keep from=0 to=5_000_000\n    }\n}\n",
+        )
+        .unwrap();
+        cut = cut.compose(&lineup, None).unwrap();
+        assert_eq!(
+            blocks(&cut),
+            [
+                ("Intro".into(), "t01".into(), 1, 19),
+                ("Demo".into(), "t02".into(), 21, 29),
+                ("B-roll".into(), "t03".into(), 0, 5),
+            ]
         );
     }
 
     #[test]
-    fn stars_and_circles_follow_their_attempt_and_round_trip() {
-        let lineup = lineup();
-        let row = lineup.row(row_at(0, 0)).unwrap();
-        let first = attempt("t01", 1., 9.);
-        // The attempt moved a little since it was rated: the rating still binds.
-        let rated = Cut::default().rate(&first, Some(9));
-        assert_eq!(
-            rated.rating(&attempt("t01", 1.5, 9.5)).unwrap().stars,
-            Some(5)
-        );
-        let picked = rated.set_pick(row, Some(&attempt("t02", 1., 9.)));
-        let moved = picked.set_pick(row, Some(&first));
-        assert_eq!(
-            moved.ratings,
-            [Rating {
-                take: first.take.clone(),
-                range: first.range,
-                stars: Some(5),
-                pick: true,
-            }]
-        );
-        assert_eq!(Cut::parse(&moved.to_kdl()).unwrap(), moved);
-        let cleared = moved.set_pick(row, None).rate(&first, None);
-        assert!(cleared.ratings.is_empty());
+    fn without_beats_and_nothing_said_twice_the_cut_stays() {
+        let mut lineup = lineup();
+        lineup.scripted = false;
+        for group in &mut lineup.groups {
+            for row in &mut group.rows {
+                row.attempts.truncate(1);
+            }
+        }
+        assert_eq!(recorded().compose(&lineup, None).unwrap(), recorded());
     }
 }

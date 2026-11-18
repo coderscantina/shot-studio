@@ -141,7 +141,7 @@ impl Outline {
                             chapter.takes.push(attempt.take.clone());
                         }
                     }
-                    if let Some(choice) = cut.choice(row) {
+                    if let Some(choice) = cut.plays(lineup, row, None).into_iter().next() {
                         match plays.iter_mut().find(|(id, _)| *id == choice.take) {
                             Some((_, beats)) => *beats += 1,
                             None => plays.push((choice.take, 1)),

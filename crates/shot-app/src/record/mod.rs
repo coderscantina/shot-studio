@@ -1113,9 +1113,11 @@ pub(crate) fn analyze_later(folder: &Entity<VideoFolder>, take: &Id, cx: &mut Ap
         if analyzed {
             folder.update(cx, |folder, cx| {
                 // A failed reload shows on the next edit; nothing waits on this one.
+                // The analysis knows the take's stumbles now, so its attempts score for real.
                 let _ = folder
                     .load_transcripts()
-                    .and_then(|()| folder.rebuild_lock());
+                    .and_then(|()| folder.rebuild_lock())
+                    .and_then(|()| folder.as_one_change(|folder| folder.propose(None)));
                 cx.notify();
             });
         }
