@@ -4,7 +4,7 @@
 //!
 //! An attempt comes from the take's `beat` elements when it was recorded with the prompter:
 //! from each beat the prompter showed to the next, trimmed to the words said in it, and to the
-//! retake when an earlier take already has the beat. A take
+//! retake when an earlier take already has the beat or the take showed it before. A take
 //! without them is aligned to the script by word overlap: its sentences go to the beats whose
 //! text shares the most words with them, in order, and back to an earlier beat only when a
 //! sentence clearly says it again. What a retake of a beat says before and after the sentences
@@ -745,8 +745,8 @@ pub fn words_in(words: &[Word], range: TimeRange) -> &[Word] {
 
 /// Attempts from the take's `beat` elements: each beat the prompter showed, up to the next,
 /// trimmed to its words. A beat is shown from the take's start or the beat before, and the
-/// last until the take stops, so where `taken` says an earlier take already has the row the
-/// attempt is the [`retake_only`]. `texts` are the content words of each row. `None` when the
+/// last until the take stops, so where `taken` says an earlier take already has the row, or
+/// the take itself showed the beat before (Again), the attempt is the [`retake_only`]. `texts` are the content words of each row. `None` when the
 /// take has no beat elements.
 fn beat_attempts(
     take: &TakeWords<'_>,
@@ -774,7 +774,8 @@ fn beat_attempts(
         .filter_map(|(i, &(t, row))| {
             let until = beats.get(i + 1).map_or(end, |&(next, _)| next);
             let mut said = words_in(words, TimeRange::new(t, until)?);
-            if taken(row) {
+            let again = beats[..i].iter().any(|&(_, earlier)| earlier == row);
+            if taken(row) || again {
                 said = retake_only(said, &texts[row]);
             }
             (!said.is_empty()).then(|| (row, span(said)))
@@ -1360,6 +1361,49 @@ mod tests {
             ),
             "We install the speech model with a checksum. Pick the channel folder in git. \
              Now press record and talk."
+        );
+    }
+
+    #[test]
+    fn again_in_one_prompter_take_plays_the_beat_without_lead_in_or_remark() {
+        // Beat 2 is flubbed, Again shows it a second time before `again`, Next goes on at "Now".
+        let again = |text: &str, again: &str| {
+            let take = said("t01", 0, text);
+            let at = |word: &str| {
+                let word = take.words().iter().find(|w| w.text == word).unwrap();
+                word.range.from()
+            };
+            let mut beats = Elements::new(id("t01"));
+            for (t, index) in [(Micros(0), 1), (at("Then"), 2), (at(again), 2), (at("Now"), 3)] {
+                beats
+                    .push(
+                        Element::at(ElementKind::Beat, t, "script")
+                            .with_integer(Attr::Index, index),
+                    )
+                    .unwrap();
+            }
+            let cut = composed(&script(), &[(&take, Some(&beats), "Take t01")]);
+            spoken(&cut, &[&take])
+        };
+        let played = "We install the speech model with a checksum. \
+                      Pick the channel folder in git. Now press record and talk.";
+        assert_eq!(
+            again(
+                "We install the speech model with a checksum. Then pick a channel. \
+                 Alright, here goes attempt number two. Pick the channel folder in git. \
+                 Now press record and talk.",
+                "Alright,"
+            ),
+            played
+        );
+        assert_eq!(
+            again(
+                "We install the speech model with a checksum. Then pick a channel. \
+                 Okay, once more. Pick the channel folder in git. Yes, that was much better. \
+                 Now press record and talk.",
+                "Okay,"
+            ),
+            played
         );
     }
 
