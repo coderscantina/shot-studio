@@ -6,8 +6,9 @@ use std::fmt;
 use crate::takes::{holds, middle};
 use crate::{
     Applied, Attempt, Chapter, Cut, EffectKey, ElementKind, Id, Instance, Layer, Layout,
-    LayoutChange, Lineup, Lock, Micros, Music, Overlay, Override, OverrideEffect, Pick, RangeEdit,
-    Row, RowAt, TakeEdit, Target, TimeRange, Transcript, Word, Zoom, ZoomShape, word_cut,
+    LayoutChange, LeftCut, Lineup, Lock, Micros, Music, Overlay, Override, OverrideEffect, Pick,
+    RangeEdit, Row, RowAt, TakeEdit, Target, TimeRange, Transcript, Word, Zoom, ZoomShape,
+    word_cut,
 };
 
 /// One take block of the main cut: the chapter and the take's position in that chapter. A take
@@ -845,12 +846,60 @@ impl Cut {
             chapters,
             ..self.clone()
         }
+        .settle_left_cuts(self)
         .settle_takes()
+    }
+
+    /// Sets aside a person's cuts that no block holds any more, those of the blocks of
+    /// `before` and its left cuts, and drops the left cuts a block took back, see
+    /// [`Cut::material`].
+    fn settle_left_cuts(mut self, before: &Cut) -> Cut {
+        let spans = |take: &Id| {
+            let blocks = self.chapters.iter().flat_map(|c| &c.takes);
+            let mut spans: Vec<TimeRange> = blocks
+                .filter(|edit| edit.take == *take)
+                .filter_map(|edit| {
+                    let (first, last) = (edit.ranges.first()?, edit.ranges.last()?);
+                    TimeRange::new(first.range().from(), last.range().to())
+                })
+                .collect();
+            spans.sort_by_key(|span| span.from());
+            spans
+        };
+        let blocks = before.chapters.iter().flat_map(|c| &c.takes);
+        let cuts = blocks.flat_map(|edit| {
+            edit.ranges.iter().filter_map(|r| match *r {
+                RangeEdit::Remove(range) => Some((&edit.take, range)),
+                RangeEdit::Keep(_) => None,
+            })
+        });
+        let mut left_cuts: Vec<LeftCut> = Vec::new();
+        for (take, cut) in cuts.chain(before.left_cuts.iter().map(|l| (&l.take, l.range))) {
+            let mut cursor = cut.from();
+            let mut outside = Vec::new();
+            for span in spans(take) {
+                outside.extend(window(cursor, span.from().min(cut.to())));
+                cursor = cursor.max(span.to());
+            }
+            outside.extend(window(cursor, cut.to()));
+            for range in outside {
+                let of_take = left_cuts.iter().filter(|l| l.take == *take);
+                if free(range, of_take.map(|l| l.range)) {
+                    left_cuts.push(LeftCut {
+                        take: take.clone(),
+                        range,
+                    });
+                }
+            }
+        }
+        left_cuts.sort_by(|a, b| a.order().cmp(&b.order()));
+        self.left_cuts = left_cuts;
+        self
     }
 
     /// A block of `take` over `range` with what the cut's blocks of that take have there: their
     /// keeps and removes, layouts, zooms and overlays. Where no block covers the take's
-    /// media, the block keeps it.
+    /// media, the block keeps it, less the cuts a person made there before it left the cut.
     pub fn material(&self, take: &Id, range: TimeRange) -> TakeEdit {
         let mut out = TakeEdit {
             take: take.clone(),
@@ -886,6 +935,13 @@ impl Cut {
                 if !out.overlays.contains(&o) {
                     out.overlays.push(o);
                 }
+            }
+        }
+        for left in self.left_cuts.iter().filter(|l| l.take == *take) {
+            if let Some(inside) = left.range.intersect(range)
+                && free(inside, out.ranges.iter().map(|o| o.range()))
+            {
+                out.ranges.push(RangeEdit::Remove(inside));
             }
         }
         out.ranges.sort_by_key(|r| r.range().from());
@@ -1674,6 +1730,31 @@ mod tests {
         );
         let cleared = picked.set_pick(row, &[]);
         assert!(cleared.picks.is_empty());
+    }
+
+    #[test]
+    fn an_attempt_that_left_the_cut_comes_back_with_a_persons_cuts() {
+        let lineup = lineup();
+        let row = lineup.row(row_at(0, 1)).unwrap();
+        let new = Id::new("t02").unwrap();
+        let composed = recorded().compose(&lineup, Some(&new)).unwrap();
+        // The beat a person cut in goes to the second take, and their cut waits in `takes`.
+        let away = composed
+            .set_pick(row, &[attempt("t02", 11., 19.)])
+            .compose(&lineup, None)
+            .unwrap();
+        assert!(!blocks(&away).iter().any(|b| b.1 == "t01"));
+        assert!(
+            away.to_kdl()
+                .contains("    remove t01 from=12_000_000 to=13_000_000\n}")
+        );
+        assert_eq!(Cut::parse(&away.to_kdl()).unwrap(), away);
+        let back = away
+            .set_pick(row, &[attempt("t01", 11., 19.)])
+            .compose(&lineup, None)
+            .unwrap();
+        assert_eq!(back.chapters, composed.chapters);
+        assert!(back.left_cuts.is_empty());
     }
 
     #[test]

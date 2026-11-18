@@ -451,6 +451,7 @@ impl VideoFolder {
             }
             cut.chapters.retain(|chapter| !chapter.takes.is_empty());
             cut.picks.retain(|p| p.take != *take);
+            cut.left_cuts.retain(|l| l.take != *take);
             cut.overrides.retain(|o| o.take != *take);
             cut.caption_breaks.retain(|b| b.take != *take);
             for derived in &mut cut.derived {

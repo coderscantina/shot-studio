@@ -24,6 +24,10 @@ pub struct Cut {
     /// Picks and picks of the Takes view, by take (`t9` before `t10`), then `from`. The
     /// ranges of one take do not overlap.
     pub picks: Vec<Pick>,
+    /// A person's cuts in attempts that left the main cut, by take like the picks, then `from`.
+    /// None of them lies in a block of the cut: composing gives them back to the attempt when
+    /// it plays again.
+    pub left_cuts: Vec<LeftCut>,
     /// The main cut, in output order.
     pub chapters: Vec<Chapter>,
     /// Changes to what the style rules gave single elements, in canonical order: by take in
@@ -92,6 +96,24 @@ pub struct Pick {
 
 impl Pick {
     /// The canonical order: by take, shorter ids first so `t9` comes before `t10`, then `from`.
+    pub(crate) fn order(&self) -> (usize, &str, Micros) {
+        (
+            self.take.as_str().len(),
+            self.take.as_str(),
+            self.range.from(),
+        )
+    }
+}
+
+/// A person's cut in an attempt that does not play: a `remove` node of the `takes` block.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LeftCut {
+    pub take: Id,
+    pub range: TimeRange,
+}
+
+impl LeftCut {
+    /// The canonical order, as [`Pick::order`].
     pub(crate) fn order(&self) -> (usize, &str, Micros) {
         (
             self.take.as_str().len(),
@@ -387,7 +409,7 @@ impl Cut {
         cut.caption_fixes = fixes.unwrap_or_default();
         cut.caption_breaks = breaks;
         cut.music = music;
-        cut.picks = picks.unwrap_or_default();
+        (cut.picks, cut.left_cuts) = picks.unwrap_or_default();
         let takes: HashSet<&Id> = cut
             .chapters
             .iter()
@@ -466,13 +488,16 @@ impl Cut {
                 .prop("duck", &music.duck)
                 .end();
         }
-        if !self.picks.is_empty() {
+        if !self.picks.is_empty() || !self.left_cuts.is_empty() {
             separate(&mut w);
             w.node("takes").open();
             for pick in &self.picks {
                 write_range(w.node("attempt").arg(&pick.take), pick.range);
                 w.prop("pick", &true);
                 w.end();
+            }
+            for left in &self.left_cuts {
+                write_range(w.node("remove").arg(&left.take), left.range).end();
             }
             w.close();
         }
@@ -729,10 +754,20 @@ impl CaptionFix {
 }
 
 impl Pick {
-    fn read_all(node: Node<'_>) -> Result<Vec<Self>, ParseError> {
+    /// The picks and the cuts of attempts that left the cut, each in canonical order.
+    fn read_all(node: Node<'_>) -> Result<(Vec<Self>, Vec<LeftCut>), ParseError> {
         node.expect_block(0, &[])?;
         let mut picks: Vec<(Self, Node<'_>)> = Vec::new();
+        let mut left_cuts = Vec::new();
         for child in node.children() {
+            if child.name() == "remove" {
+                child.expect(1, &["from", "to"])?;
+                left_cuts.push(LeftCut {
+                    take: child.arg(0)?,
+                    range: TimeRange::read(child)?,
+                });
+                continue;
+            }
             if child.name() != "attempt" {
                 return Err(child.unknown());
             }
@@ -764,7 +799,8 @@ impl Pick {
                 )));
             }
         }
-        Ok(picks.into_iter().map(|(r, _)| r).collect())
+        left_cuts.sort_by(|a, b| a.order().cmp(&b.order()));
+        Ok((picks.into_iter().map(|(r, _)| r).collect(), left_cuts))
     }
 }
 
