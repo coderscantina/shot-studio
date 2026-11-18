@@ -1045,6 +1045,7 @@ impl Cut {
                 if let Some(last) = spans.last_mut()
                     && last.take == piece.take
                     && last.range.to() <= piece.range.from()
+                    && !lineup.speaks(&piece.take, last.range.to(), piece.range.from())
                     && window(last.range.to(), piece.range.from()).is_none_or(|gap| {
                         !everything
                             .iter()

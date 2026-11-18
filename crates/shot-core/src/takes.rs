@@ -337,7 +337,7 @@ impl Lineup {
     }
 
     /// Whether a word of `take` starts in `[from, to)`.
-    fn speaks(&self, take: &Id, from: Micros, to: Micros) -> bool {
+    pub(crate) fn speaks(&self, take: &Id, from: Micros, to: Micros) -> bool {
         self.words.get(take).is_some_and(|words| {
             let i = words.partition_point(|w| w.from() < from);
             words.get(i).is_some_and(|w| w.from() < to)
@@ -1275,6 +1275,43 @@ mod tests {
         let alone = said("t01", 0, &format!("{retake} {remark}"));
         let lineup = Lineup::new(&script, &Cut::default(), &[with(&alone, None)]);
         assert_eq!(proposals(&lineup)[1], [("t01".into(), 0, 103)]);
+    }
+
+    #[test]
+    fn a_remark_between_two_retaken_beats_does_not_play() {
+        let script = Script::parse(
+            "# A\n\n## Setup\n\n- Create the project with cargo\n- Add the clap crate to parse arguments\n",
+        )
+        .unwrap();
+        let first = said(
+            "t01",
+            0,
+            "First we create the project with cargo. \
+             Then we add the clap crate to parse arguments.",
+        );
+        let second = said(
+            "t02",
+            0,
+            "First we create the project with cargo. \
+             Okay, I think that went much better, moving along. \
+             Then we add the clap crate to parse arguments.",
+        );
+        let cut = composed(
+            &script,
+            &[(&first, None, "Take t01"), (&second, None, "Take t02")],
+        );
+        // The newer attempt wins both beats, and the remark between them is in neither.
+        let blocks: Vec<&str> = cut.chapters[0]
+            .takes
+            .iter()
+            .map(|edit| edit.take.as_str())
+            .collect();
+        assert_eq!(blocks, ["t02", "t02"]);
+        assert_eq!(
+            spoken(&cut, &[&first, &second]),
+            "First we create the project with cargo. \
+             Then we add the clap crate to parse arguments."
+        );
     }
 
     #[test]
