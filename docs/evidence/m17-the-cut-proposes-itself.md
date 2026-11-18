@@ -185,6 +185,13 @@ Two reviews of `23ae799` scored it 8.7 and 9.2. Their four must-fix faults and o
 - Deleting a retake's closing remark left a chapter "Take t04" of 220 ms. The remark was compared with the first take of the row before it only. A marked row now stays in the chapter of the row before it when its take said that row at all (`takes::tests::without_beats_a_retakes_closing_remark_stays_in_the_chapter_it_retook`, which deletes the remark and composes again).
 - A retake of chapter two that starts with a remark made that remark a chapter "Take t04" between the two. What a retake says before a row leads into that row's chapter anywhere in the video (`takes::tests::without_beats_a_retakes_opening_remark_leads_into_the_chapter_it_retakes`).
 
+## Fixes after the tenth review
+
+Two reviews of `28195ea` scored it 9.1 and 9.3 and named the same two must-fix faults. Both are fixed on `m17/integration`, checked 2026-11-18 with fmt, workspace clippy, `cargo test --workspace --no-fail-fast` (673 passed, 1 failed in both of two runs: the timing test of `shot-editor` named under "Not verified") and the three ignored fixture tests of `shot-cli --test takes` and `shot-analyze --test findings`. Each new test failed before its fix.
+
+- With a script, a remark between two beats a take retakes played: "First we create the project with cargo. Okay, I think that went much better, moving along. Then we add the clap crate to parse arguments." The alignment ended the first attempt before the remark, but composing joined the two pieces into one block, because it only checked that no attempt lay between them. It joins two pieces of a take only when the take says no word between them (`takes::tests::a_remark_between_two_retaken_beats_does_not_play`).
+- A prompter retake kept its lead-in: "Alright, here goes attempt number two. Finally we run the binary with a flag.", and a pickup with its beat marked at the take's zero, "Okay once more. Create the channel folder. Okay we are done." Only the last beat a prompter take showed was trimmed, and only at its end. Every prompter attempt at a beat an earlier take already has now runs from its first to its last sentence that shares a word with the beat, and one with no such sentence stays whole (`takes::tests::a_prompter_retake_of_a_beat_plays_without_its_lead_in`).
+
 ## Not verified
 
 - Recording through the app with the prompter: the takes came in through `shot ingest`. The app's append and its second compose after analysis are covered by `folder::tests::a_retake_of_a_beat_plays_in_place_of_the_earlier_attempt` and by reading, not by a recording.
@@ -201,6 +208,8 @@ Two reviews of `23ae799` scored it 8.7 and 9.2. Their four must-fix faults and o
 - Of the fixes after the seventh review, by unit tests and reading only: C on a "said twice?" row and the item an answer goes on to in the running app, since `answer_look` runs in the window and the control socket cannot seek. No fixture has an unscripted retake with a new opening or ending.
 - Of the fixes after the eighth review, by unit tests and reading only: the inspector's new line and the chip on a remark in the running app. No fixture has an unscripted retake with a remark, and the control socket cannot seek.
 - Of the fixes after the ninth review, by unit tests only: the five cases in the running app and through `shot ingest`. No fixture clip has a remark after a retake, with or without a script, and no prompter take was recorded.
+- Of the fixes after the tenth review, by unit tests only: the two cases in the running app and through `shot ingest`. No fixture clip has a remark between two retaken beats, and no prompter take was recorded.
+- `source::tests::an_edit_resegments_a_ten_thousand_word_script_far_below_one_frame` of `shot-editor` failed in both workspace runs after the tenth review (worst edit 47 ms and 10 ms against a limit of 8 ms) and in two of five runs alone. It is a timing test of a debug build in a crate this work did not touch, and other builds ran on the machine.
 - `metrics::tests::the_watchdog_names_where_a_stalled_thread_waits_or_runs` failed in one of five runs, also alone, and again after the ninth review in one of two workspace runs and one of six runs alone. It is a timing test in a file this work did not touch.
 
 ## Left open
