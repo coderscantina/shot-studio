@@ -252,7 +252,7 @@ pub fn apply(
             let transcript = transcripts
                 .get(&take)
                 .ok_or_else(|| format!("take {take} has no transcript"))?;
-            cut.delete_words(change.at, transcript, change.range)
+            cut.delete_words(change.at, transcript, change.range, &Lock::default())
         } else {
             cut.restore(change.at, change.range, &Lock::default())
         }
@@ -1055,7 +1055,7 @@ mod tests {
     /// The proposal: cut "scroll", bring back the second "let me".
     fn head(base: &Cut, t: &HashMap<Id, Transcript>) -> Cut {
         let t01 = &t[&Id::new("t01").unwrap()];
-        base.delete_words(at(), t01, span(4_000_000, 4_800_000))
+        base.delete_words(at(), t01, span(4_000_000, 4_800_000), &Lock::default())
             .unwrap()
             .restore(at(), span(2_000_000, 3_800_000), &Lock::default())
             .unwrap()
@@ -1099,10 +1099,10 @@ mod tests {
 
         let t01 = &t[&Id::new("t01").unwrap()];
         let edited = base
-            .delete_words(at(), t01, span(7_000_000, 7_800_000))
+            .delete_words(at(), t01, span(7_000_000, 7_800_000), &Lock::default())
             .unwrap();
         let expected = head
-            .delete_words(at(), t01, span(7_000_000, 7_800_000))
+            .delete_words(at(), t01, span(7_000_000, 7_800_000), &Lock::default())
             .unwrap();
         assert_eq!(proposal.applied_to(&edited, &t).unwrap(), expected);
     }

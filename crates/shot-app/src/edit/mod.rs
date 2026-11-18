@@ -731,7 +731,8 @@ impl EditScreen {
             return;
         };
         let caret = model::caret_after_cut(&self.doc, at, selection.words(), forward);
-        if !self.edit(cx, |cut| cut.delete_words(at, &transcript, range)) {
+        let lock = self.folder.read(cx).lock().clone();
+        if !self.edit(cx, |cut| cut.delete_words(at, &transcript, range, &lock)) {
             return;
         }
         // The caret moves to the next word to cut, so the next cut needs no mouse. The rebuild

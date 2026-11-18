@@ -286,7 +286,7 @@ pub fn apply(
         let range = TimeRange::new(first.range.from(), last.range.to())
             .expect("words are ordered and not empty");
         cut = if removes {
-            cut.delete_words(at, transcript, range)
+            cut.delete_words(at, transcript, range, lock)
         } else {
             cut.restore(at, range, lock)
         }
@@ -363,6 +363,7 @@ mod tests {
                 },
                 &transcripts()[&Id::new("t01").unwrap()],
                 TimeRange::new(Micros(0), Micros(500_000)).unwrap(),
+                &lock,
             )
             .unwrap();
         let text = render(&removed, &lock, &transcripts());

@@ -446,7 +446,7 @@ fn deleting_words_changes_only_the_hashes_of_its_chapter() {
     let selection = TimeRange::new(Micros(12_000_000), Micros(12_100_000)).unwrap();
     project.cut = project
         .cut
-        .delete_words(at, &transcript, selection)
+        .delete_words(at, &transcript, selection, &Lock::default())
         .unwrap();
     let after = evaluate(&project);
 

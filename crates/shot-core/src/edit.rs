@@ -204,12 +204,14 @@ impl Cut {
     }
 
     /// Removes the media of the words that overlap `selection` as `remove ... by=manual`, with
-    /// one of the pauses around them, see [`word_cut`]. No word is half cut.
+    /// one of the pauses around them, see [`word_cut`]. No word is half cut. A cut of the
+    /// `lock` that lies in that pause stays the rules' own: the removal stops at it.
     pub fn delete_words(
         &self,
         at: TakeAt,
         transcript: &Transcript,
         selection: TimeRange,
+        lock: &Lock,
     ) -> Result<Cut, EditError> {
         let edit = self.take(at)?;
         if transcript.take() != &edit.take {
@@ -233,6 +235,17 @@ impl Cut {
             words[last].range,
             words.get(last + 1).map(|w| w.range),
         );
+        let (start, end) = (words[first].range.from(), words[last].range.to());
+        let (mut from, mut to) = (span.from(), span.to());
+        for cut in lock.take(&edit.take).into_iter().flat_map(|t| t.cuts()) {
+            if cut.from() < start && cut.to() > from {
+                from = cut.to().min(start);
+            }
+            if cut.to() > end && cut.from() < to {
+                to = cut.from().max(end);
+            }
+        }
+        let span = TimeRange::new(from, to).expect("a cut holds its words");
         Ok(self.with_take(at, |edit| {
             replace_in_ranges(edit, span, |piece| RangeEdit::Remove(piece.range()));
         }))
@@ -1148,7 +1161,12 @@ mod tests {
         );
 
         let manual = cut
-            .delete_words(AT, &transcript(), range(3_300_000, 3_400_000))
+            .delete_words(
+                AT,
+                &transcript(),
+                range(3_300_000, 3_400_000),
+                &Lock::default(),
+            )
             .unwrap();
         let restored = manual.restore(AT, range(0, 5_000_000), &lock).unwrap();
         assert_eq!(ranges(&restored), [keep(0, 10_000_000)]);
@@ -1180,7 +1198,12 @@ mod tests {
         // Words 2 and 3 are 2.2 s to 3.2 s and 3.3 s to 4.3 s. The cut starts half the gap
         // before word 2 and ends half the gap before word 4, taking the pause after word 3.
         let after = c
-            .delete_words(AT, &transcript(), range(2_500_000, 3_500_000))
+            .delete_words(
+                AT,
+                &transcript(),
+                range(2_500_000, 3_500_000),
+                &Lock::default(),
+            )
             .unwrap();
         assert_eq!(
             ranges(&after),
@@ -1195,13 +1218,20 @@ mod tests {
     #[test]
     fn delete_at_the_edges_leaves_one_keep() {
         let c = cut(vec![keep(0, 11_000_000)]);
-        let head = c.delete_words(AT, &transcript(), range(0, 100)).unwrap();
+        let head = c
+            .delete_words(AT, &transcript(), range(0, 100), &Lock::default())
+            .unwrap();
         assert_eq!(
             ranges(&head),
             [removed(0, 1_050_000), keep(1_050_000, 11_000_000)]
         );
         let tail = c
-            .delete_words(AT, &transcript(), range(10_000_000, 10_500_000))
+            .delete_words(
+                AT,
+                &transcript(),
+                range(10_000_000, 10_500_000),
+                &Lock::default(),
+            )
             .unwrap();
         assert_eq!(
             ranges(&tail),
@@ -1218,7 +1248,12 @@ mod tests {
         let c = cut(vec![keep(0, 11_000_000)]);
         // Starts inside word 1 (1.1 s to 2.1 s), ends in the gap after word 2.
         let after = c
-            .delete_words(AT, &transcript(), range(1_500_000, 3_250_000))
+            .delete_words(
+                AT,
+                &transcript(),
+                range(1_500_000, 3_250_000),
+                &Lock::default(),
+            )
             .unwrap();
         assert_eq!(
             ranges(&after),
@@ -1234,11 +1269,59 @@ mod tests {
     fn adjacent_removals_merge() {
         let c = cut(vec![removed(0, 1_100_000), keep(1_100_000, 11_000_000)]);
         let merged = c
-            .delete_words(AT, &transcript(), range(1_100_000, 2_000_000))
+            .delete_words(
+                AT,
+                &transcript(),
+                range(1_100_000, 2_000_000),
+                &Lock::default(),
+            )
             .unwrap();
         assert_eq!(
             ranges(&merged),
             [removed(0, 2_150_000), keep(2_150_000, 11_000_000)]
+        );
+    }
+
+    #[test]
+    fn delete_leaves_a_rules_cut_in_the_pause_it_takes() {
+        // A person cut "uh", a rule the silence after it. The longer pause follows "it", so
+        // its cut takes the pause before, up to the silence.
+        let mut spoken = Transcript::new(id());
+        for (text, from, to) in [
+            ("ship", 100_000, 600_000),
+            ("uh", 1_100_000, 1_400_000),
+            ("it", 2_100_000, 2_400_000),
+            ("now", 3_500_000, 3_900_000),
+        ] {
+            spoken
+                .push(Word {
+                    text: text.to_owned(),
+                    range: range(from, to),
+                    confidence: 90,
+                })
+                .unwrap();
+        }
+        let c = cut(vec![
+            keep(0, 1_000_000),
+            removed(1_000_000, 1_500_000),
+            keep(1_500_000, 4_000_000),
+        ]);
+        let lock = Lock::parse(
+            "lock 1\n\ntake t01 {\n    cut from=1_500_000 to=2_000_000 on=silence t=1_500_000 layer=format rule=\"silence\"\n}\n",
+        )
+        .unwrap();
+        let after = c
+            .delete_words(AT, &spoken, range(2_100_000, 2_400_000), &lock)
+            .unwrap();
+        assert_eq!(
+            ranges(&after),
+            [
+                keep(0, 1_000_000),
+                removed(1_000_000, 1_500_000),
+                keep(1_500_000, 2_000_000),
+                removed(2_000_000, 2_480_000),
+                keep(2_480_000, 4_000_000)
+            ]
         );
     }
 
@@ -1468,12 +1551,17 @@ mod tests {
             Err(EditError::UnknownTake(missing))
         );
         assert_eq!(
-            c.delete_words(AT, &transcript(), range(1_000_100, 1_000_200)),
+            c.delete_words(
+                AT,
+                &transcript(),
+                range(1_000_100, 1_000_200),
+                &Lock::default()
+            ),
             Err(EditError::NoWords)
         );
         let other = Transcript::new(Id::new("t02").unwrap());
         assert!(matches!(
-            c.delete_words(AT, &other, range(0, 1)),
+            c.delete_words(AT, &other, range(0, 1), &Lock::default()),
             Err(EditError::WrongTranscript { .. })
         ));
     }
