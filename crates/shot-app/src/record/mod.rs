@@ -1105,22 +1105,20 @@ pub(crate) fn analyze_later(folder: &Entity<VideoFolder>, take: &Id, cx: &mut Ap
         command.arg("--claude");
     }
     let folder = folder.clone();
+    let take = take.clone();
     cx.spawn(async move |cx| {
-        let analyzed = cx
-            .background_spawn(async move { command.status() })
-            .await
-            .is_ok_and(|s| s.success());
-        if analyzed {
-            folder.update(cx, |folder, cx| {
-                // A failed reload shows on the next edit; nothing waits on this one.
-                // The analysis knows the take's stumbles now, so its attempts score for real.
-                let _ = folder
-                    .load_transcripts()
-                    .and_then(|()| folder.rebuild_lock())
-                    .and_then(|()| folder.as_one_change(|folder| folder.propose(None)));
-                cx.notify();
-            });
-        }
+        // A failed analysis may still have written the take's transcript, so the cut is
+        // composed either way.
+        let _ = cx.background_spawn(async move { command.status() }).await;
+        folder.update(cx, |folder, cx| {
+            // A failed reload shows on the next edit; nothing waits on this one.
+            // The analysis knows the take's stumbles now, so its attempts score for real.
+            let _ = folder
+                .load_transcripts()
+                .and_then(|()| folder.rebuild_lock())
+                .and_then(|()| folder.propose_analyzed(&take));
+            cx.notify();
+        });
     })
     .detach();
 }
@@ -1156,6 +1154,9 @@ impl Render for RecordScreen {
         }
         if let Phase::Failed(error) = &phase {
             self.error.get_or_insert_with(|| error.clone());
+        }
+        if let Some(error) = &self.folder.read(cx).not_composed {
+            self.error.get_or_insert_with(|| error.clone().into());
         }
         let busy = busy_stage(&phase);
         self.follow_inputs(busy, cx);

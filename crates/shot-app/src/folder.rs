@@ -54,6 +54,9 @@ pub struct VideoFolder {
     batching: bool,
     /// Inside [`VideoFolder::writing`]: this folder holds the video's writer lock.
     writing: bool,
+    /// Why the cut could not be composed when [`VideoFolder::propose`] last tried, until the
+    /// cut is written again. The screens show it.
+    pub not_composed: Option<String>,
 }
 
 /// A take's words and elements as its files hold them.
@@ -116,10 +119,34 @@ impl VideoFolder {
             undone: Vec::new(),
             batching: false,
             writing: false,
+            not_composed: None,
         };
         folder.load_transcripts()?;
         folder.rebuild_lock()?;
+        if folder.analyzed_since_cut() {
+            folder.propose(None)?;
+        }
         Ok(folder)
+    }
+
+    /// Whether a take the cut plays was analyzed after `cut.kdl` was last written, as when the
+    /// app quit while the analysis ran: its attempts are not composed yet. Never for a video
+    /// that shipped.
+    fn analyzed_since_cut(&self) -> bool {
+        let written = |path: PathBuf| fs::metadata(path).and_then(|m| m.modified()).ok();
+        let Some(cut) = written(self.dir.join("cut.kdl")) else {
+            return false;
+        };
+        self.project.video.status != shot_core::Status::Shipped
+            && self.plays().any(|take| {
+                written(self.dir.join(format!("elements/{take}.jsonl"))).is_some_and(|t| t > cut)
+            })
+    }
+
+    /// The take of every block of the cut.
+    fn plays(&self) -> impl Iterator<Item = &Id> {
+        let blocks = self.project.cut.chapters.iter().flat_map(|c| &c.takes);
+        blocks.map(|edit| &edit.take)
     }
 
     /// The video's lock as last built.
@@ -309,6 +336,7 @@ impl VideoFolder {
     fn store(&mut self, cut: Cut) -> Result<(), String> {
         write(&self.dir.join("cut.kdl"), &cut.to_kdl())?;
         self.project.cut = cut;
+        self.not_composed = None;
         self.load_transcripts()?;
         self.rebuild_lock()
     }
@@ -459,16 +487,32 @@ impl VideoFolder {
     /// Composes the cut from the takes as they line up now ([`Cut::compose`]): the best
     /// scored attempt plays each beat unless a person chose or edited there. `new` is a take
     /// just appended whole. A cut that cannot be composed, because a Short uses a take that
-    /// would leave, stays as it is. Returns whether the cut changed.
+    /// would leave, stays as it is, and [`VideoFolder::not_composed`] says why. Returns whether
+    /// the cut changed.
     pub fn propose(&mut self, new: Option<&Id>) -> Result<bool, String> {
-        let Ok(cut) = self.project.cut.compose(&self.lineup(), new) else {
-            return Ok(false);
+        let cut = match self.project.cut.compose(&self.lineup(), new) {
+            Ok(cut) => cut,
+            Err(error) => {
+                self.not_composed = Some(format!("The cut was not composed: {error}"));
+                return Ok(false);
+            }
         };
+        self.not_composed = None;
         if cut == self.project.cut {
             return Ok(false);
         }
         self.write_cut(cut)?;
         Ok(true)
+    }
+
+    /// Composes the cut when the analysis of `take` landed, see [`VideoFolder::propose`], as a
+    /// change of its own. A take the cut no longer plays is left out: its recording was undone
+    /// while the analysis ran, and composing would bring it back from its media.
+    pub fn propose_analyzed(&mut self, take: &Id) -> Result<bool, String> {
+        if !self.plays().any(|played| played == take) {
+            return Ok(false);
+        }
+        self.as_one_change(|folder| folder.propose(None))
     }
 
     /// Takes `take` out of the video: out of the cut, its picks, overrides and Shorts, and
@@ -896,10 +940,27 @@ mod tests {
         assert!(checked >= 7, "checked {checked} videos");
     }
 
-    #[test]
-    fn a_retake_of_a_beat_plays_in_place_of_the_earlier_attempt() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = |name: &str, text: &str| fs::write(dir.path().join(name), text).unwrap();
+    /// Writes the transcript of `take`: a word of `text` each second.
+    fn heard(dir: &Path, take: &str, text: &str) {
+        let mut transcript = Transcript::new(Id::new(take).unwrap());
+        for (i, word) in text.split(' ').enumerate() {
+            let from = i as u64 * 1_000_000;
+            let range = TimeRange::new(Micros(from), Micros(from + 800_000)).unwrap();
+            transcript
+                .push(shot_core::Word {
+                    text: word.into(),
+                    range,
+                    confidence: 90,
+                })
+                .unwrap();
+        }
+        shot_analyze::cache::write_cached(dir, &transcript).unwrap();
+    }
+
+    /// A video with two beats and the transcripts of two takes: `t01` says both beats and is
+    /// in the cut, `t02` says the first again and waits to be appended.
+    fn retake(dir: &Path) {
+        let file = |name: &str, text: &str| fs::write(dir.join(name), text).unwrap();
         file(
             "video.kdl",
             "title \"A\"\nstatus recorded\nformat opinion\n",
@@ -916,23 +977,73 @@ mod tests {
             "cut.kdl",
             "chapter \"Take t01\" {\n    take t01 {\n        keep from=0 to=8_000_000\n    }\n}\n",
         );
-        let words = |take: &str, text: &str| {
-            let mut transcript = Transcript::new(Id::new(take).unwrap());
-            for (i, word) in text.split(' ').enumerate() {
-                let from = i as u64 * 1_000_000;
-                let range = TimeRange::new(Micros(from), Micros(from + 800_000)).unwrap();
-                transcript
-                    .push(shot_core::Word {
-                        text: word.into(),
-                        range,
-                        confidence: 90,
-                    })
-                    .unwrap();
-            }
-            shot_analyze::cache::write_cached(dir.path(), &transcript).unwrap();
-        };
-        words("t01", "Hello there world. Ship on fridays now.");
-        words("t02", "Hello there world.");
+        heard(dir, "t01", "Hello there world. Ship on fridays now.");
+        heard(dir, "t02", "Hello there world.");
+    }
+
+    fn blocks(folder: &VideoFolder) -> Vec<&str> {
+        let blocks = folder.project.cut.chapters.iter().flat_map(|c| &c.takes);
+        blocks.map(|edit| edit.take.as_str()).collect()
+    }
+
+    #[test]
+    fn an_undone_take_stays_out_when_its_analysis_lands() {
+        let dir = tempfile::tempdir().unwrap();
+        retake(dir.path());
+        let mut folder = VideoFolder::open(dir.path()).unwrap();
+        let take = Id::new("t02").unwrap();
+        folder.append_take(take.clone(), Micros(3_000_000)).unwrap();
+        assert!(folder.undo().unwrap());
+        assert!(!folder.propose_analyzed(&take).unwrap());
+        assert_eq!(blocks(&folder), ["t01"]);
+        // Redone, the take plays, and its analysis composes.
+        assert!(folder.redo().unwrap());
+        folder.propose_analyzed(&take).unwrap();
+        assert_eq!(blocks(&folder), ["t02", "t01"]);
+    }
+
+    #[test]
+    fn a_take_analyzed_after_the_cut_was_written_is_composed_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        retake(dir.path());
+        // The app quit while the take's analysis ran: the take is stacked as its own chapter.
+        let stacked = "chapter \"Take t01\" {\n    take t01 {\n        keep from=0 to=8_000_000\n    }\n}\n\nchapter \"Take t02\" {\n    take t02 {\n        keep from=0 to=3_000_000\n    }\n}\n";
+        fs::write(dir.path().join("cut.kdl"), stacked).unwrap();
+        assert_eq!(
+            blocks(&VideoFolder::open(dir.path()).unwrap()),
+            ["t01", "t02"]
+        );
+        fs::create_dir_all(dir.path().join("elements")).unwrap();
+        let elements = fs::File::create(dir.path().join("elements/t02.jsonl")).unwrap();
+        let later = SystemTime::now() + std::time::Duration::from_secs(60);
+        elements.set_modified(later).unwrap();
+        assert_eq!(
+            blocks(&VideoFolder::open(dir.path()).unwrap()),
+            ["t02", "t01"]
+        );
+    }
+
+    #[test]
+    fn a_cut_a_short_keeps_from_composing_says_why() {
+        let dir = tempfile::tempdir().unwrap();
+        retake(dir.path());
+        // The first take says only the beat the second says again, so it would leave the cut.
+        heard(dir.path(), "t01", "Hello there world.");
+        let cut = "chapter \"Take t01\" {\n    take t01 {\n        keep from=0 to=3_000_000\n    }\n}\n\nshort hello {\n    clip t01 from=0 to=3_000_000\n}\n";
+        fs::write(dir.path().join("cut.kdl"), cut).unwrap();
+        let mut folder = VideoFolder::open(dir.path()).unwrap();
+        folder
+            .append_take(Id::new("t02").unwrap(), Micros(3_000_000))
+            .unwrap();
+        assert_eq!(blocks(&folder), ["t01", "t02"], "the take is in, stacked");
+        let why = folder.not_composed.clone().unwrap();
+        assert!(why.contains("`hello` uses take t01"), "{why}");
+    }
+
+    #[test]
+    fn a_retake_of_a_beat_plays_in_place_of_the_earlier_attempt() {
+        let dir = tempfile::tempdir().unwrap();
+        retake(dir.path());
         let mut folder = VideoFolder::open(dir.path()).unwrap();
         let replaced = folder
             .append_take(Id::new("t02").unwrap(), Micros(3_000_000))

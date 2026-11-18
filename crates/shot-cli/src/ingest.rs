@@ -82,7 +82,13 @@ pub fn run(args: IngestArgs) -> Result<(), String> {
 /// scored attempt plays each beat unless a person chose or edited there.
 fn compose(video: &Path, take: &shot_core::Id) -> Result<(), String> {
     let (_lock, opened) = crate::open(video)?;
-    let cut = shot_mcp::takes::compose(video, &opened.project, Some(take))?;
+    let cut = match shot_mcp::takes::compose(video, &opened.project, Some(take)) {
+        Ok(cut) => cut,
+        Err(error) => {
+            eprintln!("the cut was not composed, {take} stays a chapter of its own: {error}");
+            return Ok(());
+        }
+    };
     if cut == opened.project.cut {
         return Ok(());
     }

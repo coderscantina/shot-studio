@@ -1020,6 +1020,9 @@ impl Render for EditScreen {
         if let Some(error) = self.sound.error() {
             self.error.get_or_insert(format!("no sound: {error}"));
         }
+        if let Some(error) = &self.folder.read(cx).not_composed {
+            self.error.get_or_insert_with(|| error.clone());
+        }
         self.advance();
         if self.playing || self.seeking {
             window.request_animation_frame();

@@ -7,7 +7,7 @@
 use std::ops::Range;
 
 use gpui::{App, Context, Div, FontWeight, Stateful, Window, div, prelude::*, px};
-use shot_core::{Decision, ElementKind, Lineup, Look, Row, RowAt, TakeAt, TimeRange};
+use shot_core::{Decision, EditError, ElementKind, Lineup, Look, Row, RowAt, TakeAt, TimeRange};
 
 use super::timeline::Pick;
 use super::{
@@ -273,9 +273,10 @@ impl EditScreen {
         let Some(look) = self.look_here() else {
             return;
         };
-        // The lineup is lent to the edit and rebuilt after it.
-        let lineup = &std::mem::take(&mut self.looks.lineup);
+        // The lineup is lent to the edit and comes back, for the rebuild to replace.
+        let lineup = std::mem::take(&mut self.looks.lineup);
         let wrote = self.edit(cx, |cut| {
+            let lineup = &lineup;
             Ok(match look {
                 Look::Unsure { at, review } => {
                     let take = &cut.chapters[at.chapter].takes[at.take].take;
@@ -291,6 +292,7 @@ impl EditScreen {
                 },
             })
         });
+        self.looks.lineup = lineup;
         if wrote {
             self.looks.current = None;
             self.lanes.picked = None;
@@ -312,8 +314,7 @@ impl EditScreen {
         let Some(beat) = self.looks.beat_playing(self.playhead).cloned() else {
             return;
         };
-        let lineup = &std::mem::take(&mut self.looks.lineup);
-        let Some(row) = lineup.row(beat.row) else {
+        let Some(row) = self.looks.row(beat.row) else {
             return;
         };
         let next = beat
@@ -321,10 +322,17 @@ impl EditScreen {
             .last()
             .map_or(0, |last| (last + 1) % row.attempts.len());
         let attempt = row.attempts[next].clone();
+        // The lineup is lent to the edit and comes back: a refused switch, as when a Short
+        // uses the take that would leave, changes nothing.
+        let lineup = std::mem::take(&mut self.looks.lineup);
         let wrote = self.edit(cx, |cut| {
+            let row = lineup
+                .row(beat.row)
+                .ok_or(EditError::UnknownRow(beat.row))?;
             cut.set_pick(row, std::slice::from_ref(&attempt))
-                .compose(lineup, None)
+                .compose(&lineup, None)
         });
+        self.looks.lineup = lineup;
         if wrote {
             self.selection = None;
             self.lanes.picked = None;
