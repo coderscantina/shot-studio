@@ -444,6 +444,18 @@ impl EditMap {
             .map(move |s| s.output_frame + (frame - s.source_frames.start))
     }
 
+    /// Where a playhead on `time` of the block at `at` goes when an edit changes the media under
+    /// it: the block's next kept media, or the last kept frame when the block ends in the cut.
+    pub fn kept_frame(&self, at: TakeAt, time: Micros) -> Option<u64> {
+        self.output_frame_from(at, time).or_else(|| {
+            self.spans
+                .iter()
+                .filter(|s| s.at == at)
+                .map(|s| s.output_frames().end.saturating_sub(1))
+                .max()
+        })
+    }
+
     /// The block and media time output frame `frame` shows.
     pub fn source_at(&self, frame: u64) -> Option<(TakeAt, Micros)> {
         self.span_at(frame)
@@ -931,6 +943,20 @@ pub fn shown_word_at(doc: &[BlockDoc], frame: u64) -> Option<(TakeAt, usize)> {
         .map(|(_, at, index)| (at, index))
 }
 
+/// Whether the block at `at` holds the same take in both documents.
+pub fn same_take(before: &[BlockDoc], doc: &[BlockDoc], at: TakeAt) -> bool {
+    let take = |doc: &'_ [BlockDoc]| doc.iter().find(|b| b.at == at).map(|b| b.take.clone());
+    take(before).is_some_and(|t| take(doc) == Some(t))
+}
+
+/// Whether the block at `at` still shows a cut run over exactly `range`.
+pub fn has_run(doc: &[BlockDoc], at: TakeAt, range: TimeRange) -> bool {
+    doc.iter()
+        .filter(|b| b.at == at)
+        .flat_map(|b| b.paragraphs.iter().flat_map(|p| &p.items))
+        .any(|item| matches!(item, Item::Cut(run) if run.range == range))
+}
+
 /// Selected words of one take block, from the word the selection started at to the word it
 /// extends to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -951,6 +977,20 @@ impl Selection {
 
     pub fn words(&self) -> RangeInclusive<usize> {
         self.anchor.min(self.head)..=self.anchor.max(self.head)
+    }
+
+    /// Whether the selection's head still shows in `block`: as a word, or as a removed word of
+    /// a cut run that is `opened`.
+    pub fn shows_in(&self, block: &BlockDoc, opened: impl Fn(&CutRun) -> bool) -> bool {
+        *self.words().end() < block.words.len()
+            && block
+                .paragraphs
+                .iter()
+                .flat_map(|p| &p.items)
+                .any(|item| match item {
+                    Item::Word(index) => *index == self.head,
+                    Item::Cut(run) => run.words.contains(&self.head) && opened(run),
+                })
     }
 
     /// Media time from the start of the first selected word to the end of the last.
@@ -1539,6 +1579,30 @@ mod tests {
     }
 
     #[test]
+    fn a_selection_stands_only_on_words_that_still_show() {
+        let ranges = vec![
+            keep(0, 1_000_000),
+            remove(1_000_000, 2_000_000),
+            keep(2_000_000, 4_000_000),
+        ];
+        let (_, doc) = one_block(ranges, &Lock::default(), &SPOKEN);
+        assert!(Selection::word(AT, 0).shows_in(&doc[0], |_| false));
+        // "uh" is cut: it shows only while its chip is open.
+        assert!(!Selection::word(AT, 1).shows_in(&doc[0], |_| false));
+        assert!(Selection::word(AT, 1).shows_in(&doc[0], |_| true));
+        assert!(!Selection::word(AT, 9).shows_in(&doc[0], |_| true));
+
+        assert!(has_run(&doc, AT, range(1_000_000, 2_000_000)));
+        assert!(!has_run(&doc, AT, range(1_000_000, 1_900_000)));
+
+        // Another take at the same place is not the block the person picked from.
+        let mut swapped = doc.clone();
+        swapped[0].take = id("t02");
+        assert!(same_take(&doc, &doc, AT));
+        assert!(!same_take(&doc, &swapped, AT));
+    }
+
+    #[test]
     fn the_caret_stays_in_the_chapter_after_a_cut() {
         let cut = Cut {
             chapters: vec![
@@ -1580,6 +1644,17 @@ mod tests {
         // A chapter's only word leaves no caret, rather than one in another chapter.
         assert_eq!(caret_after_cut(&doc, b, 0..=0, true), None);
         assert_eq!(caret_after_cut(&doc, b, 0..=0, false), None);
+    }
+
+    #[test]
+    fn a_playhead_on_media_cut_at_the_end_of_a_block_stays_in_the_block() {
+        let map = EditMap::of(&project(two_chapters()), &Lock::default(), View::Edited);
+        // Inside the block it goes on to the next kept media.
+        assert_eq!(map.kept_frame(AT, Micros(1_200_000)), Some(60));
+        // Past the block's last kept media it stays on that media's last frame, in chapter A.
+        let last = map.kept_frame(AT, Micros(2_500_000)).unwrap();
+        assert_eq!(last, map.chapters[0].frames.end - 1);
+        assert_eq!(map.chapter_at(last), Some(0));
     }
 
     #[test]

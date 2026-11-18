@@ -321,20 +321,23 @@ impl EditScreen {
                 EditMap::of(project, lock, self.view)
             }
         };
-        self.doc = document(
-            &project.cut,
-            lock,
-            &folder.transcripts,
-            &self.map,
-            self.view,
-            project.format.default_layout,
+        let before = std::mem::replace(
+            &mut self.doc,
+            document(
+                &project.cut,
+                lock,
+                &folder.transcripts,
+                &self.map,
+                self.view,
+                project.format.default_layout,
+            ),
         );
         self.chapter = self
             .chapter
             .min(project.cut.chapters.len().saturating_sub(1));
-        // Media an edit cut under the playhead hands it on to the next kept media of its block.
+        // Media an edit cut under the playhead hands it on to the kept media of its block.
         let frame = keep
-            .and_then(|(at, time)| self.map.output_frame_from(at, time))
+            .and_then(|(at, time)| self.map.kept_frame(at, time))
             .unwrap_or(self.playhead)
             .min(self.map.frames.saturating_sub(1));
         self.playhead = frame;
@@ -375,10 +378,19 @@ impl EditScreen {
                 self.lanes.picked = None;
             }
         }
+        if let Some(timeline::Pick::Cut(at, range)) = self.lanes.picked
+            && !(model::same_take(&before, &self.doc, at) && model::has_run(&self.doc, at, range))
+        {
+            self.lanes.picked = None;
+        }
         if let Some(selection) = self.selection {
-            let valid = self
-                .block(selection.at)
-                .is_some_and(|b| *selection.words().end() < b.words.len());
+            let at = selection.at;
+            let opened =
+                |run: &model::CutRun| self.expanded.contains(&run_key(at, run.range.from()));
+            let valid = model::same_take(&before, &self.doc, at)
+                && self
+                    .block(at)
+                    .is_some_and(|b| selection.shows_in(b, opened));
             if !valid {
                 self.selection = None;
             }
