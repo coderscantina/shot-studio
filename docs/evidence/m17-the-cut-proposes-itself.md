@@ -106,6 +106,20 @@ Three reviews of `5a3ec49` scored it 9.0, 8.5 and 8.5 and found 13 faults. All a
 
 Seen in the debug app on the three ingested takes, at 1600x1000: `m17/review2-beat-attempts.png` shows "Clap gives us help text" after N with its three attempts, the third lit, and no card under them, and `m17/review2-no-beat.png` the card back on the intro.
 
+## Fixes after the third review
+
+Three reviews of `610d33c` scored it 9.0, 8.8 and 9.0 and found nine faults. All are fixed on `m17/integration`, checked 2026-11-18 with fmt, workspace clippy, `cargo test --workspace --no-fail-fast` (647 passed) and the three ignored fixture tests of `shot-cli --test takes` and `shot-analyze --test findings`.
+
+- Privacy: placing, moving or lengthening an overlay goes through one core function, `Cut::spread_overlay`, which the app, the overlay editor, `shot overlays`, `shot code-diff` and the MCP server all reach. With `t01` playing 0 to 4 s and 8 to 12 s around another take, a blur lengthened from 3 s to 11 s is in both blocks and waits in the `takes` block for the media between them; moved to 9 s the first block loses its copy (`edit::tests::a_blur_placed_or_lengthened_after_a_splice_covers_every_block_it_overlaps`). `shot overlays bleep|blur` and the b-roll file of a slot went past the core before and go through it now.
+- Redo of a recording composes as a step of its own and keeps the steps still to redo, less the one that composed the same cut, so a word cut made after the recording comes back with the next redo (`folder::tests::redo_past_a_recording_keeps_the_edits_made_after_it`).
+- Removing a take on Record composes a video that has not shipped from the takes that stay, so the beat only the removed retake played goes back to the earlier attempt (`folder::tests::removing_a_retake_gives_its_beat_back_to_the_earlier_attempt`). In tests `trash` deletes instead of moving to the Trash.
+- The inspector, K and C share one target (`Looks::target`): the item N went to, then the beat that plays at the playhead while it is one to look at, then the first finding within a second. A finding near the playhead shows above the beat it is in, and the beat's K hint shows only while K answers the beat (`edit::looks::tests::the_inspector_and_k_answer_the_beat_before_a_restart_near_the_playhead`).
+- A composed cut is checked against the timeline before it is written: each clip of a Short that played with the old lock must play something in the composed cut with the lock that cut builds (`Cut::check_derived`, `shot_mcp::style::lock_with`, `shot_mcp::takes::keeps_shorts`). The app's compose, A, the takes view's pick, `shot ingest` and `shot derived remove` all check (`edit::tests::a_splice_that_leaves_a_short_only_a_restart_the_rules_cut_is_refused`, `folder::tests::a_composed_cut_that_leaves_a_short_only_what_the_rules_cut_is_refused`).
+- "The cut was not composed" lasts as long as the fault: only a successful compose clears it, a change of the cut while it shows composes again in the same step, undo and redo carry it with the files, and Record reads it from the folder as Edit does (`folder::tests::a_cut_a_short_keeps_from_composing_says_why`).
+- Without a script, a sentence a retake adds is a row right after the row said just before it, also between two paragraphs the retake says again, where it was the last row before (`takes::tests::without_beats_a_sentence_added_between_two_said_again_is_a_row_after_theirs`).
+- Ship stamps an export with the cut and the lock its run rendered and compares that with the video's now, so an export is stale when a rule change rebuilt `cut.lock` while it rendered, although the export file is the newer one (`ship::tests::an_export_rendered_from_an_older_lock_is_stale_though_the_file_is_newer`). The stamp lives in the Ship screen: after a relaunch the file times decide again.
+- The contract says what undo of a recording does once analysis has composed: the first undo reverts that compose, the second takes the take out.
+
 ## Not verified
 
 - Recording through the app with the prompter: the takes came in through `shot ingest`. The app's append and its second compose after analysis are covered by `folder::tests::a_retake_of_a_beat_plays_in_place_of_the_earlier_attempt` and by reading, not by a recording.
@@ -115,6 +129,7 @@ Seen in the debug app on the three ingested takes, at 1600x1000: `m17/review2-be
 - Release build and bench: not run.
 - Of the fixes after the review, by reading only: K and C leaving an item after a seek, the keys doing nothing outside Text, A's steps on a real splice (its order has a unit test), the error line for a cut that was not composed, composing after Transcribe in Edit, and Ship planning again. The control socket cannot seek or click, and no fixture retakes half a beat.
 - Of the fixes after the second review, by reading and unit tests only: A going back to the proposal after a word cut in the running app, the error line going away once the cut composes, the overlay editor changing an overlay's copies, and a ship run that has `cut.lock` written under it. The control socket cannot click or seek.
+- Of the fixes after the third review, by unit tests and reading only, since the control socket cannot click, seek or record: the inspector and K on a click near a restart in the running app, Record's live "not composed" line, redo past a real recording, Remove on Record with the real Trash, and Ship's stale notice after a rule change during a real export.
 - `metrics::tests::the_watchdog_names_where_a_stalled_thread_waits_or_runs` failed in one of five runs, also alone. It is a timing test in a file this work did not touch.
 
 ## Left open
