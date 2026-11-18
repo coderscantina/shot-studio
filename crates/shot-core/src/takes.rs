@@ -72,7 +72,8 @@ pub struct Row {
     /// older attempt over a newer one, or an attempt that leads by [`CLOSE`] points or less.
     /// Without beats also every row a retake adds, which may say a row in other words or be a
     /// remark that does not belong, and the rows it leaves unsaid there, since both play until
-    /// a person cuts one. So is one row a take left out between two rows it says again.
+    /// a person cuts one. So is one row a take left out between two rows it says again, and a
+    /// row with the row that says it with other numbers.
     pub look: bool,
 }
 
@@ -198,8 +199,10 @@ impl Lineup {
     /// marked. A retake may say in other words the rows it leaves unsaid where it put new
     /// ones: before the row it went before, up to the row said again next, or after the last.
     /// They are worth a look too ([`Row::look`]) when they are at most one for each new
-    /// sentence. So is one row any take skips between two it says again with nothing new. The
-    /// rows wait in one group for [`under_chapters`].
+    /// sentence. So is one row any take skips between two it says again with nothing new. A
+    /// sentence that says a row with other numbers, "12 seconds" as "9 seconds", is a new row
+    /// like any other, and it and that row are worth a look for any take. The rows wait in one
+    /// group for [`under_chapters`].
     fn add_unscripted(&mut self, transcript: &Transcript) {
         let take = transcript.take();
         let words = transcript.words();
@@ -219,10 +222,15 @@ impl Lineup {
         // How many rows the take put right after each row: its next ones go after those.
         let mut put_after = vec![0; places.len()];
         let sentences = sentences(words);
-        let said_again: Vec<Option<usize>> = sentences
+        // Per sentence the row it says again, or the row it says with other numbers.
+        let (said_again, renumbered): (Vec<Option<usize>>, Vec<Option<usize>>) = sentences
             .iter()
-            .map(|s| said_again(&words[s.clone()], &texts))
-            .collect();
+            .map(|s| match said_again(&words[s.clone()], &texts) {
+                Some((row, true)) => (Some(row), None),
+                Some((row, false)) => (None, Some(row)),
+                None => (None, None),
+            })
+            .unzip();
         // The rows of `rows` that the take says nowhere.
         let unsaid = |rows: Range<usize>| -> Vec<usize> {
             rows.filter(|row| !said_again.contains(&Some(*row)))
@@ -267,9 +275,18 @@ impl Lineup {
                     }
                     for group in groups(stretch) {
                         let at = self.new_row(group, index);
-                        self.groups[0].rows[at.row].look = retake;
                         for place in places.iter_mut().filter(|p| p.row >= at.row) {
                             place.row += 1;
+                        }
+                        // The rows this one says with other numbers: both play.
+                        let starts = |k: &usize| words[sentences[*k].start].range.from();
+                        let renumbers: Vec<usize> = (i..i + run)
+                            .filter(|k| holds(span(group), starts(k)))
+                            .filter_map(|k| renumbered[k])
+                            .collect();
+                        self.groups[0].rows[at.row].look = retake || !renumbers.is_empty();
+                        for row in renumbers {
+                            self.groups[0].rows[places[row].row].look = true;
                         }
                         if let Some(before) = before.filter(|_| index.is_some()) {
                             put_after[before] += 1;
@@ -724,17 +741,24 @@ fn alike(a: &HashSet<String>, b: &HashSet<String>) -> f64 {
 
 /// The row a sentence of `words` says again: the earliest of those with the sentence most
 /// like it ([`alike`]), at least [`SAME_SENTENCE`]. `rows` are each row's sentences. A new
-/// sentence that shares words with a long row is therefore no retake of it.
-fn said_again(words: &[Word], rows: &[Vec<HashSet<String>>]) -> Option<usize> {
+/// sentence that shares words with a long row is therefore no retake of it. With whether the
+/// two say the same numbers: a sentence with another number is not the same sentence, and
+/// one with the same numbers is found first.
+fn said_again(words: &[Word], rows: &[Vec<HashSet<String>>]) -> Option<(usize, bool)> {
     let said = content_set(words.iter().map(|w| w.text.as_str()));
+    let same_numbers = |s: &HashSet<String>| !s.symmetric_difference(&said).any(|w| is_number(w));
     rows.iter()
         .enumerate()
-        .filter_map(|(i, row)| {
-            let most = row.iter().map(|s| alike(s, &said)).max_by(f64::total_cmp)?;
-            (most >= SAME_SENTENCE).then_some((most, i))
-        })
-        .max_by(|a, b| a.0.total_cmp(&b.0).then(b.1.cmp(&a.1)))
-        .map(|(_, i)| i)
+        .flat_map(|(i, row)| row.iter().map(move |s| (i, s)))
+        .map(|(i, s)| (same_numbers(s), alike(s, &said), i))
+        .filter(|(_, alike, _)| *alike >= SAME_SENTENCE)
+        .max_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)).then(b.2.cmp(&a.2)))
+        .map(|(same, _, i)| (i, same))
+}
+
+/// Whether a content word is a number as the transcript writes it, in digits.
+fn is_number(word: &str) -> bool {
+    word.chars().all(char::is_numeric)
 }
 
 /// Shorter ids first, so `t9` comes before `t10`.
@@ -966,7 +990,7 @@ fn align(
 }
 
 /// Words that tell texts apart: lowercase letters and digits, three or more, without the most
-/// common English words and a plural `s`.
+/// common English words and a plural `s`, and numbers of any length.
 fn content_words(text: &str) -> Vec<String> {
     const COMMON: &[&str] = &[
         "the", "and", "you", "that", "this", "with", "for", "are", "was", "but", "not", "have",
@@ -976,7 +1000,8 @@ fn content_words(text: &str) -> Vec<String> {
     ];
     text.split(|c: char| !c.is_alphanumeric() && c != '\'')
         .map(|w| w.trim_matches('\'').to_lowercase())
-        .filter(|w| w.chars().count() >= 3 && !COMMON.contains(&w.as_str()))
+        .filter(|w| !w.is_empty() && is_number(w) || w.chars().count() >= 3)
+        .filter(|w| !COMMON.contains(&w.as_str()))
         .map(|w| match w.strip_suffix('s') {
             Some(stem) if stem.chars().count() >= 3 && !stem.ends_with('s') => stem.to_owned(),
             _ => w,
@@ -2110,6 +2135,34 @@ mod tests {
         // An acknowledgement is nothing a retake leaves out.
         assert_eq!(played("Okay."), (line.to_owned(), false));
         assert_eq!(played("Right."), (line.to_owned(), false));
+    }
+
+    #[test]
+    fn without_beats_a_sentence_with_another_number_is_no_repeat() {
+        let script = Script::parse("# A\n").unwrap();
+        let twelve = "The build took 12 seconds on my laptop.";
+        let nine = "The build took 9 seconds on my laptop.";
+        let cache = "The cache makes the second run faster.";
+        let played = |first: &str, second: &str| {
+            let (first, second) = (said("t01", 0, first), said("t02", 0, second));
+            let takes = [(&first, None, "Take t01"), (&second, None, "Take t02")];
+            let cut = composed(&script, &takes);
+            let lineup = Lineup::new(&script, &cut, &[with(&first, None), with(&second, None)]);
+            let looks: Vec<bool> = lineup.rows().map(|(_, row)| row.look).collect();
+            (spoken(&cut, &[&first, &second]), looks)
+        };
+        // A take that carries on: both numbers play, and both are worth a look.
+        assert_eq!(
+            played(twelve, nine),
+            (format!("{twelve} {nine}"), vec![true, true])
+        );
+        // A retake: the other number plays where it was said.
+        assert_eq!(
+            played(&format!("{twelve} {cache}"), &format!("{nine} {cache}")),
+            (format!("{twelve} {nine} {cache}"), vec![true, true, false])
+        );
+        // The same number again is a repeat, and the newer take plays.
+        assert_eq!(played(twelve, twelve), (twelve.to_owned(), vec![false]));
     }
 
     #[test]
