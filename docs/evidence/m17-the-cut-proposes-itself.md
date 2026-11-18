@@ -146,6 +146,14 @@ Three reviews of `98232bb` scored it 9.5, 9.2 and 9.0 and found eight faults. Al
 - A on a pick of the last attempt goes back to the proposal also when the proposal is one whole attempt, so a later take that scores better can win the beat again. A proposal that plays the last attempt goes on to the first (`edit::looks::tests::a_steps_through_the_whole_attempts_and_back_to_the_proposal`).
 - Ship compares the video's stamp with what it rendered before each publish call, also the second one after a sign-in that had expired.
 
+## Fixes after the sixth review
+
+Two reviews of `367990b` scored it 9.1 and 9.2 and named the same two faults and one small one. All three are fixed on `m17/integration`, checked 2026-11-18 with fmt, workspace clippy, `cargo test --workspace --no-fail-fast` (660 passed) and the three ignored fixture tests of `shot-cli --test takes` and `shot-analyze --test findings`.
+
+- The chapter fix of the fifth review missed the path a recording takes. Recording and `shot ingest` append the take as a chapter "Take t02" before composing, so a sentence the take added between two repeated ones counted as playing there and "Intro" became "Intro", "Take t02", "Intro". The chapter a take was appended as now places none of its rows: the row stays in the chapter of the rows around it, also when the first chapter still has its name "Take t01". The test appends through `Cut::append_take` and composes twice (`takes::tests::without_beats_an_appended_takes_own_chapter_places_none_of_its_rows`).
+- Without a script, a row a later take says in other words played next to that take's version with nothing marked, and Text showed 0 to look at. The rows a take skips between two rows it says again where it put new rows, and those new rows, are now worth a look, as is one row it skips with nothing new: a reworded sentence, three in a row, a throwaway sentence a clean retake left out, and a take that carries on between two stock lines. Both versions keep playing. Text shows such a row with a "said twice?" chip and counts it, K answers it and a cut in it does too (`takes::tests::without_beats_rows_a_take_skips_between_two_it_repeats_are_worth_a_look`).
+- N goes on by the item's place in the queue, and by the playhead only when no item is active, so a beat that starts at the frame of a cut restart is reached and going around does not land on the restart again. An answer goes on to the item that took the answered one's place (`edit::looks::tests::n_goes_on_to_a_second_item_at_the_same_frame`).
+
 ## Not verified
 
 - Recording through the app with the prompter: the takes came in through `shot ingest`. The app's append and its second compose after analysis are covered by `folder::tests::a_retake_of_a_beat_plays_in_place_of_the_earlier_attempt` and by reading, not by a recording.
@@ -158,6 +166,7 @@ Three reviews of `98232bb` scored it 9.5, 9.2 and 9.0 and found eight faults. Al
 - Of the fixes after the third review, by unit tests and reading only, since the control socket cannot click, seek or record: the inspector and K on a click near a restart in the running app, Record's live "not composed" line, redo past a real recording, Remove on Record with the real Trash, and Ship's stale notice after a rule change during a real export.
 - Of the fixes after the fourth review, by reading only, since the control socket cannot drag, click or ship: the drag in the running Timeline (its arithmetic has a unit test), the ship run stopping before a real upload, the chip click and Record's two lines.
 - Of the fixes after the fifth review, by unit tests and reading only, since the control socket cannot drag, click or ship: the drag over a cut in the running Timeline (the test gives `dragged_overlay` the ranges the lane maps, it does not run the map), the chip click and A in the running app, and Ship's check before the second publish, which has no test.
+- Of the fixes after the sixth review, by unit tests and reading only: the "said twice?" chip, the inspector's line for it and N across two items at one frame in the running app. No fixture has an unscripted retake that rewords a sentence, and the control socket cannot seek.
 - `metrics::tests::the_watchdog_names_where_a_stalled_thread_waits_or_runs` failed in one of five runs, also alone. It is a timing test in a file this work did not touch.
 
 ## Left open
