@@ -173,10 +173,10 @@ impl Lineup {
     }
 
     /// A take of a video without beats: each sentence that says a row again is an attempt at
-    /// it, and the rest are new rows, sentence groups: right after the row the take said just
-    /// before them, or after the rows there are when it said none before them, so a sentence
-    /// added in a retake is never lost and plays where it was said. The rows wait in one group
-    /// for [`under_chapters`].
+    /// it, and the rest are new rows, sentence groups: after the rows there are, so a take that
+    /// carries on is appended, or right after the row the take said just before them when it
+    /// then says that row or the next again, so a sentence added in a retake plays where it was
+    /// said. The rows wait in one group for [`under_chapters`].
     fn add_unscripted(&mut self, transcript: &Transcript) {
         let take = transcript.take();
         let words = transcript.words();
@@ -206,9 +206,12 @@ impl Lineup {
             match row {
                 Some(row) => self.push(places[row], take, span(stretch)),
                 None => {
-                    // New after a row the take said again: its place is after that row.
+                    // New between two sentences said again, of one row or of a row and the
+                    // next: its place is after the first. Anything else carries on, at the end.
                     let before = i.checked_sub(1).and_then(|b| said_again[b]);
-                    let mut index = before.map(|row| places[row].row + 1);
+                    let next = said_again.get(i + run).copied().flatten();
+                    let between = before.filter(|b| next.is_some_and(|n| n == *b || n == *b + 1));
+                    let mut index = between.map(|row| places[row].row + 1);
                     for group in groups(stretch) {
                         let at = self.new_row(group, index);
                         for place in places.iter_mut().filter(|p| p.row >= at.row) {
@@ -1456,6 +1459,39 @@ mod tests {
             ["Always encrypt them first.", "Caching comes last."]
         );
         assert_eq!(lineup.rows().nth(2).unwrap().1.attempts.len(), 2);
+    }
+
+    #[test]
+    fn without_beats_a_take_that_carries_on_is_appended_after_a_sentence_it_repeats() {
+        let script = Script::parse("# A\n").unwrap();
+        let first = said(
+            "t01",
+            0,
+            "Welcome to the channel. Let's look at the code. The parser reads every token. Thanks for watching today.",
+        );
+        let second = said(
+            "t02",
+            0,
+            "Now for the second part. Let's look at the code. The renderer draws every frame. See you next week.",
+        );
+        let lineup = Lineup::new(
+            &script,
+            &Cut::default(),
+            &[with(&first, None), with(&second, None)],
+        );
+        let rows: Vec<&str> = lineup.rows().map(|(_, r)| r.text.as_str()).collect();
+        assert_eq!(
+            rows,
+            [
+                "Welcome to the channel.",
+                "Let's look at the code.",
+                "The parser reads every token.",
+                "Thanks for watching today.",
+                "Now for the second part.",
+                "The renderer draws every frame.",
+                "See you next week.",
+            ]
+        );
     }
 
     #[test]
