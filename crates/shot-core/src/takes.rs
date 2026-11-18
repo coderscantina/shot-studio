@@ -65,6 +65,9 @@ pub struct Row {
     /// of equals, with each of its sentences that another attempt says cleaner, or as clean
     /// and later, taken from that attempt. Padded into the gaps, see [`Lineup::padded`].
     pub proposal: Vec<Attempt>,
+    /// Whether the proposal is worth a person's look: it plays more than one attempt, an
+    /// older attempt over a newer one, or an attempt that leads by [`CLOSE`] points or less.
+    pub look: bool,
 }
 
 /// A row by its group and its place in the group.
@@ -81,6 +84,8 @@ const GROUP_WORDS: usize = 40;
 const BACK: usize = 2;
 /// A piece reaches at most this far into the gap before and after its words.
 const JOIN_PAD: Micros = Micros(300_000);
+/// A lead of at most this many points is close.
+const CLOSE: u8 = 5;
 /// Sentences this alike ([`alike`]) say the same thing.
 const SAME_SENTENCE: f64 = 0.5;
 
@@ -237,14 +242,15 @@ impl Lineup {
                 .iter()
                 .map(|a| facts.get(&a.take).map_or(0, |f| f.score(a.range, &beat)))
                 .collect();
-            let pieces = proposal(&row.attempts, &scores, &facts);
+            let (pieces, look) = proposal(&row.attempts, &scores, &facts);
             let padded = self.joined(pieces);
-            proposals.push((at, scores, padded));
+            proposals.push((at, scores, padded, look));
         }
-        for (at, scores, proposal) in proposals {
+        for (at, scores, proposal, look) in proposals {
             let row = &mut self.groups[at.group].rows[at.row];
             row.scores = scores;
             row.proposal = proposal;
+            row.look = look;
         }
     }
 
@@ -277,23 +283,27 @@ impl Lineup {
     }
 
     /// `piece` reaching into the gaps around its words, so a join between takes keeps a short
-    /// pause and never clips a word's edge: half the gap to the take's word before and after,
-    /// at most [`JOIN_PAD`], and [`EDGE_PAD`] where the take has no word there.
+    /// pause and never clips a word's edge: from its first word to its last, then half the gap
+    /// to the take's word before and after, at most [`JOIN_PAD`], and [`EDGE_PAD`] where the
+    /// take has no word there. Padding a padded piece changes nothing.
     pub fn padded(&self, piece: &Attempt) -> Attempt {
         let Some(words) = self.words.get(&piece.take) else {
             return piece.clone();
         };
-        let range = piece.range;
-        let first = words.partition_point(|w| middle(*w) < range.from());
-        let last = words.partition_point(|w| middle(*w) < range.to());
+        let first = words.partition_point(|w| middle(*w) < piece.range.from());
+        let last = words.partition_point(|w| middle(*w) < piece.range.to());
+        if first >= last {
+            return piece.clone();
+        }
+        let (from, to) = (words[first].from().0, words[last - 1].to().0);
         let pad = |gap: u64| JOIN_PAD.0.min(gap / 2);
         let from = match first.checked_sub(1).map(|i| words[i].to()) {
-            Some(before) => range.from().0 - pad(range.from().0.saturating_sub(before.0)),
-            None => range.from().0.saturating_sub(EDGE_PAD.0),
+            Some(before) => from - pad(from.saturating_sub(before.0)),
+            None => from.saturating_sub(EDGE_PAD.0),
         };
         let to = match words.get(last).map(|w| w.from()) {
-            Some(after) => range.to().0 + pad(after.0.saturating_sub(range.to().0)),
-            None => range.to().0 + EDGE_PAD.0,
+            Some(after) => to + pad(after.0.saturating_sub(to)),
+            None => to + EDGE_PAD.0,
         };
         Attempt {
             take: piece.take.clone(),
@@ -353,6 +363,7 @@ impl Row {
             attempts: Vec::new(),
             scores: Vec::new(),
             proposal: Vec::new(),
+            look: false,
         }
     }
 }
@@ -463,11 +474,20 @@ struct Said {
 
 /// The pieces that play a row, see [`Row::proposal`]: the best scored attempt, the newest of
 /// equals, and for each of its sentences the cleanest saying of it among the attempts, the
-/// newest of equals. Unpadded.
-fn proposal(attempts: &[Attempt], scores: &[u8], facts: &BTreeMap<&Id, Facts<'_>>) -> Vec<Attempt> {
+/// newest of equals. Unpadded, with whether it is worth a look, see [`Row::look`].
+fn proposal(
+    attempts: &[Attempt],
+    scores: &[u8],
+    facts: &BTreeMap<&Id, Facts<'_>>,
+) -> (Vec<Attempt>, bool) {
     let Some(base) = (0..attempts.len()).max_by_key(|&i| (scores[i], i)) else {
-        return Vec::new();
+        return (Vec::new(), false);
     };
+    let lead = (0..attempts.len())
+        .filter(|&i| i != base)
+        .map(|i| scores[base] - scores[i])
+        .min();
+    let look = base + 1 < attempts.len() || lead.is_some_and(|lead| (1..=CLOSE).contains(&lead));
     let said = |i: usize| {
         facts
             .get(&attempts[i].take)
@@ -504,7 +524,7 @@ fn proposal(attempts: &[Attempt], scores: &[u8], facts: &BTreeMap<&Id, Facts<'_>
         })
     };
     if winners.iter().all(|&(_, by, _)| by == base) {
-        return vec![attempts[base].clone()];
+        return (vec![attempts[base].clone()], look);
     }
     let mut pieces = Vec::new();
     let mut cursor = attempts[base].range.from();
@@ -520,7 +540,7 @@ fn proposal(attempts: &[Attempt], scores: &[u8], facts: &BTreeMap<&Id, Facts<'_>
         cursor = slot.range.to();
     }
     pieces.extend(of_base(cursor, attempts[base].range.to()));
-    pieces
+    (pieces, true)
 }
 
 /// How alike two sets of content words are, 0 to 1: the share of all their words both have.

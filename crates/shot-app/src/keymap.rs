@@ -82,6 +82,10 @@ fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("l", edit::PickLayout, edit),
         KeyBinding::new("t", edit::EditSwitch, edit),
         KeyBinding::new("shift-l", edit::BuildLayout, edit),
+        KeyBinding::new("n", edit::NextLook, edit),
+        KeyBinding::new("k", edit::KeepLook, edit),
+        KeyBinding::new("c", edit::CutLook, edit),
+        KeyBinding::new("a", edit::NextAttempt, edit),
         // Edit screen, a focused knob
         KeyBinding::new("left", edit::zoom::StepDown, knob),
         KeyBinding::new("right", edit::zoom::StepUp, knob),

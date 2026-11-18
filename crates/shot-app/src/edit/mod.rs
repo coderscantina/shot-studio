@@ -8,6 +8,7 @@ mod camera;
 mod captions;
 mod lane_menu;
 pub(crate) mod library;
+mod looks;
 mod marks;
 mod music;
 mod overlays;
@@ -107,6 +108,10 @@ actions!(
         EditSwitch,
         BuildLayout,
         CopyText,
+        NextLook,
+        KeepLook,
+        CutLook,
+        NextAttempt,
     ]
 );
 
@@ -223,6 +228,8 @@ pub struct EditScreen {
     captions: captions::CaptionsState,
     /// The Text workspace's hovered and picked effect and its pickers.
     text: text::TextState,
+    /// The takes lined up, the beats with other attempts and what is worth a look.
+    looks: looks::Looks,
 }
 
 impl EditScreen {
@@ -292,6 +299,7 @@ impl EditScreen {
             run: None,
             captions: captions::CaptionsState::default(),
             text: text::TextState::default(),
+            looks: looks::Looks::default(),
         };
         this.rebuild(cx);
         this
@@ -383,6 +391,7 @@ impl EditScreen {
         for take in takes {
             self.load_peaks(take, cx);
         }
+        self.rebuild_looks(cx);
         self.reload_proposals(cx);
     }
 
@@ -556,6 +565,7 @@ impl EditScreen {
 
     fn select_word(&mut self, at: TakeAt, index: usize, extend: bool, cx: &mut Context<Self>) {
         self.proposal = None;
+        self.looks.current = None;
         self.lanes.picked = None;
         self.selection = match self.selection {
             Some(selection) if extend && selection.at == at => Some(Selection {
@@ -999,6 +1009,10 @@ impl Render for EditScreen {
             .on_action(cx.listener(Self::play_around))
             .on_action(cx.listener(Self::delete_selection))
             .on_action(cx.listener(Self::restore_selection))
+            .on_action(cx.listener(Self::next_look))
+            .on_action(cx.listener(Self::keep_look))
+            .on_action(cx.listener(Self::cut_look))
+            .on_action(cx.listener(Self::next_attempt))
             .on_action(cx.listener(|this, _: &ClearSelection, _, cx| {
                 if this.lanes.switch.take().is_none()
                     && !this.close_picker()

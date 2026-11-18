@@ -569,29 +569,63 @@ impl Cut {
     }
 }
 
+/// Something worth a person's look, see [`Cut::looks`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Look {
+    /// A finding the rules were not sure of. It plays until it is answered.
+    Unsure { at: TakeAt, review: Review },
+    /// A restart or a misspoken passage the rules cut.
+    Restart {
+        at: TakeAt,
+        kind: ElementKind,
+        t: Micros,
+        range: TimeRange,
+    },
+    /// A beat whose proposal may not be what the person wants.
+    Beat(RowAt),
+}
+
 /// Composing the main cut from the attempts of several takes, see [`Lineup`] and [0040].
 ///
 /// [0040]: ../../../docs/decisions/0040-the-cut-proposes-itself.md
 impl Cut {
-    /// A person's pick among the attempts of `row`: the one whose middle lies in an attempt.
-    pub fn picked(&self, row: &Row) -> Option<&Pick> {
-        self.picks.iter().find(|p| {
-            row.attempts
+    /// A person's picks among the attempts of `row`, those whose middle lies in an attempt, in
+    /// the order the cut plays them and then in canonical order. Mostly one: the attempt they
+    /// switched the beat to. Several when they kept a proposal that plays more than one.
+    pub fn picked(&self, row: &Row) -> Vec<&Pick> {
+        let mut picked: Vec<&Pick> = self
+            .picks
+            .iter()
+            .filter(|p| {
+                row.attempts
+                    .iter()
+                    .any(|a| a.take == p.take && holds(a.range, middle(p.range)))
+            })
+            .collect();
+        let place = |pick: &Pick| {
+            self.chapters
                 .iter()
-                .any(|a| a.take == p.take && holds(a.range, middle(p.range)))
-        })
+                .flat_map(|c| &c.takes)
+                .position(|edit| {
+                    edit.take == pick.take
+                        && edit.ranges.iter().any(|r| r.range().overlaps(pick.range))
+                })
+                .unwrap_or(usize::MAX)
+        };
+        picked.sort_by_key(|pick| place(pick));
+        picked
     }
 
-    /// Picks `chosen`, an attempt of `row` or a part of one, in place of the row's pick. `None`
-    /// takes the pick away, so the row's proposal plays again.
-    pub fn set_pick(&self, row: &Row, chosen: Option<&Attempt>) -> Cut {
+    /// Picks `chosen`, attempts of `row` or parts of them, in place of the row's picks. None
+    /// takes the picks away, so the row's proposal plays again.
+    pub fn set_pick(&self, row: &Row, chosen: &[Attempt]) -> Cut {
         let mut cut = self.clone();
         cut.picks.retain(|p| {
             !row.attempts
                 .iter()
                 .any(|a| a.take == p.take && a.range.overlaps(p.range))
         });
-        cut.picks.extend(chosen.map(|chosen| Pick {
+        cut.picks.extend(chosen.iter().map(|chosen| Pick {
             take: chosen.take.clone(),
             range: chosen.range,
         }));
@@ -616,27 +650,87 @@ impl Cut {
         Micros(kept)
     }
 
-    /// The pieces that play `row`, in order: a person's pick, else what the cut holds of a row
-    /// a person edited, else the row's proposal. A pick of nearly a whole attempt follows the
-    /// attempt when a new transcript moves its edges. `new` is a take that was just appended
-    /// whole: the cut holds all of it, and none of it by a person's choice.
+    /// The pieces that play `row`, in order: a person's picks, else what the cut holds of a
+    /// row a person edited, else the row's proposal. A pick of nearly a whole attempt follows
+    /// the attempt when a new transcript moves its edges. `new` is a take that was just
+    /// appended whole: the cut holds all of it, and none of it by a person's choice.
     pub fn plays(&self, lineup: &Lineup, row: &Row, new: Option<&Id>) -> Vec<Attempt> {
-        if let Some(pick) = self.picked(row) {
-            let whole = row.attempts.iter().find(|a| {
-                a.take == pick.take
-                    && pick
-                        .range
-                        .intersect(a.range)
-                        .is_some_and(|both| 10 * both.duration().0 >= 9 * a.range.duration().0)
-            });
-            let piece = whole.cloned().unwrap_or_else(|| Attempt {
-                take: pick.take.clone(),
-                range: pick.range,
-            });
-            return vec![lineup.padded(&piece)];
+        let picked = self.picked(row);
+        if picked.is_empty() {
+            return self
+                .held_by_hand(lineup, row, new)
+                .unwrap_or_else(|| row.proposal.clone());
         }
-        self.held_by_hand(lineup, row, new)
-            .unwrap_or_else(|| row.proposal.clone())
+        picked
+            .into_iter()
+            .map(|pick| {
+                let whole = row.attempts.iter().find(|a| {
+                    a.take == pick.take
+                        && pick
+                            .range
+                            .intersect(a.range)
+                            .is_some_and(|both| 10 * both.duration().0 >= 9 * a.range.duration().0)
+                });
+                let piece = whole.cloned().unwrap_or_else(|| Attempt {
+                    take: pick.take.clone(),
+                    range: pick.range,
+                });
+                lineup.padded(&piece)
+            })
+            .collect()
+    }
+
+    /// What a person may want to look at before the video ships, in no order: findings the
+    /// rules were not sure of, restarts and misspoken passages the rules cut and nobody
+    /// answered, and beats whose proposal is worth a look ([`Row::look`]) and that a person
+    /// neither picked nor edited.
+    pub fn looks(&self, lineup: &Lineup, lock: &Lock) -> Vec<Look> {
+        let mut looks: Vec<Look> = self
+            .review_queue(lock)
+            .map(|(at, review)| Look::Unsure { at, review })
+            .collect();
+        for (chapter, c) in self.chapters.iter().enumerate() {
+            for (take, edit) in c.takes.iter().enumerate() {
+                let instances = lock.take(&edit.take).into_iter().flat_map(|t| &t.instances);
+                looks.extend(
+                    instances.filter_map(|i| match (&i.applied, i.element.target) {
+                        (
+                            &Applied::Cut(range),
+                            Target::Kind(kind @ (ElementKind::Retake | ElementKind::Misspoken)),
+                        ) if i.provenance.rule.is_some()
+                            && edit.ranges.iter().any(|r| {
+                                matches!(r, RangeEdit::Keep(_)) && r.range().overlaps(range)
+                            }) =>
+                        {
+                            Some(Look::Restart {
+                                at: TakeAt { chapter, take },
+                                kind,
+                                t: i.element.t,
+                                range,
+                            })
+                        }
+                        _ => None,
+                    }),
+                );
+            }
+        }
+        looks.extend(
+            lineup
+                .rows()
+                .filter(|(_, row)| {
+                    row.look
+                        && self.picked(row).is_empty()
+                        && self.held_by_hand(lineup, row, None).is_none()
+                })
+                .map(|(at, _)| Look::Beat(at)),
+        );
+        looks
+    }
+
+    /// Answers the finding of `kind` at `t` of `take`: `keep` plays it, `cut` cuts it whatever
+    /// the rules' confidence. Either way it is no longer something to look at.
+    pub fn answer(&self, take: &Id, kind: ElementKind, t: Micros, decision: Decision) -> Cut {
+        self.with_override(take, kind, t, |o| o.decision = Some(decision))
     }
 
     /// What the cut holds of `row`, in cut order, when a person cut words in it or answered a
@@ -1407,6 +1501,7 @@ mod tests {
             attempts: vec![attempt("t01", from, to), attempt("t02", from, to)],
             scores: vec![80, 100],
             proposal: vec![attempt("t02", from, to)],
+            look: false,
         };
         Lineup {
             groups: vec![
@@ -1475,8 +1570,8 @@ mod tests {
     fn a_pick_plays_instead_of_the_proposal_and_one_per_beat() {
         let lineup = lineup();
         let row = lineup.row(row_at(1, 0)).unwrap();
-        let picked = recorded().set_pick(row, Some(&attempt("t02", 21., 29.)));
-        let picked = picked.set_pick(row, Some(&attempt("t01", 21., 29.)));
+        let picked = recorded().set_pick(row, &[attempt("t02", 21., 29.)]);
+        let picked = picked.set_pick(row, &[attempt("t01", 21., 29.)]);
         assert_eq!(picked.picks.len(), 1);
         assert_eq!(Cut::parse(&picked.to_kdl()).unwrap(), picked);
         let new = Id::new("t02").unwrap();
@@ -1489,7 +1584,7 @@ mod tests {
             picked.plays(&moved, &moved.groups[1].rows[0], None),
             [attempt("t01", 21.4, 29.2)]
         );
-        let cleared = picked.set_pick(row, None);
+        let cleared = picked.set_pick(row, &[]);
         assert!(cleared.picks.is_empty());
     }
 
@@ -1511,6 +1606,48 @@ mod tests {
                 ("Demo".into(), "t02".into(), 21, 29),
                 ("B-roll".into(), "t03".into(), 0, 5),
             ]
+        );
+    }
+
+    #[test]
+    fn looks_list_unsure_cuts_cut_restarts_and_doubtful_beats_until_answered() {
+        let lock = Lock::parse(
+            "lock 1\n\ntake t02 {\n    cut from=2_000_000 to=3_000_000 on=retake t=2_000_000 layer=format rule=\"retake\"\n    cut from=4_000_000 to=4_500_000 on=silence t=4_000_000 layer=format rule=\"silence\"\n    review from=6_000_000 to=7_000_000 on=filler t=6_000_000 layer=format rule=\"filler\"\n}\n",
+        )
+        .unwrap();
+        let mut lineup = lineup();
+        lineup.groups[1].rows[0].look = true;
+        let new = Id::new("t02").unwrap();
+        let cut = Cut::parse(
+            "chapter \"Take t01\" {\n    take t01 {\n        keep from=0 to=30_000_000\n    }\n}\n\nchapter \"Take t02\" {\n    take t02 {\n        keep from=0 to=30_000_000\n    }\n}\n",
+        )
+        .unwrap()
+        .compose(&lineup, Some(&new))
+        .unwrap();
+        let looks = cut.looks(&lineup, &lock);
+        // The silence is no stumble: nobody needs to hear it.
+        assert_eq!(looks.len(), 3, "{looks:?}");
+        assert!(
+            matches!(looks[0], Look::Unsure { review, .. } if review.kind == ElementKind::Filler)
+        );
+        assert!(matches!(
+            looks[1],
+            Look::Restart {
+                kind: ElementKind::Retake,
+                ..
+            }
+        ));
+        assert_eq!(looks[2], Look::Beat(row_at(1, 0)));
+        // A pick answers the beat. The findings are answered by overrides, which the next lock
+        // carries as their provenance.
+        let row = lineup.row(row_at(1, 0)).unwrap();
+        let kept = cut.set_pick(row, &cut.plays(&lineup, row, None));
+        assert_eq!(kept.looks(&lineup, &lock).len(), 2);
+        let answered = kept.answer(&new, ElementKind::Retake, s(2.), Decision::Cut);
+        assert!(
+            answered
+                .to_kdl()
+                .contains("override t02 retake at=2_000_000 {\n    cut\n}")
         );
     }
 

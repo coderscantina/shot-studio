@@ -560,7 +560,9 @@ fn document(this: &mut EditScreen, cx: &mut Context<EditScreen>) -> Div {
                         .font_weight(FontWeight::BOLD)
                         .child(title),
                 )
-                .children(range.map(|r| mono(r).text_color(MUTED))),
+                .children(range.map(|r| mono(r).text_color(MUTED)))
+                .child(div().flex_1())
+                .children(super::looks::count(this, cx)),
         )
         .child(
             div()
@@ -633,6 +635,11 @@ const CLEAR: f32 = 8.;
 /// words. It covers the text under it and never moves it. Hidden for the one frame before the
 /// selected words are measured.
 fn floating_toolbar(this: &EditScreen, pad: f32, cx: &mut Context<EditScreen>) -> Option<Div> {
+    // The words of an unsure finding are selected to show what would go: the inspector has
+    // its keys, and the toolbar would cover the text around it.
+    if matches!(this.looks.current, Some(shot_core::Look::Unsure { .. })) {
+        return None;
+    }
     let selection = this.selection?;
     this.selected()?;
     let words = selection.words();
@@ -807,6 +814,9 @@ fn paragraph_element(
             .filter(|m| first_word(block, m.range.from()) == Some(i))
         {
             children.push(mark_chip(this, mark, cx).into_any_element());
+        }
+        if let Some(beat) = this.looks.beat_at(at, i) {
+            children.push(super::looks::beat_chip(this, beat, cx).into_any_element());
         }
         children.push(word(this, block, i, effects, cx).into_any_element());
     };
@@ -1510,6 +1520,7 @@ fn inspector(this: &EditScreen, cx: &mut Context<EditScreen>) -> Stateful<Div> {
         .gap(px(16.))
         .px(px(18.))
         .py(px(16.))
+        .children(super::looks::section(this, cx))
         .map(|pane| match &selection {
             _ if mark.is_some() => pane.children(mark.map(|mark| mark_section(this, mark, cx))),
             _ if picked_zoom => pane.children(zoom.map(|zoom| zoom_section(this, zoom, true, cx))),

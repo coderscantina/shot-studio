@@ -539,7 +539,7 @@ impl TakesView {
         };
         let cut = &self.folder.read(cx).project.cut;
         let cut = cut
-            .set_pick(row, chosen.as_ref())
+            .set_pick(row, chosen.as_slice())
             .compose(&self.lineup, None);
         self.write(note, cx, |folder| {
             folder.write_cut(cut.map_err(|e| e.to_string())?)
@@ -555,7 +555,7 @@ impl TakesView {
             return;
         };
         let cut = &self.folder.read(cx).project.cut;
-        let picked = cut.picked(row).is_some_and(|p| p.range == chosen.range);
+        let picked = cut.picked(row).iter().any(|p| p.range == chosen.range);
         self.choose((!picked).then_some(chosen), None, cx);
     }
 
@@ -761,7 +761,8 @@ impl TakesView {
         let focused = self.at == (row, index);
         let picked = cut
             .picked(row_data)
-            .is_some_and(|p| p.take == attempt.take && p.range.overlaps(attempt.range));
+            .iter()
+            .any(|p| p.take == attempt.take && p.range.overlaps(attempt.range));
         // A pick means something only next to another attempt.
         let choice = row_data.attempts.len() > 1;
         let kept = cut.kept_of(&attempt.take, attempt.range);
@@ -1050,7 +1051,7 @@ impl TakesView {
         let picked = self
             .lineup
             .rows()
-            .filter(|(_, row)| cut.picked(row).is_some())
+            .filter(|(_, row)| !cut.picked(row).is_empty())
             .count();
         // With one attempt at every beat there is nothing to pick between.
         let choice = self.lineup.rows().any(|(_, row)| row.attempts.len() > 1);
@@ -1381,6 +1382,7 @@ mod tests {
             text: String::new(),
             scores: vec![100; attempts.len()],
             proposal: attempts.last().cloned().into_iter().collect(),
+            look: false,
             attempts,
         };
         Lineup {
