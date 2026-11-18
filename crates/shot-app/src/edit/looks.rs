@@ -86,6 +86,24 @@ impl Looks {
     fn row(&self, at: RowAt) -> Option<&Row> {
         self.lineup.row(at)
     }
+
+    /// The one item the inspector shows and K and C answer with the playhead at `frame`:
+    /// `current`, the item N went to, else the beat that plays there while it is one to look
+    /// at, else the first finding within a second.
+    fn target(&self, current: Option<Look>, frame: u64) -> Option<Look> {
+        let open = |look: &Look| self.items.iter().any(|(item, _)| item == look);
+        let beat = || {
+            let beat = Look::Beat(self.beat_playing(frame)?.row);
+            open(&beat).then_some(beat)
+        };
+        let finding = || {
+            let near = self.items.iter().find(|(look, at)| {
+                !matches!(look, Look::Beat(_)) && at.abs_diff(frame) <= u64::from(FPS)
+            });
+            near.map(|(look, _)| *look)
+        };
+        current.or_else(beat).or_else(finding)
+    }
 }
 
 /// How a finding's kind reads in a sentence.
@@ -291,23 +309,9 @@ impl EditScreen {
         played.contains(&self.playhead).then_some(current)
     }
 
-    /// The item K and C answer: the one N went to, else the one at the playhead.
+    /// The item K and C answer and the inspector shows, see [`Looks::target`].
     fn look_here(&self) -> Option<Look> {
-        self.current_look().or_else(|| {
-            let second = u64::from(FPS);
-            self.looks
-                .items
-                .iter()
-                .find(|(look, frame)| match look {
-                    Look::Beat(row) => self
-                        .looks
-                        .beats
-                        .iter()
-                        .any(|b| b.row == *row && b.frames.contains(&self.playhead)),
-                    _ => frame.abs_diff(self.playhead) <= second,
-                })
-                .map(|(look, _)| *look)
-        })
+        self.looks.target(self.current_look(), self.playhead)
     }
 
     /// K keeps what plays: an unsure finding stays, a cut restart plays again. C cuts: the
@@ -494,18 +498,12 @@ pub fn shows_attempts(this: &EditScreen) -> bool {
     !finding && this.looks.beat_playing(this.playhead).is_some()
 }
 
-/// The inspector's section for the item N went to, or for the beat at the playhead: what it is
-/// and the keys that answer it.
+/// The inspector's section for the item K and C answer ([`Looks::target`]) and for the beat at
+/// the playhead: what it is and the keys that answer it. A finding N went to shows alone, one
+/// near the playhead above the beat it is in.
 pub fn section(this: &EditScreen, cx: &App) -> Option<Div> {
     let beat = this.looks.beat_playing(this.playhead);
-    let look = this.current_look().or_else(|| {
-        let row = beat?.row;
-        this.looks
-            .items
-            .iter()
-            .map(|(look, _)| *look)
-            .find(|look| *look == Look::Beat(row))
-    });
+    let look = this.look_here();
     if look.is_none() && beat.is_none() {
         return None;
     }
@@ -533,13 +531,13 @@ pub fn section(this: &EditScreen, cx: &App) -> Option<Div> {
         }
         Some(Look::Beat(_)) | None => {}
     }
-    if let Some(beat) =
-        beat.filter(|_| !matches!(look, Some(Look::Unsure { .. } | Look::Restart { .. })))
+    if let Some(beat) = beat.filter(|_| shows_attempts(this))
         && let Some(row) = this.looks.row(beat.row)
     {
         let cut = &this.folder.read(cx).project.cut;
         let picked = !cut.picked(row).is_empty();
-        let open = look.is_some();
+        // K answers the beat only while it is the target, not a finding near the playhead.
+        let open = matches!(look, Some(Look::Beat(_)));
         // The keys come first: a long list of attempts must not push them out of sight.
         section = section
             .child(title(if open { "Worth a look" } else { "This beat" }))
@@ -581,7 +579,42 @@ pub fn section(this: &EditScreen, cx: &App) -> Option<Div> {
 
 #[cfg(test)]
 mod tests {
-    use super::next_attempt;
+    use shot_core::{ElementKind, Look, Micros, RowAt, TakeAt, TimeRange};
+
+    use super::{Beat, Looks, next_attempt};
+
+    #[test]
+    fn the_inspector_and_k_answer_the_beat_before_a_restart_near_the_playhead() {
+        let at = TakeAt {
+            chapter: 0,
+            take: 0,
+        };
+        let row = RowAt { group: 0, row: 1 };
+        let restart = Look::Restart {
+            at,
+            kind: ElementKind::Retake,
+            t: Micros(9_000_000),
+            range: TimeRange::new(Micros(9_000_000), Micros(9_800_000)).unwrap(),
+        };
+        // A restart was cut 20 frames before a contested beat starts.
+        let looks = Looks {
+            beats: vec![Beat {
+                row,
+                at,
+                word: 12,
+                frames: 600..900,
+                playing: vec![0],
+            }],
+            items: vec![(restart, 580), (Look::Beat(row), 600)],
+            ..Looks::default()
+        };
+        // On a word near the start of the beat, the beat is the target, not the restart.
+        assert_eq!(looks.target(None, 610), Some(Look::Beat(row)));
+        // What N went to wins, and outside the beat the restart near the playhead does.
+        assert_eq!(looks.target(Some(restart), 610), Some(restart));
+        assert_eq!(looks.target(None, 590), Some(restart));
+        assert_eq!(looks.target(None, 400), None);
+    }
 
     #[test]
     fn a_steps_through_the_whole_attempts_and_back_to_the_spliced_proposal() {
