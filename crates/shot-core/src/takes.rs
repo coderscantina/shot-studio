@@ -591,25 +591,28 @@ fn proposal(
 /// that keeps the start of one of its attempts. A row the cut plays nothing of stays with the
 /// row before it when the same take said both, or when the next row the cut plays is in that
 /// row's chapter, so a chapter a person renamed is not split by the passage a later take
-/// replaced or by a sentence it added, and else goes under its take's name.
+/// replaced or by a sentence it added, and else goes under its take's name. A take that was
+/// just appended whole plays under its own name, `Take <take>`: that chapter holds the take
+/// until it is composed and places none of its rows.
 fn under_chapters(rows: Vec<Row>, cut: &Cut) -> Vec<Group> {
-    // The chapter that plays each row, by its title.
-    let playing: Vec<Option<&str>> = rows
-        .iter()
-        .map(|row| {
-            row.attempts.iter().find_map(|a| {
-                let start = TimeRange::new(a.range.from(), Micros(a.range.from().0 + 1))?;
-                let plays = |edit: &crate::TakeEdit| edit.take == a.take && edit.keeps(start);
-                let chapter = cut.chapters.iter().find(|c| c.takes.iter().any(plays))?;
-                Some(chapter.title.as_str())
-            })
+    // The chapter that plays a row, by its title, `placed` without the take's own chapter.
+    let chapter = |row: &Row, placed: bool| -> Option<&str> {
+        row.attempts.iter().find_map(|a| {
+            let start = TimeRange::new(a.range.from(), Micros(a.range.from().0 + 1))?;
+            let plays = |edit: &crate::TakeEdit| edit.take == a.take && edit.keeps(start);
+            let own = format!("Take {}", a.take);
+            let chapters = cut.chapters.iter().filter(|c| !placed || c.title != own);
+            let chapter = chapters.into_iter().find(|c| c.takes.iter().any(plays))?;
+            Some(chapter.title.as_str())
         })
-        .collect();
+    };
+    let playing: Vec<Option<&str>> = rows.iter().map(|row| chapter(row, true)).collect();
+    let holding: Vec<Option<&str>> = rows.iter().map(|row| chapter(row, false)).collect();
     let mut groups: Vec<Group> = Vec::new();
     let mut before: Option<Id> = None;
     for (i, row) in rows.into_iter().enumerate() {
         let said = row.attempts.first().map(|a| a.take.clone());
-        let next = playing[i + 1..].iter().flatten().next();
+        let next = holding[i + 1..].iter().flatten().next();
         let inside = |group: &Group| before == said || next.is_some_and(|n| *n == group.title);
         let title = match (playing[i], groups.last(), &said) {
             (Some(title), _, _) => title.to_owned(),
@@ -1702,6 +1705,37 @@ mod tests {
             .collect();
         // The sentence added between two the chapter plays is in it, the one at the end is not.
         assert_eq!(groups, [("Intro", 4), ("Take t02", 1)]);
+    }
+
+    #[test]
+    fn without_beats_an_appended_takes_own_chapter_places_none_of_its_rows() {
+        let script = Script::parse("# A\n").unwrap();
+        let first = said(
+            "t01",
+            0,
+            "The router keeps routes next to pages. The loader runs on the server.",
+        );
+        let second = said(
+            "t02",
+            0,
+            "The router keeps routes next to pages. Always encrypt the cookies. \
+             The loader runs on the server.",
+        );
+        let whole = TimeRange::new(Micros(0), Micros(20_000_000)).unwrap();
+        let takes = [with(&first, None), with(&second, None)];
+        // A recording enters the cut as a chapter of its own, and the cut is composed after.
+        for (title, chapters) in [("Intro", ["Intro"]), ("Take t01", ["Take t01"])] {
+            let mut cut = Cut::default()
+                .append_take(id("t01"), title, whole)
+                .append_take(id("t02"), "Take t02", whole);
+            for _ in 0..2 {
+                cut = cut
+                    .compose(&Lineup::new(&script, &cut, &takes), Some(&id("t02")))
+                    .unwrap();
+                let titles: Vec<&str> = cut.chapters.iter().map(|c| c.title.as_str()).collect();
+                assert_eq!(titles, chapters);
+            }
+        }
     }
 
     #[test]
