@@ -21,6 +21,7 @@ Mark a milestone complete only after its acceptance criteria pass and an evidenc
 | 14 | [Hardening from FilmCraft and EffectCraft](14-hardening-from-filmcraft-and-effectcraft.md) | 13 | All roles | Built on `m14/integration`; decisions 0033 and 0034 wait for Mike. [Evidence](../evidence/m14-hardening.md) |
 | 15 | [One video model, one transition type, themes as files](15-one-video-model-transitions-and-themes.md) | 14 | All roles | Built on `m15/integration`; the app check and the quiet bench are in the report. [Evidence](../evidence/m15-one-video-model.md) |
 | 16 | [Script editor and clip ingest](16-script-editor-and-clip-ingest.md) | 15 | App, Media, Agents | Built on `m16/integration`; decisions 0038 and 0039 wait for Mike, app import and drop and HDR tone mapping unverified. [Evidence](../evidence/m16-script-editor-and-clip-ingest.md) |
+| 17 | [The cut proposes itself](17-the-cut-proposes-itself.md) | 16 | Core, Analysis, App | In progress on `m17/integration` ([0040](../decisions/0040-the-cut-proposes-itself.md)). |
 | 09 | [Release gate](09-release-gate.md) | 01 to 08, 10 to 12 | Core | Items 1 to 3 and 6 built (release.sh, workflow, bundle, cask, credits); signing waits for Mike's Apple secrets. [Evidence](../evidence/m09/release-machinery.md) |
 
 Milestone 02 is a go/no-go gate. If gpui can't show a 4K60 VideoToolbox decode without a CPU copy, stop and bring the measurements to Mike before 03 starts, because the UI choice changes.
