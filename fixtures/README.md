@@ -3,10 +3,10 @@
 Test media is generated, never committed ([0007](../docs/decisions/0007-generated-fixtures-only.md)).
 
 ```
-scripts/fixtures.sh [small|target|demo|phone-clip|all] [--force]
+scripts/fixtures.sh [small|takes|target|demo|phone-clip|all] [--force]
 ```
 
-Output goes to `$SHOT_FIXTURES`, by default `fixtures/generated/` (git-ignored). Agents working in a git worktree set `SHOT_FIXTURES=$HOME/.cache/shot-studio-fixtures`, so media is generated once and survives removing the worktree. Needs macOS (`say`), ffmpeg with libx265, ffprobe and awk. `small` takes about 1.5 min, `target` several minutes on an M1 Pro, `demo` a second, `phone-clip` about 15 s.
+Output goes to `$SHOT_FIXTURES`, by default `fixtures/generated/` (git-ignored). Agents working in a git worktree set `SHOT_FIXTURES=$HOME/.cache/shot-studio-fixtures`, so media is generated once and survives removing the worktree. Needs macOS (`say`), ffmpeg with libx265, ffprobe and awk. `small` takes about 1.5 min, `takes` about 20 s, `target` several minutes on an M1 Pro, `demo` a second, `phone-clip` about 15 s.
 
 `demo` always rebuilds the repo, since it is cheap. A rerun skips media groups whose files all match `checksums.txt`. `--force` regenerates and logs `unchanged` or `changed` per file. The output is deterministic: x265 runs with one frame thread and no pool, muxing is bitexact with no metadata, and the speech comes from `say` with a fixed voice (Samantha). A different voice or macOS speech version changes the speech checksums.
 
@@ -15,6 +15,8 @@ Output goes to `$SHOT_FIXTURES`, by default `fixtures/generated/` (git-ignored).
 | Path | Content |
 | --- | --- |
 | `speech/*.wav`, `speech/*.txt` | Six clips, mono 48 kHz PCM, and the spoken text: `clean`, `retake`, `self-correction`, `filler`, `long-silence` (8 s), `mid-pause` (1.5 s) |
+| `takes/*.wav`, `takes/*.txt` | Four spoken takes, mono 48 kHz PCM, and their text: `one-take` (unscripted, with doubled words, restarts, a spoken cue and a self-correction), `script-full`, `script-chapter` (a restart after a short sentence) and `script-beats` |
+| `takes/script.md` | The script the three `script-*` takes follow |
 | `screen-30s.mp4` | 3840x2160, 60 fps, HEVC, fragmented MP4, 0.5 s GOP (30 frames) |
 | `screen-30s.events.jsonl` | Cursor, clicks and keys of the screen clip |
 | `camera-30s.mp4` | 1920x1080, 60 fps, HEVC, fragmented MP4, synthetic face |
@@ -42,6 +44,7 @@ Output goes to `$SHOT_FIXTURES`, by default `fixtures/generated/` (git-ignored).
 `fixtures/spec/` holds the inputs:
 
 - `clean.txt` and the other clip texts are exactly what `say` speaks. `[[slnc N]]` is a pause of N ms. The generated `speech/*.txt` is the same text without that markup, the ground truth for transcription tests.
+- `takes-*.txt` are the spoken takes in the same markup, and `takes-script.md` is the script they follow.
 - `screen-scenario.txt` is one 6 s loop of cursor moves, clicks and typing. Every screen segment and event log tiles it.
 - `phone-clip.txt` is what the phone clip says.
 - `chapters.tsv` lists chapter length, accent color and title. `narration-N.txt` is spoken in chapter N after 0.8 s of silence, then padded with silence to the chapter end.

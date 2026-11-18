@@ -117,6 +117,10 @@ fn host(url: &str) -> Option<(String, String)> {
     if !bare.contains('.') || bare.starts_with('.') || bare.ends_with('.') {
         return None;
     }
+    // A number said with a decimal point ("13.53") is no host.
+    if bare.chars().all(|c| c.is_ascii_digit() || c == '.') {
+        return None;
+    }
     let short = match bare {
         "github.com" => "github",
         "x.com" | "twitter.com" => "x",
@@ -185,6 +189,14 @@ mod tests {
             ]
         );
         assert_eq!(found[1].words.from(), Micros(3 * 400_000));
+    }
+
+    #[test]
+    fn a_number_with_a_decimal_point_is_no_link() {
+        assert_eq!(
+            urls(&words("The build ran in 13.53. Sorry, 13.35 milliseconds.")),
+            []
+        );
     }
 
     #[test]

@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Generates the deterministic test media and demo data.
 #
-#   scripts/fixtures.sh [small|target|demo|phone-clip|all] [--force]
+#   scripts/fixtures.sh [small|takes|target|demo|phone-clip|all] [--force]
 #
 # Output goes to $SHOT_FIXTURES, default fixtures/generated/ (git-ignored). Agents in worktrees
 # set SHOT_FIXTURES=$HOME/.cache/shot-studio-fixtures so media survives worktree removal.
 #
 # small   speech clips, a 30 s 4K60 screen capture with cursor events, a 30 s 1080p60 camera clip
+# takes   spoken takes with stumbles: one unscripted take and three takes of takes/script.md
 # target  the 17 min 4K60 workload: screen, camera and mic tracks, events.jsonl and chapters.json,
 #         plus target-project/, the committed project text with the media linked into media/t01/
 # demo    demo-channel/, a git repo with videos in every board column, built from fixtures/projects
@@ -45,9 +46,9 @@ MODE=all
 FORCE=0
 for arg in "$@"; do
   case $arg in
-    small | target | demo | phone-clip | all) MODE=$arg ;;
+    small | takes | target | demo | phone-clip | all) MODE=$arg ;;
     --force) FORCE=1 ;;
-    *) echo "usage: scripts/fixtures.sh [small|target|demo|phone-clip|all] [--force]" >&2; exit 2 ;;
+    *) echo "usage: scripts/fixtures.sh [small|takes|target|demo|phone-clip|all] [--force]" >&2; exit 2 ;;
   esac
 done
 
@@ -114,6 +115,24 @@ gen_speech() {
     # Ground truth: the spoken text without say's [[slnc N]] pause markup.
     sed -E 's/ ?\[\[[^]]*\]\] ?/ /g' "$SPEC/$name.txt" >"$out.txt"
   done
+  record "${files[@]}"
+}
+
+# Takes as a person records them: restarts, cues and fillers, and three takes of one script.
+gen_takes() {
+  local names=(one-take script-full script-chapter script-beats) files=("$OUT/takes/script.md") name out
+  for name in "${names[@]}"; do
+    files+=("$OUT/takes/$name.wav" "$OUT/takes/$name.txt")
+  done
+  if ((!FORCE)) && group_current "${files[@]}"; then log "takes up to date"; return; fi
+  log "spoken takes (voice $VOICE)"
+  mkdir -p "$OUT/takes"
+  for name in "${names[@]}"; do
+    out=$OUT/takes/$name
+    speak "$name" "$SPEC/takes-$name.txt" "$out.wav"
+    sed -E 's/ ?\[\[[^]]*\]\] ?/ /g' "$SPEC/takes-$name.txt" >"$out.txt"
+  done
+  cp "$SPEC/takes-script.md" "$OUT/takes/script.md"
   record "${files[@]}"
 }
 
@@ -472,9 +491,10 @@ trap 'rm -rf "$WORK"' EXIT
 start=$SECONDS
 case $MODE in
   small) gen_small ;;
+  takes) gen_takes ;;
   target) gen_target; gen_target_project ;;
   demo) gen_demo ;;
   phone-clip) gen_phone_clip ;;
-  all) gen_small; gen_target; gen_target_project; gen_demo; gen_phone_clip ;;
+  all) gen_small; gen_takes; gen_target; gen_target_project; gen_demo; gen_phone_clip ;;
 esac
 log "done in $((SECONDS - start)) s, checksums in ${SUMS#"$ROOT"/}"
