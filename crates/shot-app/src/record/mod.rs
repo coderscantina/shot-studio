@@ -1296,20 +1296,23 @@ impl RecordScreen {
     }
 
     /// The error of the last take, with a way to the setting that fixes a missing permission,
-    /// else why the cut was not composed, for as long as the folder says so.
-    fn failure(&self, cx: &App) -> Option<Div> {
-        let not_composed = || self.folder.read(cx).not_composed.clone().map(Failure::from);
-        let failure = self.error.clone().or_else(not_composed)?;
-        Some(
-            alert(failure.message.clone()).children(failure.permission.map(|permission| {
-                let url = settings_url(permission);
-                Button::new("open-privacy")
-                    .small()
-                    .label("Open Privacy & Security")
-                    .on_click(move |_, _, cx| cx.open_url(url))
-            })),
-        )
+    /// and why the cut was not composed, for as long as the folder says so.
+    fn failure(&self, cx: &App) -> Vec<Div> {
+        let not_composed = self.folder.read(cx).not_composed.clone().map(Failure::from);
+        let failures = self.error.clone().into_iter().chain(not_composed);
+        failures
+            .map(|failure| {
+                alert(failure.message).children(failure.permission.map(|permission| {
+                    let url = settings_url(permission);
+                    Button::new("open-privacy")
+                        .small()
+                        .label("Open Privacy & Security")
+                        .on_click(move |_, _, cx| cx.open_url(url))
+                }))
+            })
+            .collect()
     }
+
     fn transcript(&self, phase: &Phase) -> impl IntoElement {
         let words = self.shared.words.lock().expect("words").join(" ");
         let empty = match (self.choice.mic(), phase) {

@@ -489,6 +489,8 @@ pub fn beat_chip(this: &EditScreen, beat: &Beat, cx: &mut Context<EditScreen>) -
         .on_click(cx.listener(move |this, _, _, cx| {
             this.selection = None;
             this.lanes.picked = None;
+            // K and C answer this beat now, not the item N went to before.
+            this.looks.current = None;
             this.seek(frames.start);
             cx.notify();
         }))
