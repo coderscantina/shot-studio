@@ -156,7 +156,7 @@ Open a video folder in the app, and drive the same folder from the CLI:
 
 `./target/release/shot --help` lists every command. To try it without recording, `scripts/fixtures.sh all` generates a 17 min 4K60 test project with ffmpeg, see [fixtures/README.md](fixtures/README.md). Recording needs Screen Recording, Camera and Microphone access. The speech model, about 1.6 GB, downloads on first use and is checked against a pinned SHA-256.
 
-`scripts/bundle.sh` builds `Shot Studio.app` and a DMG into `dist/`.
+`scripts/bundle.sh` builds `Shot Studio.app` and a DMG into `dist/`. `scripts/app-icon.sh` regenerates `packaging/macos/AppIcon.icns` from `AppIcon.svg`.
 
 ## Contributing
 
